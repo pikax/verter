@@ -642,7 +642,7 @@ export interface CheckboxProps {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "CheckboxProps",
             ),
-            Err(crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+            Err(verter_session_query::inputs::prepared::PreparationFailure::MissingExternalOwner {
                 local_name,
             }) if local_name == "theme"
         ),
@@ -3797,7 +3797,7 @@ fn resolved_type_declaration_same_name_edit_never_replays_stale_metadata() {
         crate::host_manage::jsdoc_resolve::resolve_type_declaration(&host, canonical, "Props");
     assert_eq!(
         before.kind,
-        crate::resolver_core::ResolvedDeclarationKind::Interface,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
         "control: the first lookup must resolve the authored interface"
     );
 
@@ -3814,7 +3814,7 @@ fn resolved_type_declaration_same_name_edit_never_replays_stale_metadata() {
         crate::host_manage::jsdoc_resolve::resolve_type_declaration(&host, canonical, "Props");
     assert_eq!(
         after.kind,
-        crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias,
         "a same-name edit must resolve current declaration metadata rather than replaying a stale symbol-cache entry: before={before:?}, after={after:?}"
     );
     assert_ne!(

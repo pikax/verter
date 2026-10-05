@@ -927,7 +927,9 @@ impl VerterHost {
         let decl_bodies = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
             snapshot_key,
             Arc::clone(&eval_source),
-            framework_parse.clone(),
+            framework_parse
+                .as_deref()
+                .map(crate::parse::framework_parse_facts),
             source_type,
             Arc::clone(&products.owner_table),
             products.svelte_component_runes_mode,
@@ -957,7 +959,7 @@ impl VerterHost {
             &mut shallow_state_inner,
             &snapshot.macros,
             Some(eval_source.as_ref()),
-            decl_bodies.framework_parse(),
+            framework_parse.as_ref(),
         );
         let shallow_state = Arc::new(shallow_state_inner);
 

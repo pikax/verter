@@ -1177,7 +1177,7 @@ impl ShallowFileState {
         if self.has_value_symbol(name) {
             return;
         }
-        let owner = if self.decl_bodies.framework_parse().is_some() {
+        let owner = if self.decl_bodies.framework_parse_facts().is_some() {
             TopLevelOwnerId::instance(0)
         } else {
             TopLevelOwnerId::ordinary_file()

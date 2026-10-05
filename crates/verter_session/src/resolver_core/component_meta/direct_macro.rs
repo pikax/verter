@@ -4,7 +4,7 @@ use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
 
-use crate::resolver_core::ResolvedTypeDeclaration;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 use super::ComponentMetaResolutionPurpose;
 

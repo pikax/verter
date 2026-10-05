@@ -605,13 +605,21 @@ pub(super) fn macro_kind_to_string(
 }
 
 pub(super) fn resolved_declaration_kind_to_string(
-    kind: host::meta_resolve::ResolvedDeclarationKind,
+    kind: verter_session_query::declarations::metadata::ResolvedDeclarationKind,
 ) -> String {
     match kind {
-        host::meta_resolve::ResolvedDeclarationKind::Interface => "interface".to_string(),
-        host::meta_resolve::ResolvedDeclarationKind::TypeAlias => "typeAlias".to_string(),
-        host::meta_resolve::ResolvedDeclarationKind::Class => "class".to_string(),
-        host::meta_resolve::ResolvedDeclarationKind::Unknown => "unknown".to_string(),
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface => {
+            "interface".to_string()
+        }
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias => {
+            "typeAlias".to_string()
+        }
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Class => {
+            "class".to_string()
+        }
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Unknown => {
+            "unknown".to_string()
+        }
     }
 }
 

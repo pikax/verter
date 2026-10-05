@@ -1500,7 +1500,7 @@ impl VerterHost {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
         else {
@@ -1528,7 +1528,7 @@ impl VerterHost {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, services, canonical_id)
         else {
@@ -1582,7 +1582,7 @@ impl VerterHost {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
         else {
@@ -1600,7 +1600,7 @@ impl VerterHost {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, services, canonical_id)
         else {
@@ -1913,6 +1913,7 @@ impl VerterHost {
             verter_session_query::analysis::route_inventory::ScriptRouteInventory,
         >,
         decl_bodies: &Arc<crate::decl_body_memo::DeclBodyMemo>,
+        framework_parse: Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         eval_source: Option<&str>,
     ) -> Arc<crate::resolver_core::ShallowFileState> {
         self.provenance
@@ -1935,7 +1936,7 @@ impl VerterHost {
             // The flight's already-resolved carrier artifact — never a
             // re-fetch through `current_eval_state` (which re-indexes the
             // owner mid-index and recurses).
-            decl_bodies.framework_parse(),
+            framework_parse,
         );
         Arc::new(shallow_state_inner)
     }
@@ -2455,7 +2456,9 @@ impl VerterHost {
             let decl_bodies = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
                 snapshot_key,
                 Arc::clone(&eval_source),
-                framework_parse.clone(),
+                framework_parse
+                    .as_deref()
+                    .map(crate::parse::framework_parse_facts),
                 source_type,
                 Arc::clone(&products.owner_table),
                 products.svelte_component_runes_mode,
@@ -2471,6 +2474,7 @@ impl VerterHost {
                 snapshot.as_ref(),
                 &route_inventory,
                 &decl_bodies,
+                framework_parse.as_ref(),
                 Some(eval_source.as_ref()),
             );
 
@@ -2897,7 +2901,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
-        indexed: &Arc<crate::resolver_core::request_inputs::IndexedInputRecord>,
+        indexed: &Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
     ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
         if !indexed.shallow_state.has_resolvable_surface() {
             return None;

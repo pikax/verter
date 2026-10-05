@@ -4,7 +4,6 @@
 //! non-admission, warm-hit identity, content-version keying, and the
 //! empty-fact-rail pin (no slice identity in `ReadSetSignature.facts`).
 
-use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use verter_language::FileLanguage;
@@ -326,15 +325,16 @@ fn skeleton_source_verifies_parse_key_and_language() {
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
-            serve.indexed.raw_source.as_ref(),
+            serve
+                .indexed
+                .source_parse_key()
+                .expect("a served script file has an exact source identity"),
             serve.indexed.file_language.clone(),
-            serve.indexed.framework_parse.as_deref(),
             serve.indexed.parse_env_hash,
-        )
-        .expect("a served script file has an exact source identity");
+        );
     let env = host.host_view_env_hashes_for(canonical);
     let key = FlowSliceFunctionKey {
         canonical_id: Arc::from(canonical),
@@ -448,15 +448,16 @@ fn skeleton_source_verifies_parse_env_and_toolchain() {
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
-            serve.indexed.raw_source.as_ref(),
+            serve
+                .indexed
+                .source_parse_key()
+                .expect("a served script file has an exact source identity"),
             serve.indexed.file_language.clone(),
-            serve.indexed.framework_parse.as_deref(),
             serve.indexed.parse_env_hash,
-        )
-        .expect("a served script file has an exact source identity");
+        );
     let key = FlowSliceFunctionKey {
         canonical_id: Arc::from(canonical),
         function: entry.key().clone(),
@@ -1141,15 +1142,16 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         .expect("myType is a served function position");
     let env = host.host_view_env_hashes_for(canonical);
     let source_key =
-        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
             Arc::from(canonical),
             serve.indexed.whole_hash,
-            serve.indexed.raw_source.as_ref(),
+            serve
+                .indexed
+                .source_parse_key()
+                .expect("a served script file has an exact source identity"),
             serve.indexed.file_language.clone(),
-            serve.indexed.framework_parse.as_deref(),
             serve.indexed.parse_env_hash,
-        )
-        .expect("a served script file has an exact source identity");
+        );
     let key = FlowSliceHashKey {
         function: FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),

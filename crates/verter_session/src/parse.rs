@@ -723,6 +723,25 @@ pub(crate) fn module_script_region(
         .map(|region| (region.span.start, region.span.end))
 }
 
+/// The owned parse facts of a framework carrier artifact: its adapter and
+/// carrier language, the parse identity it recorded and its module-script
+/// region. Engine inputs and source lowering consume these facts instead of
+/// retaining the artifact.
+#[allow(clippy::let_and_return)]
+pub(crate) fn framework_parse_facts(
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+) -> verter_session_query::source::framework_parse::FrameworkParseFacts {
+    let facts = verter_session_query::source::framework_parse::FrameworkParseFacts::new(
+        artifact.adapter_id().clone(),
+        artifact.language_id().clone(),
+        artifact.parse_key().clone(),
+        module_script_region(artifact),
+    );
+    #[cfg(any(test, feature = "test-support"))]
+    let facts = facts.with_script_regions(artifact.script_regions());
+    facts
+}
+
 /// The parser-owned non-script mode inputs carried by a neutral parse artifact.
 ///
 /// Svelte captures `<svelte:options runes={...}>` during its single carrier

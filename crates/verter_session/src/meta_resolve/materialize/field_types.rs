@@ -142,8 +142,8 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
     );
     if matches!(
         declaration.kind,
-        crate::resolver_core::ResolvedDeclarationKind::Interface
-            | crate::resolver_core::ResolvedDeclarationKind::Class,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface
+            | verter_session_query::declarations::metadata::ResolvedDeclarationKind::Class,
     ) {
         return if refused {
             (true, None)

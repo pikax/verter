@@ -409,7 +409,7 @@ pub struct DeclBodyMemo {
     key: SnapshotKey,
     #[cfg(test)]
     eval_source: Arc<str>,
-    framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
+    framework_parse: Option<verter_session_query::source::framework_parse::FrameworkParseFacts>,
     owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
     /// Scope-aware component mode captured from the SAME retained eval program
     /// during cold indexing. This is separate from `.svelte.ts`/`.svelte.js`
@@ -477,7 +477,7 @@ impl DeclBodyMemo {
     pub(crate) fn new(
         key: SnapshotKey,
         eval_source: Arc<str>,
-        framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
+        framework_parse: Option<verter_session_query::source::framework_parse::FrameworkParseFacts>,
         source_type: oxc_span::SourceType,
         owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
         svelte_component_runes_mode: bool,
@@ -750,15 +750,11 @@ impl DeclBodyMemo {
         self.is_rune_module() || self.svelte_component_runes_mode
     }
 
-    /// The retained framework parse artifact for this content generation, when
-    /// the file is a framework carrier. This is the SAME artifact the indexing
-    /// flight resolved — exposed so the component-default synth seam can read
-    /// the carrier's module-script region without re-fetching it through
-    /// `current_eval_state` (which re-enters `current_content_pinned_indexed`
-    /// for the owner and recurses while the owner is mid-index).
-    pub(crate) fn framework_parse(
+    /// The owned framework parse facts of this content generation, when the
+    /// file is a framework carrier.
+    pub(crate) fn framework_parse_facts(
         &self,
-    ) -> Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>> {
+    ) -> Option<&verter_session_query::source::framework_parse::FrameworkParseFacts> {
         self.framework_parse.as_ref()
     }
 
@@ -2365,8 +2361,8 @@ impl DeclBodyMemo {
         self.ensure_lease();
         let module_region = self
             .framework_parse
-            .as_deref()
-            .and_then(crate::parse::module_script_region);
+            .as_ref()
+            .and_then(verter_session_query::source::framework_parse::FrameworkParseFacts::module_script_region);
         let owner_table = Arc::clone(&self.owner_table);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
@@ -2416,8 +2412,8 @@ impl DeclBodyMemo {
         self.ensure_lease();
         let module_region = self
             .framework_parse
-            .as_deref()
-            .and_then(crate::parse::module_script_region);
+            .as_ref()
+            .and_then(verter_session_query::source::framework_parse::FrameworkParseFacts::module_script_region);
         let owner_table = Arc::clone(&self.owner_table);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;

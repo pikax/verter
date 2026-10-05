@@ -241,7 +241,7 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
     assert!(
         matches!(
             &wrong_owner_result,
-            Err(crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+            Err(verter_session_query::inputs::prepared::PreparationFailure::MissingExternalOwner {
             local_name,
         }) if local_name == "Foo"
         ),
@@ -1025,7 +1025,8 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 #[test]
 fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::prepared_decl::{PreparationFailure, PreparedTypeDeclResolution};
+    use verter_session_query::inputs::prepared::PreparationFailure;
+    use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
     use crate::semantic_query::{ProjectionReductionContext, QueryResult, SemanticQueryKey};
 

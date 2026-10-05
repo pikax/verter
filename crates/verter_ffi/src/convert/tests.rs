@@ -714,14 +714,15 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
     let resolution = resolution_output_with(
         vec![host::meta_resolve::ResolvedTypeRegistryMeta {
             name: "Props".to_string(),
-            declaration: host::meta_resolve::ResolvedTypeDeclaration {
+            declaration: verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
                 requested_name: "Props".to_string(),
                 declaration_id: None,
                 resolved_name: "Props".to_string(),
                 canonical_source: "/src/types.ts".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 span: verter_span::Span::new(10, 48),
-                kind: host::meta_resolve::ResolvedDeclarationKind::Interface,
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
             },
         }],
@@ -840,14 +841,15 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
     let resolution = resolution_output_with(
         vec![host::meta_resolve::ResolvedTypeRegistryMeta {
             name: "Button".to_string(),
-            declaration: host::meta_resolve::ResolvedTypeDeclaration {
+            declaration: verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
                 requested_name: "Button".to_string(),
                 declaration_id: None,
                 resolved_name: "Button".to_string(),
                 canonical_source: "/src/App.vue".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 span: verter_span::Span::new(10, 52),
-                kind: host::meta_resolve::ResolvedDeclarationKind::TypeAlias,
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias,
                 text: Some(
                     "type Button = ComponentConfig<typeof theme, MissingAppConfig>".to_string(),
                 ),

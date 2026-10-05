@@ -168,7 +168,7 @@ pub(crate) fn request_source_performed_compute(source: RequestSource) -> bool {
 
 pub(crate) fn should_skip_imported_registry_seed_refresh(
     owner_canonical: &str,
-    declaration: &ResolvedTypeDeclaration,
+    declaration: &verter_session_query::declarations::metadata::ResolvedTypeDeclaration,
     existing_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> bool {
     crate::resolver_core::component_meta::imported_registry_seed_can_skip_refresh(
@@ -631,11 +631,6 @@ impl<'a> ComponentMetaRequestHost for ViewBoundRequestHost<'a> {
     }
 }
 
-/// Native declaration kind for the resolved pre-expansion type.
-pub type ResolvedDeclarationKind = crate::resolver_core::ResolvedDeclarationKind;
-
-/// Native pre-expansion declaration metadata retained by the shared resolver.
-pub type ResolvedTypeDeclaration = crate::resolver_core::ResolvedTypeDeclaration;
 pub type ResolvedTypeRegistryMeta = crate::resolver_core::ResolvedTypeRegistryMeta;
 pub type ResolvedMacroMeta = crate::resolver_core::ResolvedMacroMeta;
 pub type ResolvedNativeProp = crate::resolver_core::ResolvedNativeProp;

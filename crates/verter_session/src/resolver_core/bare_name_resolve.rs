@@ -29,8 +29,10 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
-use super::prepared_decl::{ImportBinding, PreparedTypeDeclResolution, TypeParamBinding};
 use crate::resolver_core::ResolverContext;
+use verter_session_query::inputs::prepared::ImportBinding;
+use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
+use verter_session_query::inputs::prepared::TypeParamBinding;
 
 /// Declaration-scope context used by bare-name root-identity resolution.
 ///
@@ -55,7 +57,7 @@ use crate::resolver_core::ResolverContext;
 /// to carry is redundant.
 #[derive(Clone)]
 pub(crate) struct DeclarationScopePayload {
-    bundle: Arc<super::request_inputs::PreparedInputRecord>,
+    bundle: Arc<verter_session_query::inputs::prepared::PreparedInputRecord>,
     owner: verter_type_expr::TopLevelOwnerId,
 }
 
@@ -90,11 +92,13 @@ impl DeclarationScopePayload {
 
     /// The prepared bundle this payload views.
     #[cfg(test)]
-    pub(crate) fn bundle_for_tests(&self) -> &Arc<super::request_inputs::PreparedInputRecord> {
+    pub(crate) fn bundle_for_tests(
+        &self,
+    ) -> &Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
         &self.bundle
     }
 
-    fn owner_scope(&self) -> Option<&crate::resolver_core::prepared_decl::PreparedOwnerScope> {
+    fn owner_scope(&self) -> Option<&verter_session_query::inputs::prepared::PreparedOwnerScope> {
         self.bundle.owner_scope(self.owner)
     }
 
@@ -278,7 +282,7 @@ pub(crate) fn resolve_bare_name_in_scope<C: crate::resolver_core::ResolverCapabi
 }
 
 fn symbol_exists_in_facts(
-    entry: &crate::resolver_core::request_inputs::IndexedInputRecord,
+    entry: &verter_session_query::inputs::indexed::IndexedInputRecord,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
 ) -> bool {
@@ -528,7 +532,7 @@ fn resolve_imported_type_root_identity<C: crate::resolver_core::ResolverCapabili
 /// this function.** Script-setup parameters are not type-aliases and
 /// therefore not `PreparedTypeDecl`s; the lowering hot path reads
 /// `scope_payload.scope_type_bindings().get(name)` directly to obtain a
-/// [`TypeParamBinding`](crate::resolver_core::prepared_decl::TypeParamBinding)
+/// [`TypeParamBinding`](verter_session_query::inputs::prepared::TypeParamBinding)
 /// and emits a `SemanticNodeData::TypeParam` without going through
 /// this function.
 ///
@@ -660,10 +664,9 @@ mod bare_name_resolve_namespace_tests;
 #[cfg(test)]
 mod payload_tests {
     use super::*;
-    use crate::resolver_core::prepared_decl::{
-        build_prepared_decl_bundle, ImportCanonicalization, TypeParamBinding,
-    };
+    use crate::resolver_core::prepared_decl::{build_prepared_decl_bundle, ImportCanonicalization};
     use crate::resolver_core::ShallowFileState;
+    use verter_session_query::inputs::prepared::TypeParamBinding;
 
     /// `DeclarationScopePayload` is a VIEW over the prepared-decl
     /// bundle: construction shares the bundle's maps through the

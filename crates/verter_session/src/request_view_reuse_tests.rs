@@ -697,14 +697,17 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
     assert!(host
         .authoritative_current_artifact_key(&canonical)
         .is_some());
-    let before = crate::file_artifact_store::source_parse_identity_derivations_for_tests();
+    let before =
+        verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests(
+        );
     for _ in 0..50 {
         assert!(host
             .authoritative_current_artifact_key(&canonical)
             .is_some());
     }
     assert_eq!(
-        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
+        verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests(
+        ) - before,
         0,
         "fifty key reads hash the script's source no time at all"
     );
@@ -726,7 +729,8 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
         )
         .expect("the script's language has a parse identity");
     assert_eq!(
-        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
+        verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests(
+        ) - before,
         1,
         "deriving the key from the source hashes it once"
     );

@@ -44,8 +44,9 @@ impl VerterHost {
         canonical_id: &str,
         _state: &crate::resolver_core::ShallowFileState,
         _dep_edges: &rustc_hash::FxHashMap<String, String>,
-    ) -> rustc_hash::FxHashMap<String, crate::resolver_core::prepared_decl::TypeParamBinding> {
-        use crate::resolver_core::prepared_decl::TypeParamBinding;
+    ) -> rustc_hash::FxHashMap<String, verter_session_query::inputs::prepared::TypeParamBinding>
+    {
+        use verter_session_query::inputs::prepared::TypeParamBinding;
 
         let mut bindings = rustc_hash::FxHashMap::default();
 

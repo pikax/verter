@@ -58,7 +58,6 @@ use std::sync::Arc;
 use verter_session_query::type_solver::builtin::BuiltinUtility;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
-use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     BranchSelection, CacheRead, DeclIdentity, DepSignature, DepVersion, IndexKey, NodeScopeId,
@@ -69,6 +68,7 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::{Acquired, ReadCapture, SemanticGraphStore};
 use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 use verter_type_expr::PrimitiveName;
 
 // Module tree. The sub-modules are `pub(crate)` so external callers see only

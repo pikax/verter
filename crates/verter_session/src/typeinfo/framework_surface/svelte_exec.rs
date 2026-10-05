@@ -762,8 +762,9 @@ fn member_declaration_origin(
     owner: &str,
     member: &crate::typeinfo::surface::TypeInfoSurfaceMember,
 ) -> Option<crate::typeinfo::framework_surface::results::PropOrigin> {
-    use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
     use crate::typeinfo::framework_surface::results::{OriginHop, PropOrigin};
+    use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+    use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
     let canonical_file = member.origin.canonical_file.as_ref()?;
     let canonical_source = canonical_file.as_ref().to_string();
@@ -1276,7 +1277,7 @@ fn retain_svelte_snippet_members(
 /// slot named by its `name` attribute (default `"default"`); the forwarded prop
 /// attributes (every plain attribute other than `name`) become its bindings.
 fn resolve_legacy_slot_inventory(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
     owner: &str,
 ) -> ResolvedMacroPayload {
     // Resolve the owner's `IndexedReady` through the request view `ctx` ONCE and
@@ -1300,10 +1301,10 @@ fn resolve_legacy_slot_inventory(
     );
     // Read the typed carrier FROM THE SNAPSHOT — never a source-text scan, never
     // a separate host-current carrier read.
-    let Some(artifact) = indexed.framework_parse.as_ref() else {
+    let Some(artifact) = ctx.framework_parse_artifact(&indexed) else {
         return ResolvedOutcome::Missing;
     };
-    let Some(parsed) = crate::typeinfo::adapters::svelte::svelte_parse(artifact) else {
+    let Some(parsed) = crate::typeinfo::adapters::svelte::svelte_parse(&artifact) else {
         return ResolvedOutcome::Missing;
     };
 

@@ -1516,7 +1516,7 @@ fn imported_props_members_carry_an_import_member_declaration_origin() {
 /// `AnalyzedEmitField` is display + honest locator-less `None`s by contract).
 fn assert_callback_row_param_resolves_precisely(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
     canonical: &str,
     member_name: &str,
 ) {
@@ -2218,11 +2218,11 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
             "Props",
         );
     match preparation {
-        crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::AuthoredPartial {
+        verter_session_query::inputs::prepared::PreparedTypeDeclResolution::AuthoredPartial {
             root_identity,
             declaration,
             failure:
-                crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+                verter_session_query::inputs::prepared::PreparationFailure::MissingExternalOwner {
                     local_name,
                 },
         } => {
@@ -2453,7 +2453,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
             props_owner,
             "Props",
         );
-    let crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Complete(declaration) =
+    let verter_session_query::inputs::prepared::PreparedTypeDeclResolution::Complete(declaration) =
         preparation
     else {
         panic!("fully resolved Props must prepare completely, got {preparation:?}");

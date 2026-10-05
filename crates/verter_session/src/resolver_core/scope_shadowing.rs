@@ -157,9 +157,9 @@ impl ScopeShadowing {
 mod tests {
     use super::*;
     use crate::resolver_core::prepared_decl::PreparedDeclBundle;
-    use crate::resolver_core::prepared_decl::TypeParamBinding;
     use rustc_hash::FxHashMap;
     use std::sync::Arc;
+    use verter_session_query::inputs::prepared::TypeParamBinding;
 
     fn make_binding(name: &str, ordinal: u16) -> TypeParamBinding {
         TypeParamBinding {
@@ -187,8 +187,9 @@ mod tests {
         import_names: &[&str],
     ) -> (Arc<PreparedDeclBundle>, verter_type_expr::TopLevelOwnerId) {
         use crate::resolver_core::prepared_decl::{
-            build_prepared_decl_bundle, ImportBinding, ImportCanonicalization,
+            build_prepared_decl_bundle, ImportCanonicalization,
         };
+        use verter_session_query::inputs::prepared::ImportBinding;
         let scope_type_names: rustc_hash::FxHashSet<String> =
             names.iter().map(|s| s.to_string()).collect();
         let mut bindings: FxHashMap<String, TypeParamBinding> = FxHashMap::default();

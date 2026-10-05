@@ -6,9 +6,8 @@ use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
 
-use crate::resolver_core::{
-    resolve_type_declaration, DeclarationMetadataResolver, ResolvedTypeDeclaration,
-};
+use crate::resolver_core::{resolve_type_declaration, DeclarationMetadataResolver};
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 
 mod cold_resolver;
@@ -719,7 +718,7 @@ fn placeholder_type_declaration(
         canonical_source: String::new(),
         owner,
         span: verter_span::Span::default(),
-        kind: crate::resolver_core::ResolvedDeclarationKind::Unknown,
+        kind: verter_session_query::declarations::metadata::ResolvedDeclarationKind::Unknown,
         text: None,
     }
 }

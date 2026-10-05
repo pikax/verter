@@ -16,7 +16,6 @@ use verter_type_expr::{ObjectMember, TypeExpr};
 use super::signature_discovery::PositionalArgument;
 use super::walk::PathWalker;
 use super::{empty_signature, utility_param_names, ProjectSemanticDispatch, SessionDispatchHost};
-use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::semantic_query::demand::{Demand, MaterializedPoint, MaterializedSet, ProjectionPath};
 use crate::semantic_query::{
     DepSignature, IndexKey, LiteralValue, NodeScopeId, OriginEdgeKind, OriginMeta, PathSegment,
@@ -24,6 +23,7 @@ use crate::semantic_query::{
     ResolveDeclKey, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceEntry,
     SurfaceMember, SurfaceView, ValueRootKey,
 };
+use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
 /// The node budget of one transitive self-root walk
 /// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk
@@ -4557,7 +4557,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // returns `cache_suppress` below.
         let decl_canonical_str = decl_canonical.as_ref();
         let is_non_file_base = crate::semantic_query::is_non_file_base(decl_canonical_str);
-        let live_indexed: Option<Arc<crate::resolver_core::request_inputs::IndexedInputRecord>> =
+        let live_indexed: Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> =
             if is_non_file_base {
                 None
             } else {
@@ -4803,7 +4803,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 failure,
             } => {
                 verter_debug_assert_eq!(root_identity, declaration.root_identity);
-                let crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+                let verter_session_query::inputs::prepared::PreparationFailure::MissingExternalOwner {
                     ..
                 } = failure
                 else {
@@ -5957,14 +5957,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 *contributor_owner,
                                 decl_name,
                             ) {
-                                crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(
+                                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
                                     Some(prepared),
                                 ) => prepared,
-                                crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(
+                                verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
                                     None,
                                 ) => continue,
-                                crate::resolver_core::prepared_decl::PreparedDeclOutcome::LeaseMiss
-                                | crate::resolver_core::prepared_decl::PreparedDeclOutcome::Failed(_) => {
+                                verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
+                                | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
                                     source_env_unobservable = true;
                                     continue;
                                 }
@@ -6031,11 +6031,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             *contributor_owner,
                             decl_name,
                         ) {
-                            crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(
+                            verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
                                 Some(prepared),
                             ) => prepared,
                             // Genuine absence: this augmenter has no contributor for the spec.
-                            crate::resolver_core::prepared_decl::PreparedDeclOutcome::Ready(
+                            verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
                                 None,
                             ) => continue,
                             // A broken decl-body lease pin (the augmenter body demand
@@ -6047,11 +6047,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             // consumer (`instantiate_shell`) for every unobservable
                             // source, so the enclosing component-meta tracer refuses the
                             // final result too. A later demand under a live lease recovers.
-                            crate::resolver_core::prepared_decl::PreparedDeclOutcome::LeaseMiss => {
+                            verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss => {
                                 source_env_unobservable = true;
                                 continue;
                             }
-                            crate::resolver_core::prepared_decl::PreparedDeclOutcome::Failed(_) => {
+                            verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
                                 source_env_unobservable = true;
                                 continue;
                             }
@@ -16505,7 +16505,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // later serve stale.
         let owner_canonical_str = owner.defining_canonical.as_ref();
         let is_non_file_owner = crate::semantic_query::is_non_file_base(owner_canonical_str);
-        let owner_indexed: Option<Arc<crate::resolver_core::request_inputs::IndexedInputRecord>> =
+        let owner_indexed: Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> =
             if is_non_file_owner {
                 None
             } else {

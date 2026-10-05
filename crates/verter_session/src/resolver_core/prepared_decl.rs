@@ -12,6 +12,10 @@ use verter_type_expr::TopLevelOwnerId;
 use super::ShallowFileState;
 use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use crate::identity_interner::IdentityInterner;
+use verter_session_query::inputs::prepared::{
+    ImportBinding, PreparationFailure, PreparedDeclOutcome, PreparedOwnerScope,
+    PreparedTypeDeclResolution, TypeParamBinding,
+};
 use verter_session_query::inputs::shallow::ClassifiedTypeDeps;
 use verter_session_query::inputs::shallow::ExportTarget;
 use verter_session_query::source::demand::DemandOutcome;
@@ -62,53 +66,15 @@ type OwnerNameResolutionBases =
 /// `PreparedTypeDecl::name_resolution` for the sharing + interning contract.
 type SharedNameResolutionBase = Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>;
 
-/// Outcome of a lease-aware prepared-decl build. A genuine `Ready(None)` (the
-/// symbol is not inventoried, is an import-local, or lowered to no decl) is a
-/// cacheable absence; a `LeaseMiss` (a broken decl-body lease pin — the
-/// demanded body lowering ReturnOnly'd, lowering NOTHING) is a TRANSIENT
-/// no-warm signal a cache-admitting consumer must NOT persist as absence, so a
-/// later demand under a live lease recovers. Never collapse the two at a
-/// warm-admission boundary (the write-once prepared-decl slot).
-pub(crate) use super::request_inputs::PreparedDeclOutcome;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PreparationFailure {
-    MissingExternalOwner { local_name: String },
-    AuthoredOrdinalOverflow { count: usize },
-}
-
-/// Projection-facing prepared-declaration lookup.
+/// Session-side evidence folding over a prepared-declaration outcome.
 ///
-/// Strict prepared declarations are the only values admitted to the shared
-/// cache. When strict preparation fails solely because an exact authored
-/// declaration references an unresolved import, projection may consume an
-/// ephemeral declaration that retains the known authored shape while carrying
-/// typed unresolved-owner debt. The declaration is never written into a slot;
-/// the projection must run the normal resolver and classify the result partial
-/// only if that exact debt remains unresolved at query exit.
-#[derive(Debug, Clone)]
-pub enum PreparedTypeDeclResolution {
-    Complete(Arc<PreparedTypeDecl>),
-    AuthoredPartial {
-        root_identity: ResolvedRootIdentity,
-        declaration: Arc<PreparedTypeDecl>,
-        failure: PreparationFailure,
-    },
-    Missing,
-    Failed {
-        root_identity: ResolvedRootIdentity,
-        failure: PreparationFailure,
-    },
+/// The outcome itself is an owned record; folding a lease miss into the
+/// enclosing compute's non-cacheability is host evidence and stays here.
+pub(crate) trait PreparedDeclOutcomeFold<T> {
+    fn into_result(self) -> Result<Option<T>, PreparationFailure>;
 }
 
-impl PreparedTypeDeclResolution {
-    #[must_use]
-    pub fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-}
-
-impl<T> PreparedDeclOutcome<T> {
+impl<T> PreparedDeclOutcomeFold<T> for PreparedDeclOutcome<T> {
     /// Collapse to the plain `Option` for direct/standalone callers
     /// (`prepare_exported_*`, tests) that do NOT admit into the write-once
     /// slot cache: a lease-miss reads as `None` there (they recompute on the
@@ -118,7 +84,7 @@ impl<T> PreparedDeclOutcome<T> {
     /// enclosing traced compute that folds this transient miss refuses its
     /// own shared-cache admission; a `Ready(None)` cacheable absence marks
     /// nothing.
-    pub(crate) fn into_result(self) -> Result<Option<T>, PreparationFailure> {
+    fn into_result(self) -> Result<Option<T>, PreparationFailure> {
         match self {
             PreparedDeclOutcome::Ready(value) => Ok(value),
             PreparedDeclOutcome::LeaseMiss => {
@@ -130,14 +96,6 @@ impl<T> PreparedDeclOutcome<T> {
             PreparedDeclOutcome::Failed(failure) => Err(failure),
         }
     }
-}
-
-/// Import binding: maps a local import name to its resolved target.
-/// Used by the declaration-scope solver host to resolve cross-file references.
-#[derive(Debug, Clone)]
-pub struct ImportBinding {
-    pub canonical_id: String,
-    pub exported_name: String,
 }
 
 /// FINAL defining-file canonicalization of a file's import targets, computed
@@ -160,38 +118,6 @@ pub struct ImportCanonicalization {
     /// every resolvable import, canonicalized through the authoritative type or
     /// value route rail.
     pub final_resolution: FxHashMap<verter_type_expr::DeclBindingKey, ResolvedRootIdentity>,
-}
-
-/// Script-setup generic type-parameter binding for
-/// `<script setup lang="ts" generic="T extends Item = Item">`
-/// parameters.
-///
-/// The binding carries ONLY the parameter name plus its 0-based clause
-/// ordinal — the content-free FACT pair. The declaration-site `extends`
-/// constraint and `=` default are NEVER stored: at query time the ONE
-/// dispatch lowering helper re-borrows the full parameter clause lease-only
-/// from the pinned [`crate::project_type_store::IndexedReady`] (raw source +
-/// framework parse) and selects + validates the transient parameter by
-/// `(ordinal, name)`, interning its bounds into
-/// [`SemanticNodeData::TypeParam`](crate::semantic_query::SemanticNodeData::TypeParam)
-/// via `shallow_lower_type_expr`. `PreparedTypeDecl` would be the
-/// wrong category for this data — type parameters do not have alias
-/// bodies, scope-local `name_resolution`, or the rest of the
-/// prepared-decl surface.
-///
-/// `ordinal` carries the 0-based clause position into the lowered
-/// `SemanticNodeData::TypeParam.param_index`, disambiguating same-name
-/// parameters across multiple script-setup declarations within one
-/// file.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
-pub struct TypeParamBinding {
-    pub name: Arc<str>,
-    /// 0-based position in the
-    /// `<script setup generic="T, U, V">` clause, used as
-    /// [`SemanticNodeData::TypeParam.param_index`](crate::semantic_query::SemanticNodeData::TypeParam)
-    /// so multiple script-setup parameters in one file get distinct
-    /// identity tuples.
-    pub ordinal: u16,
 }
 
 /// Canonicalize ONE import target to the FINAL defining-file identity for the
@@ -1328,23 +1254,6 @@ impl PreparedValueDeclCache {
     }
 }
 
-/// Owner-exact declaration-scope surfaces retained by a prepared bundle.
-///
-/// The lexical owner is the key in [`PreparedDeclBundle::owner_scopes`], so
-/// every map here can stay string-keyed without aliasing a same-name binding
-/// from another script region.
-#[derive(Clone, Default)]
-pub struct PreparedOwnerScope {
-    /// Resolved imports visible in this lexical owner.
-    pub import_bindings: FxHashMap<String, ImportBinding>,
-    /// Same-file type names visible in this lexical owner.
-    pub scope_type_names: FxHashSet<String>,
-    /// Same-file value names visible in this lexical owner.
-    pub scope_value_names: FxHashSet<String>,
-    /// Script-setup generic parameters visible in this lexical owner.
-    pub script_setup_type_bindings: FxHashMap<String, TypeParamBinding>,
-}
-
 /// Atomic declaration-surface bundle for one canonical file.
 ///
 /// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
@@ -1352,8 +1261,9 @@ pub struct PreparedOwnerScope {
 /// import graph or file content changes.
 #[derive(Clone)]
 pub struct PreparedDeclBundle {
-    input_projection:
-        super::request_inputs::CachedProjection<super::request_inputs::PreparedInputRecord>,
+    input_projection: super::request_inputs::CachedProjection<
+        verter_session_query::inputs::prepared::PreparedInputRecord,
+    >,
     /// The content version (`ShallowFileState::whole_hash`) of the
     /// canonical file this bundle was built from. A consumer that
     /// resolves a declaration through this bundle and roots a cache
@@ -1374,9 +1284,11 @@ pub struct PreparedDeclBundle {
 }
 
 impl PreparedDeclBundle {
-    pub(crate) fn input_record(&self) -> Arc<super::request_inputs::PreparedInputRecord> {
-        self.input_projection
-            .get_or_init(|| super::request_inputs::PreparedInputRecord {
+    pub(crate) fn input_record(
+        &self,
+    ) -> Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
+        self.input_projection.get_or_init(|| {
+            verter_session_query::inputs::prepared::PreparedInputRecord {
                 observation_id: {
                     static NEXT_OBSERVATION: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(1);
@@ -1384,7 +1296,8 @@ impl PreparedDeclBundle {
                 },
                 owner_whole_hash: self.owner_whole_hash,
                 owner_scopes: Arc::clone(&self.owner_scopes),
-            })
+            }
+        })
     }
 
     /// Exact declaration scope for `owner`.

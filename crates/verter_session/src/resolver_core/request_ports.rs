@@ -1,7 +1,9 @@
 //! Narrow services selected at the request boundary. Evaluated-node storage
 //! is owned by the query facade; these ports only serve inputs and typed work.
 
-use super::request_inputs::{IndexedInputRecord, IndexedInputServe, PreparedInputRecord};
+use verter_session_query::inputs::indexed::IndexedInputRecord;
+use verter_session_query::inputs::indexed::IndexedInputServe;
+use verter_session_query::inputs::prepared::PreparedInputRecord;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
 
 use std::sync::Arc;
@@ -11,9 +13,9 @@ use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use super::resolver_context::MaterializeScopeObservation;
 use crate::fact_tracing::note_non_cacheable_read_fan_out;
-use crate::resolver_core::ValueDeclIdentity;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::declarations::metadata::ValueDeclIdentity;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
 
 /// Content-free marker for the published workspace root an epoch retains.
@@ -360,7 +362,7 @@ pub trait RouteLookup {
         dep_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> crate::resolver_core::ResolvedTypeDeclaration;
+    ) -> verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
     fn resolve_value_export_target(
         &self,
@@ -524,7 +526,7 @@ pub trait OwnedLowering {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
     /// Consume a typed preparation failure as a ReturnOnly absence at an
@@ -560,7 +562,7 @@ pub trait OwnedLowering {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
     /// Consume a typed preparation failure as a ReturnOnly absence at an
@@ -662,28 +664,28 @@ pub trait OwnedLowering {
         name: &str,
     ) -> Result<
         Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn prepared_type_for_projection(
         &self,
         input: &PreparedInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
+    ) -> verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
     fn prepare_augmentation_type(
         &self,
         input: &PreparedInputRecord,
         scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> crate::resolver_core::prepared_decl::PreparedDeclOutcome<PreparedTypeDecl>;
+    ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<PreparedTypeDecl>;
     fn prepare_augmentation_value(
         &self,
         input: &PreparedInputRecord,
         scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> crate::resolver_core::prepared_decl::PreparedDeclOutcome<PreparedValueDecl>;
+    ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<PreparedValueDecl>;
 
     #[cfg(test)]
     fn function_program_index(

@@ -36,9 +36,10 @@ use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
 use crate::capture_token::assert_no_stack_overflow;
 use crate::component_meta_resolution_policy::apply_component_meta_resolution_policy;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
-use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{FileLanguage, VerterHost};
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 // ---------------------------------------------------------------------------
 // Test fixture helpers

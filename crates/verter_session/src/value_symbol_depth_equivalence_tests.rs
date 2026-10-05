@@ -409,7 +409,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     );
     assert_eq!(
         oracle_peel,
-        crate::resolver_core::ValueDeclIdentity {
+        verter_session_query::declarations::metadata::ValueDeclIdentity {
             canonical_id: "/dep.ts".to_string(),
             owner,
             name: "base".to_string(),

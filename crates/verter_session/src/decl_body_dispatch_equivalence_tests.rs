@@ -356,7 +356,7 @@ fn c2_typeof_alias_cycle_terminates_identically_in_oracle_and_graph_native() {
     );
     assert_eq!(
         oracle,
-        crate::resolver_core::ValueDeclIdentity {
+        verter_session_query::declarations::metadata::ValueDeclIdentity {
             canonical_id: "/cyc.ts".to_string(),
             owner,
             name: "a".to_string(),

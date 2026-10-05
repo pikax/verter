@@ -747,7 +747,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     #[allow(clippy::too_many_arguments)]
     pub(in crate::project_semantic_dispatch) fn lower_script_setup_type_param_binding(
         &self,
-        binding: &crate::resolver_core::prepared_decl::TypeParamBinding,
+        binding: &verter_session_query::inputs::prepared::TypeParamBinding,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
         name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
@@ -2078,7 +2078,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // same-file type decls.
             //
             // The binding store is
-            // [`crate::resolver_core::prepared_decl::TypeParamBinding`]
+            // [`verter_session_query::inputs::prepared::TypeParamBinding`]
             // (the content-free name + ordinal fact pair); the ONE
             // shared helper re-borrows the clause lease-only from the
             // pinned artifact and constructs the node — never an

@@ -1273,7 +1273,7 @@ impl IndexedModuleFacts for IndexedReady {
         &self.shallow_state
     }
 }
-impl IndexedModuleFacts for crate::resolver_core::request_inputs::IndexedInputRecord {
+impl IndexedModuleFacts for verter_session_query::inputs::indexed::IndexedInputRecord {
     fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly {
         &self.shallow_state
     }

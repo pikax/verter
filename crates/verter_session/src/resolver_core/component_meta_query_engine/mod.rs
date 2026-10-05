@@ -80,15 +80,15 @@ use std::collections::BTreeSet;
 use rustc_hash::FxHashMap;
 use verter_session_query::declarations::DeclarationId;
 
-use super::declaration_metadata::{
-    DeclarationMetadataResolver, ResolvedDeclarationKind, ResolvedLocalTypeSymbolMetadata,
-    ResolvedTypeDeclaration,
-};
+use super::declaration_metadata::DeclarationMetadataResolver;
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::resolver_core::ResolverContext;
 use crate::resolver_core::{FuseBudgets, FuseState};
 use crate::semantic_query::SemanticNodeId;
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 // The output-sink capabilities for this subtree are defined PER-SINK in the
 // exact output-SINK modules that project — NOT subtree-wide:
@@ -1045,7 +1045,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         _dep_canonical: &str,
         _dep_owner: verter_type_expr::TopLevelOwnerId,
         _requested_name: &str,
-    ) -> Option<super::declaration_metadata::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         None
     }
 
@@ -1084,7 +1084,7 @@ impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<super::declaration_metadata::ResolvedLocalTypeSymbolMetadata> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata> {
         local_type_symbol_metadata_for_known_source(
             self.ctx,
             canonical_source,

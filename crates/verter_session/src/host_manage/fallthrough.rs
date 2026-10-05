@@ -60,7 +60,7 @@ pub(crate) struct FallthroughComputeOutcome {
 pub(super) struct FallthroughEvalInputs {
     pub(super) env: std::sync::Arc<verter_session_query::declarations::EvalEnv>,
     pub(super) materialized_runtime_values:
-        std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity>,
+        std::collections::BTreeSet<verter_session_query::declarations::metadata::ValueDeclIdentity>,
 }
 
 /// Whether a STATIC `is="…"` value names a NATIVE element rather than a
@@ -797,7 +797,8 @@ impl VerterHost {
         root_reachability: Option<
             &verter_session_query::analysis::component_meta::RootReachability,
         >,
-    ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
+    ) -> std::collections::BTreeSet<verter_session_query::declarations::metadata::ValueDeclIdentity>
+    {
         use verter_session_query::analysis::types::ImportBindingKind;
 
         let required_runtime_value_names = match root_reachability {
@@ -878,7 +879,8 @@ impl VerterHost {
         owner_local_value_names: &rustc_hash::FxHashSet<verter_type_expr::DeclBindingKey>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
         env: &mut verter_session_query::declarations::EvalEnv,
-    ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
+    ) -> std::collections::BTreeSet<verter_session_query::declarations::metadata::ValueDeclIdentity>
+    {
         component_meta_trace_custom!(
             "materialize_runtime_values",
             format!(

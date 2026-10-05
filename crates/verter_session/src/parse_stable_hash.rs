@@ -76,7 +76,11 @@ const SEP: u8 = 0u8;
 /// Invariant under cosmetic edits; changes under decl-shape edits.
 #[must_use]
 pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
-    compute_parse_stable_hash_parts(&indexed.shallow_state, indexed.framework_parse.as_deref())
+    let script_regions = indexed
+        .framework_parse
+        .as_deref()
+        .map(|parse| parse.script_regions());
+    compute_parse_stable_hash_parts(&indexed.shallow_state, script_regions.as_deref())
 }
 /// The same hash, computed from a request-input record rather than the
 /// canonical artifact. The request-input carrier is the port-shaped
@@ -86,13 +90,19 @@ pub fn compute_parse_stable_hash(indexed: &IndexedReady) -> Hash16 {
 /// them — therefore has no reader.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn compute_parse_stable_hash_inputs(
-    indexed: &crate::resolver_core::request_inputs::IndexedInputRecord,
+    indexed: &verter_session_query::inputs::indexed::IndexedInputRecord,
 ) -> Hash16 {
-    compute_parse_stable_hash_parts(&indexed.shallow_state, indexed.framework_parse.as_deref())
+    compute_parse_stable_hash_parts(
+        &indexed.shallow_state,
+        indexed
+            .framework_parse
+            .as_ref()
+            .map(|facts| facts.script_regions()),
+    )
 }
 fn compute_parse_stable_hash_parts(
     shallow: &verter_session_query::inputs::shallow::ShallowInputAssembly,
-    framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
+    script_regions: Option<&[verter_language::ScriptRegion]>,
 ) -> Hash16 {
     verter_audit::attribute!(ParseStableHash);
 
@@ -254,8 +264,8 @@ fn compute_parse_stable_hash_parts(
     // the region KIND and source dialect, but not byte spans: offsets move
     // under cosmetic carrier edits and are not semantic shape.
     write_section(&mut buf, b"carrier_script_regions");
-    if let Some(parse) = framework_parse {
-        for region in parse.script_regions() {
+    if let Some(script_regions) = script_regions {
+        for region in script_regions {
             write_script_region_kind(&mut buf, region.kind);
             write_script_source_type(&mut buf, region.source_type);
             buf.push(SEP);

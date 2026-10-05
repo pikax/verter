@@ -219,7 +219,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
     >,
     name: String,
     type_source: verter_type_expr::facts::SemanticTypeSource,
-    declaration: crate::resolver_core::ResolvedTypeDeclaration,
+    declaration: verter_session_query::declarations::metadata::ResolvedTypeDeclaration,
     producer_scope: &RegistryProducerScope,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) {

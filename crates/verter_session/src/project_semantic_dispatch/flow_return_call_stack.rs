@@ -107,7 +107,7 @@ pub(super) enum CallStep<'e> {
 /// A call's executor route ([`FlowEvaluator::resolve_call_step`]) between
 /// its arguments: the arguments typed so far.
 pub(super) struct ResolveCallFrame<'e> {
-    _serve: crate::resolver_core::request_inputs::IndexedInputServe,
+    _serve: verter_session_query::inputs::indexed::IndexedInputServe,
     /// The call's whole span.
     span: verter_span::Span,
     callee: SemanticNodeId,
@@ -127,7 +127,7 @@ pub(super) struct ResolveCallFrame<'e> {
 /// asked, and asked again for each context-sensitive argument its second
 /// inference pass retypes.
 pub(super) struct FinishRoute {
-    _serve: crate::resolver_core::request_inputs::IndexedInputServe,
+    _serve: verter_session_query::inputs::indexed::IndexedInputServe,
     key: crate::semantic_query::ResolveCallKey,
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,

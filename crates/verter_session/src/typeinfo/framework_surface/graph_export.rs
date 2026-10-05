@@ -48,12 +48,13 @@ use verter_protocol::verter::v1::{
 };
 use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
-use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
 use crate::typeinfo::framework_surface::results;
 use crate::typeinfo::framework_surface::results::{
     MacroSurfaceDtos, NamedTypeMember, NamedTypeMemberOutput, NormalizedSurface,
     NormalizedSurfaces, OriginHop, ResolvedOutcome,
 };
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 /// The bounded shallow encoder's traversal depth budget. The member value
 /// vocabulary is one-level — a member's value is a leaf node (primitive /

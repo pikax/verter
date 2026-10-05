@@ -119,7 +119,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.inner.prepared_type_decl_in_with_context(
             ctx,
@@ -142,7 +142,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.inner.prepared_value_decl_in_with_context(
             ctx,

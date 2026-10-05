@@ -811,12 +811,13 @@ fn loop_statements_nested_10000_deep_return_on_production_stacks() {
 #[test]
 fn a_nest_derives_its_source_parse_identity_a_fixed_number_of_times() {
     let derivations = |depth: usize| {
-        let before = crate::file_artifact_store::source_parse_identity_derivations_for_tests();
+        let before = verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests();
         assert_eq!(
             mismatches(&arrows(depth), &[(ARROW_PROBE, "1")]),
             Vec::<String>::new()
         );
-        crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before
+        verter_session_query::source::framework_parse::source_parse_identity_derivations_for_tests()
+            - before
     };
     assert_eq!(derivations(20), derivations(200));
 }

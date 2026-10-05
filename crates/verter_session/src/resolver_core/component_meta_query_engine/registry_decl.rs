@@ -34,7 +34,7 @@ use super::route_admission::{self, AdmittedRouteProjectionNode};
 use super::surface::{compound_root_surface_view_via_dispatch, surface_view_from_semantic_node};
 use super::{
     empty_semantic_args, local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
-    DirectPreparedDeclarationResolver, ResolvedTypeDeclaration,
+    DirectPreparedDeclarationResolver,
 };
 use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
@@ -43,6 +43,7 @@ use crate::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
     SemanticQueryOutput,
 };
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn resolve_direct_prepared_type_declaration(

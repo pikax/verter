@@ -953,10 +953,10 @@ mod tests {
 
         use super::super::core::{PolicyCtx, PolicyRegistry};
         use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
-        use crate::resolver_core::{
-            ComponentMetaQueryEngine, ResolvedDeclarationKind, ResolvedTypeDeclaration,
-        };
+        use crate::resolver_core::ComponentMetaQueryEngine;
         use crate::semantic_query::{DeclIdentity, SemanticNodeData};
+        use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+        use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();

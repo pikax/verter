@@ -118,9 +118,8 @@ pub(crate) use crate::host_manage::component_meta_request_impl::{
     should_skip_imported_registry_seed_refresh, trace_request_source,
 };
 pub use crate::host_manage::component_meta_request_impl::{
-    CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedDeclarationKind,
-    ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp,
-    ResolvedTypeDeclaration, ResolvedTypeRegistryMeta,
+    CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedJsdocBlock,
+    ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedTypeRegistryMeta,
 };
 pub use crate::project_semantic_dispatch::interior_source::InteriorSourceStep;
 pub(crate) use output::PublishedCompleteness;

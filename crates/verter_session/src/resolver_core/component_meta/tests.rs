@@ -1,10 +1,10 @@
 use super::*;
-use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
 use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, ImportBindingKind,
     ResolvedLocalType,
 };
+use verter_session_query::declarations::metadata::ResolvedExportTarget;
 use verter_session_query::declarations::DeclarationId;
 use verter_span::Span;
 use verter_type_expr::{PrimitiveName, TopLevelOwnerId};
@@ -291,7 +291,8 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                 canonical_source: "/dep.ts".to_string(),
                 owner: TopLevelOwnerId::ordinary_file(),
                 span: Span::new(0, 29),
-                kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
             },
             native_props: vec![crate::resolver_core::ResolvedNativeProp {

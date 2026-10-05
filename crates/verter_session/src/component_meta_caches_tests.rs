@@ -1318,8 +1318,9 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
 fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
     use crate::component_meta_caches::ComputedEntry;
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
-    use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
     use std::cell::Cell;
+    use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+    use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
     let project = make_project();
     project

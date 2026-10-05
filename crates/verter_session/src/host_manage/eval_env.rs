@@ -12,8 +12,8 @@ use verter_session_query::analysis::types::Hash16;
 use std::sync::Arc;
 
 use crate::instant::Instant;
-use crate::resolver_core::ValueDeclIdentity;
 use crate::VerterHost;
+use verter_session_query::declarations::metadata::ValueDeclIdentity;
 
 use super::resolve_eval_dependency_canonical_with;
 use super::{is_raw_import_specifier_id, log_snapshot_debug, ComputedEvaluatedTypes};

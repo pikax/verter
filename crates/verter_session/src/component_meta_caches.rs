@@ -84,7 +84,7 @@ use crate::cache_runtime::node::QueryFlightKey;
 use crate::cache_runtime::singleflight::InflightTable;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
-use crate::resolver_core::ResolvedTypeDeclaration;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 #[cfg(any(test, feature = "test-support"))]
 use verter_session_query::facts::fact_cache::ReadSetSignature;

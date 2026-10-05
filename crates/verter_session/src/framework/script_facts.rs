@@ -770,7 +770,7 @@ pub(crate) fn resolve_script_facts_with_ctx<T: FrameworkScriptFactPayload>(
     host: &VerterHost,
     registration: &FrameworkRegistration,
     canonical: &str,
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
 ) -> ScriptFactEvidence<T> {
     resolve_script_facts_inner::<T>(host, registration, canonical, Some(ctx))
 }
@@ -779,8 +779,10 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     host: &VerterHost,
     registration: &FrameworkRegistration,
     canonical: &str,
-    request_ctx: Option<&dyn ResolverContext<crate::resolver_core::HostCapabilities>>,
+    request_ctx: Option<&dyn crate::resolver_core::HostRequestContext>,
 ) -> ScriptFactEvidence<T> {
+    let engine_ctx = request_ctx
+        .map(|ctx| -> &dyn ResolverContext<crate::resolver_core::HostCapabilities> { ctx });
     // Zero-cost fast path: this registration registers NO provider ⇒ no
     // candidates ⇒ no facts, so the resolved-validation half does ZERO per-file
     // work — no IndexedReady serve, no classification, no `get_analysis`, no
@@ -800,13 +802,17 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             ScriptFactNotApplicableReason::ProviderNotRegistered,
         ));
     }
-    let Some(facts) = (match request_ctx {
-        Some(ctx) => ctx
-            .ensure_indexed_ready_serve(canonical)
-            .map(|serve| serve.indexed),
-        None => host
-            .ensure_indexed_ready_serve(canonical)
-            .map(|serve| serve.indexed.input_record()),
+    let Some((facts, framework_parse)) = (match request_ctx {
+        Some(ctx) => ctx.ensure_indexed_ready_serve(canonical).map(|serve| {
+            let framework_parse = ctx.framework_parse_artifact(&serve.indexed);
+            (serve.indexed, framework_parse)
+        }),
+        None => host.ensure_indexed_ready_serve(canonical).map(|serve| {
+            (
+                serve.indexed.input_record(),
+                serve.indexed.framework_parse.clone(),
+            )
+        }),
     }) else {
         return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
             ScriptFactUnavailableReason::SourceUnavailable,
@@ -815,7 +821,6 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     let file_language = host.language_classifier().classify(canonical);
     let carrier_language = file_language.carrier_language_id();
     let whole_hash = facts.whole_hash;
-    let framework_parse = facts.framework_parse.clone();
 
     // Provider capture uses the stored IndexedReady eval-source Arc (script
     // bytes at raw carrier offsets, markup/styles blanked). Catalog lookup
@@ -861,7 +866,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         Option<Vec<ResolvedImportTarget>>,
         bool,
     ) = named_cacheability_scope!(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, request_ctx),
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, engine_ctx),
         TracerScope::ScriptFactsImportRoute,
         || {
             let mut snapshot = host.get_analysis(canonical)?;
@@ -1011,8 +1016,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             bool,
         ) = named_cacheability_scope!(
             &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(
-                host,
-                request_ctx
+                host, engine_ctx
             ),
             TracerScope::ScriptFactsImportRoute,
             || {
@@ -1142,7 +1146,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // ONE of the two sibling tracers and must be able to say WHICH. Erased in a
     // production build.
     let (payload_opt, finalise) = named_fact_tracer!(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, request_ctx),
+        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, engine_ctx),
         TracerScope::ScriptFactsProviderValidate,
         || {
             // Observe the owner's whole hash + every resolved import contributor so
@@ -1414,7 +1418,7 @@ impl VerterHost {
     /// resolves under, never a second `current_store_view_for_query`.
     pub(crate) fn resolve_svelte_script_facts_with_ctx(
         &self,
-        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn crate::resolver_core::HostRequestContext,
         canonical: &str,
     ) -> ScriptFactEvidence<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>
     {

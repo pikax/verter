@@ -58,21 +58,6 @@ pub use verter_session_query::resolution::ProjectIdentity;
 
 // ── FileArtifactKey ──
 
-#[cfg(test)]
-thread_local! {
-    /// How many keys this thread derived by hashing a plain script's whole
-    /// source ([`FileArtifactKey::for_source_identity`]); test-only.
-    static SOURCE_PARSE_IDENTITY_DERIVATIONS: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
-
-/// How many artifact keys this thread derived from a plain script's whole
-/// source text so far (test-only).
-#[cfg(test)]
-pub(crate) fn source_parse_identity_derivations_for_tests() -> usize {
-    SOURCE_PARSE_IDENTITY_DERIVATIONS.with(std::cell::Cell::get)
-}
-
 // ── FileFacts ──
 
 /// Per-file fact registry payload.
@@ -3715,23 +3700,17 @@ impl FileArtifactKeySource for FileArtifactKey {
         framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
         parse_env_hash: Hash16,
     ) -> Option<Self> {
-        let parse_key = match framework_parse {
-            Some(artifact) => {
-                if artifact.adapter_id() != file_language_id.adapter_id()?
-                    || Some(artifact.language_id()) != file_language_id.carrier_language_id()
-                {
-                    return None;
+        let parse_key = verter_session_query::source::framework_parse::exact_source_parse_key(
+            source,
+            &file_language_id,
+            framework_parse.map(|artifact| {
+                verter_session_query::source::framework_parse::CarrierParseKey {
+                    adapter_id: artifact.adapter_id(),
+                    language_id: artifact.language_id(),
+                    parse_key: artifact.parse_key(),
                 }
-                artifact.parse_key().clone()
-            }
-            None => {
-                #[cfg(test)]
-                SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
-                verter_language::default_parse_identity_for(source, &file_language_id)
-                    .ok()?
-                    .1
-            }
-        };
+            }),
+        )?;
         Some(Self {
             canonical,
             content_hash,

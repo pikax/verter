@@ -393,7 +393,7 @@ impl ComponentMetaQueryEngine<'_> {
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> super::ResolvedTypeDeclaration {
+    ) -> verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
         let key = (
             canonical_source.to_string(),
             owner,

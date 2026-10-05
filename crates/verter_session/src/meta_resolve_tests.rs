@@ -149,14 +149,14 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
     // `append_component_meta_registry_entries_seeds_explicit_object_surface_for_imported_props`
     // covers the surviving invariant: the imported seed still carries
     // an explicit object surface in the initial registry.
-    let declaration = crate::resolver_core::ResolvedTypeDeclaration {
+    let declaration = verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
         requested_name: "Props".to_string(),
         declaration_id: None,
         resolved_name: "Props".to_string(),
         canonical_source: "/src/types.ts".to_string(),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
-        kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
+        kind: verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
         text: Some("export interface Props { label?: string }".to_string()),
     };
     let object = verter_type_expr::facts::SemanticTypeSource::Synthesized(
@@ -187,14 +187,14 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
 
 #[test]
 fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable() {
-    let declaration = crate::resolver_core::ResolvedTypeDeclaration {
+    let declaration = verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
         requested_name: "Button".to_string(),
         declaration_id: None,
         resolved_name: "Button".to_string(),
         canonical_source: "/src/types.ts".to_string(),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         span: verter_span::Span::default(),
-        kind: crate::resolver_core::ResolvedDeclarationKind::TypeAlias,
+        kind: verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias,
         text: Some("export type Button = VariantProps<typeof config>".to_string()),
     };
     let symbolic = verter_type_expr::facts::SemanticTypeSource::Synthesized(
@@ -2510,7 +2510,7 @@ defineProps<Props>()
     );
     assert_eq!(
         props_macro.declaration.kind,
-        crate::meta_resolve::ResolvedDeclarationKind::Interface,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
         "native declaration metadata should preserve the pre-expansion kind"
     );
     assert_eq!(
@@ -4730,7 +4730,7 @@ defineProps<Props>()
     assert_eq!(registry_entry.declaration.canonical_source, "/types.ts");
     assert_eq!(
         registry_entry.declaration.kind,
-        crate::meta_resolve::ResolvedDeclarationKind::Interface,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
     );
     // Discriminating invariant: declaration text recovery via
     // source-reparse is not supported. The type-registry metadata

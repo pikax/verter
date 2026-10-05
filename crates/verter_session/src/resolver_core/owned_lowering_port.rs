@@ -96,7 +96,7 @@ trait SourceInputProvider {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn raw_prepared_value_decl(
         &self,
@@ -105,7 +105,7 @@ trait SourceInputProvider {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn source_host(&self) -> &crate::VerterHost;
     fn source_session_view(&self) -> Option<&dyn crate::session_view::SessionView>;
@@ -128,8 +128,12 @@ trait SourceInputProvider {
     ) -> Option<Arc<super::ShallowFileState>>;
     fn prepared(
         &self,
-        input: &super::request_inputs::PreparedInputRecord,
+        input: &verter_session_query::inputs::prepared::PreparedInputRecord,
     ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>>;
+    fn indexed(
+        &self,
+        input: &verter_session_query::inputs::indexed::IndexedInputRecord,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>>;
 }
 impl<L: RequestBoundLifecycle> SourceInputProvider for RequestBoundAdapter<L>
 where
@@ -144,7 +148,7 @@ where
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.0
             .prepared_type_decl(self, canonical_id, owner, symbol_name)
@@ -157,7 +161,7 @@ where
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.0
             .prepared_value_decl(self, canonical_id, owner, symbol_name)
@@ -208,13 +212,23 @@ where
     }
     fn prepared(
         &self,
-        input: &super::request_inputs::PreparedInputRecord,
+        input: &verter_session_query::inputs::prepared::PreparedInputRecord,
     ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>> {
         self.0
             .request_view()
             .overlay()
             .input_artifacts
             .prepared(input)
+    }
+    fn indexed(
+        &self,
+        input: &verter_session_query::inputs::indexed::IndexedInputRecord,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.0
+            .request_view()
+            .overlay()
+            .input_artifacts
+            .indexed(input)
     }
 }
 #[cfg(any(test, feature = "test-support"))]
@@ -227,7 +241,7 @@ impl SourceInputProvider for crate::VerterHost {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
         crate::VerterHost::prepared_type_decl_in_with_store_view(
@@ -247,7 +261,7 @@ impl SourceInputProvider for crate::VerterHost {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
         crate::VerterHost::prepared_value_decl_in_with_store_view(
@@ -298,9 +312,15 @@ impl SourceInputProvider for crate::VerterHost {
     }
     fn prepared(
         &self,
-        input: &super::request_inputs::PreparedInputRecord,
+        input: &verter_session_query::inputs::prepared::PreparedInputRecord,
     ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>> {
         self.source_input_leases.prepared(input)
+    }
+    fn indexed(
+        &self,
+        input: &verter_session_query::inputs::indexed::IndexedInputRecord,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.source_input_leases.indexed(input)
     }
 }
 fn observed_fact_hash(
@@ -347,7 +367,7 @@ impl<
         &self,
         canonical: &str,
     ) -> Option<(
-        super::request_inputs::IndexedInputServe,
+        verter_session_query::inputs::indexed::IndexedInputServe,
         Option<Self::ExpressionDemand>,
     )> {
         let serve =
@@ -362,7 +382,7 @@ impl<
         &self,
         canonical: &str,
     ) -> Option<(
-        super::request_inputs::IndexedInputServe,
+        verter_session_query::inputs::indexed::IndexedInputServe,
         Self::ExpressionDemand,
     )> {
         let serve =
@@ -372,18 +392,27 @@ impl<
     }
 }
 
-/// Session-side extension over a request context: the Svelte
-/// resolved-validation script facts. The semantic engine never demands them,
-/// so they are not part of the engine's request ports.
-pub(crate) trait SvelteScriptFactsPort {
+/// Session-side extension over a request context: what host framework code
+/// reads beside the engine's request ports. The semantic engine never demands
+/// these, so they are not part of its ports.
+pub(crate) trait HostSourcePort {
+    /// The Svelte resolved-validation script facts of `canonical`.
     fn svelte_script_facts(
         &self,
         canonical: &str,
     ) -> crate::framework::script_facts::ScriptFactEvidence<
         verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
     >;
+    /// The framework parse artifact behind a served indexed input, from the
+    /// request lease that retains it. Engine inputs carry only the owned
+    /// parse facts; host framework code that needs the parsed carrier itself
+    /// reads it here.
+    fn framework_parse_artifact(
+        &self,
+        input: &verter_session_query::inputs::indexed::IndexedInputRecord,
+    ) -> Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>;
 }
-impl<T: SourceInputProvider> SvelteScriptFactsPort for T {
+impl<T: SourceInputProvider> HostSourcePort for T {
     fn svelte_script_facts(
         &self,
         canonical: &str,
@@ -392,18 +421,21 @@ impl<T: SourceInputProvider> SvelteScriptFactsPort for T {
     > {
         self.raw_svelte_script_facts(canonical)
     }
+    fn framework_parse_artifact(
+        &self,
+        input: &verter_session_query::inputs::indexed::IndexedInputRecord,
+    ) -> Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>> {
+        self.indexed(input)?.framework_parse.clone()
+    }
 }
 
 /// A session request context: the engine's request contract plus the
 /// session-only extensions a framework-surface resolver demands.
 pub(crate) trait HostRequestContext:
-    super::ResolverContext<super::HostCapabilities> + SvelteScriptFactsPort
+    super::ResolverContext<super::HostCapabilities> + HostSourcePort
 {
 }
-impl<T: super::ResolverContext<super::HostCapabilities> + SvelteScriptFactsPort> HostRequestContext
-    for T
-{
-}
+impl<T: super::ResolverContext<super::HostCapabilities> + HostSourcePort> HostRequestContext for T {}
 
 impl<
         T: SourceInputProvider
@@ -413,11 +445,11 @@ impl<
 {
     fn script_setup_type_params(
         &self,
-        serve: &super::request_inputs::IndexedInputServe,
+        serve: &verter_session_query::inputs::indexed::IndexedInputServe,
     ) -> Vec<verter_type_expr::TypeParam> {
         crate::host_resolve::sfc_script_setup_type_params(
             &serve.indexed.raw_source,
-            serve.indexed.framework_parse.as_deref(),
+            HostSourcePort::framework_parse_artifact(self, &serve.indexed).as_deref(),
         )
     }
     fn terminal_macro_inventory(
@@ -451,7 +483,7 @@ impl<
         symbol_name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.raw_prepared_value_decl(canonical_id, owner, symbol_name)
     }
@@ -463,7 +495,7 @@ impl<
         symbol_name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.raw_prepared_type_decl(canonical_id, owner, symbol_name)
     }
@@ -677,12 +709,12 @@ impl<
 
     fn prepared_type_from_input(
         &self,
-        input: &super::request_inputs::PreparedInputRecord,
+        input: &verter_session_query::inputs::prepared::PreparedInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Result<
         Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
-        super::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared(input) else {
             missing_source();
@@ -692,13 +724,13 @@ impl<
     }
     fn prepared_type_for_projection(
         &self,
-        input: &super::request_inputs::PreparedInputRecord,
+        input: &verter_session_query::inputs::prepared::PreparedInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> super::prepared_decl::PreparedTypeDeclResolution {
+    ) -> verter_session_query::inputs::prepared::PreparedTypeDeclResolution {
         let Some(bundle) = self.prepared(input) else {
             missing_source();
-            return super::prepared_decl::PreparedTypeDeclResolution::Missing;
+            return verter_session_query::inputs::prepared::PreparedTypeDeclResolution::Missing;
         };
         bundle
             .prepared_type_decls
@@ -706,31 +738,31 @@ impl<
     }
     fn prepare_augmentation_type(
         &self,
-        input: &super::request_inputs::PreparedInputRecord,
+        input: &verter_session_query::inputs::prepared::PreparedInputRecord,
         scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> super::prepared_decl::PreparedDeclOutcome<
+    ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<
         verter_session_query::type_solver::PreparedTypeDecl,
     > {
         let Some(bundle) = self.prepared(input) else {
             missing_source();
-            return super::prepared_decl::PreparedDeclOutcome::LeaseMiss;
+            return verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss;
         };
         bundle.prepare_augmentation_type_decl_outcome_in(scope, owner, name)
     }
     fn prepare_augmentation_value(
         &self,
-        input: &super::request_inputs::PreparedInputRecord,
+        input: &verter_session_query::inputs::prepared::PreparedInputRecord,
         scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> super::prepared_decl::PreparedDeclOutcome<
+    ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<
         verter_session_query::type_solver::PreparedValueDecl,
     > {
         let Some(bundle) = self.prepared(input) else {
             missing_source();
-            return super::prepared_decl::PreparedDeclOutcome::LeaseMiss;
+            return verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss;
         };
         bundle.prepare_augmentation_value_decl_outcome_in(scope, owner, name)
     }

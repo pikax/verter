@@ -24,10 +24,11 @@ use verter_type_expr::locators::{
 
 use crate::component_meta_resolution_policy::apply_component_meta_resolution_policy;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
-use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{FileLanguage, VerterHost};
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 // ---------------------------------------------------------------------------
 // Fixture helpers

@@ -1553,7 +1553,7 @@ fn unresolved_direct_import_remains_a_typed_preparation_failure() {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "Props",
             ),
-            Err(crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+            Err(verter_session_query::inputs::prepared::PreparationFailure::MissingExternalOwner {
                 local_name
             }) if local_name == "External"
         ));

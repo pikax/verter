@@ -8,6 +8,7 @@
 //! `SemanticQueryKey::LowerLocator` memo drives.
 
 use super::*;
+use crate::resolver_core::prepared_decl::PreparedDeclOutcomeFold;
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// The ONE shared binder-frame constructor for declared type-parameter
@@ -379,17 +380,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             anchor.owner,
                             anchor_symbol.as_ref(),
                         ) {
-                            crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Complete(
+                            verter_session_query::inputs::prepared::PreparedTypeDeclResolution::Complete(
                                 prepared,
                             )
-                            | crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::AuthoredPartial {
+                            | verter_session_query::inputs::prepared::PreparedTypeDeclResolution::AuthoredPartial {
                                 declaration: prepared,
                                 ..
                             } => Some(AnchorPreparedDecl::Type(prepared)),
-                            crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Missing => {
+                            verter_session_query::inputs::prepared::PreparedTypeDeclResolution::Missing => {
                                 None
                             }
-                            crate::resolver_core::prepared_decl::PreparedTypeDeclResolution::Failed {
+                            verter_session_query::inputs::prepared::PreparedTypeDeclResolution::Failed {
                                 failure,
                                 ..
                             } => {

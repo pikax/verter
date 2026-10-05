@@ -5417,7 +5417,8 @@ fn dispatch_host_adapter_routes_per_base_scope() {
 
 #[test]
 fn dispatch_host_preserves_prepared_outcomes_and_final_hop_identity() {
-    use crate::resolver_core::prepared_decl::{PreparationFailure, PreparedTypeDeclResolution};
+    use verter_session_query::inputs::prepared::PreparationFailure;
+    use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
     let host = host();
     upsert_ts(

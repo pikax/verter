@@ -24,7 +24,7 @@ use verter_session_query::analysis::types::{
     AnalyzedDefaultValue, AnalyzedExposeField, AnalyzedPropField, AnalyzedSlotField,
 };
 
-use crate::resolver_core::ResolvedTypeDeclaration;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 /// The resolved `defineProps` surface: named prop fields plus index signatures.
 ///

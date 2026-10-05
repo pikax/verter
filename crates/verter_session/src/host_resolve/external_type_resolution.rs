@@ -185,7 +185,7 @@ impl VerterHost {
         target_canonical: &str,
         target_owner: verter_type_expr::TopLevelOwnerId,
         target_name: &str,
-    ) -> crate::resolver_core::ResolvedTypeDeclaration {
+    ) -> verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
         self.provenance
             .imported_macro_declaration_builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -67,11 +67,11 @@ use crate::component_meta_caches::ComputedEntry;
 use crate::fact_signature_helpers::empty_fact_signature;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
-use crate::resolver_core::{
-    MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration, ResolverContext,
-};
+use crate::resolver_core::{MaterializeScopeObservation, ResolverContext};
 use crate::semantic_query::ProjectionMode;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
 

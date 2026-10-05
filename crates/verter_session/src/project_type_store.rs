@@ -215,7 +215,7 @@ pub struct IndexedReady {
     /// again.
     pub(crate) source_parse_key: SourceParseKey,
     pub(crate) input_projection: crate::resolver_core::request_inputs::CachedProjection<
-        crate::resolver_core::request_inputs::IndexedInputRecord,
+        verter_session_query::inputs::indexed::IndexedInputRecord,
     >,
 }
 

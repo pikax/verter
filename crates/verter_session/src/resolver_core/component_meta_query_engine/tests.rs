@@ -56,7 +56,7 @@ export interface AvatarProps {
     assert_eq!(declaration.resolved_name, "AvatarProps");
     assert_eq!(
         declaration.kind,
-        crate::resolver_core::ResolvedDeclarationKind::Interface,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
     );
     assert!(
         declaration.span.end > declaration.span.start,
@@ -113,7 +113,7 @@ export interface AvatarProps {
     assert_eq!(declaration.resolved_name, "AvatarProps");
     assert_eq!(
         declaration.kind,
-        crate::resolver_core::ResolvedDeclarationKind::Interface,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
     );
     assert!(
         declaration.span.end > declaration.span.start,

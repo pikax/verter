@@ -1510,11 +1510,11 @@ enum MacroHotRefOutcome {
 /// only this module's own producer paths can reach them.
 fn build_macro_hot_ref(
     ctx: &dyn crate::resolver_core::request_ports::OwnedLowering,
-    serve: &crate::resolver_core::request_inputs::IndexedInputServe,
+    serve: &verter_session_query::inputs::indexed::IndexedInputServe,
     source_demand: Option<&impl ExpressionSourceDemand>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     owner_canonical: &str,
-    indexed: &crate::resolver_core::request_inputs::IndexedInputRecord,
+    indexed: &verter_session_query::inputs::indexed::IndexedInputRecord,
     macro_index: usize,
     #[cfg(test)] mirror: &MacroMirrorAttachment,
 ) -> MacroHotRefOutcome {

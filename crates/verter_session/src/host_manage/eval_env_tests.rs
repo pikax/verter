@@ -682,8 +682,9 @@ fn sfc_script_setup_generic_param_is_not_a_type_declaration_id_in_oracle_or_grap
 #[cfg(not(target_arch = "wasm32"))]
 struct RecordingRuntimeValueResolver<'a> {
     host: &'a crate::VerterHost,
-    touched:
-        std::cell::RefCell<std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity>>,
+    touched: std::cell::RefCell<
+        std::collections::BTreeSet<verter_session_query::declarations::metadata::ValueDeclIdentity>,
+    >,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -697,14 +698,14 @@ impl crate::resolver_core::ImportedRuntimeValueResolver for RecordingRuntimeValu
 
     fn dependency_value_symbol_graph_native(
         &self,
-        source: &crate::resolver_core::ValueDeclIdentity,
+        source: &verter_session_query::declarations::metadata::ValueDeclIdentity,
     ) -> Option<verter_session_query::declarations::ValueDeclInfo> {
         self.host.dependency_value_symbol_graph_native(source)
     }
 
     fn prepared_value_decl(
         &self,
-        source: &crate::resolver_core::ValueDeclIdentity,
+        source: &verter_session_query::declarations::metadata::ValueDeclIdentity,
     ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
         self.host
             .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
@@ -712,8 +713,8 @@ impl crate::resolver_core::ImportedRuntimeValueResolver for RecordingRuntimeValu
 
     fn resolve_value_export_target(
         &self,
-        requested: &crate::resolver_core::ValueDeclIdentity,
-    ) -> Option<crate::resolver_core::ValueDeclIdentity> {
+        requested: &verter_session_query::declarations::metadata::ValueDeclIdentity,
+    ) -> Option<verter_session_query::declarations::metadata::ValueDeclIdentity> {
         let resolved = self
             .host
             .resolve_value_export_target(&requested.canonical_id, &requested.name);
@@ -749,7 +750,7 @@ fn materializer_touched_source_pairs(
     host: &crate::VerterHost,
     owner: &str,
     snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
-) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
+) -> std::collections::BTreeSet<verter_session_query::declarations::metadata::ValueDeclIdentity> {
     // The materializer's INPUTS (its parameters), identical to what the
     // production `build_fallthrough_eval_env_lightweight` template path
     // passes: the required template runtime-value names + the owner-local
@@ -944,11 +945,13 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
     let deps = host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
     assert_eq!(
         deps,
-        std::collections::BTreeSet::from([crate::resolver_core::ValueDeclIdentity {
-            canonical_id: "/src/dep.ts".to_string(),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name: "themeImpl".to_string(),
-        }]),
+        std::collections::BTreeSet::from([
+            verter_session_query::declarations::metadata::ValueDeclIdentity {
+                canonical_id: "/src/dep.ts".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name: "themeImpl".to_string(),
+            }
+        ]),
         "the required `theme` resolves through the barrel to its single source pair: {deps:?}"
     );
 
@@ -1084,11 +1087,13 @@ fn c3_double_alias_onto_same_source_drives_readiness_without_false_panic() {
     let deps = host.fallthrough_runtime_value_deps_graph_native("/src/Owner.vue", &snapshot, None);
     assert_eq!(
         deps,
-        std::collections::BTreeSet::from([crate::resolver_core::ValueDeclIdentity {
-            canonical_id: "/src/m.ts".to_string(),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name: "xImpl".to_string(),
-        }]),
+        std::collections::BTreeSet::from([
+            verter_session_query::declarations::metadata::ValueDeclIdentity {
+                canonical_id: "/src/m.ts".to_string(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name: "xImpl".to_string(),
+            }
+        ]),
         "two aliases onto the same source must yield exactly the single (source_canonical, \
          source_name) pair: {deps:?}"
     );

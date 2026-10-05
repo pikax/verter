@@ -33,9 +33,10 @@ use crate::instant::Instant;
 // move, `super` is `host_manage`, so the rewrite goes via the
 // `crate::meta_resolve` re-export surface.
 use crate::host_manage::component_meta_request_impl::{
-    CapturedComponentMetaInputs, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedTypeDeclaration,
+    CapturedComponentMetaInputs, ResolvedJsdocBlock, ResolvedJsdocTag,
 };
 use crate::meta_resolve::project_expr_class_a_via_dispatch;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 /// Declaration-only uses carry `()`; semantic callbacks require the caller's
 /// existing facade and captured private view at the type level.
@@ -61,16 +62,18 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         dep_canonical: &str,
         _dep_owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         let (resolved, route_facts) = self
             .ctx
             .resolve_imported_type_root_with_facts(dep_canonical, requested_name);
         self.ctx.observe_borrowed_signature(&route_facts);
-        resolved.map(|identity| crate::resolver_core::ResolvedExportTarget {
-            source_canonical_id: (identity.canonical_id.as_ref() != dep_canonical)
-                .then(|| identity.canonical_id.to_string()),
-            source_owner: identity.owner,
-            source_name: identity.symbol_name.to_string(),
+        resolved.map(|identity| {
+            verter_session_query::declarations::metadata::ResolvedExportTarget {
+                source_canonical_id: (identity.canonical_id.as_ref() != dep_canonical)
+                    .then(|| identity.canonical_id.to_string()),
+                source_owner: identity.owner,
+                source_name: identity.symbol_name.to_string(),
+            }
         })
     }
 
@@ -112,7 +115,7 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         dep_canonical: &str,
         dep_owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         self.resolve_export_target(dep_canonical, dep_owner, requested_name)
     }
 
@@ -121,7 +124,7 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         dep_canonical: &str,
         dep_owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         // Overlay-aware: the owner file (and its import surface) may
         // exist only in a session overlay, so the shallow import
         // lookup must read through the resolver context's view — the
@@ -138,11 +141,13 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
             .resolve_imported_type_root_with_facts(&next_canonical, &import_target.imported_name);
         self.ctx.observe_borrowed_signature(&route_facts);
         let resolved = resolved?;
-        Some(crate::resolver_core::ResolvedExportTarget {
-            source_canonical_id: Some(resolved.canonical_id.to_string()),
-            source_owner: resolved.owner,
-            source_name: resolved.symbol_name.to_string(),
-        })
+        Some(
+            verter_session_query::declarations::metadata::ResolvedExportTarget {
+                source_canonical_id: Some(resolved.canonical_id.to_string()),
+                source_owner: resolved.owner,
+                source_name: resolved.symbol_name.to_string(),
+            },
+        )
     }
 
     fn resolve_local_export_symbol_target(
@@ -165,7 +170,7 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata> {
         let serve = self.ctx.ensure_indexed_ready_serve(canonical_source)?;
         self.ctx.observe(
             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
@@ -182,19 +187,21 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
             .type_header_in(owner, resolved_name)?;
         let kind = match header.kind {
             verter_session_query::declarations::TypeDeclKind::Alias => {
-                crate::resolver_core::ResolvedDeclarationKind::TypeAlias
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias
             }
             verter_session_query::declarations::TypeDeclKind::Interface => {
-                crate::resolver_core::ResolvedDeclarationKind::Interface
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface
             }
             verter_session_query::declarations::TypeDeclKind::Class => {
-                crate::resolver_core::ResolvedDeclarationKind::Class
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::Class
             }
         };
-        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata {
-            kind,
-            span: header.span,
-        })
+        Some(
+            verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata {
+                kind,
+                span: header.span,
+            },
+        )
     }
 }
 

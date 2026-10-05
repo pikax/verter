@@ -2,18 +2,8 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::analysis::types::{AnalyzedImport, ImportBindingKind};
+use verter_session_query::declarations::metadata::ValueDeclIdentity;
 use verter_session_query::declarations::{EvalEnv, ValueDeclInfo};
-
-/// Exact identity of a top-level runtime value declaration.
-///
-/// `owner` is part of the identity for carrier files: module and instance
-/// declarations with the same name are distinct values.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ValueDeclIdentity {
-    pub canonical_id: String,
-    pub owner: verter_type_expr::TopLevelOwnerId,
-    pub name: String,
-}
 
 pub trait ImportedRuntimeValueResolver {
     fn dependency_eval_env(&self, canonical_id: &str) -> Option<Arc<EvalEnv>>;
@@ -206,16 +196,14 @@ fn prepared_value_decl_to_value_decl_info(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
-        ValueDeclIdentity,
-    };
+    use super::{materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver};
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::sync::Arc;
     use verter_session_query::analysis::types::{
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
     };
+    use verter_session_query::declarations::metadata::ValueDeclIdentity;
     use verter_session_query::declarations::{EvalEnv, ValueDeclInfo, ValueDeclKind};
     use verter_span::Span;
     use verter_type_expr::facts::{

@@ -8,12 +8,12 @@ use crate::cache_runtime::{CacheAdmission, CacheEntry, NonAdmissionReason};
 use crate::component_meta_caches::*;
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
-use crate::resolver_core::ResolvedTypeDeclaration;
 use dashmap::DashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 /// Selected output storage; there are no raw-resource accessors.

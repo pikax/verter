@@ -98,7 +98,7 @@ impl crate::resolver_core::DeclarationMetadataResolver
         _dep_canonical: &str,
         _dep_owner: verter_type_expr::TopLevelOwnerId,
         _requested_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         None
     }
 
@@ -137,21 +137,26 @@ impl crate::resolver_core::DeclarationMetadataResolver
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata> {
         let state = self.host.shallow_file_state(canonical_source)?;
         let (symbol_kind, span) = state.type_symbol_metadata_in(owner, resolved_name)?;
         let kind = match symbol_kind {
             verter_session_query::declarations::TypeDeclKind::Alias => {
-                crate::resolver_core::ResolvedDeclarationKind::TypeAlias
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias
             }
             verter_session_query::declarations::TypeDeclKind::Interface => {
-                crate::resolver_core::ResolvedDeclarationKind::Interface
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface
             }
             verter_session_query::declarations::TypeDeclKind::Class => {
-                crate::resolver_core::ResolvedDeclarationKind::Class
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::Class
             }
         };
-        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata { kind, span })
+        Some(
+            verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata {
+                kind,
+                span,
+            },
+        )
     }
 }
 

@@ -2042,14 +2042,14 @@ mod publish_order_tests {
     use super::*;
 
     use crate::resolver_core::component_meta::ResolvedMacroMeta;
-    use crate::resolver_core::{
-        with_bare_host_ctx_for_test, ResolvedDeclarationKind, ResolvedTypeDeclaration,
-    };
+    use crate::resolver_core::with_bare_host_ctx_for_test;
     use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use rustc_hash::FxHashSet;
     use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
+    use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+    use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
     use verter_type_expr::facts::SemanticTypeSource;
     use verter_type_expr::TopLevelOwnerId;
 

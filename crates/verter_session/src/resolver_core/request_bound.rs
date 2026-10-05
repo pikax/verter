@@ -9,16 +9,18 @@ use verter_session_query::declarations::DeclarationId;
 use verter_session_query::resolution::{AmbientSymbolHit, ProjectStableKey};
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
-use super::request_inputs::{IndexedInputRecord, IndexedInputServe, PreparedInputRecord};
 use super::request_ports::{Cancellation, ExecutionSubmission, IndexedInputs, RouteLookup};
 use super::resolver_context::*;
+use verter_session_query::inputs::indexed::IndexedInputRecord;
+use verter_session_query::inputs::indexed::IndexedInputServe;
+use verter_session_query::inputs::prepared::PreparedInputRecord;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
 
 use crate::fact_tracing::tracing as tracer_stack;
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::ShallowFileState;
-use crate::resolver_core::ValueDeclIdentity;
+use verter_session_query::declarations::metadata::ValueDeclIdentity;
 
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
@@ -431,7 +433,7 @@ impl RouteLookup for crate::VerterHost {
         dep_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> crate::resolver_core::ResolvedTypeDeclaration {
+    ) -> verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
         crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
             self,
             self,
@@ -554,7 +556,7 @@ pub(crate) trait RequestBoundLifecycle {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
     fn prepared_value_decl(
@@ -565,7 +567,7 @@ pub(crate) trait RequestBoundLifecycle {
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
     /// Materialise (or warm-read) the canonical artifact. The adapter
@@ -1000,7 +1002,7 @@ where
         dep_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> crate::resolver_core::ResolvedTypeDeclaration {
+    ) -> verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
         // The walker constructed inside binds to this request-bound context.
         crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_context(
             self.0.host(),

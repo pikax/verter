@@ -564,7 +564,7 @@ struct EvaluatedFlowRoot {
 pub(super) struct FlowSliceDemandSite<D> {
     source_demand: D,
     /// The served indexed state of the function's own file (pinned).
-    indexed: Arc<crate::resolver_core::request_inputs::IndexedInputRecord>,
+    indexed: Arc<verter_session_query::inputs::indexed::IndexedInputRecord>,
     /// The function's own file roots.
     self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     /// The content-pinned function identity.
