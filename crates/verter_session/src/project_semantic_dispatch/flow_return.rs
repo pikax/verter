@@ -59,8 +59,9 @@ use crate::semantic_query::{
     FlowReturnUnsupported, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
 };
-use verter_semantic::analysis::flow::{
-    FlowBindingMap, FlowBindingRef as FlowProductSubject, FunctionBodySkeleton, SkeletonBindingId,
+use verter_session_query::flow::{
+    binding::{FlowBindingMap, FlowBindingRef as FlowProductSubject},
+    skeleton::{FunctionBodySkeleton, SkeletonBindingId},
 };
 
 /// A distributed intersection and whether one combination's collapse was
@@ -1818,7 +1819,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let index = source_demand.function_program_index();
                 let record = index.expression(point)?;
                 match &record.source {
-                    verter_semantic::analysis::function_program::ProgramExpressionSource::FunctionReturn(source) => {
+                    verter_session_query::function_program::ProgramExpressionSource::FunctionReturn(source) => {
                         regular(match self.execute_function_return_source(source, point.canonical_id.as_ref()) {
                             FunctionReturnNode::Declared(node) => Some(node.node()),
                             FunctionReturnNode::Flow(result) => Some(result.return_type()),
@@ -1827,20 +1828,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             | FunctionReturnNode::Absent => None,
                         })
                     }
-                    verter_semantic::analysis::function_program::ProgramExpressionSource::FieldInitializer {
+                    verter_session_query::function_program::ProgramExpressionSource::FieldInitializer {
                         source: verter_type_expr::facts::FunctionReturnSource::Flow(identity),
                         readonly,
                     } => regular(self.field_initializer_value(identity, *readonly)),
-                    verter_semantic::analysis::function_program::ProgramExpressionSource::FieldInitializer { .. } => {
+                    verter_session_query::function_program::ProgramExpressionSource::FieldInitializer { .. } => {
                         crate::request_context::mark_request_result_partial();
                         None
                     }
-                    verter_semantic::analysis::function_program::ProgramExpressionSource::UnsupportedCall => {
+                    verter_session_query::function_program::ProgramExpressionSource::UnsupportedCall => {
                         crate::request_context::mark_request_result_partial();
                         None
                     }
-                    verter_semantic::analysis::function_program::ProgramExpressionSource::Value
-                    | verter_semantic::analysis::function_program::ProgramExpressionSource::SemanticCall { .. } => {
+                    verter_session_query::function_program::ProgramExpressionSource::Value
+                    | verter_session_query::function_program::ProgramExpressionSource::SemanticCall { .. } => {
                         let expression = source_demand.indexed_program_expression_ir(record)?;
                         self.evaluate_indexed_value_for_type(
                             point.canonical_id.as_ref(),
@@ -2226,11 +2227,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let canonical = identity.anchor.canonical_id.as_ref();
         let (_serve, source_demand) = self.ctx.indexed_flow_source(canonical)?;
         let source_demand = source_demand?;
-        let key = verter_semantic::analysis::function_program::FunctionProgramKey {
-            declaration: verter_semantic::analysis::function_program::FunctionDeclarationRef {
+        let key = verter_session_query::function_program::FunctionProgramKey {
+            declaration: verter_session_query::function_program::FunctionDeclarationRef {
                 owner: identity.anchor.owner,
                 name: Arc::clone(&identity.anchor.symbol),
-                space: verter_semantic::facts::SymbolSpace::Value,
+                space: verter_session_query::facts::SymbolSpace::Value,
             },
             part: identity.function_part.clone(),
             overload_ordinal: identity.overload_ordinal,
@@ -3070,12 +3071,12 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn attach_function_kind_wrap(
         &self,
         result: FlowReturnResult,
-        kind: verter_semantic::analysis::flow::FunctionBodyKind,
+        kind: verter_session_query::flow::skeleton::FunctionBodyKind,
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: crate::semantic_query::NullabilityPolicy,
     ) -> FlowReturnResult {
-        use verter_semantic::analysis::flow::FunctionBodyKind;
+        use verter_session_query::flow::skeleton::FunctionBodyKind;
         if kind == FunctionBodyKind::Plain {
             return result;
         }
@@ -3311,7 +3312,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         result: FlowReturnResult,
     ) -> FlowReturnResult {
-        use verter_semantic::analysis::flow::FunctionBodyKind;
+        use verter_session_query::flow::skeleton::FunctionBodyKind;
         let Some(wrap) = result.function_wrap().copied() else {
             return result;
         };
@@ -3930,7 +3931,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // `None` = the evaluation never evaluated it; `Some(decided)` =
         // it did, with `decided` the conjunction of every recorded
         // occurrence's relation-decided bit.
-        let call_evidence_for = |site: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        let call_evidence_for = |site: verter_session_query::flow::skeleton::SkeletonExprSiteId,
                                  call_ordinal: u32| {
             let call = witness
                 .skeleton
@@ -3939,7 +3940,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .get(call_ordinal as usize)?;
             let mut relations_decided: Option<bool> = None;
             for evidence in witness.calls {
-                let evaluated = verter_semantic::analysis::flow::FrameSpan::rebase(
+                let evaluated = verter_session_query::flow::frame_span::FrameSpan::rebase(
                     witness.anchor,
                     evidence.span,
                 );
@@ -4000,7 +4001,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 // the declaration itself, as its own frame does.
                 FlowObligationBasis::CapturedBinding { node, identity, .. }
                     if identity.kind
-                        == verter_semantic::analysis::function_program::FunctionBindingKind::NestedFunction =>
+                        == verter_session_query::function_program::FunctionBindingKind::NestedFunction =>
                 {
                     witness
                         .executed_selection
@@ -5150,7 +5151,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         let name_resolution: rustc_hash::FxHashMap<
             std::sync::Arc<str>,
-            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
+            verter_session_query::type_solver::host::ResolvedRootIdentity,
         > = rustc_hash::FxHashMap::default();
         // Seed from the ENCLOSING environment, then let this clause
         // shadow it.
@@ -5579,7 +5580,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .filter(|origin| {
                 matches!(
                     origin,
-                    verter_semantic::analysis::flow::peeker::SliceOrigin::Return(_)
+                    verter_session_query::flow::peeker::SliceOrigin::Return(_)
                 )
             })
             .count();
@@ -5689,10 +5690,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // did not select. The scan runs AFTER the content build for
         // exactly that subtraction.
         let unapplied_write_effect = {
-            use verter_semantic::analysis::flow::flow_ir::{FlowEffect, FlowEffectTarget};
-            let retypes_slot = |slot: &verter_semantic::analysis::flow::flow_ir::FlowSlot| {
+            use verter_session_query::flow::flow_ir::{FlowEffect, FlowEffectTarget};
+            let retypes_slot = |slot: &verter_session_query::flow::flow_ir::FlowSlot| {
                 slot.value_selected
-                    || slot.kind == verter_semantic::analysis::flow::SkeletonBindingKind::Param
+                    || slot.kind == verter_session_query::flow::skeleton::SkeletonBindingKind::Param
             };
             lowered.effects.iter().any(|effect| {
                 let FlowEffect::Write {
@@ -6788,7 +6789,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.owner,
             &identity.decl_name,
         )?;
-        (prepared.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class)
+        (prepared.kind == verter_session_query::declarations::TypeDeclKind::Class)
             .then_some(identity)
     }
 
@@ -7255,7 +7256,7 @@ struct MemberDemandFilter {
 /// sibling-member writes never apply and are NOT subtracted there.
 fn collect_assignment_spans(
     region: &crate::flow_slice_content::SliceRegion,
-    out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
+    out: &mut rustc_hash::FxHashSet<verter_session_query::flow::frame_span::FrameSpan>,
     include_expression_writes: bool,
 ) {
     // The spans are a set, so the regions nested in a region (a block, an
@@ -7412,7 +7413,7 @@ fn collect_assignment_spans(
 /// function value, the write's own right-hand side).
 fn collect_expression_write_spans(
     expr: &crate::flow_slice_content::SliceExpr,
-    out: &mut rustc_hash::FxHashSet<verter_semantic::analysis::flow::FrameSpan>,
+    out: &mut rustc_hash::FxHashSet<verter_session_query::flow::frame_span::FrameSpan>,
 ) {
     for write in expression_effect_tree(expr, |_| true) {
         match write {
@@ -8045,17 +8046,17 @@ fn is_nullable_node(graph: &impl crate::semantic_query::NodeRead, node: Semantic
 /// declaration itself, hoisted to its frame's entry, so it has no slot
 /// product.
 fn binding_is_local_function_declaration(
-    binding: &verter_semantic::analysis::flow::FlowBindingRef,
-    skeleton: &verter_semantic::analysis::flow::FunctionBodySkeleton,
+    binding: &verter_session_query::flow::binding::FlowBindingRef,
+    skeleton: &verter_session_query::flow::skeleton::FunctionBodySkeleton,
 ) -> bool {
     match binding {
-        verter_semantic::analysis::flow::FlowBindingRef::Local(local) => {
+        verter_session_query::flow::binding::FlowBindingRef::Local(local) => {
             skeleton.binding(*local).kind
-                == verter_semantic::analysis::flow::SkeletonBindingKind::NestedFunction
+                == verter_session_query::flow::skeleton::SkeletonBindingKind::NestedFunction
         }
-        verter_semantic::analysis::flow::FlowBindingRef::Captured(identity) => {
+        verter_session_query::flow::binding::FlowBindingRef::Captured(identity) => {
             identity.kind
-                == verter_semantic::analysis::function_program::FunctionBindingKind::NestedFunction
+                == verter_session_query::function_program::FunctionBindingKind::NestedFunction
         }
     }
 }
@@ -8234,7 +8235,7 @@ pub(super) struct FlowBinderEnv {
     /// The (empty) explicit name-resolution overlay.
     name_resolution: rustc_hash::FxHashMap<
         Arc<str>,
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
+        verter_session_query::type_solver::host::ResolvedRootIdentity,
     >,
     /// Binder name → interned `TypeParam` node.
     env: rustc_hash::FxHashMap<String, SemanticNodeId>,
@@ -8757,7 +8758,7 @@ use crate::semantic_query::{
     SemanticQueryOutput, SignatureKind, SignatureKind as GraphSignatureKind,
 };
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::TypeExpr;
 
 /// Nested semantic demands always return to the existing driver. All calls
@@ -8770,7 +8771,7 @@ pub(super) trait FlowDemandDriver {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_semantic::analysis::flow::flow_ir::FlowSliceIR>>;
+    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>>;
     fn flow_slice_hash(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
@@ -8808,7 +8809,7 @@ pub(super) trait FlowDemandDriver {
     fn attach_function_kind_wrap(
         &self,
         result: FlowReturnResult,
-        kind: verter_semantic::analysis::flow::FunctionBodyKind,
+        kind: verter_session_query::flow::skeleton::FunctionBodyKind,
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: crate::semantic_query::NullabilityPolicy,
@@ -9093,7 +9094,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_semantic::analysis::flow::flow_ir::FlowSliceIR>> {
+    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>> {
         self.flow_slice_driver().lookup_lowered(key)
     }
     fn flow_slice_hash(
@@ -9159,7 +9160,7 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn attach_function_kind_wrap(
         &self,
         result: FlowReturnResult,
-        kind: verter_semantic::analysis::flow::FunctionBodyKind,
+        kind: verter_session_query::flow::skeleton::FunctionBodyKind,
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: crate::semantic_query::NullabilityPolicy,
@@ -9701,7 +9702,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn flow_slice_lowered(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceLoweredKey,
-    ) -> Option<Arc<verter_semantic::analysis::flow::flow_ir::FlowSliceIR>> {
+    ) -> Option<Arc<verter_session_query::flow::flow_ir::FlowSliceIR>> {
         self.driver.flow_slice_lowered(key)
     }
     fn flow_slice_hash(
@@ -9765,7 +9766,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn attach_function_kind_wrap(
         &self,
         result: FlowReturnResult,
-        kind: verter_semantic::analysis::flow::FunctionBodyKind,
+        kind: verter_session_query::flow::skeleton::FunctionBodyKind,
         yield_contributions: &[YieldContribution],
         binder_env: &FlowBinderEnv,
         nullability: crate::semantic_query::NullabilityPolicy,
@@ -10289,7 +10290,7 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// neither can read the other's product.
     bindings: Arc<FlowBindingMap>,
     skeleton: Arc<FunctionBodySkeleton>,
-    flow_graph: Arc<verter_semantic::analysis::flow::flow_graph::FunctionFlowGraph>,
+    flow_graph: Arc<verter_session_query::flow::flow_graph::FunctionFlowGraph>,
     execution_selection: Arc<super::flow_solve::FlowExecutionSelection>,
     plan: Option<Arc<super::flow_solve::FlowDemandPlan>>,
     anchor: u32,
@@ -10366,7 +10367,7 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// declared type they read. A function the body creates reads the same
     /// declared type for them.
     declared_capture_types: rustc_hash::FxHashMap<
-        verter_semantic::analysis::function_program::FlowBindingIdentity,
+        verter_session_query::function_program::FlowBindingIdentity,
         SemanticNodeId,
     >,
     /// The captures of a nested body that entered it past their last
@@ -10376,7 +10377,7 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// closures however deeply nested. Owned by the evaluator for its one
     /// frame.
     extended_capture_identities:
-        rustc_hash::FxHashSet<verter_semantic::analysis::function_program::FlowBindingIdentity>,
+        rustc_hash::FxHashSet<verter_session_query::function_program::FlowBindingIdentity>,
     /// The frame's EVOLVING-array bindings (declared `autoArrayType` under
     /// `noImplicitAny`), by canonical runtime subject: a write to one takes
     /// the checker's `autoArrayType` assignment rule.
@@ -10412,7 +10413,7 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     pending_statement_gap: Option<crate::semantic_query::FlowGap>,
     /// The value site of the destructuring assignment whose targets are
     /// being written — the definition each target's write records.
-    pattern_write_definition: Option<verter_semantic::analysis::flow::SkeletonExprSiteId>,
+    pattern_write_definition: Option<verter_session_query::flow::skeleton::SkeletonExprSiteId>,
     /// The correlated destructuring patterns this evaluation bound
     /// ([`correlation::CorrelatedGroup`]). Owned by the evaluator, dropped
     /// with it.
@@ -10483,7 +10484,7 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// evaluation order) and the in-order application REUSES the verdict —
     /// no right-hand side evaluates twice.
     expression_write_nodes: rustc_hash::FxHashMap<
-        verter_semantic::analysis::flow::FrameSpan,
+        verter_session_query::flow::frame_span::FrameSpan,
         Positional<SemanticNodeId>,
     >,
     /// The deferred-read look-ahead of the CURRENT statement: the
@@ -10575,8 +10576,8 @@ impl ExecutedSliceWalk {
     /// then claims no structural obligation.
     fn completed_selection<'p>(
         &self,
-        selection: &'p verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan,
-    ) -> Option<&'p verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan> {
+        selection: &'p verter_session_query::flow::flow_ir::ReturnSlicePlan,
+    ) -> Option<&'p verter_session_query::flow::flow_ir::ReturnSlicePlan> {
         (!self.aborted
             && self.regions_entered == self.regions_completed
             && self.regions_entered > 0)
@@ -10630,8 +10631,8 @@ struct FlowCallEvidence {
 /// yielded by [`ExecutedSliceWalk::completed_selection`], never assigned
 /// from the plan unconditionally.
 struct FlowExecutionWitness<'w> {
-    executed_selection: Option<&'w verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan>,
-    skeleton: &'w verter_semantic::analysis::flow::FunctionBodySkeleton,
+    executed_selection: Option<&'w verter_session_query::flow::flow_ir::ReturnSlicePlan>,
+    skeleton: &'w verter_session_query::flow::skeleton::FunctionBodySkeleton,
     anchor: u32,
     calls: &'w [FlowCallEvidence],
     /// The frame's exact indexed-to-skeleton declaration correspondence.
@@ -11087,7 +11088,7 @@ fn seed_selected_parameters(
         .chain(selection.effect_only_nodes().iter())
         .copied()
     {
-        let verter_semantic::analysis::flow::flow_graph::FlowNodeKind::Binding(binding) =
+        let verter_session_query::flow::flow_graph::FlowNodeKind::Binding(binding) =
             bound.bundle().graph.node_kind(node)
         else {
             continue;
@@ -11379,7 +11380,7 @@ struct EnclosingFrames<'b>(Option<std::rc::Rc<EnclosingFrame<'b>>>);
 
 /// One frame around a nested function's evaluator.
 struct EnclosingFrame<'b> {
-    function: verter_semantic::analysis::function_program::FunctionProgramKey,
+    function: verter_session_query::function_program::FunctionProgramKey,
     binder_env: &'b FlowBinderEnv,
     products: FlowProductStore,
     outer: EnclosingFrames<'b>,
@@ -11389,7 +11390,7 @@ impl<'b> EnclosingFrames<'b> {
     /// This chain with `function`'s frame added innermost.
     fn with(
         &self,
-        function: verter_semantic::analysis::function_program::FunctionProgramKey,
+        function: verter_session_query::function_program::FunctionProgramKey,
         binder_env: &'b FlowBinderEnv,
         products: FlowProductStore,
     ) -> Self {
@@ -11458,7 +11459,7 @@ enum Pending<'r> {
 /// function value: what its binding is made from once the initializer has a
 /// value.
 struct PendingBinding<'r> {
-    binding: verter_semantic::analysis::flow::SkeletonBindingId,
+    binding: verter_session_query::flow::skeleton::SkeletonBindingId,
     kind: crate::flow_slice_content::SliceBindingKind,
     init: &'r crate::flow_slice_content::SliceExpr,
     freshness: &'r crate::flow_slice_content::SliceFreshness,
@@ -14222,7 +14223,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         single_path: bool,
         reaching: ReachingTypeProduct,
         degraded: bool,
-        definition: Option<verter_semantic::analysis::flow::flow_graph::FlowNodeId>,
+        definition: Option<verter_session_query::flow::flow_graph::FlowNodeId>,
     ) {
         self.record_dead_write(binding);
         self.products.bind_at(
@@ -14741,7 +14742,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         target: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
-        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
         widening_nullish: bool,
         fresh_literal: bool,
     ) -> SemanticNodeId {
@@ -14926,7 +14927,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         target: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
-        definition: Option<verter_semantic::analysis::flow::flow_graph::FlowNodeId>,
+        definition: Option<verter_session_query::flow::flow_graph::FlowNodeId>,
         widening_nullish: bool,
     ) {
         self.bind_written_with(target, node, degraded, definition, widening_nullish, None);
@@ -14940,7 +14941,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         target: &crate::flow_slice_content::SliceNarrowSubject,
         node: SemanticNodeId,
         degraded: bool,
-        definition: Option<verter_semantic::analysis::flow::flow_graph::FlowNodeId>,
+        definition: Option<verter_session_query::flow::flow_graph::FlowNodeId>,
         widening_nullish: bool,
         widening: Option<WideningMembership>,
     ) {
@@ -15012,8 +15013,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         target: &crate::flow_slice_content::SliceNarrowSubject,
         value: &crate::flow_slice_content::SliceExpr,
         freshness: &crate::flow_slice_content::SliceFreshness,
-        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
-        span: verter_semantic::analysis::flow::FrameSpan,
+        definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
+        span: verter_session_query::flow::frame_span::FrameSpan,
     ) -> (Positional<SemanticNodeId>, Option<SemanticNodeId>) {
         let declared = self.target_declared_node(target).is_some();
         let holds_before = self.holds.len();
@@ -15561,7 +15562,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         if matches!(
             kind,
-            Some(verter_semantic::analysis::function_program::FunctionBindingKind::Var)
+            Some(verter_session_query::function_program::FunctionBindingKind::Var)
         ) {
             FlowBindingLayer::Function
         } else {
@@ -15582,7 +15583,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return false;
         };
         let declaration = self.skeleton.binding(*binding);
-        declaration.kind == verter_semantic::analysis::flow::SkeletonBindingKind::Let
+        declaration.kind == verter_session_query::flow::skeleton::SkeletonBindingKind::Let
             && declaration.initializer.is_none()
             && self.products.runtime_declared_type(subject).is_none()
     }
@@ -15990,8 +15991,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         root: verter_semantic::analysis::type_eval_build::IndexedValueReadRoot,
     ) -> FlowIndexedArgumentBinding {
-        use verter_semantic::analysis::flow::{FlowBindingOccurrence, FrameSpan};
         use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot;
+        use verter_session_query::flow::{binding::FlowBindingOccurrence, frame_span::FrameSpan};
         let occurrence = match root {
             IndexedValueReadRoot::NonBinding => {
                 return FlowIndexedArgumentBinding::NonBindingExpression;
@@ -21965,7 +21966,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     #[allow(clippy::too_many_arguments)]
     fn bind_initialized_local(
         &mut self,
-        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        binding: verter_session_query::flow::skeleton::SkeletonBindingId,
         kind: crate::flow_slice_content::SliceBindingKind,
         init: &crate::flow_slice_content::SliceExpr,
         freshness: &crate::flow_slice_content::SliceFreshness,
@@ -23596,7 +23597,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         nested_params: &[crate::flow_slice_content::SliceParam],
         type_parameters: &[crate::flow_slice_content::SliceTypeParam],
         capture_context: &Arc<crate::flow_slice_content::NestedFlowContext>,
-        declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity],
+        declared_evolving_captures: &[verter_session_query::function_program::FlowBindingIdentity],
         declared_return: Option<&crate::flow_slice_content::GatedType>,
         declared_predicate: Option<&crate::flow_slice_content::SlicePredicate>,
         bindings: &Arc<FlowBindingMap>,
@@ -23606,7 +23607,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         anchor: u32,
         key: &FlowReturnKey,
         outer_env: &FlowBinderEnv,
-        extended_captures: &[verter_semantic::analysis::flow::SkeletonBindingId],
+        extended_captures: &[verter_session_query::flow::skeleton::SkeletonBindingId],
         circular: bool,
         contextual: Option<&ContextualSignature>,
     ) -> NestedSignatureStep {
@@ -23891,8 +23892,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         let fact = self.skeleton.binding(binding);
                         let unannotated_whole = matches!(
                             fact.kind,
-                            verter_semantic::analysis::flow::SkeletonBindingKind::Let
-                                | verter_semantic::analysis::flow::SkeletonBindingKind::Var
+                            verter_session_query::flow::skeleton::SkeletonBindingKind::Let
+                                | verter_session_query::flow::skeleton::SkeletonBindingKind::Var
                         ) && !fact.destructured
                             && fact.annotation_span.is_none();
                         unannotated_whole.then(|| {
@@ -24176,7 +24177,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// admitted.
     fn direct_callee_clause(
         &mut self,
-        target: &verter_semantic::analysis::function_program::FunctionProgramKey,
+        target: &verter_session_query::function_program::FunctionProgramKey,
         site: crate::flow_slice_content::SliceCallSite,
     ) -> CalleeClauseLookup {
         let Some((_serve, source_demand)) = self
@@ -25618,7 +25619,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// initializer's flow position.
     fn direct_callee_value_node(
         &self,
-        target: &verter_semantic::analysis::function_program::FunctionProgramKey,
+        target: &verter_session_query::function_program::FunctionProgramKey,
     ) -> Option<SemanticNodeId> {
         let callee_expr = verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: target
@@ -25642,7 +25643,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// call resolves over the merged set, exactly as an overloaded group's.
     fn direct_callee_is_augmented(
         &self,
-        target: &verter_semantic::analysis::function_program::FunctionProgramKey,
+        target: &verter_session_query::function_program::FunctionProgramKey,
     ) -> bool {
         let exported = self
             .dispatch

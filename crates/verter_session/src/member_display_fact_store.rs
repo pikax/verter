@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::{Fact, FactHash, FactKey, SymbolSpace};
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::{Fact, FactHash, FactKey, SymbolSpace};
 
 use crate::file_artifact_store::InternedName;
 

@@ -146,8 +146,8 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     // `/test/fact-dep.ts`.
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
         canonical_id: "/test/fact-dep.ts".to_string(),
-        key: verter_semantic::facts::FactKey::SyntacticExportSet,
-        lane: verter_semantic::facts::FactLane::Semantic,
+        key: verter_session_query::facts::FactKey::SyntacticExportSet,
+        lane: verter_session_query::facts::FactLane::Semantic,
         expected_hash: [0x22u8; 16],
     })]);
     let carrier = ReadSetSignature::new(facts);
@@ -319,8 +319,8 @@ fn read_set_signature_carrier_canonical_ids_covers_fact_rail() {
         },
         FactVersionRef::Parse(ParseFactRef {
             canonical_id: "/parse.ts".to_string(),
-            key: verter_semantic::facts::FactKey::SyntacticExportSet,
-            lane: verter_semantic::facts::FactLane::Semantic,
+            key: verter_session_query::facts::FactKey::SyntacticExportSet,
+            lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: [2u8; 16],
         }),
     ]);

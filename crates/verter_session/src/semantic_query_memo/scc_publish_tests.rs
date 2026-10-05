@@ -137,11 +137,11 @@ fn flow_demand_basis_for_member(
         ancestry: Default::default(),
         graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
-            function: verter_semantic::analysis::function_program::FunctionProgramKey {
-                declaration: verter_semantic::analysis::function_program::FunctionDeclarationRef {
+            function: verter_session_query::function_program::FunctionProgramKey {
+                declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
                     name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
-                    space: verter_semantic::facts::SymbolSpace::Value,
+                    space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),
                 overload_ordinal: key.function.overload_ordinal,

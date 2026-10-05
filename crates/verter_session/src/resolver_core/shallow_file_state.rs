@@ -23,8 +23,8 @@ use verter_parser::utils::oxc::script::route_inventory::{
     RouteCapability, RouteImportForm, RouteImportedName, ScriptRouteInventory,
 };
 use verter_semantic::analysis::decl_headers::{TypeDeclHeader, ValueDeclHeader};
-use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::declarations::{TypeDeclKind, ValueDeclKind};
 use verter_span::Span;
 use verter_type_expr::facts::TypeDependencyPathFact;
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TypeAuthoredPropertyKey, TypeExpr};
@@ -74,7 +74,7 @@ pub struct ShallowInputRecord {
     pub(crate) owner_import_targets: FxHashMap<DeclBindingKey, ImportTarget>,
     pub route_inventory: Arc<ScriptRouteInventory>,
     pub(crate) headers: Arc<verter_semantic::analysis::decl_headers::DeclHeaderIndex>,
-    pub(crate) owners: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
+    pub(crate) owners: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
     synthesised_value_symbols: FxHashMap<DeclBindingKey, Arc<ShallowValueSymbol>>,
     export_assignment: Option<String>,
     rune_ambient_visible: bool,
@@ -538,7 +538,7 @@ impl ShallowFileState {
     /// genuine miss. Same gate as [`Self::header_routing_only_for_test`].
     #[cfg(any(test, feature = "test-support"))]
     fn empty_header_only_memo(whole_hash: Hash16) -> Arc<crate::decl_body_memo::DeclBodyMemo> {
-        let env = verter_semantic::analysis::type_eval::EvalEnv::default();
+        let env = verter_session_query::declarations::EvalEnv::default();
         let header_index =
             Arc::new(verter_semantic::analysis::decl_headers::DeclHeaderIndex::from_eval_env(&env));
         Arc::new(crate::decl_body_memo::DeclBodyMemo::seeded_from_env(
@@ -631,13 +631,13 @@ impl ShallowFileState {
         );
         let owner_table = Arc::new(match statement_owners {
             Some(owners) => {
-                verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
+                verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
                     parsed.program.body.len(),
                     owners.iter().copied(),
                 )
                 .expect("service-backed test owner table must cover every statement")
             }
-            None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(
+            None => verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
                 parsed.program.body.len(),
             ),
         });
@@ -1235,7 +1235,7 @@ impl ShallowFileState {
     /// miss returns `None`.
     pub fn augmentation_type_decl(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         name: &str,
     ) -> Option<Arc<LoweredTypeDecl>> {
         self.augmentation_type_decl_in(scope, TopLevelOwnerId::ordinary_file(), name)
@@ -1243,7 +1243,7 @@ impl ShallowFileState {
 
     pub(crate) fn augmentation_type_decl_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredTypeDecl>> {
@@ -1256,7 +1256,7 @@ impl ShallowFileState {
 
     pub(crate) fn augmentation_type_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredTypeDecl> {
@@ -1276,7 +1276,7 @@ impl ShallowFileState {
     /// [`Self::augmentation_type_decl_outcome_in`].
     pub(crate) fn augmentation_value_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         name: &str,
     ) -> DemandOutcome<LoweredValueDecl> {
@@ -1295,7 +1295,7 @@ impl ShallowFileState {
     /// Value-space counterpart of [`Self::augmentation_type_decl`].
     pub fn augmentation_value_decl(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         name: &str,
     ) -> Option<Arc<LoweredValueDecl>> {
         self.decl_bodies
@@ -1460,7 +1460,7 @@ impl ShallowFileState {
     ///
     /// Budget limits the total number of local symbols visited to prevent
     /// pathological same-file dependency chains. Thin driver over the shared
-    /// fact-closure core (`verter_semantic::facts::route_closure`) reading
+    /// fact-closure core (`verter_session_query::facts::route_closure`) reading
     /// this state's stored per-decl route facts + dependency edges.
     pub fn local_closure(&self, symbol_name: &str, budget: usize) -> LocalClosureResult {
         self.local_closure_in(TopLevelOwnerId::ordinary_file(), symbol_name, budget)
@@ -1472,7 +1472,7 @@ impl ShallowFileState {
         symbol_name: &str,
         budget: usize,
     ) -> LocalClosureResult {
-        from_fact_closure(verter_semantic::facts::local_closure_over_facts(
+        from_fact_closure(verter_session_query::facts::local_closure_over_facts(
             &SfsRouteFactProvider { state: self, owner },
             symbol_name,
             budget,
@@ -1486,7 +1486,7 @@ impl ShallowFileState {
     /// `Route::Pick`/`Route::Omit`, the member-seeded dependency closure.
     /// Falls back to the plain local closure when member-level data is
     /// unavailable. Thin driver over the shared fact-closure core: the
-    /// transitive semantics live in `verter_semantic::facts::route_closure`,
+    /// transitive semantics live in `verter_session_query::facts::route_closure`,
     /// reading each declaration's stored `ShallowRouteFacts` through
     /// [`SfsRouteFactProvider`] — declaration bodies are never re-walked at
     /// query time.
@@ -1506,7 +1506,7 @@ impl ShallowFileState {
         route: &RouteDemand,
         budget: usize,
     ) -> LocalClosureResult {
-        from_fact_closure(verter_semantic::facts::route_closure_over_facts(
+        from_fact_closure(verter_session_query::facts::route_closure_over_facts(
             &SfsRouteFactProvider { state: self, owner },
             symbol_name,
             route,
@@ -1524,7 +1524,7 @@ struct SfsRouteFactProvider<'s> {
     owner: TopLevelOwnerId,
 }
 
-impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
+impl verter_session_query::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
     fn has_type_symbol(&self, name: &str) -> bool {
         self.state.has_type_symbol_in(self.owner, name)
     }
@@ -1535,9 +1535,12 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
             .map(|lowered| lowered.route_facts.clone())
     }
 
-    fn classified_deps(&self, name: &str) -> Option<verter_semantic::facts::ClassifiedRouteDeps> {
+    fn classified_deps(
+        &self,
+        name: &str,
+    ) -> Option<verter_session_query::facts::ClassifiedRouteDeps> {
         let deps = self.state.type_deps_in(self.owner, name)?;
-        Some(verter_semantic::facts::ClassifiedRouteDeps {
+        Some(verter_session_query::facts::ClassifiedRouteDeps {
             local_deps: deps.local_deps.clone(),
             external_deps: deps
                 .external_deps
@@ -1564,8 +1567,8 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
         })
     }
 
-    fn key_source_lookup(&self, name: &str) -> verter_semantic::facts::KeySourceLookup {
-        use verter_semantic::facts::KeySourceLookup;
+    fn key_source_lookup(&self, name: &str) -> verter_session_query::facts::KeySourceLookup {
+        use verter_session_query::facts::KeySourceLookup;
         use verter_type_expr::facts::KeySourceFact;
 
         // Header-decidable without any body demand: a non-type-symbol alias
@@ -1590,7 +1593,8 @@ impl verter_semantic::facts::RouteClosureProvider for SfsRouteFactProvider<'_> {
         // declaration body — only this tri-state outcome.
         let route_fact_lens = self.state.decl_bodies().route_fact_lens();
         let route_lens = route_fact_lens.for_owner(self.owner);
-        let own_canonical = verter_semantic::facts::RouteFactLens::own_canonical_id(&route_lens);
+        let own_canonical =
+            verter_session_query::facts::RouteFactLens::own_canonical_id(&route_lens);
         let mut visited = FxHashSet::default();
         let mut keys: Vec<verter_type_expr::facts::FactPropertyKey> = Vec::new();
         let mut pending = vec![name.to_string()];
@@ -1647,7 +1651,7 @@ impl SfsRouteFactProvider<'_> {
     fn mint_key_source_fact(
         &self,
         name: &str,
-        lens: &dyn verter_semantic::facts::RouteFactLens,
+        lens: &dyn verter_session_query::facts::RouteFactLens,
     ) -> Option<verter_type_expr::facts::KeySourceFact> {
         self.state.type_decl_in(self.owner, name)?;
         match self
@@ -1658,7 +1662,7 @@ impl SfsRouteFactProvider<'_> {
             crate::decl_body_memo::DemandOutcome::Ready(Some(parts))
                 if !parts.bodies.is_empty() =>
             {
-                Some(verter_semantic::facts::produce_key_source_fact(
+                Some(verter_session_query::facts::produce_key_source_fact(
                     &parts.bodies,
                     lens,
                 ))
@@ -1702,8 +1706,8 @@ fn external_fact_to_ref(fact: verter_type_expr::facts::ExternalRouteRefFact) -> 
 
 /// Convert a shared fact-closure result to the session closure result
 /// (status arms map 1:1; external refs convert field-by-field).
-fn from_fact_closure(result: verter_semantic::facts::FactClosureResult) -> LocalClosureResult {
-    use verter_semantic::facts::FactClosureStatus;
+fn from_fact_closure(result: verter_session_query::facts::FactClosureResult) -> LocalClosureResult {
+    use verter_session_query::facts::FactClosureStatus;
     LocalClosureResult {
         status: match result.status {
             FactClosureStatus::Resolved => LocalClosureStatus::Resolved,
@@ -2040,7 +2044,7 @@ impl ShallowInputRecord {
     pub fn type_symbol_kind(
         &self,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+    ) -> Option<verter_session_query::declarations::TypeDeclKind> {
         self.type_symbol_kind_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
@@ -2049,7 +2053,7 @@ impl ShallowInputRecord {
         &self,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+    ) -> Option<verter_session_query::declarations::TypeDeclKind> {
         self.headers
             .type_header_in(owner, name)
             .map(|header| header.kind)
@@ -2060,7 +2064,7 @@ impl ShallowInputRecord {
     pub fn value_symbol_kind(
         &self,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclKind> {
+    ) -> Option<verter_session_query::declarations::ValueDeclKind> {
         if let Some(synthesised) = self
             .synthesised_export_decl_key(name)
             .and_then(|key| self.synthesised_value_symbols.get(&key))
@@ -2242,7 +2246,7 @@ impl ShallowInputRecord {
         &self,
     ) -> impl Iterator<
         Item = (
-            &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+            &verter_session_query::declarations::AugmentationScopeKind,
             &str,
         ),
     > {
@@ -2261,7 +2265,7 @@ impl ShallowInputRecord {
         &self,
     ) -> impl Iterator<
         Item = (
-            &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+            &verter_session_query::declarations::AugmentationScopeKind,
             &DeclBindingKey,
         ),
     > {
@@ -2293,7 +2297,7 @@ impl ShallowInputRecord {
         &self,
     ) -> impl Iterator<
         Item = (
-            &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+            &verter_session_query::declarations::AugmentationScopeKind,
             &str,
         ),
     > {
@@ -2326,7 +2330,7 @@ impl ShallowInputRecord {
     /// module names X by `default` only then. `None` for a module without an
     /// export assignment.
     pub(crate) fn export_assignment_is_callable(&self) -> Option<bool> {
-        use verter_semantic::analysis::type_eval::ValueDeclKind;
+        use verter_session_query::declarations::ValueDeclKind;
         let assigned = self.export_assignment_target()?;
         Some(
             self.headers
@@ -2468,8 +2472,8 @@ impl ShallowInputRecord {
         &self,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::AugmentationScopeKind> {
-        use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    ) -> Option<verter_session_query::declarations::AugmentationScopeKind> {
+        use verter_session_query::declarations::AugmentationScopeKind;
         let headers = &self.headers;
         if crate::global_contributors::classify_shallow_module_kind(self)
             == crate::global_contributors::FileModuleKind::Module
@@ -2495,9 +2499,9 @@ impl ShallowInputRecord {
         &self,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::AugmentationScopeKind> {
+    ) -> Option<verter_session_query::declarations::AugmentationScopeKind> {
         if self.has_global_augmentation(name) {
-            return Some(verter_semantic::analysis::type_eval::AugmentationScopeKind::Global);
+            return Some(verter_session_query::declarations::AugmentationScopeKind::Global);
         }
         self.headers
             .sole_module_augmentation_type_scope(owner, name)
@@ -2841,7 +2845,7 @@ impl ShallowInputRecord {
     pub fn has_global_augmentation(&self, name: &str) -> bool {
         self.headers
             .augmentation_type_header(
-                &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                &verter_session_query::declarations::AugmentationScopeKind::Global,
                 name,
             )
             .is_some()
@@ -2902,7 +2906,7 @@ impl ShallowInputRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::type_eval::ValueDeclKind;
+    use verter_session_query::declarations::ValueDeclKind;
 
     #[test]
     fn input_projection_is_shared_and_resets_after_routing_mutation() {
@@ -2943,7 +2947,7 @@ mod tests {
             !parsed.fatal_error,
             "owner-qualified route fixture must parse"
         );
-        let owner_table = verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
+        let owner_table = verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
             parsed.program.body.len(),
             owners,
         )
@@ -3666,7 +3670,7 @@ export interface Props { child: Inner; data: Local }
         let import_canonicalization = super::super::prepared_decl::ImportCanonicalization {
             final_resolution: FxHashMap::from_iter([(
                 DeclBindingKey::new(owner, "Inner"),
-                verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+                verter_session_query::type_solver::ResolvedRootIdentity::new_in_owner(
                     "/resolved/inner.ts",
                     owner,
                     "Inner",

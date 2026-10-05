@@ -339,8 +339,8 @@ fn view_answers_the_premutation_world_for_a_dependency_it_never_observed() {
 
 #[test]
 fn a_point_miss_rejects_and_enumerates_nothing() {
-    use verter_semantic::facts::registry::{FactLane, InternedName, SymbolSpace};
-    use verter_semantic::facts::FactKey;
+    use verter_session_query::facts::registry::{FactLane, InternedName, SymbolSpace};
+    use verter_session_query::facts::FactKey;
     use verter_type_expr::facts::FactPropertyKey;
 
     let host = host_with_n_materialized_files(250);

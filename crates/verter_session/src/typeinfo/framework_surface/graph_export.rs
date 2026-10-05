@@ -966,7 +966,7 @@ fn interned_diagnostic(message_name_id: u32) -> wire::Diagnostic {
 mod tests {
     use super::*;
     use crate::typeinfo::framework_surface::results::{PropsSurface, ResolvedOutcome};
-    use verter_semantic::analysis::types::AnalyzedPropField;
+    use verter_session_query::analysis::types::AnalyzedPropField;
     use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
     /// A named prop field. The prop's typed body is now an on-demand payload
@@ -985,7 +985,7 @@ mod tests {
             type_expr_scope: None,
             description: None,
             tags: Vec::new(),
-            resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+            resolution_source: verter_session_query::analysis::types::TypeResolutionSource::Rust,
             resolution_error: None,
             declared_in_macro_type_arg: true,
             constructor_bindings: Vec::new(),

@@ -42,7 +42,7 @@ pub fn organize_imports_actions(
     //    If a binding's initializer references an import, that import is used.
     for binding in &analysis.bindings {
         // Bindings that use an imported value as initializer
-        if let Some(verter_semantic::analysis::BindingInitializer::FunctionCall {
+        if let Some(verter_session_query::analysis::types::BindingInitializer::FunctionCall {
             ref callee,
             ..
         }) = binding.initializer
@@ -245,9 +245,13 @@ pub fn organize_imports_actions(
 mod tests {
     use super::*;
     use crate::documents::line_index::LineIndex;
-    use verter_semantic::analysis::types::ImportBindingKind;
-    use verter_semantic::analysis::types::VueApiCallSite;
     use verter_semantic::analysis::*;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedImportBinding;
+    use verter_session_query::analysis::types::ImportBindingKind;
+    use verter_session_query::analysis::types::VueApiCallSite;
+    use verter_session_query::analysis::types::VueApiClassification;
 
     fn make_analysis(
         imports: Vec<AnalyzedImport>,

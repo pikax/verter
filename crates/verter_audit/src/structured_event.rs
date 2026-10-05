@@ -26,7 +26,7 @@
 //! `verter_session::resolver_core::route_db`,
 //! `verter_session::file_artifact_store`,
 //! `verter_session::resolver_core::mod`, and
-//! `verter_semantic::facts::registry` source surfaces.
+//! `verter_session_query::facts::registry` source surfaces.
 //!
 //! The typed cache-subsystem variants are:
 //!

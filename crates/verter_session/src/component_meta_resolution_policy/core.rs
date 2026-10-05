@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::facts::SemanticTypeSource;
 use verter_type_expr::TopLevelOwnerId;
 

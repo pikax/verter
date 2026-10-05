@@ -40,7 +40,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::registry::{FactKey, SymbolSpace};
+use verter_session_query::facts::registry::{FactKey, SymbolSpace};
 
 use crate::file_artifact_store::FileArtifactKey;
 use crate::resolver_core::{FactVersionRef, ResolverContext};
@@ -101,7 +101,7 @@ fn host_with_ts(path: &str, source: &str) -> (VerterHost, [u8; 16]) {
 /// returns `None`.
 #[test]
 fn observed_parse_fact_lookup_is_content_addressed_not_get_any() {
-    use verter_semantic::facts::FactLane;
+    use verter_session_query::facts::FactLane;
 
     let canonical = "/self_root/probe_facts.ts";
     let (host, real_hash) = host_with_ts(

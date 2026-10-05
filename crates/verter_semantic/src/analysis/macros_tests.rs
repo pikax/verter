@@ -2812,7 +2812,7 @@ mod locator_only_macro_replay {
         reset_test_build_count, test_build_count, RootBindingIndex,
     };
     use crate::analysis::scope::AnalysisScope;
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::ConstructorBindingOutcome;
 
     fn parse_source<'a>(alloc: &'a Allocator, source: &'a str) -> oxc_parser::ParserReturn<'a> {

@@ -36,9 +36,11 @@ use verter_type_expr::{
 };
 use verter_type_expr_oxc::lower_property_key;
 
-use crate::analysis::top_level_owners::{DeclMap, TopLevelOwnerTable, TopLevelStatementOwner};
-use crate::analysis::type_eval::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
+use verter_session_query::analysis::top_level_owners::{
+    DeclMap, TopLevelOwnerTable, TopLevelStatementOwner,
+};
+use verter_session_query::declarations::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
 
 use crate::analysis::namespace_walk::{
     for_each_namespace, NamespaceVisitor, Nesting, QualifiedPath,
@@ -615,8 +617,8 @@ impl DeclHeaderIndex {
     /// from the env's groups; statement locators are empty (a seeded
     /// index never drives selective statement lowering — its memo is
     /// pre-filled).
-    pub fn from_eval_env(env: &crate::analysis::type_eval::EvalEnv) -> Self {
-        use crate::analysis::type_eval::{TypeDeclGroup, ValueDeclGroup};
+    pub fn from_eval_env(env: &verter_session_query::declarations::EvalEnv) -> Self {
+        use verter_session_query::declarations::{TypeDeclGroup, ValueDeclGroup};
 
         fn type_header_from_group(group: &TypeDeclGroup) -> TypeDeclHeader {
             let primary = group.primary();

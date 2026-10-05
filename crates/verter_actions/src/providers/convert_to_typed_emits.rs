@@ -14,7 +14,7 @@
 use crate::provider::{ActionContext, ActionProvider};
 use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct ConvertToTypedEmits;
 
@@ -79,8 +79,9 @@ mod tests {
     use verter_diagnostics::{
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
     };
-    use verter_semantic::analysis::types::{
-        AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot,
+    use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::types::{
+        AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind,
     };
     use verter_span::Span;
     use verter_type_expr::TopLevelOwnerId;

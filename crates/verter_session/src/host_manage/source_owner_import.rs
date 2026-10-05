@@ -1,7 +1,7 @@
 //! Request-side owner-import coordination over passive owned storage.
 use crate::owner_import_surface::{OwnerImportSurface, OwnerImportSurfaceDb};
 use std::sync::{atomic::Ordering, Arc};
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// **The single publisher of `OwnerResolutionSet`.**
 ///

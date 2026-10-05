@@ -1640,7 +1640,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 identity.owner,
                 identity.decl_name.as_ref(),
             )?;
-            if prepared.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Alias
+            if prepared.kind != verter_session_query::declarations::TypeDeclKind::Alias
                 || !seen.insert(identity)
             {
                 return None;
@@ -2267,7 +2267,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             identity.owner,
             identity.decl_name.as_ref(),
         )?;
-        (prepared.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Alias)
+        (prepared.kind == verter_session_query::declarations::TypeDeclKind::Alias)
             .then_some((identity, arguments))
     }
 
@@ -7297,7 +7297,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         self.ctx
             .prepared_type_decl_return_only(canonical.as_ref(), owner, name.as_ref())
             .is_some_and(|prepared| {
-                prepared.kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                prepared.kind == verter_session_query::declarations::TypeDeclKind::Class
             })
     }
 
@@ -9106,7 +9106,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         node: SemanticNodeId,
         seen: &mut FxHashSet<SemanticNodeId>,
     ) -> bool {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_session_query::declarations::TypeDeclKind;
         if !seen.insert(node) {
             return true;
         }
@@ -10830,7 +10830,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// expression, a class declared inside a body) by its node. A member
     /// whose declaration neither reads is undecided.
     fn member_owner(&self, member: &crate::semantic_query::SurfaceMember) -> MemberOwner {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_session_query::declarations::TypeDeclKind;
         let (Some(span), Some(file)) =
             (member.spans.declaration, member.declaration_origin.as_ref())
         else {

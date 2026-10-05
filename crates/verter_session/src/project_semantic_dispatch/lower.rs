@@ -21,7 +21,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar, LeafTypeFact};
 use verter_type_expr::{FunctionExpr, ObjectMember, PrimitiveName, TypeExpr};
 
@@ -511,7 +511,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// anchors on.
     fn unique_symbol_member_certification(
         &self,
-        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
         member: &str,
     ) -> Option<UniqueSymbolMemberCertification> {
         if prepared
@@ -557,7 +557,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// to shadow, so an absent shape answers `false` and costs nothing.
     fn value_decl_declares_own_member(
         &self,
-        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
         member: &str,
     ) -> bool {
         prepared.object_shape.as_ref().is_some_and(|shape| {
@@ -684,7 +684,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// The literal type a dotted type-position reference `Enum.Member`
     /// names — the enum member's own nominal literal type — GATED strictly
     /// on the typed
-    /// [`ValueDeclKind::Enum`](verter_semantic::analysis::type_eval::ValueDeclKind::Enum)
+    /// [`ValueDeclKind::Enum`](verter_session_query::declarations::ValueDeclKind::Enum)
     /// fact. Returns `None` for any prefix that is not a proven enum value
     /// declaration (so a non-enum `Ns.Member` reference is never
     /// mis-projected) or an unknown member name. A one-segment prefix

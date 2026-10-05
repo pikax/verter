@@ -153,7 +153,7 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
 /// Debug-substring) per the Typed-IR-Only rule.
 #[test]
 fn imported_alias_decl_body_lowers_to_an_import_carrier_reference() {
-    use verter_semantic::analysis::type_eval::TypeDeclBody;
+    use verter_session_query::declarations::TypeDeclBody;
 
     let host = make_host();
     upsert_ts(&host, "/m.ts", "export type G = { g: number };\n");

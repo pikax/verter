@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_eval::DeclarationId;
-use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
-use verter_semantic::resolver_core::{AmbientSymbolHit, ProjectStableKey};
+use verter_session_query::declarations::DeclarationId;
+use verter_session_query::resolution::{AmbientSymbolHit, ProjectStableKey};
+use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use super::fact_validation_port::FactValidation;
 use super::request_inputs::{IndexedInputRecord, IndexedInputServe, PreparedInputRecord};
@@ -214,7 +214,7 @@ impl IndexedInputs for crate::VerterHost {
     fn project_stable_key_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+    ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         self.workspace()
             .project_stable_key(crate::VerterHost::resolve_project_for_canonical(
                 self, canonical,
@@ -246,7 +246,7 @@ impl IndexedInputs for crate::VerterHost {
     fn semantic_compiler_options_for(
         &self,
         canonical: &str,
-    ) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+    ) -> verter_session_query::resolution::SemanticCompilerOptions {
         crate::VerterHost::semantic_compiler_options_for(self, canonical)
     }
     fn resolve_project_for_canonical(
@@ -454,7 +454,7 @@ impl RouteLookup for crate::VerterHost {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
         crate::VerterHost::resolve_imported_type_root_with_store_view(
             self,
@@ -470,7 +470,7 @@ impl RouteLookup for crate::VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
@@ -836,7 +836,7 @@ where
     fn project_stable_key_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+    ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         self.0
             .host()
             .workspace()
@@ -866,7 +866,7 @@ where
     fn semantic_compiler_options_for(
         &self,
         canonical: &str,
-    ) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+    ) -> verter_session_query::resolution::SemanticCompilerOptions {
         self.0.host().semantic_compiler_options_for(canonical)
     }
     fn resolve_project_for_canonical(
@@ -1029,7 +1029,7 @@ where
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         // The context-bound shim validates the cached imported-root entry
         // against this request's view instead of rebuilding a snapshot.
         self.0.host().resolve_imported_type_root_with_context(
@@ -1046,7 +1046,7 @@ where
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         self.0

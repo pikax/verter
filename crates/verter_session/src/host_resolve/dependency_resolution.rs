@@ -123,9 +123,9 @@ impl VerterHost {
         self.resolve_for_persistent_state(
             owner_canonical,
             import_source,
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            verter_session_query::resolution::ResolutionContext {
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             },
         )
         .map_result(|resolution| resolution.source_id)
@@ -207,14 +207,14 @@ impl VerterHost {
         overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         owner_canonical: &str,
         import_source: &str,
-        kind: verter_semantic::resolver_core::ResolveRequestKind,
+        kind: verter_session_query::resolution::ResolveRequestKind,
     ) -> verter_workspace::ResolutionPublication<String> {
         self.resolve_for_persistent_state_in(
             overlay,
             owner_canonical,
             import_source,
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            verter_session_query::resolution::ResolutionContext {
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                 kind,
             },
         )
@@ -225,7 +225,7 @@ impl VerterHost {
         &self,
         owner_canonical: &str,
         import_source: &str,
-        kind: verter_semantic::resolver_core::ResolveRequestKind,
+        kind: verter_session_query::resolution::ResolveRequestKind,
     ) -> verter_workspace::ResolutionPublication<String> {
         self.resolve_dependency_lane(None, owner_canonical, import_source, kind)
     }
@@ -270,7 +270,7 @@ impl VerterHost {
             overlay,
             owner_canonical,
             import_source,
-            verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            verter_session_query::resolution::ResolveRequestKind::TypeImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted)
                 if admitted.result().is_some() =>
@@ -286,7 +286,7 @@ impl VerterHost {
             overlay,
             owner_canonical,
             import_source,
-            verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted,
             verter_workspace::ResolutionPublication::Refused(refusal) => {
@@ -309,7 +309,7 @@ impl VerterHost {
             overlay,
             owner_canonical,
             &runtime_target,
-            verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            verter_session_query::resolution::ResolveRequestKind::TypeImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(normalized)
                 if normalized.result().is_some() =>
@@ -398,17 +398,17 @@ impl VerterHost {
         overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         owner_canonical: &str,
         import_source: &str,
-        recorded_kind: Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        recorded_kind: Option<verter_session_query::resolution::ResolveRequestKind>,
     ) -> verter_workspace::ResolutionPublication<String> {
         match recorded_kind {
-            Some(verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr) => self
+            Some(verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr) => self
                 .resolve_for_persistent_state_in(
                     overlay,
                     owner_canonical,
                     import_source,
-                    verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                        kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                    verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                        kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                     },
                 )
                 .map_result(|resolution| resolution.source_id),
@@ -426,7 +426,7 @@ impl VerterHost {
         &self,
         owner_canonical: &str,
         import_source: &str,
-        recorded_kind: Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        recorded_kind: Option<verter_session_query::resolution::ResolveRequestKind>,
     ) -> verter_workspace::ResolutionPublication<String> {
         self.generation_current_route_resolution_in(
             None,

@@ -131,7 +131,7 @@ impl VerterHost {
     pub(crate) fn build_template_class_semantic_facts(
         &self,
         canonical: &str,
-        whole_hash: verter_semantic::analysis::Hash16,
+        whole_hash: verter_session_query::analysis::types::Hash16,
         source: Arc<str>,
         script: crate::project_semantic_dispatch::template_class_facts::TemplateClassScriptInputs<
             '_,
@@ -207,7 +207,7 @@ impl VerterHost {
     pub(super) fn build_template_analysis(
         &self,
         canonical: &str,
-        whole_hash: verter_semantic::analysis::Hash16,
+        whole_hash: verter_session_query::analysis::types::Hash16,
         file_language: &FileLanguage,
         source: &Arc<str>,
         framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
@@ -1508,11 +1508,11 @@ impl VerterHost {
         }
         let fact = artifacts
             .facts
-            .lookup(&verter_semantic::facts::FactKey::SyntacticRouteInterface)?;
+            .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
         Some(crate::resolver_core::ParseFactRef {
             canonical_id: canonical.to_string(),
-            key: verter_semantic::facts::FactKey::SyntacticRouteInterface,
-            lane: verter_semantic::facts::FactLane::Semantic,
+            key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
+            lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: fact.semantic_hash,
         })
     }
@@ -1579,8 +1579,8 @@ impl VerterHost {
                 ctx,
                 canonical,
                 observed_whole_hash,
-                verter_semantic::facts::FactKey::SyntacticExportSet,
-                verter_semantic::facts::FactLane::Semantic,
+                verter_session_query::facts::FactKey::SyntacticExportSet,
+                verter_session_query::facts::FactLane::Semantic,
             );
         Some(crate::resolver_core::MaterializeScopeObservation {
             canonical_id: Arc::from(canonical),
@@ -1901,7 +1901,7 @@ impl VerterHost {
         let dep_id = match self.resolve_loaded_dependency_canonical(
             owner_canonical,
             specifier,
-            verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+            verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 match admitted.into_result() {
@@ -1909,7 +1909,7 @@ impl VerterHost {
                     None => match self.resolve_loaded_dependency_canonical(
                         owner_canonical,
                         specifier,
-                        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                        verter_session_query::resolution::ResolveRequestKind::EsmImport,
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
                             admitted.into_result()
@@ -1970,12 +1970,12 @@ impl VerterHost {
                 let resolved = if authoritative.is_some() {
                     authoritative
                 } else {
-                    let ctx = verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    let ctx = verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                         kind: if import.is_type_only {
-                            verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+                            verter_session_query::resolution::ResolveRequestKind::TypeImport
                         } else {
-                            verter_semantic::resolver_core::ResolveRequestKind::EsmImport
+                            verter_session_query::resolution::ResolveRequestKind::EsmImport
                         },
                     };
                     match self.resolve_via_vfs(parent_canonical_id, &import.source, ctx) {
@@ -2001,7 +2001,7 @@ impl VerterHost {
     /// match binding names to field names and replace `MaybeRef` with the
     /// field's actual `ReactivityKind`.
     pub(crate) fn enrich_destructured_bindings(&self, snapshot: &mut FileAnalysisSnapshot) {
-        use verter_semantic::analysis::types::{
+        use verter_session_query::analysis::types::{
             BindingInitializer, ComposableReturn, ReactivityKind,
         };
 
@@ -2311,7 +2311,7 @@ impl VerterHost {
             };
             let mut exact_summaries = Vec::new();
 
-            use verter_semantic::resolver_core::{ResolvePhase as P, ResolveRequestKind as K};
+            use verter_session_query::resolution::{ResolvePhase as P, ResolveRequestKind as K};
             for (phase, kind) in [
                 (P::CodegenBlocker, K::EsmImport),
                 (P::CodegenBlocker, K::TypeImport),
@@ -2648,7 +2648,7 @@ impl VerterHost {
     ) -> Option<(
         FileLanguage,
         Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
-        Vec<verter_semantic::analysis::ExportSignature>,
+        Vec<verter_session_query::analysis::types::ExportSignature>,
     )> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
 
@@ -2740,7 +2740,7 @@ impl VerterHost {
     pub(super) fn find_export_span(
         file_language: &FileLanguage,
         script_analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
-        export_signatures: &[verter_semantic::analysis::ExportSignature],
+        export_signatures: &[verter_session_query::analysis::types::ExportSignature],
         binding_name: &str,
     ) -> Option<(u32, u32)> {
         // Framework component files (Vue included) synthesize one semantic
@@ -2817,9 +2817,9 @@ impl VerterHost {
         if self.is_canonical_evicted(&canonical_parent) {
             return None;
         }
-        let ctx = verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        let ctx = verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         };
         match self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),

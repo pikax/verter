@@ -418,7 +418,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 verter_type_expr::locators::LocatorSymbolSpace::Namespace => None,
             },
             AuthoredBodyLocator::AugmentationBody(aug) => {
-                use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+                use verter_session_query::declarations::AugmentationScopeKind;
                 let scope_kind = match &aug.scope {
                     verter_type_expr::locators::AuthoredAugmentationScope::Global => {
                         AugmentationScopeKind::Global

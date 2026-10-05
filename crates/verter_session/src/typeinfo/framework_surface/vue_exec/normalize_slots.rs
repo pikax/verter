@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
+use verter_session_query::analysis::types::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
 use verter_type_expr::{LiteralValue, TypeExpr, UnknownValue};
 
 use super::{member_jsdoc_from_spans, raise_member_value, slice_canonical_span};
@@ -157,8 +157,8 @@ pub(crate) fn slots_from_typeinfo_surface(
                 // A resolved-surface slot has no authored props-object member
                 // list at an addressable position in the consuming file — the
                 // honest typed miss, paired with the `None` payload below.
-                props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
-                    verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                props_anchor: verter_session_query::analysis::types::MacroAnchor::Unsupported(
+                    verter_session_query::analysis::types::MacroAnchorUnsupported::NoMemberList,
                 ),
                 return_type,
                 // A resolved-surface slot has no flat authored macro-payload

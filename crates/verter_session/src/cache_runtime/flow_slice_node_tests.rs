@@ -7,16 +7,14 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use verter_semantic::analysis::flow::flow_ir::{FlowExprShape, FlowObjectEntry, FlowObjectKey};
-use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, FlowSliceBudgetAxis};
-use verter_semantic::analysis::flow::{
-    build_indexed_function_body_skeleton, FunctionBodySkeleton, FunctionBodySource,
-};
-use verter_semantic::analysis::function_program::{
-    build_function_program_index, FunctionDeclarationRef, FunctionProgramKey,
-};
-use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
-use verter_semantic::facts::SymbolSpace;
+use verter_semantic::analysis::flow::{build_indexed_function_body_skeleton, FunctionBodySource};
+use verter_semantic::analysis::function_program::build_function_program_index;
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
+use verter_session_query::facts::SymbolSpace;
+use verter_session_query::flow::flow_ir::{FlowExprShape, FlowObjectEntry, FlowObjectKey};
+use verter_session_query::flow::peeker::{FlowSliceBudget, FlowSliceBudgetAxis};
+use verter_session_query::flow::skeleton::FunctionBodySkeleton;
+use verter_session_query::function_program::{FunctionDeclarationRef, FunctionProgramKey};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::TopLevelOwnerId;
 
@@ -28,7 +26,7 @@ use crate::resolver_core::ResolverContext;
 use crate::semantic_query::SemanticQueryApi as _;
 use crate::types::HostConfig;
 use crate::VerterHost;
-use verter_semantic::analysis::flow::FlowBindingMapError;
+use verter_session_query::flow::binding::FlowBindingMapError;
 
 fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
     let allocator = oxc_allocator::Allocator::default();
@@ -227,7 +225,7 @@ fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
         source: &str,
     ) -> (
         FlowSliceFunctionKey,
-        verter_semantic::analysis::function_program::FlowBindingIdentity,
+        verter_session_query::function_program::FlowBindingIdentity,
     ) {
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
@@ -349,7 +347,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
     assert_eq!(bindings.value_count(), entry.bindings.len());
     for (slot, record) in entry.bindings.iter().enumerate() {
         let local = bindings
-            .declaration_at_span(verter_semantic::analysis::flow::FrameSpan::rebase(
+            .declaration_at_span(verter_session_query::flow::frame_span::FrameSpan::rebase(
                 entry.span.start,
                 record.span,
             ))
@@ -624,8 +622,8 @@ fn planned(outcome: FlowSliceHashOutcome) -> FlowSliceHash {
 ///   this assertion).
 #[test]
 pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
-    use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash_thread_invocations;
-    use verter_semantic::analysis::flow::peeker::return_path_peeker_plan_thread_invocations;
+    use verter_session_query::flow::hashing::compute_flow_slice_hash_thread_invocations;
+    use verter_session_query::flow::peeker::return_path_peeker_plan_thread_invocations;
 
     let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(
@@ -1110,13 +1108,13 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
 ///   not a return-statement walker.
 #[test]
 pub(crate) fn flow_slice_is_graph_reachability_not_procedural_walk() {
-    use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
 
     let skeleton = skeleton_of(
         "function f(u: number) { const b = 1; const dead = mystery(u); return { a: dead, b } }",
     );
     let graph =
-        verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(&skeleton);
+        verter_session_query::flow::flow_graph::build_function_flow_graph_for_test(&skeleton);
 
     // Resolve every asserted node id BEFORE the skeleton is dropped.
     let object_site = skeleton.return_sites[0].argument.expect("return argument");
@@ -1128,11 +1126,10 @@ pub(crate) fn flow_slice_is_graph_reachability_not_procedural_walk() {
             .out_edges(object_node)
             .iter()
             .find_map(|edge| match &edge.kind {
-                verter_semantic::analysis::flow::flow_graph::FlowEdgeKind::PathWrite {
-                    path,
-                    ..
+                verter_session_query::flow::flow_graph::FlowEdgeKind::PathWrite {
+                    path, ..
                 } if path.as_ref()
-                    == [verter_semantic::analysis::flow::SkeletonPathSegment::Static(key)] =>
+                    == [verter_session_query::flow::skeleton::SkeletonPathSegment::Static(key)] =>
                 {
                     Some(edge.to)
                 }
@@ -1199,12 +1196,12 @@ pub(crate) fn flow_slice_is_graph_reachability_not_procedural_walk() {
 /// definite write while the effect family stays live past it.
 #[test]
 pub(crate) fn flow_graph_effect_edges_stay_live_past_value_writes() {
-    use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
 
     let skeleton =
         skeleton_of(r#"function f(x: string) { return { a: (x = "s"), b: x.toUpperCase() } }"#);
     let graph =
-        verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(&skeleton);
+        verter_session_query::flow::flow_graph::build_function_flow_graph_for_test(&skeleton);
     let demand = SliceDemand::for_return_projection(&skeleton, &[Arc::<str>::from("b")]);
     let plan = ReturnPathPeeker::new(&graph)
         .plan(&demand, &FlowSliceBudget::default())
@@ -1218,11 +1215,10 @@ pub(crate) fn flow_graph_effect_edges_stay_live_past_value_writes() {
             .out_edges(object_node)
             .iter()
             .find_map(|edge| match &edge.kind {
-                verter_semantic::analysis::flow::flow_graph::FlowEdgeKind::PathWrite {
-                    path,
-                    ..
+                verter_session_query::flow::flow_graph::FlowEdgeKind::PathWrite {
+                    path, ..
                 } if path.as_ref()
-                    == [verter_semantic::analysis::flow::SkeletonPathSegment::Static(key)] =>
+                    == [verter_session_query::flow::skeleton::SkeletonPathSegment::Static(key)] =>
                 {
                     Some(edge.to)
                 }
@@ -1270,8 +1266,7 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
     fn assert_arena_free_no_type_expr<T: Send + Sync + 'static + verter_no_typeexpr::NoTypeExpr>() {
     }
     assert_arena_free_no_type_expr::<FunctionBodySkeleton>();
-    assert_arena_free_no_type_expr::<verter_semantic::analysis::flow::flow_graph::FunctionFlowGraph>(
-    );
+    assert_arena_free_no_type_expr::<verter_session_query::flow::flow_graph::FunctionFlowGraph>();
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let source = r#"function big(input: Widget, flags: Map<string, Set<number>>) {
@@ -1286,10 +1281,9 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
         &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || {
             let skeleton = skeleton_of(source);
-            let graph =
-                verter_semantic::analysis::flow::flow_graph::build_function_flow_graph_for_test(
-                    &skeleton,
-                );
+            let graph = verter_session_query::flow::flow_graph::build_function_flow_graph_for_test(
+                &skeleton,
+            );
             assert!(graph.node_count() > 0, "the build produced a real graph");
         },
     );
@@ -1320,9 +1314,9 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
 #[test]
 pub(crate) fn flow_slice_ir_detaches_from_oxc_arena() {
     fn assert_detached<T: Send + Sync + 'static + verter_no_typeexpr::NoTypeExpr>() {}
-    assert_detached::<verter_semantic::analysis::flow::flow_ir::FlowSliceIR>();
-    assert_detached::<verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan>();
-    assert_detached::<verter_semantic::analysis::flow::hashing::FlowSliceHash>();
+    assert_detached::<verter_session_query::flow::flow_ir::FlowSliceIR>();
+    assert_detached::<verter_session_query::flow::flow_ir::ReturnSlicePlan>();
+    assert_detached::<verter_session_query::flow::hashing::FlowSliceHash>();
 
     let function = function_key("/fixtures/my-type.ts", "myType", 1, MYTYPE_FIXTURE);
     let rig = rig(

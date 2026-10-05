@@ -5,7 +5,7 @@
 //! (`AnalyzedImport` / `AnalyzedImportBinding`) and the
 //! admitted-route map on `DerivedRawState::import_routes`,
 //! classifies each binding into
-//! [`verter_semantic::facts::registry::SymbolSpace`]
+//! [`verter_session_query::facts::registry::SymbolSpace`]
 //! (`Type` / `Value` / `Namespace` — v8 AMENDMENT-S), composes the
 //! cache key from real per-canonical env hashes
 //! (`VerterHost::host_view_env_hashes_for`), constructs one
@@ -38,7 +38,7 @@
 //! is `None` on the admitted entry. The `Fact.key` for negative
 //! entries uses the `UNRESOLVED_SENTINEL` (`"\0unresolved\0"`) so
 //! the fact key namespace stays in
-//! [`verter_semantic::facts::registry::FactDomain::ResolveImports`]
+//! [`verter_session_query::facts::registry::FactDomain::ResolveImports`]
 //! (`FactKey::ResolvedImportClause`) while remaining distinguishable
 //! from any real canonical path.
 //!
@@ -60,8 +60,8 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::ImportBindingKind;
-use verter_semantic::facts::registry::{
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::facts::registry::{
     Fact, FactKey, InternedName, InternedSpecifier, SymbolSpace,
 };
 use verter_workspace::FactVersionRef;
@@ -399,7 +399,7 @@ struct ClassifiedBinding {
 /// `script_analysis.imports` vector (`AnalyzedImport` with full
 /// kind + `is_type_only` info).
 fn collect_analyzed_bindings(
-    imports: &[verter_semantic::analysis::types::AnalyzedImport],
+    imports: &[verter_session_query::analysis::types::AnalyzedImport],
 ) -> Vec<ClassifiedBinding> {
     let mut out = Vec::new();
     for imp in imports {

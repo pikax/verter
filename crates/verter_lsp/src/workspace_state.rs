@@ -246,7 +246,7 @@ pub fn set_conditional_root_narrowing(views: &mut LspViews, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::resolver_core::{CompiledGlob, ModuleResolverCore, NormalizedGlob};
+    use verter_session_query::resolution::{CompiledGlob, ModuleResolverCore, NormalizedGlob};
     use verter_workspace::workspace_snapshot::{
         OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
@@ -293,8 +293,8 @@ mod tests {
             workspace_root: root_cp.clone(),
             payload: ProjectPayload::Configured {
                 tsconfig_path: CanonicalPath::new(tsconfig),
-                membership: verter_semantic::resolver_core::ConfiguredMembership {
-                    spec: verter_semantic::resolver_core::StaticMembershipSpec {
+                membership: verter_session_query::resolution::ConfiguredMembership {
+                    spec: verter_session_query::resolution::StaticMembershipSpec {
                         files: files.iter().map(|f| CanonicalPath::new(f)).collect(),
                         include: Vec::new(),
                         exclude: Vec::new().into(),

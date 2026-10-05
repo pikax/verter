@@ -97,11 +97,12 @@ fn compute_upsert_changes_core(
 pub(crate) struct UpsertResultData {
     pub(crate) new_meta: FileMeta,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
-    pub(crate) imports: Vec<verter_semantic::analysis::AnalyzedImport>,
-    pub(crate) module_references: Vec<verter_semantic::analysis::AnalyzedModuleReference>,
+    pub(crate) imports: Vec<verter_session_query::analysis::types::AnalyzedImport>,
+    pub(crate) module_references:
+        Vec<verter_session_query::analysis::types::AnalyzedModuleReference>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
-    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
 }
 
 /// Render bundler and LSP IDs for a list of virtual nodes.

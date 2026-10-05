@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 use super::prepared_decl::{ImportBinding, PreparedTypeDeclResolution, TypeParamBinding};
 use crate::resolver_core::ResolverContext;
@@ -636,7 +636,7 @@ pub(crate) fn resolve_namespace_sibling_in_scope(
         }
         // Global-augmentation namespace: a global TYPE sibling ONLY.
         LocalScopeOrigin::Global => {
-            use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+            use verter_session_query::declarations::AugmentationScopeKind;
             let is_global_type_sibling = state.augmentation_type_keys().any(|(scope, sym)| {
                 matches!(scope, AugmentationScopeKind::Global) && sym == qualified
             });

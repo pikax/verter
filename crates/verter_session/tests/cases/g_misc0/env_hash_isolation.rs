@@ -25,7 +25,9 @@ use verter_session::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, ProjectIdentity,
 };
 
-use verter_semantic::resolver_core::{IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias};
+use verter_session_query::resolution::{
+    IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias,
+};
 use verter_workspace::env_hash::EnvHashInputs;
 use verter_workspace::env_hash::IdeProjectConfigEnvHash;
 use verter_workspace::module_resolution::{ConditionSet, ModuleResolutionMode};

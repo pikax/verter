@@ -92,6 +92,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [dev-dependencies]
+verter_session_query = { workspace = true }
 # The headless mechanics e2e drives the shim over a fake-editor LSP stdio + the
 # control client, and connects the minted `--api` pipe with the crate's attach
 # client against a REAL spawned tsgo. tokio itself is not re-declared here:

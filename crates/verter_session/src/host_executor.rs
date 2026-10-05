@@ -108,17 +108,18 @@ impl SnapshotData for HostSourceData {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields are part of the get_analysis surface.
 pub struct AnalysisArcs {
-    pub(crate) module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
-    pub(crate) macros: Arc<Vec<verter_semantic::analysis::AnalyzedMacro>>,
-    pub(crate) macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
-    pub(crate) vue_api_calls: Arc<Vec<verter_semantic::analysis::types::VueApiCallSite>>,
+    pub(crate) module_references:
+        Arc<Vec<verter_session_query::analysis::types::AnalyzedModuleReference>>,
+    pub(crate) macros: Arc<Vec<verter_session_query::analysis::types::AnalyzedMacro>>,
+    pub(crate) macro_type_deps: Arc<Vec<verter_session_query::analysis::types::MacroTypeDep>>,
+    pub(crate) vue_api_calls: Arc<Vec<verter_session_query::analysis::types::VueApiCallSite>>,
     pub(crate) dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
     pub(crate) css_var_manipulations:
-        Arc<Vec<verter_semantic::analysis::types::CssVarManipulation>>,
+        Arc<Vec<verter_session_query::analysis::types::CssVarManipulation>>,
     pub(crate) script_binding_occurrences:
-        Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
-    pub(crate) store_usages: Arc<Vec<verter_semantic::analysis::types::StoreUsage>>,
-    pub(crate) store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
+        Arc<Vec<verter_session_query::analysis::types::ScriptBindingOccurrence>>,
+    pub(crate) store_usages: Arc<Vec<verter_session_query::analysis::types::StoreUsage>>,
+    pub(crate) store_definitions: Arc<Vec<verter_session_query::analysis::types::StoreDefinition>>,
 }
 
 impl AnalysisArcs {
@@ -146,7 +147,7 @@ impl AnalysisArcs {
 #[allow(dead_code)] // arcs field is part of the get_analysis surface.
 pub struct HostAnalysisData {
     pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
-    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
     pub(crate) style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
     pub(crate) markup_class_tokens: Arc<Vec<verter_semantic::analysis::MarkupClassToken>>,
     pub(crate) arcs: AnalysisArcs,
@@ -561,8 +562,8 @@ impl StageExecutor for HostStageExecutor {
                 .resolve_import_outcome(
                     canonical_id,
                     specifier,
-                    verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                         kind,
                     },
                 )
@@ -584,7 +585,7 @@ impl StageExecutor for HostStageExecutor {
             if dep.import_source.starts_with('.') || dep.import_source.starts_with("../") {
                 let Some(resolved) = resolve_dep(
                     &dep.import_source,
-                    verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                    verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 ) else {
                     return ExtractedDeps::default();
                 };

@@ -115,7 +115,7 @@ impl crate::resolver_core::DeclarationMetadataResolver
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_session_query::declarations::DeclarationId> {
         (owner == verter_type_expr::TopLevelOwnerId::ordinary_file())
             .then(|| {
                 self.host
@@ -141,13 +141,13 @@ impl crate::resolver_core::DeclarationMetadataResolver
         let state = self.host.shallow_file_state(canonical_source)?;
         let (symbol_kind, span) = state.type_symbol_metadata_in(owner, resolved_name)?;
         let kind = match symbol_kind {
-            verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
+            verter_session_query::declarations::TypeDeclKind::Alias => {
                 crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
-            verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
+            verter_session_query::declarations::TypeDeclKind::Interface => {
                 crate::resolver_core::ResolvedDeclarationKind::Interface
             }
-            verter_semantic::analysis::type_eval::TypeDeclKind::Class => {
+            verter_session_query::declarations::TypeDeclKind::Class => {
                 crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };

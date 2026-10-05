@@ -56,14 +56,15 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use verter_language::{FileLanguage, ParseKey};
-use verter_semantic::analysis::flow::flow_graph::{build_function_flow_graph, FunctionFlowGraph};
-use verter_semantic::analysis::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
-use verter_semantic::analysis::flow::hashing::FlowSliceHash;
-use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
-use verter_semantic::analysis::flow::{
-    FlowBindingMap, FunctionBodySkeleton, PreparedFunctionBodySkeleton,
+use verter_session_query::flow::flow_graph::{build_function_flow_graph, FunctionFlowGraph};
+use verter_session_query::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
+use verter_session_query::flow::hashing::FlowSliceHash;
+use verter_session_query::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
+use verter_session_query::flow::{
+    binding::FlowBindingMap,
+    skeleton::{FunctionBodySkeleton, PreparedFunctionBodySkeleton},
 };
-use verter_semantic::analysis::function_program::FunctionProgramKey;
+use verter_session_query::function_program::FunctionProgramKey;
 
 use super::admission::CacheEntry;
 use super::node::QueryFlightKey;

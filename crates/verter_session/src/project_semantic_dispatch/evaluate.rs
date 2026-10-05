@@ -1492,7 +1492,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         identity: &crate::semantic_query::DeclIdentity,
         visited: &mut rustc_hash::FxHashSet<crate::semantic_query::DeclIdentity>,
     ) -> DeclarationPrinting {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_session_query::declarations::TypeDeclKind;
         if !visited.insert(identity.clone()) {
             // An alias cycle names nothing.
             return DeclarationPrinting::Printed(Some(PrintedDeclaration::AliasTransparent));
@@ -1586,7 +1586,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         target: &crate::semantic_query::DeclIdentity,
         args: &[SemanticNodeId],
     ) -> ReferencePrinting {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_session_query::declarations::TypeDeclKind;
         if is_builtin(target) {
             return ReferencePrinting::Printed(match BuiltinMappedUtility::of(&target.decl_name) {
                 Some(BuiltinMappedUtility::Homomorphic) if !self.declared_union(args.first()) => {
@@ -1649,7 +1649,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         identity: &crate::semantic_query::DeclIdentity,
         walked: &mut Vec<crate::semantic_query::DeclIdentity>,
     ) -> bool {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_session_query::declarations::TypeDeclKind;
         let mut visited = rustc_hash::FxHashSet::default();
         let mut current = identity.clone();
         loop {

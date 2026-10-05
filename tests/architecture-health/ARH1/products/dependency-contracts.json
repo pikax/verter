@@ -86,6 +86,7 @@
         "verter_macro_dto",
         "verter_no_typeexpr",
         "verter_parser",
+        "verter_session_query",
         "verter_span",
         "verter_type_expr",
         "verter_type_expr_oxc"
@@ -700,6 +701,7 @@
           "verter_audit",
           "verter_identity",
           "verter_semantic",
+          "verter_session_query",
           "verter_span",
           "verter_type_expr"
         ],
@@ -738,14 +740,14 @@
           "owner": "verter_semantic flow substrate (analysis::flow), re-planned once per content version",
           "lifetime": "content-version",
           "evidence": "the demanded function's slice is planned as graph reachability over the once-per-content-version FunctionFlowGraph",
-          "soleOwner": "crates/verter_semantic/src/analysis/flow/flow_graph.rs"
+          "soleOwner": "crates/verter_session_query/src/flow/flow_graph.rs"
         },
         {
           "state": "FlowSliceIR",
           "owner": "flow_return.rs (lowered slice)",
           "lifetime": "content-version",
           "evidence": "planned slice is hashed and lowered into the content-free FlowSliceIR before evaluation",
-          "soleOwner": "crates/verter_semantic/src/analysis/flow/flow_ir.rs"
+          "soleOwner": "crates/verter_session_query/src/flow/flow_ir.rs"
         },
         {
           "state": "flow-return compute frame (demand site + MaterializedSet)",
@@ -860,7 +862,7 @@
       "allowedImportDirection": {
         "verter": [
           "verter_audit",
-          "verter_semantic",
+          "verter_session_query",
           "verter_span",
           "verter_type_expr"
         ],
@@ -995,7 +997,7 @@
           "verter_audit",
           "verter_identity",
           "verter_no_typeexpr",
-          "verter_semantic",
+          "verter_session_query",
           "verter_span",
           "verter_type_expr"
         ],
@@ -1332,6 +1334,7 @@
       "allowedImportDirection": {
         "verter": [
           "verter_semantic",
+          "verter_session_query",
           "verter_span",
           "verter_type_expr",
           "verter_type_expr_oxc"

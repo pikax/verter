@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::typeinfo::framework_surface::vue_exec::{
     emits_from_typeinfo_surface, props_from_typeinfo_surface, resolved_vue_surface_for_test,
@@ -46,7 +46,10 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
     });
 }
 
-fn whole_hash(host: &VerterHost, canonical_id: &str) -> verter_semantic::analysis::types::Hash16 {
+fn whole_hash(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> verter_session_query::analysis::types::Hash16 {
     host.ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .whole_hash

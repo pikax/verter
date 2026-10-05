@@ -328,7 +328,7 @@ impl MetaProject {
     /// Configure project-scoped path alias resolution.
     pub fn configure_projects(
         &self,
-        projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
         // No overlay gate — base operations go directly to host.

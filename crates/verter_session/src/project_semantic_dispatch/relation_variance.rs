@@ -316,7 +316,7 @@ impl ProjectSemanticDispatch<'_> {
         arity: usize,
         measure_aliases: bool,
     ) -> Option<DeclarationVariance> {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_session_query::declarations::TypeDeclKind;
         use verter_type_expr::facts::TypeParamVariance;
         let prepared = self.ctx.prepared_type_decl_return_only(
             declaration.canonical_id.as_ref(),

@@ -49,7 +49,7 @@ impl LintRule for NoLeakedEventListeners {
     }
 
     fn check_script(&self, script: &ScriptAnalysisSnapshot, ctx: &mut LintContext) {
-        use verter_semantic::analysis::types::VueApiClassification;
+        use verter_session_query::analysis::types::VueApiClassification;
 
         // Must have DOM query calls — otherwise nothing to warn about
         if script.dom_query_calls.is_empty() {
@@ -103,8 +103,9 @@ impl LintRule for NoLeakedEventListeners {
 mod tests {
     use super::*;
 
-    use verter_semantic::analysis::types::{
-        DomQueryCallSite, DomQueryKind, VueApiCallSite, VueApiClassification,
+    use verter_semantic::analysis::types::DomQueryCallSite;
+    use verter_session_query::analysis::types::{
+        DomQueryKind, VueApiCallSite, VueApiClassification,
     };
     use verter_span::Span;
 

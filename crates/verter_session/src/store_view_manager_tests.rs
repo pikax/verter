@@ -2539,7 +2539,7 @@ fn reentrant_base_view_on_the_claim_holding_thread_refuses_to_park() {
 /// captured view must not, or Vue-macro `InputBasisId` aliases across snapshots.
 #[test]
 fn captured_view_project_identity_survives_live_republish() {
-    use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+    use verter_session_query::resolution::IdeProjectCompilerOptions;
     use verter_workspace::{
         MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
         WorkspaceAccess,

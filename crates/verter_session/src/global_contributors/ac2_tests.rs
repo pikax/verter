@@ -23,7 +23,10 @@ fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
     store.insert(Arc::from(canonical), indexed);
 }
 
-fn fingerprint(store: &FileArtifactStore, name: &str) -> verter_semantic::analysis::Hash16 {
+fn fingerprint(
+    store: &FileArtifactStore,
+    name: &str,
+) -> verter_session_query::analysis::types::Hash16 {
     store
         .global_contributor_index()
         .snapshot()

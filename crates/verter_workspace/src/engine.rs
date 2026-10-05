@@ -33,7 +33,7 @@ use crate::workspace_snapshot::{
     OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 use crate::{SignatureAdmission, CANDIDATE_CAP};
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     IdeProjectConfig, ResolutionPopulation, ResolutionWorldId, ResolvePhase, ResolveRequestKind,
     ResolveResult, SessionFingerprint,
 };
@@ -397,7 +397,7 @@ struct ObservedBaselineValue<'a> {
 /// fold, and the live observation triple at once.
 #[derive(Debug, Clone, Copy)]
 enum ObservedFamilyValue<'a> {
-    Probe(verter_semantic::resolver_core::PathProbe),
+    Probe(verter_session_query::resolution::PathProbe),
     Realpath(Option<&'a str>),
     Manifest(Option<[u8; 16]>),
 }
@@ -491,7 +491,7 @@ impl BaselineFold {
 /// ordering constraints. `resolution_epoch` is an atomic, sequenced by
 /// `resolution_world_write` rather than by a lock order of its own.
 pub(crate) struct Engine {
-    pub(crate) input_resolution_budgets: verter_semantic::resolver_core::InputResolutionBudgets,
+    pub(crate) input_resolution_budgets: verter_session_query::resolution::InputResolutionBudgets,
     pub(crate) overlay: RwLock<OverlayStore>,
     pub(crate) snapshot: RwLock<MemorySnapshot>,
     pub(crate) edges: RwLock<EdgeStore>,
@@ -645,7 +645,7 @@ pub(crate) struct Engine {
     /// workspace mutation chokepoints, so mutators that bypass any
     /// host-level wrapper (direct embedder `notify_upsert`, `write_file`,
     /// `copy_file`) are covered by construction. Keys are normalized
-    /// through [`verter_semantic::resolver_core::normalize_canonical_id`] at the
+    /// through [`verter_session_query::resolution::normalize_canonical_id`] at the
     /// recording chokepoints AND the query, so a direct embedder passing
     /// a non-canonical key form (backslashes, Windows drive casing)
     /// records under the same key the gate reads.
@@ -688,12 +688,12 @@ impl Engine {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::new_with_input_resolution_budgets(
-            verter_semantic::resolver_core::InputResolutionBudgets::default(),
+            verter_session_query::resolution::InputResolutionBudgets::default(),
         )
     }
 
     pub(crate) fn new_with_input_resolution_budgets(
-        input_resolution_budgets: verter_semantic::resolver_core::InputResolutionBudgets,
+        input_resolution_budgets: verter_session_query::resolution::InputResolutionBudgets,
     ) -> Self {
         static NEXT_SESSION_FINGERPRINT: AtomicU64 = AtomicU64::new(1);
         let initial_extensions: Vec<String> = Self::merge_extensions(&[]);
@@ -770,7 +770,7 @@ impl Engine {
     /// then ascending lex. Used by [`Engine::new`] and
     /// [`Engine::set_default_resolve_extensions`] (single source of truth).
     fn merge_extensions(host_resolve_extensions: &[String]) -> Vec<String> {
-        let mut merged: BTreeSet<String> = verter_semantic::resolver_core::probe_extensions()
+        let mut merged: BTreeSet<String> = verter_session_query::resolution::probe_extensions()
             .iter()
             .map(|s| (*s).to_string())
             .collect();
@@ -954,7 +954,7 @@ impl Engine {
     fn record_content_transition_at(&self, canonical_id: &str, generation: u64) {
         let mut transitions = self.content_transitions.write();
         let recorded = transitions
-            .entry(verter_semantic::resolver_core::normalize_canonical_id(
+            .entry(verter_session_query::resolution::normalize_canonical_id(
                 canonical_id,
             ))
             .or_insert(0);
@@ -969,7 +969,7 @@ impl Engine {
     }
 
     fn record_subtree_content_transition_at(&self, prefix: &str, generation: u64) {
-        let mut normalized = verter_semantic::resolver_core::normalize_canonical_id(prefix);
+        let mut normalized = verter_session_query::resolution::normalize_canonical_id(prefix);
         while normalized.len() > 1 && normalized.ends_with('/') {
             normalized.pop();
         }
@@ -1003,7 +1003,7 @@ impl Engine {
     /// registration pair, which does not exist on `wasm32`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn bump_content_generation_for(&self, canonical_id: &str) -> u64 {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         self.mutate_resolution_world(|_world| {
             self.pending_resolution_refresh
                 .write()
@@ -1044,7 +1044,7 @@ impl Engine {
     /// containing the canonical (a `delete_dir_all` / watcher recovery
     /// transitions every member of the subtree).
     pub(crate) fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         let exact = self
             .content_transitions
             .read()
@@ -1561,7 +1561,7 @@ impl Engine {
         population: ResolutionPopulation,
     ) -> Option<crate::FactVersionRef> {
         let node = ResolutionFactKey::owner_resolution_set(
-            CanonicalResolutionId::new(verter_semantic::resolver_core::normalize_canonical_id(
+            CanonicalResolutionId::new(verter_session_query::resolution::normalize_canonical_id(
                 owner_canonical,
             )),
             population,
@@ -1653,7 +1653,7 @@ impl Engine {
             ResolutionFactKey::exact_importer(
                 canonical_id,
                 &resolution.specifier,
-                verter_semantic::resolver_core::ResolutionContext {
+                verter_session_query::resolution::ResolutionContext {
                     phase: resolution.phase,
                     kind: resolution.kind,
                 },
@@ -1690,7 +1690,7 @@ impl Engine {
         canonical_id: &str,
         population: ResolutionPopulation,
     ) -> Vec<ResolutionFactKey> {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         let mut keys = vec![
             ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(canonical.clone()),
@@ -1715,9 +1715,9 @@ impl Engine {
         &self,
         world: &mut ResolutionWorldRoot,
         canonical_id: &str,
-        outcome: verter_semantic::resolver_core::PathProbe,
+        outcome: verter_session_query::resolution::PathProbe,
     ) -> bool {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         if world.path_probes.get(&canonical).copied() == Some(outcome) {
             return false;
         }
@@ -1727,8 +1727,8 @@ impl Engine {
         }
         if matches!(
             outcome,
-            verter_semantic::resolver_core::PathProbe::File
-                | verter_semantic::resolver_core::PathProbe::Directory
+            verter_session_query::resolution::PathProbe::File
+                | verter_session_query::resolution::PathProbe::Directory
         ) {
             self.advance_absent_realpath_ancestors(world, &canonical);
         }
@@ -1769,7 +1769,7 @@ impl Engine {
     /// recorded evidence baselines and advance the exact path facts so
     /// stale witnesses fail. Never touches recovery scopes.
     fn advance_base_path_facts_unknown(&self, world: &mut ResolutionWorldRoot, canonical_id: &str) {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         world.path_probes.remove(&canonical);
         world.realpaths.remove(&canonical);
         for key in Self::path_fact_keys(&canonical, ResolutionPopulation::Base) {
@@ -1801,9 +1801,9 @@ impl Engine {
         canonical_id: &str,
         resolved: Option<String>,
     ) -> bool {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         let resolved =
-            resolved.map(|path| verter_semantic::resolver_core::normalize_canonical_id(&path));
+            resolved.map(|path| verter_session_query::resolution::normalize_canonical_id(&path));
         if world.realpaths.get(&canonical) == Some(&resolved) {
             return false;
         }
@@ -1827,7 +1827,7 @@ impl Engine {
         canonical_id: &str,
         fingerprint: Option<[u8; 16]>,
     ) -> bool {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         if !crate::resolution_currency::is_package_manifest_path(&canonical) {
             return false;
         }
@@ -1950,16 +1950,16 @@ impl Engine {
         canonical_id: &str,
         manifest_fingerprint: Option<[u8; 16]>,
     ) {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         let population = ResolutionPopulation::Session(fingerprint);
         let was_overlay = session.overlay_paths.contains(&canonical);
         let effective_before = if was_overlay {
-            Some(verter_semantic::resolver_core::PathProbe::File)
+            Some(verter_session_query::resolution::PathProbe::File)
         } else {
             base.path_probes.get(&canonical).copied()
         };
         let path_changed =
-            effective_before != Some(verter_semantic::resolver_core::PathProbe::File);
+            effective_before != Some(verter_session_query::resolution::PathProbe::File);
         // An overlay's effective realpath is its canonical overlay path.
         // Compare against the recorded base realpath value: only a base
         // value known to already equal the canonical leaves the effective
@@ -2034,7 +2034,7 @@ impl Engine {
         fingerprint: SessionFingerprint,
         canonical_id: &str,
     ) -> bool {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         if session.overlay_paths.remove(&canonical).is_none() {
             return false;
         }
@@ -2076,7 +2076,7 @@ impl Engine {
         &self,
         canonical_id: &str,
         remove_edges: bool,
-        path_after: Option<verter_semantic::resolver_core::PathProbe>,
+        path_after: Option<verter_session_query::resolution::PathProbe>,
         realpath_after: BaseRealpathTransition,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
@@ -2095,7 +2095,7 @@ impl Engine {
             match realpath_after {
                 BaseRealpathTransition::Unknown => {
                     world.realpaths.remove(
-                        &verter_semantic::resolver_core::normalize_canonical_id(canonical_id),
+                        &verter_session_query::resolution::normalize_canonical_id(canonical_id),
                     );
                 }
                 BaseRealpathTransition::Known(resolved) => {
@@ -2223,7 +2223,7 @@ impl Engine {
                 self.update_base_path_facts(
                     world,
                     &canonical_id,
-                    verter_semantic::resolver_core::PathProbe::Absent,
+                    verter_session_query::resolution::PathProbe::Absent,
                 );
                 self.update_base_realpath_fact(world, &canonical_id, None);
                 self.update_base_manifest_fact(world, &canonical_id, None);
@@ -2255,7 +2255,7 @@ impl Engine {
             if remove_edges {
                 self.remove_edges_under_in_world(world, prefix);
             }
-            let normalized = verter_semantic::resolver_core::normalize_canonical_id(prefix);
+            let normalized = verter_session_query::resolution::normalize_canonical_id(prefix);
             self.advance_resolution_fact(
                 &mut world.facts,
                 ResolutionFactKey::RecoveryScope {
@@ -2575,7 +2575,7 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: verter_semantic::resolver_core::ResolutionContext,
+        context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
     ) -> Option<ResolutionQueryKey> {
         self.lazy_resolution_cache
@@ -2598,7 +2598,7 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: verter_semantic::resolver_core::ResolutionContext,
+        context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
     ) -> usize {
         self.lazy_resolution_cache
@@ -2619,7 +2619,7 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: verter_semantic::resolver_core::ResolutionContext,
+        context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
     ) -> usize {
         self.overlay_lane
@@ -2639,7 +2639,7 @@ impl Engine {
         &self,
         importer_id: &str,
         specifier: &str,
-        context: verter_semantic::resolver_core::ResolutionContext,
+        context: verter_session_query::resolution::ResolutionContext,
         population: ResolutionPopulation,
         overlay_domain: bool,
     ) -> usize {
@@ -2738,7 +2738,7 @@ impl Engine {
             let graph = self.project_graph.read();
             let resolver = configured_projects
                 .clone()
-                .map(verter_semantic::resolver_core::ModuleResolverCore::new)
+                .map(verter_session_query::resolution::ModuleResolverCore::new)
                 .unwrap_or_else(|| graph.to_module_resolver_core());
 
             // Build a WorkspaceSnapshot from the graph's projects
@@ -2799,7 +2799,7 @@ impl Engine {
     ) -> Option<crate::types::PackageManifest> {
         use crate::package_index::ManifestEntry;
 
-        let canonical_id = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical_id = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         {
             let cache = self.package_index.read();
             match cache.get_cached(&canonical_id) {
@@ -2824,7 +2824,7 @@ impl Engine {
     }
 
     pub(crate) fn invalidate_package_manifest(&self, canonical_id: &str) {
-        let canonical_id = verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+        let canonical_id = verter_session_query::resolution::normalize_canonical_id(canonical_id);
         if canonical_id.ends_with("/package.json") {
             self.package_index.write().invalidate(&canonical_id);
         }
@@ -2925,13 +2925,13 @@ impl Engine {
                                 self.update_base_path_facts(
                                     world,
                                     &canonical_id,
-                                    verter_semantic::resolver_core::PathProbe::File,
+                                    verter_session_query::resolution::PathProbe::File,
                                 );
                                 // A disk-backed change cannot cheaply prove
                                 // the post-change realpath; comparisons stay
                                 // conservative until re-observed.
                                 world.realpaths.remove(
-                                    &verter_semantic::resolver_core::normalize_canonical_id(
+                                    &verter_session_query::resolution::normalize_canonical_id(
                                         &canonical_id,
                                     ),
                                 );
@@ -2947,7 +2947,7 @@ impl Engine {
                                 self.advance_base_path_facts_unknown(world, &canonical_id);
                                 if canonical_id.ends_with("/package.json") {
                                     let canonical =
-                                        verter_semantic::resolver_core::normalize_canonical_id(
+                                        verter_session_query::resolution::normalize_canonical_id(
                                             &canonical_id,
                                         );
                                     world.manifest_fingerprints.remove(&canonical);
@@ -2973,7 +2973,7 @@ impl Engine {
                         self.update_base_path_facts(
                             world,
                             &canonical_id,
-                            verter_semantic::resolver_core::PathProbe::Absent,
+                            verter_session_query::resolution::PathProbe::Absent,
                         );
                         self.update_base_realpath_fact(world, &canonical_id, None);
                         self.update_base_manifest_fact(world, &canonical_id, None);
@@ -2988,7 +2988,7 @@ impl Engine {
                         // change), so record the narrowest subtree scope at
                         // the batch's post-mutation generation.
                         let normalized =
-                            verter_semantic::resolver_core::normalize_canonical_id(&prefix);
+                            verter_session_query::resolution::normalize_canonical_id(&prefix);
                         self.advance_resolution_fact(
                             &mut world.facts,
                             ResolutionFactKey::RecoveryScope {
@@ -3085,8 +3085,8 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.resolve_import_outcome(reader, importer_id, specifier, ctx)
             .into_transient_result()
     }
@@ -3103,7 +3103,7 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
@@ -3124,8 +3124,8 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.resolve_import_outcome_with_evidence(reader, evidence, importer_id, specifier, ctx)
             .into_transient_result()
     }
@@ -3144,7 +3144,7 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
@@ -3169,7 +3169,7 @@ impl Engine {
         expected_published: &Arc<crate::published_state::PublishedRoot>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.input_resolution_budgets);
@@ -3193,7 +3193,7 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
         operation: ResolutionOperation<'_>,
     ) -> ResolutionOutcome {
         self.resolve_import_outcome_in_published(
@@ -3348,7 +3348,7 @@ impl Engine {
             {
                 continue;
             }
-            let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+            let key = verter_session_query::resolution::normalize_canonical_id(canonical);
             let recorded = Self::recorded_baseline(&recorded_before, &key);
             // A source that could not produce a trustworthy live observation
             // gets no stamp and no fold. The stamp certifies an actual live
@@ -3436,14 +3436,14 @@ impl Engine {
     /// was last read LIVE, or `None` when it never has been.
     #[cfg(test)]
     pub(crate) fn evidence_verified_generation_for_test(&self, canonical: &str) -> Option<u64> {
-        let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        let key = verter_session_query::resolution::normalize_canonical_id(canonical);
         self.evidence_verified_generation.read().get(&key).copied()
     }
 
     /// Whether `canonical` is still awaiting evidence re-observation.
     #[cfg(test)]
     pub(crate) fn pending_resolution_refresh_for_test(&self, canonical: &str) -> bool {
-        let key = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        let key = verter_session_query::resolution::normalize_canonical_id(canonical);
         self.pending_resolution_refresh.read().contains(&key)
     }
 
@@ -3462,7 +3462,7 @@ impl Engine {
             probe: reader.probe_path(canonical_id),
             realpath: reader
                 .realpath(canonical_id)
-                .map(|path| verter_semantic::resolver_core::normalize_canonical_id(&path)),
+                .map(|path| verter_session_query::resolution::normalize_canonical_id(&path)),
             manifest: crate::resolution_currency::is_package_manifest_path(canonical_id).then(
                 || {
                     reader.read_file(canonical_id).map(|source| {
@@ -3598,7 +3598,7 @@ impl Engine {
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
         operation: ResolutionOperation<'_>,
     ) -> ResolutionOutcome {
         let ResolutionOperation {
@@ -3930,9 +3930,9 @@ impl Engine {
                                     provider_id: id.clone(),
                                     provider_specifier: specifier.to_string(),
                                     provider_target:
-                                        verter_semantic::resolver_core::ProviderTarget::SourceFile,
+                                        verter_session_query::resolution::ProviderTarget::SourceFile,
                                     resolution_kind:
-                                        verter_semantic::resolver_core::ResolutionKind::Bundler,
+                                        verter_session_query::resolution::ResolutionKind::Bundler,
                                     owner_tsconfig_path: None,
                                 }
                             })
@@ -3947,7 +3947,7 @@ impl Engine {
                         .published
                         .as_ref()
                         .map_or(Ok(None), |root| {
-                            let request = verter_semantic::resolver_core::ResolveRequest {
+                            let request = verter_session_query::resolution::ResolveRequest {
                                 importer_id: importer_id.to_string(),
                                 specifier: specifier.to_string(),
                                 kind: ctx.kind,
@@ -4321,7 +4321,7 @@ impl Engine {
                 if target == ResolveContextId::unowned()
                     && result.owner_tsconfig_path.is_none()
                     && result.provider_target
-                        == verter_semantic::resolver_core::ProviderTarget::SourceFile =>
+                        == verter_session_query::resolution::ProviderTarget::SourceFile =>
             {
                 Some(selected.with_external_provider_projection(result))
             }
@@ -4336,10 +4336,10 @@ impl Engine {
     pub(crate) fn resolve_import_for_project(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.resolve_import_for_project_outcome(reader, owner, specifier, ctx)
             .into_transient_result()
     }
@@ -4347,9 +4347,9 @@ impl Engine {
     pub(crate) fn resolve_import_for_project_outcome(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> ResolutionOutcome {
         let population = reader.resolution_population();
         let mut input_ledger =
@@ -4578,10 +4578,10 @@ impl Engine {
             .snapshot
             .resolver
             .preferred_specifier_candidates(importer_id, target_id)?;
-        let normalized_target = verter_semantic::resolver_core::normalize_canonical_id(target_id);
-        let context = verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        let normalized_target = verter_session_query::resolution::normalize_canonical_id(target_id);
+        let context = verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         };
         let mut best: Option<String> = None;
         for candidate in candidates {
@@ -4593,7 +4593,7 @@ impl Engine {
                 context,
             );
             if outcome.into_transient_result().is_some_and(|result| {
-                verter_semantic::resolver_core::normalize_canonical_id(&result.source_id)
+                verter_session_query::resolution::normalize_canonical_id(&result.source_id)
                     == normalized_target
             }) {
                 match &best {
@@ -4617,7 +4617,7 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
         captured_world: &Arc<CapturedResolutionWorld>,
         input_ledger: &mut crate::resolver::InputResolutionLedger,
     ) -> ResolutionOutcome {
@@ -4642,7 +4642,7 @@ impl Engine {
             .published
             .as_ref()
             .map_or(Ok(None), |root| {
-                let request = verter_semantic::resolver_core::ResolveRequest {
+                let request = verter_session_query::resolution::ResolveRequest {
                     importer_id: importer_id.to_string(),
                     specifier: specifier.to_string(),
                     kind: ctx.kind,
@@ -4715,7 +4715,7 @@ impl Engine {
         importer_id: &str,
         specifier: &str,
         target_id: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
         captured_world: &Arc<CapturedResolutionWorld>,
     ) -> ResolutionOutcome {
         let population = captured_world.population;
@@ -4752,8 +4752,8 @@ impl Engine {
                     source_id: target_id.to_owned(),
                     provider_id: target_id.to_owned(),
                     provider_specifier: specifier.to_owned(),
-                    provider_target: verter_semantic::resolver_core::ProviderTarget::SourceFile,
-                    resolution_kind: verter_semantic::resolver_core::ResolutionKind::Bundler,
+                    provider_target: verter_session_query::resolution::ProviderTarget::SourceFile,
+                    resolution_kind: verter_session_query::resolution::ResolutionKind::Bundler,
                     owner_tsconfig_path: None,
                 })
             });
@@ -5143,8 +5143,8 @@ impl Engine {
         for edge in edges {
             match edge {
                 crate::types::ParsedEdge::Relative { specifier, kind } => {
-                    let ctx = verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                    let ctx = verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                         kind: *kind,
                     };
                     let relative_candidate = specifier.starts_with('.').then(|| {
@@ -5157,7 +5157,7 @@ impl Engine {
                     let batch_key = relative_results.as_ref().and_then(|_| {
                         let (_, joined_stem) = relative_candidate.as_ref()?;
                         let normalized_importer =
-                            verter_semantic::resolver_core::normalize_canonical_id(canonical_id);
+                            verter_session_query::resolution::normalize_canonical_id(canonical_id);
                         let scope = if suffix_crosses_node_modules(&normalized_importer) {
                             ParsedRelativeBatchScope::PackageImporter(normalized_importer)
                         } else {
@@ -5241,10 +5241,10 @@ impl Engine {
                             canonical_id,
                             specifier,
                             path,
-                            verter_semantic::resolver_core::ResolutionContext {
-                                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                            verter_session_query::resolution::ResolutionContext {
+                                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                                 kind:
-                                    verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                                    verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                             },
                             captured_world,
                         );
@@ -5260,9 +5260,9 @@ impl Engine {
                             }
                         }
                     } else {
-                        let ctx = verter_semantic::resolver_core::ResolutionContext {
-                            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                            kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                        let ctx = verter_session_query::resolution::ResolutionContext {
+                            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                            kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                         };
                         let outcome = self.resolve_parsed_edge_in_world(
                             reader,
@@ -5420,7 +5420,7 @@ impl Engine {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn unregister_ambient_lib(
         &self,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Result<(), crate::ambient_lib::AmbientLibError> {
         use crate::ambient_lib::{cas_unregister, normalize_canonical_id};
@@ -5442,7 +5442,7 @@ impl Engine {
     pub(crate) fn read_ambient_lib(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
         let canonical = crate::ambient_lib::normalize_canonical_id(canonical_id);
@@ -5463,9 +5463,9 @@ impl Engine {
     /// `lib_order`) that exposes the symbol.
     pub(crate) fn lookup_ambient_symbol(
         &self,
-        consumer_project: verter_semantic::resolver_core::ProjectStableKey,
+        consumer_project: verter_session_query::resolution::ProjectStableKey,
         symbol: &str,
-    ) -> Option<verter_semantic::resolver_core::AmbientSymbolHit> {
+    ) -> Option<verter_session_query::resolution::AmbientSymbolHit> {
         let ambient = self.ambient_libs.load_full();
         let p = ambient.by_project.get(&consumer_project)?;
         let candidates = p.symbol_index.get(symbol)?;
@@ -5474,7 +5474,7 @@ impl Engine {
             consumer_project,
             canonical_id.as_ref(),
         );
-        Some(verter_semantic::resolver_core::AmbientSymbolHit {
+        Some(verter_session_query::resolution::AmbientSymbolHit {
             project: consumer_project,
             canonical_id,
             virtual_id,
@@ -5486,7 +5486,7 @@ impl Engine {
     pub(crate) fn project_stable_key(
         &self,
         project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+    ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         let published = self.load_published()?;
         published
             .snapshot
@@ -5628,14 +5628,14 @@ fn compose_env_hash_tables_from_configs(
             ProjectPayload::Fallback { .. } => None,
         };
         let selected = configs.iter().find(|config| {
-            verter_semantic::resolver_core::normalize_canonical_id(&config.root)
+            verter_session_query::resolution::normalize_canonical_id(&config.root)
                 == project.root.as_str()
-                && verter_semantic::resolver_core::normalize_canonical_id(&config.workspace_root)
+                && verter_session_query::resolution::normalize_canonical_id(&config.workspace_root)
                     == project.workspace_root.as_str()
                 && config
                     .tsconfig_path
                     .as_deref()
-                    .map(verter_semantic::resolver_core::normalize_canonical_id)
+                    .map(verter_session_query::resolution::normalize_canonical_id)
                     .as_deref()
                     == expected_tsconfig
         });

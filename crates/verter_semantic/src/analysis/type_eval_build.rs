@@ -16,11 +16,6 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use crate::analysis::fact_projection::{
-    signature_return_reference_head_fact, value_type_annotation_fact,
-};
-use crate::analysis::top_level_owners::{TopLevelOwnerTable, TopLevelStatementOwner};
-use crate::analysis::type_eval::*;
 use oxc_ast::ast::{
     ArrowFunctionExpression, BinaryOperator, BindingPattern, Class, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinition,
@@ -32,6 +27,13 @@ use oxc_ast::ast::{
     VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
+use verter_session_query::analysis::fact_projection::{
+    signature_return_reference_head_fact, value_type_annotation_fact,
+};
+use verter_session_query::analysis::top_level_owners::{
+    TopLevelOwnerTable, TopLevelStatementOwner,
+};
+use verter_session_query::declarations::*;
 
 use crate::analysis::namespace_walk::for_each_namespace;
 use oxc_span::GetSpan;
@@ -176,7 +178,7 @@ fn expansion_metadata_hit_budget(
 
 struct ExpandStageLog<'a> {
     macro_index: usize,
-    macro_kind: crate::analysis::types::AnalyzedMacroKind,
+    macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
     stage: &'a str,
     target: &'a str,
     started: Instant,
@@ -6036,7 +6038,7 @@ fn expanded_field_authority(
 }
 
 pub fn expand_macro_types_impl_with_expander<F>(
-    macros: &[crate::analysis::types::AnalyzedMacro],
+    macros: &[verter_session_query::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     binding_entries: &[BindingExpansionEntry],
     debug_env: Option<&mut EvalEnv>,
@@ -6286,7 +6288,7 @@ where
             let item_started = Instant::now();
             let stage_log = ExpandStageLog {
                 macro_index: usize::MAX,
-                macro_kind: crate::analysis::types::AnalyzedMacroKind::DefineExpose,
+                macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose,
                 stage: "binding",
                 target: name.as_str(),
                 started: item_started,

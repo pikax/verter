@@ -2309,7 +2309,7 @@ pub(crate) fn source_bare_ref_name(
 /// unraisable under the live view (unloaded / evicted producing canonical).
 pub(crate) fn prepared_body_root_node(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::PreparedTypeDecl,
 ) -> Option<SemanticNodeId> {
     dispatch
         .raise_authored_locator_to_hot(

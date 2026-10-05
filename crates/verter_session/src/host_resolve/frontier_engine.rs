@@ -750,7 +750,7 @@ impl VerterHost {
         let route_key = crate::resolver_core::route_db::RouteNameKey::new(
             provider,
             requested_name,
-            verter_semantic::facts::registry::SymbolSpace::Type,
+            verter_session_query::facts::registry::SymbolSpace::Type,
             self.host_view_project_identity_for(provider),
             env.resolve_env_hash,
             env.lib_env_hash,

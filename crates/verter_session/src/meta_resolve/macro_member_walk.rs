@@ -50,7 +50,7 @@ pub(crate) fn collect_define_props_root_names(
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
 ) -> rustc_hash::FxHashSet<String> {
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let mut names: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
@@ -184,11 +184,10 @@ pub(crate) fn slot_binding_targets_define_props_root(
         // `Omit<Props, …>`): the root is the SOURCE argument's reference head.
         if let Some((name, _)) = data.bare_ref_head() {
             let args = data.carrier_type_args();
-            let is_utility =
-                verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                    name.as_ref(),
-                )
-                .is_some();
+            let is_utility = verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
+                name.as_ref(),
+            )
+            .is_some();
             if is_utility && !args.is_empty() {
                 let source =
                     crate::project_semantic_dispatch::node_data_for(dispatch.graph(), args[0])?;

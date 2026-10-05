@@ -55,8 +55,8 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::builtin::BuiltinUtility;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 use crate::resolver_core::prepared_decl::PreparedTypeDeclResolution;
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure, ResolverContext};

@@ -199,7 +199,7 @@ use crate::fact_cache::{
 };
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::resolution_currency::ResolutionEvidenceSource;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     ResolutionContext, ResolutionPopulation, ResolutionWorldId, ResolvePhase, ResolveRequestKind,
 };
 

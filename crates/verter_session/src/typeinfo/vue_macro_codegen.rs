@@ -24,8 +24,9 @@ use verter_macro_dto::{
     UnsupportedReason,
 };
 use verter_semantic::analysis::component_meta::MacroExpansionKind;
-use verter_semantic::analysis::{
-    AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind, ScriptAnalysisSnapshot,
+use verter_semantic::analysis::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::{
+    AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind,
 };
 
 use crate::locator_identity::BroadRuntimeSubjectLocator;
@@ -245,7 +246,7 @@ pub(crate) enum VueMacroDependencyFailure {
 #[derive(Debug, Clone)]
 pub(crate) struct VueMacroCodegenOutput {
     /// Content identity of the exact indexed snapshot used by the producer.
-    pub origin_whole_hash: Option<verter_semantic::analysis::types::Hash16>,
+    pub origin_whole_hash: Option<verter_session_query::analysis::types::Hash16>,
     /// Runtime bundle only when demanded.
     pub runtime: Option<Arc<MacroRuntimeBundle>>,
     /// TSC bundle only when demanded.
@@ -516,7 +517,7 @@ impl ProjectionFailure {
 }
 
 struct ProducerState {
-    origin_whole_hash: Option<verter_semantic::analysis::types::Hash16>,
+    origin_whole_hash: Option<verter_session_query::analysis::types::Hash16>,
     runtime_entries: Vec<MacroRuntimeEntry>,
     tsc_entries: Vec<MacroTscEntry>,
     dependency_failures: Vec<VueMacroDependencyFailure>,

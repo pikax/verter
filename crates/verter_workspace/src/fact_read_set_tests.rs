@@ -32,7 +32,7 @@ use crate::fact_cache::{
     DomainGenerationFact, FactVersionRef, ParseEnvHash, ParseFactRef, ResolveImportsFactRef,
     RouteSurfaceFactRef, SessionOverlayFingerprint, ViewPopulation,
 };
-use verter_semantic::facts::registry::{
+use verter_session_query::facts::registry::{
     AugmentationTargetKindTag, FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
 };
 
@@ -49,7 +49,7 @@ use crate::resolution_currency::{
     CanonicalResolutionId, RawSpecifier, ResolutionEntry, ResolutionFactKey, ResolutionFactRef,
     ResolutionFactVersion,
 };
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     ResolutionPopulation, ResolvePhase, ResolveRequestKind, SessionFingerprint,
 };
 

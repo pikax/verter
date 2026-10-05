@@ -81,7 +81,7 @@ pub struct VueSurfaceKey {
     /// Stable index of the macro in the SFC's analysis snapshot.
     pub macro_index: usize,
     /// The macro kind the cached DTO bundle was normalized for.
-    pub macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
+    pub macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
 }
 
 /// The Svelte adapter's typed [`crate::framework::surface_store::FullKey`]

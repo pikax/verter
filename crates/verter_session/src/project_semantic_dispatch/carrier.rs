@@ -34,7 +34,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 use super::ProjectSemanticDispatch;
 use crate::resolver_core::bare_name_resolve::{
@@ -537,11 +537,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn builtin_sentinel_utility(
         &self,
         identity: &DeclIdentity,
-    ) -> Option<verter_semantic::analysis::type_solver::builtin::BuiltinUtility> {
+    ) -> Option<verter_session_query::type_solver::builtin::BuiltinUtility> {
         if identity.canonical_id.as_ref() != "__builtin__" {
             return None;
         }
-        verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+        verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
             identity.decl_name.as_ref(),
         )
     }
@@ -613,7 +613,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 args,
             ));
         }
-        if verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name.as_ref())
+        if verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name.as_ref())
             .is_some()
         {
             return Some(self.finish_carrier_resolution(
@@ -691,8 +691,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return true;
         }
         self.runtime_nominal_global_name(name).is_some()
-            || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name)
-                .is_some()
+            || verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
     }
 
     pub(super) fn plan_bare_ref_head(
@@ -746,10 +745,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // userland alias — "user shadowing wins".
         if !name_resolution.contains_key(name.as_ref())
             && !shadowing.is_shadowing_lib(name.as_ref())
-            && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                name.as_ref(),
-            )
-            .is_some()
+            && verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name.as_ref())
+                .is_some()
         {
             let builtin_identity = DeclIdentity {
                 canonical_id: Arc::from("__builtin__"),

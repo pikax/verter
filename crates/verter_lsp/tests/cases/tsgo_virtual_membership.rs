@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use verter_lsp::tsgo::composite::TsgoCompositeProvider;
 use verter_lsp::type_provider::traits::TypeProvider;
-use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::ConfiguredMembership;
 use verter_tsgo_api::actor::spawn_actor;
 use verter_tsgo_api::proto::types::{
     method, Diagnostic, InitializeResponse, UpdateSnapshotResponse,

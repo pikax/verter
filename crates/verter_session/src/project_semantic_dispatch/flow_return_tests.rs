@@ -2654,7 +2654,7 @@ fn flow_return_failed_binding_initializer_degrades_only_when_observed() {
 /// the budget, and nothing else, caused the refusal).
 #[test]
 pub(crate) fn flow_slice_budget_exceeded_is_return_only_at_the_memo() {
-    use verter_semantic::analysis::flow::peeker::FlowSliceBudget;
+    use verter_session_query::flow::peeker::FlowSliceBudget;
     let host = make_host();
     host.project_type_store()
         .flow_slice()
@@ -2771,7 +2771,7 @@ fn flow_return_warm_read_consults_no_slice_state() {
 /// at all.
 #[test]
 fn flow_return_cold_demand_plans_the_slice_once_and_warm_replay_never_plans() {
-    use verter_semantic::analysis::flow::peeker::return_path_peeker_plan_thread_invocations;
+    use verter_session_query::flow::peeker::return_path_peeker_plan_thread_invocations;
 
     let host = make_host();
     let plans_before = return_path_peeker_plan_thread_invocations();
@@ -3916,11 +3916,11 @@ fn staged_flow_proof(
         ancestry: Default::default(),
         graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
-            function: verter_semantic::analysis::function_program::FunctionProgramKey {
-                declaration: verter_semantic::analysis::function_program::FunctionDeclarationRef {
+            function: verter_session_query::function_program::FunctionProgramKey {
+                declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
                     name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
-                    space: verter_semantic::facts::SymbolSpace::Value,
+                    space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),
                 overload_ordinal: key.function.overload_ordinal,

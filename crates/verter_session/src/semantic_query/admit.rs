@@ -137,7 +137,7 @@ mod tests {
     use super::*;
     use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef};
     use std::sync::Arc;
-    use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
+    use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
     fn sig_from(facts: Vec<FactVersionRef>) -> ReadSetSignature {
         ReadSetSignature::new(Arc::from(facts.into_boxed_slice()))
@@ -151,7 +151,7 @@ mod tests {
     }
 
     fn negative_resolved_import_fact() -> FactVersionRef {
-        use verter_semantic::facts::registry::InternedSpecifier;
+        use verter_session_query::facts::registry::InternedSpecifier;
         FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
             canonical_id: "/importer.ts".to_string(),
             key: FactKey::ResolvedImportClause {

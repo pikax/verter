@@ -70,7 +70,7 @@ impl LintRule for PreferStoreToRefs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::types::{StoreApiClassification, StoreUsage};
+    use verter_session_query::analysis::types::{StoreApiClassification, StoreUsage};
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

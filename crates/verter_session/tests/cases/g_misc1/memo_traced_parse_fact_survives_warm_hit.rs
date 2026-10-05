@@ -52,8 +52,8 @@
 use std::sync::Arc;
 
 use serial_test::serial;
-use verter_semantic::facts::registry::InternedName;
-use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
+use verter_session_query::facts::registry::InternedName;
+use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 use verter_session::for_tests::{
     dispatch_execute_type_node_for_tests, dispatch_inject_parse_fact_for_tests,

@@ -9,7 +9,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
-use verter_semantic::analysis::types::AnalysisFlags;
+use verter_session_query::analysis::types::AnalysisFlags;
 
 pub struct NoDuplicateAttrInheritance;
 

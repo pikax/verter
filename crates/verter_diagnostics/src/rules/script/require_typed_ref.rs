@@ -13,7 +13,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{ScriptAnalysisSnapshot, VueApiClassification};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::VueApiClassification;
 
 pub struct RequireTypedRef;
 
@@ -54,11 +55,12 @@ impl LintRule for RequireTypedRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::types::VueApiCallSite;
 
     use crate::config::LintConfig;
     use crate::context::LintContext;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::types::*;
+
     use verter_span::Span;
 
     /// Run the rule with it explicitly enabled (since it's off by default).

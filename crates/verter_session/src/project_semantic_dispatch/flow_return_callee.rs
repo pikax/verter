@@ -87,7 +87,7 @@ use crate::flow_slice_content::SliceCallSite;
 use crate::semantic_query::{
     ClauseSpelling, FlowReturnKey, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId,
 };
-use verter_semantic::analysis::function_program::{FunctionProgramMatch, FunctionProgramTypeParam};
+use verter_session_query::function_program::{FunctionProgramMatch, FunctionProgramTypeParam};
 
 /// Where the node a clause instantiates into was LOWERED, which decides
 /// which SPELLINGS of a clause parameter that node can contain.

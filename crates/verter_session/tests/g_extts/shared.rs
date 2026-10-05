@@ -12,11 +12,11 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{
     CarrierOwnershipResolution, EnvDims, ExternalTsProjectResolver, WorkspaceProjectResolver,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
+use verter_session_query::resolution::ConfiguredMembership;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,

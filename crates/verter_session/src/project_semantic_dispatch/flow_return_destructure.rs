@@ -11,7 +11,7 @@ use crate::flow_slice_content::{
     SlicePatternKey,
 };
 use crate::semantic_query::{LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId};
-use verter_semantic::analysis::flow::SkeletonBindingId;
+use verter_session_query::flow::skeleton::SkeletonBindingId;
 
 /// One element's value: the node, and the FRESH literal values in it.
 struct ElementValue {
@@ -142,7 +142,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         &mut self,
         pattern: &SlicePattern,
         value: &SliceExpr,
-        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
     ) {
         self.prescan_statement_value_writes(Some(value));
         let holds_before = self.holds.len();
@@ -195,7 +195,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 properties: &'p [(SlicePatternKey, SlicePatternElement)],
                 rest: &'p Option<(
                     SkeletonBindingId,
-                    verter_semantic::analysis::flow::FrameSpan,
+                    verter_session_query::flow::frame_span::FrameSpan,
                 )>,
                 parent: Option<SemanticNodeId>,
                 next: usize,
@@ -205,7 +205,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 elements: &'p [Option<SlicePatternElement>],
                 rest: &'p Option<(
                     SkeletonBindingId,
-                    verter_semantic::analysis::flow::FrameSpan,
+                    verter_session_query::flow::frame_span::FrameSpan,
                 )>,
                 parent: Option<SemanticNodeId>,
                 next: usize,

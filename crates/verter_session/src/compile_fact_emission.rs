@@ -67,12 +67,12 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::types::AnalyzedImport;
-use verter_semantic::analysis::MacroTypeDep;
-use verter_semantic::facts::registry::{
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::MacroTypeDep;
+use verter_session_query::facts::registry::{
     AugmentationTargetKindTag, FactKey, InternedName, InternedSpecifier, SymbolSpace,
 };
-use verter_semantic::facts::FactLane;
+use verter_session_query::facts::FactLane;
 
 use crate::resolver_core::{FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
 use crate::types::{ExternalSourceRequest, Hash16};

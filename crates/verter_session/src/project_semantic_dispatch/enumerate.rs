@@ -15,7 +15,7 @@ use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
     HashValue, LiteralValue, PrimitiveKind, PropertyKey, SemanticNodeData, SemanticNodeId,
 };
-use verter_semantic::facts::registry::{FactKey, InternedName, SymbolSpace};
+use verter_session_query::facts::registry::{FactKey, InternedName, SymbolSpace};
 
 /// One enumerated key-domain member: the canonical published property
 /// NAME plus the literal VALUE substituted for the mapper binder `K`.

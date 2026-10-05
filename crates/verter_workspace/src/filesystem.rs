@@ -80,7 +80,7 @@ fn record_resolution_directory_observation(canonical_id: &str, value: Resolution
         observations
             .borrow_mut()
             .push(ResolutionDirectoryObservation {
-                canonical: verter_semantic::resolver_core::normalize_canonical_id(canonical_id),
+                canonical: verter_session_query::resolution::normalize_canonical_id(canonical_id),
                 value,
             });
     });
@@ -201,14 +201,14 @@ impl FilesystemWorkspace {
     pub fn new(options: FilesystemOptions) -> Self {
         Self::new_with_input_resolution_budgets(
             options,
-            verter_semantic::resolver_core::InputResolutionBudgets::default(),
+            verter_session_query::resolution::InputResolutionBudgets::default(),
         )
     }
 
     /// Construct with a complete tightening-only semantic budget policy.
     pub fn new_with_input_resolution_budgets(
         options: FilesystemOptions,
-        budgets: verter_semantic::resolver_core::InputResolutionBudgets,
+        budgets: verter_session_query::resolution::InputResolutionBudgets,
     ) -> Self {
         Self {
             options,
@@ -331,7 +331,7 @@ impl FilesystemWorkspace {
         self.engine.mutate_content_for(
             &canonical_id,
             false,
-            Some(verter_semantic::resolver_core::PathProbe::File),
+            Some(verter_session_query::resolution::PathProbe::File),
             crate::engine::BaseRealpathTransition::Unknown,
             || {
                 self.engine.invalidate_package_manifest(&canonical_id);
@@ -442,7 +442,7 @@ impl FilesystemWorkspace {
         overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
@@ -522,7 +522,7 @@ impl FilesystemWorkspace {
         overlay: &crate::resolution_currency::ResolutionOverlaySnapshot,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         let Some(published) = self.load_published() else {
             return crate::resolution_currency::ResolutionOutcome::refused(
@@ -667,7 +667,7 @@ impl FilesystemWorkspace {
 
 struct FilesystemResolutionObservations {
     files: parking_lot::Mutex<HashMap<String, Option<Arc<str>>>>,
-    probes: parking_lot::Mutex<HashMap<String, verter_semantic::resolver_core::PathProbe>>,
+    probes: parking_lot::Mutex<HashMap<String, verter_session_query::resolution::PathProbe>>,
     realpaths: parking_lot::Mutex<HashMap<String, Option<String>>>,
     manifests: parking_lot::Mutex<HashMap<String, Option<crate::types::PackageManifest>>>,
     directories: parking_lot::Mutex<HashMap<String, ResolutionDirectoryValue>>,
@@ -867,7 +867,7 @@ impl<'a> FilesystemResolutionRecorder<'a> {
 }
 
 fn observation_key(canonical_id: &str) -> String {
-    verter_semantic::resolver_core::normalize_canonical_id(canonical_id)
+    verter_session_query::resolution::normalize_canonical_id(canonical_id)
 }
 
 impl FilesystemWorkspace {
@@ -903,9 +903,9 @@ impl FilesystemWorkspace {
     fn independent_probe_path(
         &self,
         canonical_id: &str,
-    ) -> verter_semantic::resolver_core::PathProbe {
+    ) -> verter_session_query::resolution::PathProbe {
         if self.engine.overlay.read().has_overlay(canonical_id) {
-            return verter_semantic::resolver_core::PathProbe::File;
+            return verter_session_query::resolution::PathProbe::File;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -915,7 +915,7 @@ impl FilesystemWorkspace {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = canonical_id;
-            verter_semantic::resolver_core::PathProbe::Unknown
+            verter_session_query::resolution::PathProbe::Unknown
         }
     }
 
@@ -988,7 +988,7 @@ impl FilesystemWorkspace {
         use crate::resolution_currency::{
             is_package_manifest_path, manifest_fingerprint_of, LiveResolutionObservation,
         };
-        use verter_semantic::resolver_core::PathProbe;
+        use verter_session_query::resolution::PathProbe;
 
         let key = observation_key(canonical_id);
         let is_manifest = is_package_manifest_path(&key);
@@ -1006,7 +1006,7 @@ impl FilesystemWorkspace {
         let realpath = self
             .independent_realpath(canonical_id)
             .ok()?
-            .map(|path| verter_semantic::resolver_core::normalize_canonical_id(&path));
+            .map(|path| verter_session_query::resolution::normalize_canonical_id(&path));
         let manifest = if is_manifest {
             Some(
                 self.independent_manifest(canonical_id)
@@ -1171,12 +1171,12 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
     fn file_exists(&self, canonical_id: &str) -> bool {
         matches!(
             self.probe_path(canonical_id),
-            verter_semantic::resolver_core::PathProbe::File
-                | verter_semantic::resolver_core::PathProbe::Directory
+            verter_session_query::resolution::PathProbe::File
+                | verter_session_query::resolution::PathProbe::Directory
         )
     }
 
-    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_session_query::resolution::PathProbe {
         let result = crate::traits::WorkspaceRead::probe_path(self.workspace, canonical_id);
         self.observations
             .record(&self.observations.probes, canonical_id, result);
@@ -1203,7 +1203,7 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
         canonicals
     }
 
-    fn resolution_population(&self) -> verter_semantic::resolver_core::ResolutionPopulation {
+    fn resolution_population(&self) -> verter_session_query::resolution::ResolutionPopulation {
         crate::traits::WorkspaceRead::resolution_population(self.workspace)
     }
 
@@ -1230,11 +1230,11 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
 
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<
         crate::resolver::ResolutionInputReservationBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         let reservation = crate::traits::WorkspaceRead::preflight_resolution_inputs_bounded(
             self.workspace,
@@ -1244,14 +1244,14 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
         for entry in reservation.entries() {
             match entry {
                 crate::resolver::ResolutionInputReservation::PathProbe {
-                    key: verter_semantic::resolver_core::InputKey::PathProbe { path },
+                    key: verter_session_query::resolution::InputKey::PathProbe { path },
                     value,
                     ..
                 } => self
                     .observations
                     .record(&self.observations.probes, path, *value),
                 crate::resolver::ResolutionInputReservation::RealPath {
-                    key: verter_semantic::resolver_core::InputKey::RealPath { path },
+                    key: verter_session_query::resolution::InputKey::RealPath { path },
                     value,
                     ..
                 } => self
@@ -1268,7 +1268,7 @@ impl crate::traits::WorkspaceRead for FilesystemResolutionRecorder<'_> {
         reservation: &crate::resolver::ResolutionInputReservationBatch,
     ) -> Result<
         crate::resolver::LoadedResolutionInputBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         let loaded = crate::traits::WorkspaceRead::load_preflighted_resolution_inputs(
             self.workspace,
@@ -1360,7 +1360,7 @@ struct FrozenFilesystemResolutionReader<'a> {
     published: Arc<crate::published_state::PublishedRoot>,
     content_generation: u64,
     files: HashMap<String, Option<Arc<str>>>,
-    probes: HashMap<String, verter_semantic::resolver_core::PathProbe>,
+    probes: HashMap<String, verter_session_query::resolution::PathProbe>,
     realpaths: HashMap<String, Option<String>>,
     manifests: HashMap<String, Option<crate::types::PackageManifest>>,
     directories: HashMap<String, ResolutionDirectoryValue>,
@@ -1444,18 +1444,18 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
     fn file_exists(&self, canonical_id: &str) -> bool {
         matches!(
             self.probe_path(canonical_id),
-            verter_semantic::resolver_core::PathProbe::File
-                | verter_semantic::resolver_core::PathProbe::Directory
+            verter_session_query::resolution::PathProbe::File
+                | verter_session_query::resolution::PathProbe::Directory
         )
     }
 
-    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_session_query::resolution::PathProbe {
         self.probes
             .get(&observation_key(canonical_id))
             .copied()
             .unwrap_or_else(|| {
                 self.mark_incomplete();
-                verter_semantic::resolver_core::PathProbe::Unknown
+                verter_session_query::resolution::PathProbe::Unknown
             })
     }
 
@@ -1463,7 +1463,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
         self.complete() && self.revalidate()
     }
 
-    fn resolution_population(&self) -> verter_semantic::resolver_core::ResolutionPopulation {
+    fn resolution_population(&self) -> verter_session_query::resolution::ResolutionPopulation {
         crate::traits::WorkspaceRead::resolution_population(self.workspace)
     }
 
@@ -1495,11 +1495,11 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
 
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<
         crate::resolver::ResolutionInputReservationBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         crate::resolver::preflight_supported_resolution_inputs(
             keys,
@@ -1518,7 +1518,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
                 None => {
                     self.mark_incomplete();
                     Err(
-                        verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
+                        verter_session_query::resolution::AttemptFailure::InputLoadUnavailable {
                             key: Box::new(key.clone()),
                         },
                     )
@@ -1532,7 +1532,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
         reservation: &crate::resolver::ResolutionInputReservationBatch,
     ) -> Result<
         crate::resolver::LoadedResolutionInputBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         crate::resolver::load_supported_resolution_inputs(
             reservation,
@@ -1540,15 +1540,15 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
                 match self.manifests.get(&observation_key(manifest_path)) {
                     Some(value) if value.is_some() == expected_present => Ok(value.clone()),
                     Some(_) => Err(
-                        verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                             unresolved: vec![key.clone()],
-                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                            reason: verter_session_query::resolution::InputLoadIntegrityReason::IncompleteBoundedCapture,
                         },
                     ),
                     None => {
                         self.mark_incomplete();
                         Err(
-                            verter_semantic::resolver_core::AttemptFailure::InputLoadUnavailable {
+                            verter_session_query::resolution::AttemptFailure::InputLoadUnavailable {
                                 key: Box::new(key.clone()),
                             },
                         )
@@ -1646,7 +1646,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
     fn is_dir(&self, path: &str) -> bool {
         matches!(
             self.probe_path(path),
-            verter_semantic::resolver_core::PathProbe::Directory
+            verter_session_query::resolution::PathProbe::Directory
         )
     }
 }
@@ -1769,11 +1769,11 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         false
     }
 
-    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_session_query::resolution::PathProbe {
         if self.engine.overlay.read().has_overlay(canonical_id)
             || self.engine.snapshot.read().contains(canonical_id)
         {
-            return verter_semantic::resolver_core::PathProbe::File;
+            return verter_session_query::resolution::PathProbe::File;
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1781,13 +1781,13 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
             // without a syscall. A positive still goes through metadata so a
             // directory is not laundered into File.
             if self.ensure_parent_dir_indexed(canonical_id) == Some(false) {
-                return verter_semantic::resolver_core::PathProbe::Absent;
+                return verter_session_query::resolution::PathProbe::Absent;
             }
             self.native_fs.probe_path(canonical_id)
         }
         #[cfg(target_arch = "wasm32")]
         {
-            verter_semantic::resolver_core::PathProbe::Absent
+            verter_session_query::resolution::PathProbe::Absent
         }
     }
 
@@ -1799,7 +1799,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         take_resolution_directory_observations()
     }
 
-    fn resolution_population(&self) -> verter_semantic::resolver_core::ResolutionPopulation {
+    fn resolution_population(&self) -> verter_session_query::resolution::ResolutionPopulation {
         self.engine.default_resolution_population()
     }
 
@@ -1832,11 +1832,11 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<
         crate::resolver::ResolutionInputReservationBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         crate::resolver::preflight_supported_resolution_inputs(
             keys,
@@ -1845,13 +1845,13 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                 let value = if self.engine.overlay.read().has_overlay(path)
                     || self.engine.snapshot.read().contains(path)
                 {
-                    verter_semantic::resolver_core::PathProbe::File
+                    verter_session_query::resolution::PathProbe::File
                 } else {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         self.native_fs.probe_path_live(path).map_err(|_| {
-                            verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                key: Box::new(verter_semantic::resolver_core::InputKey::PathProbe {
+                            verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
+                                key: Box::new(verter_session_query::resolution::InputKey::PathProbe {
                                     path: path.into(),
                                 }),
                             }
@@ -1859,7 +1859,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
-                        verter_semantic::resolver_core::PathProbe::Absent
+                        verter_session_query::resolution::PathProbe::Absent
                     }
                 };
                 Ok((value, Vec::new()))
@@ -1873,8 +1873,8 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         self.native_fs.realpath_live(path).map_err(|_| {
-                            verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
-                                key: Box::new(verter_semantic::resolver_core::InputKey::RealPath {
+                            verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
+                                key: Box::new(verter_session_query::resolution::InputKey::RealPath {
                                     path: path.into(),
                                 }),
                             }
@@ -1905,7 +1905,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                     Some(source.len() as u64)
                 } else {
                     self.native_fs.file_len_live(manifest_path).map_err(|_| {
-                        verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
+                        verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
                             key: Box::new(key.clone()),
                         }
                     })?
@@ -1920,7 +1920,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         reservation: &crate::resolver::ResolutionInputReservationBatch,
     ) -> Result<
         crate::resolver::LoadedResolutionInputBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         crate::resolver::load_supported_resolution_inputs(
             reservation,
@@ -1934,9 +1934,9 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                 let source = if let Some(source) = in_memory {
                     if source.len() as u64 > reserved_raw_bytes {
                         return Err(
-                            verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
                             },
                         );
                     }
@@ -1948,16 +1948,16 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                             .native_fs
                             .read_file_bounded_live(manifest_path, reserved_raw_bytes)
                             .map_err(|_| {
-                                verter_semantic::resolver_core::AttemptFailure::TransientInputLoadFailure {
+                                verter_session_query::resolution::AttemptFailure::TransientInputLoadFailure {
                                     key: Box::new(key.clone()),
                                 }
                             })? {
                             crate::native_fs::BoundedFileRead::Missing => None,
                             crate::native_fs::BoundedFileRead::Exceeded => {
                                 return Err(
-                                    verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                                    verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                         unresolved: vec![key.clone()],
-                                        reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                                        reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
                                     },
                                 );
                             }
@@ -1971,9 +1971,9 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
                 };
                 if source.is_some() != expected_present {
                     return Err(
-                        verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                             unresolved: vec![key.clone()],
-                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                            reason: verter_session_query::resolution::InputLoadIntegrityReason::IncompleteBoundedCapture,
                         },
                     );
                 }
@@ -2026,8 +2026,8 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.engine.resolve_import_with_evidence(
             self,
             self.resolution_evidence_source(),
@@ -2041,7 +2041,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         let Some(published) = self.load_published() else {
             return crate::resolution_currency::ResolutionOutcome::refused(
@@ -2057,7 +2057,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         overlay: &crate::resolution_currency::ResolutionOverlaySnapshot,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         self.resolve_import_with_overlay_snapshot(overlay, importer_id, specifier, ctx)
     }
@@ -2067,26 +2067,26 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         published: &Arc<crate::published_state::PublishedRoot>,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         self.resolve_import_at_published_snapshot(published, None, importer_id, specifier, ctx)
     }
 
     fn resolve_import_for_project(
         &self,
-        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.engine
             .resolve_import_for_project(self, owner, specifier, ctx)
     }
 
     fn resolve_import_for_project_outcome(
         &self,
-        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
         self.engine
             .resolve_import_for_project_outcome(self, owner, specifier, ctx)
@@ -2209,7 +2209,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     #[cfg(not(target_arch = "wasm32"))]
     fn read_ambient_lib(
         &self,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
         self.engine.read_ambient_lib(self, stable_key, canonical_id)
@@ -2218,15 +2218,15 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
     fn project_stable_key(
         &self,
         project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+    ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         self.engine.project_stable_key(project_id)
     }
 
     fn lookup_ambient_symbol(
         &self,
-        consumer_project: verter_semantic::resolver_core::ProjectStableKey,
+        consumer_project: verter_session_query::resolution::ProjectStableKey,
         symbol: &str,
-    ) -> Option<verter_semantic::resolver_core::AmbientSymbolHit> {
+    ) -> Option<verter_session_query::resolution::AmbientSymbolHit> {
         self.engine.lookup_ambient_symbol(consumer_project, symbol)
     }
 
@@ -2397,7 +2397,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             canonical_id,
             true,
-            Some(verter_semantic::resolver_core::PathProbe::Absent),
+            Some(verter_session_query::resolution::PathProbe::Absent),
             crate::engine::BaseRealpathTransition::Known(None),
             || {
                 self.engine.invalidate_package_manifest(canonical_id);
@@ -2412,7 +2412,10 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         );
     }
 
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.engine
             .set_configured_resolver_projects(Some(projects.clone()));
         let vfs_configs: Vec<crate::project_graph::VfsProjectConfig> = projects
@@ -2442,7 +2445,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             path,
             true,
-            Some(verter_semantic::resolver_core::PathProbe::File),
+            Some(verter_session_query::resolution::PathProbe::File),
             crate::engine::BaseRealpathTransition::Unknown,
             || {
                 if let Err(error) = self.native_fs.write_file(path, content) {
@@ -2465,7 +2468,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             path,
             false,
-            Some(verter_semantic::resolver_core::PathProbe::Directory),
+            Some(verter_session_query::resolution::PathProbe::Directory),
             crate::engine::BaseRealpathTransition::Unknown,
             || {
                 if let Err(error) = self.native_fs.create_dir_all(path) {
@@ -2486,7 +2489,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             path,
             true,
-            Some(verter_semantic::resolver_core::PathProbe::Absent),
+            Some(verter_session_query::resolution::PathProbe::Absent),
             crate::engine::BaseRealpathTransition::Known(None),
             || {
                 if let Err(error) = self.native_fs.delete_file(path) {
@@ -2524,7 +2527,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
         self.engine.mutate_content_for(
             dst,
             true,
-            Some(verter_semantic::resolver_core::PathProbe::File),
+            Some(verter_session_query::resolution::PathProbe::File),
             crate::engine::BaseRealpathTransition::Unknown,
             || {
                 if let Err(error) = self.native_fs.copy_file(src, dst) {
@@ -2574,7 +2577,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     #[cfg(not(target_arch = "wasm32"))]
     fn unregister_ambient_lib(
         &self,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Result<(), crate::ambient_lib::AmbientLibError> {
         self.engine.unregister_ambient_lib(stable_key, canonical_id)
@@ -2608,7 +2611,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     fn semantic_compiler_options_for_project(
         &self,
         project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<verter_semantic::resolver_core::SemanticCompilerOptions> {
+    ) -> Option<verter_session_query::resolution::SemanticCompilerOptions> {
         let root = self.engine.load_published()?;
         root.snapshot.semantic_compiler_options(project_id)
     }

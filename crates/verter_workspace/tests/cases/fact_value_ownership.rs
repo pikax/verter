@@ -13,7 +13,7 @@ fn assert_same_nominal_type<Semantic: 'static, Workspace: 'static>() {
 
 #[test]
 fn fact_version_value_graph_is_semantic_owned_and_workspace_reexported() {
-    use verter_semantic::facts::version as semantic;
+    use verter_session_query::facts::version as semantic;
     use verter_workspace::fact_cache as workspace;
 
     assert_same_nominal_type::<semantic::FactHash16, workspace::FactHash16>();
@@ -59,7 +59,7 @@ fn fact_version_value_graph_is_semantic_owned_and_workspace_reexported() {
 
 #[test]
 fn resolution_identity_value_graph_is_semantic_owned_and_workspace_reexported() {
-    use verter_semantic::facts::resolution as semantic;
+    use verter_session_query::facts::resolution as semantic;
     use verter_workspace::resolution_currency as workspace;
 
     assert_same_nominal_type::<semantic::CanonicalResolutionId, workspace::CanonicalResolutionId>();
@@ -85,7 +85,7 @@ fn resolution_identity_value_graph_is_semantic_owned_and_workspace_reexported() 
 #[test]
 fn input_resolution_policy_is_the_exact_semantic_owned_nominal_value() {
     assert_same_nominal_type::<
-        verter_semantic::resolver_core::InputResolutionBudgets,
+        verter_session_query::resolution::InputResolutionBudgets,
         verter_workspace::InputResolutionBudgets,
     >();
 

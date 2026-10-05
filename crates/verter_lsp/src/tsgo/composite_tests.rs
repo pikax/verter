@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 
-use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, GeneratedUnitAdmissionFact,
 };
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::ConfiguredMembership;
 use verter_type_runtime::protocol::*;
 use verter_type_runtime::provider_hub::{
     HubPolicy, ProviderEstablisher, ProviderHub, TracingNotifier,
@@ -1527,7 +1527,7 @@ async fn hub_binding_warmth_reuses_the_same_witness_within_one_publication() {
     assert!(overlay
         .inner
         .hub
-        .bound_project(&verter_semantic::resolver_core::normalize_canonical_id(
+        .bound_project(&verter_session_query::resolution::normalize_canonical_id(
             source
         ))
         .is_some_and(|warm| warm.same_binding(&first)));
@@ -1617,7 +1617,7 @@ async fn republished_generation_scalar_never_reuses_a_prior_epoch_binding() {
         !overlay
             .inner
             .hub
-            .bound_project(&verter_semantic::resolver_core::normalize_canonical_id(
+            .bound_project(&verter_session_query::resolution::normalize_canonical_id(
                 source
             ))
             .is_some_and(|warm| warm.same_binding(&witness_a)),

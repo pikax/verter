@@ -1,6 +1,6 @@
 use super::*;
 use crate::canonical_path::CanonicalPath;
-use verter_semantic::resolver_core::{CompiledGlob, NormalizedGlob};
+use verter_session_query::resolution::{CompiledGlob, NormalizedGlob};
 
 fn root() -> CanonicalPath {
     CanonicalPath::new("d:/project")

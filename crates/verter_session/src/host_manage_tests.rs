@@ -37,9 +37,9 @@ fn expected_imported_root(
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
-) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
     Some(
-        verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+        verter_session_query::type_solver::ResolvedRootIdentity::new_in_owner(
             canonical_id,
             owner,
             symbol_name,
@@ -222,8 +222,8 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         *self
             .resolve_counts
             .lock()
@@ -236,7 +236,7 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         *self
             .resolve_counts
@@ -351,7 +351,10 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.notify_delete(canonical_id);
     }
 
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.inner.configure_resolver(projects);
     }
 
@@ -1443,9 +1446,9 @@ fn owner_import_route_witness_is_side_effect_free() {
             .resolve_import(
                 importer,
                 "./theme",
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             )
             .map(|r| r.source_id),
@@ -3122,8 +3125,8 @@ fn resolve_dep_source_reuses_cached_source_without_loading_dependency_into_host_
         "/workspace/src/App.vue",
         vec![verter_workspace::ExactResolution {
             specifier: "./partial.html".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/src/partial.html".to_string()),
             possible_canonical_ids: vec!["/workspace/src/partial.html".to_string()],
         }],
@@ -3180,8 +3183,8 @@ import { dep } from "@/dep"
         "/workspace/src/App.vue",
         vec![verter_workspace::ExactResolution {
             specifier: "@/dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/src/dep.ts".to_string()),
             possible_canonical_ids: vec!["/workspace/src/dep.ts".to_string()],
         }],
@@ -3191,13 +3194,13 @@ import { dep } from "@/dep"
     let first = host.resolve_loaded_dependency_canonical(
         "/workspace/src/App.vue",
         "@/dep",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     let second = host.resolve_import("/workspace/src/App.vue", "@/dep");
     let third = host.resolve_loaded_dependency_canonical(
         "/workspace/src/App.vue",
         "@/dep",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
 
     assert_eq!(
@@ -3343,9 +3346,10 @@ import Child from './Child.vue'
             imports: &resolved.snapshot.imports,
             template: resolved.snapshot.template.as_deref(),
             options_api: resolved.snapshot.options_api.as_ref(),
-            analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
-                resolved.snapshot.script_flags,
-            ),
+            analysis_flags:
+                verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
+                    resolved.snapshot.script_flags,
+                ),
             styles: &resolved.snapshot.styles,
             vue_api_calls: &resolved.snapshot.vue_api_calls,
             store_usages: &resolved.snapshot.store_usages,
@@ -3969,16 +3973,17 @@ fn get_analysis_resolves_alias_import() {
     );
     // Configure workspace resolver via host wrapper.
     {
-        host.configure_projects(vec![verter_semantic::resolver_core::IdeProjectConfig {
+        host.configure_projects(vec![verter_session_query::resolution::IdeProjectConfig {
             root: "/project".to_string(),
             workspace_root: "/project".to_string(),
             tsconfig_path: None,
             provider_root: "/project".to_string(),
-            workspace_aliases: vec![verter_semantic::resolver_core::WorkspaceAlias {
+            workspace_aliases: vec![verter_session_query::resolution::WorkspaceAlias {
                 find: "@/".to_string(),
                 replacement: "/project/src/".to_string(),
             }],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/project"),
@@ -4339,14 +4344,14 @@ const { x, y, reset } = useMouse()
     let x_binding = analysis.bindings.iter().find(|b| b.name == "x").unwrap();
     assert_eq!(
         x_binding.reactivity_kind,
-        verter_semantic::analysis::ReactivityKind::Ref,
+        verter_session_query::analysis::types::ReactivityKind::Ref,
         "x should be enriched from MaybeRef to Ref via composable return shape"
     );
 
     let y_binding = analysis.bindings.iter().find(|b| b.name == "y").unwrap();
     assert_eq!(
         y_binding.reactivity_kind,
-        verter_semantic::analysis::ReactivityKind::Ref,
+        verter_session_query::analysis::types::ReactivityKind::Ref,
         "y should be enriched from MaybeRef to Ref via composable return shape"
     );
 
@@ -4358,14 +4363,15 @@ const { x, y, reset } = useMouse()
         .unwrap();
     assert_eq!(
         reset_binding.reactivity_kind,
-        verter_semantic::analysis::ReactivityKind::None,
+        verter_session_query::analysis::types::ReactivityKind::None,
         "reset (a function) should be None, not reactive"
     );
 
     // Negative: non-enriched bindings should not be affected
     assert!(
         !x_binding.is_reactive
-            || x_binding.reactivity_kind != verter_semantic::analysis::ReactivityKind::MaybeRef,
+            || x_binding.reactivity_kind
+                != verter_session_query::analysis::types::ReactivityKind::MaybeRef,
         "x should NOT remain MaybeRef after enrichment"
     );
 }
@@ -5295,7 +5301,7 @@ fn dtos_for_kind(
     host: &VerterHost,
     owner: &str,
     state: &crate::meta_resolve::ResolvedComponentMetaState,
-    kind: verter_semantic::analysis::AnalyzedMacroKind,
+    kind: verter_session_query::analysis::types::AnalyzedMacroKind,
 ) -> Vec<std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos>> {
     let mut seen = rustc_hash::FxHashSet::default();
     state
@@ -5313,7 +5319,7 @@ fn names_for_kind(
     host: &VerterHost,
     owner: &str,
     state: &crate::meta_resolve::ResolvedComponentMetaState,
-    kind: verter_semantic::analysis::AnalyzedMacroKind,
+    kind: verter_session_query::analysis::types::AnalyzedMacroKind,
     pick: fn(&crate::typeinfo::framework_surface::MacroSurfaceDtos) -> Vec<String>,
 ) -> Vec<String> {
     let mut seen = rustc_hash::FxHashSet::default();
@@ -5335,7 +5341,7 @@ fn hm_prop_names(
         host,
         owner,
         state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         |d| {
             d.prop_fields()
                 .iter()
@@ -5354,7 +5360,7 @@ fn hm_slot_names(
         host,
         owner,
         state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots,
         |d| d.slot_fields().iter().map(|s| s.name.clone()).collect(),
     )
 }
@@ -5613,7 +5619,7 @@ defineProps<Props>()
     let dp = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .unwrap();
     assert!(
         dp.prop_fields.is_empty(),
@@ -5680,7 +5686,7 @@ defineEmits<Events>()
         &host,
         "/src/Comp.vue",
         &state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
     );
     let emits: Vec<_> = emit_dtos
         .iter()
@@ -5721,7 +5727,7 @@ defineSlots<Slots>()
         &host,
         "/src/Comp.vue",
         &state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots,
     );
     let slots: Vec<_> = slot_dtos
         .iter()
@@ -5846,7 +5852,7 @@ defineSlots<Slots>()
         &host,
         "/src/Comp.vue",
         &state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots,
     );
     let slots: Vec<_> = slot_dtos
         .iter()
@@ -5888,7 +5894,7 @@ defineSlots<{
     let ds = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots)
         .expect("should have DefineSlots macro");
 
     let default_slot = ds.slot_fields.iter().find(|s| s.name == "default").unwrap();
@@ -5918,7 +5924,7 @@ defineSlots<{
     let ds = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots)
         .expect("should have DefineSlots macro");
 
     let default_slot = ds.slot_fields.iter().find(|s| s.name == "default").unwrap();
@@ -8768,7 +8774,7 @@ fn component_meta_binding_return_wrapper_role_is_exact_and_degrades_typed() {
     );
     assert_eq!(
         counter.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::Ref,
+        verter_session_query::analysis::types::ReactivityKind::Ref,
         "an exact role must REFINE the collapsed decoration kind"
     );
 
@@ -8780,11 +8786,11 @@ fn component_meta_binding_return_wrapper_role_is_exact_and_degrades_typed() {
     );
     assert_eq!(
         total.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::Computed
+        verter_session_query::analysis::types::ReactivityKind::Computed
     );
     assert_ne!(
         total.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::Ref,
+        verter_session_query::analysis::types::ReactivityKind::Ref,
         "ComputedRef must not collapse onto the ref decoration"
     );
 
@@ -8798,7 +8804,7 @@ fn component_meta_binding_return_wrapper_role_is_exact_and_degrades_typed() {
     );
     assert_eq!(
         plain.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        verter_session_query::analysis::types::ReactivityKind::MaybeRef,
         "a proven non-wrapper return type must NOT downgrade the reactivity kind"
     );
 
@@ -8815,7 +8821,7 @@ fn component_meta_binding_return_wrapper_role_is_exact_and_degrades_typed() {
     );
     assert_eq!(
         ambiguous.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        verter_session_query::analysis::types::ReactivityKind::MaybeRef,
         "a degradation must claim no reactivity"
     );
 
@@ -8894,12 +8900,12 @@ fn component_meta_binding_role_none_never_downgrades_value_space_reactivity() {
     );
     assert_eq!(
         state.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        verter_session_query::analysis::types::ReactivityKind::MaybeRef,
         "the value-space classification must survive a `None` role untouched"
     );
     assert_ne!(
         state.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::None,
+        verter_session_query::analysis::types::ReactivityKind::None,
         "`ReactiveWrapperRole::None` must NEVER downgrade to `ReactivityKind::None`"
     );
 }
@@ -8942,7 +8948,7 @@ fn component_meta_destructured_member_is_not_decided_by_the_whole_return_role() 
     );
     assert_eq!(
         count.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::MaybeRef,
+        verter_session_query::analysis::types::ReactivityKind::MaybeRef,
         "a destructured member keeps its value-space classification"
     );
     // Control on the same fixture: the whole-value form DOES resolve, so the
@@ -8992,7 +8998,7 @@ fn component_meta_binding_role_rejects_local_and_foreign_wrapper_fakes() {
     );
     assert_ne!(
         fake.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::Ref,
+        verter_session_query::analysis::types::ReactivityKind::Ref,
         "a local fake `Ref` must publish NO reactive kind from the type path"
     );
 
@@ -9037,7 +9043,7 @@ fn component_meta_binding_role_rejects_local_and_foreign_wrapper_fakes() {
     );
     assert_ne!(
         foreign.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::Ref
+        verter_session_query::analysis::types::ReactivityKind::Ref
     );
 }
 
@@ -9145,7 +9151,7 @@ fn component_meta_binding_role_is_not_demanded_when_value_space_decided() {
     let decided = a6_binding(&meta, "decided");
     assert_eq!(
         decided.reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::Ref,
+        verter_session_query::analysis::types::ReactivityKind::Ref,
         "the value-space `ref()` classification is unchanged"
     );
     assert_eq!(
@@ -9230,7 +9236,7 @@ fn component_meta_binding_return_wrapper_role_demand_is_request_bound() {
     );
     assert_eq!(
         a6_binding(&overlaid, "counter").reactivity_kind,
-        verter_semantic::analysis::types::ReactivityKind::Computed,
+        verter_session_query::analysis::types::ReactivityKind::Computed,
         "and the refined decoration kind follows the overlay too"
     );
 
@@ -9775,7 +9781,10 @@ const variant: Variant = 'primary'
 
 /// The file's authoritative current `whole_hash`, for probing whether the
 /// content-addressed artifact store already holds its `IndexedReady`.
-fn current_whole_hash(host: &VerterHost, canonical: &str) -> verter_semantic::analysis::Hash16 {
+fn current_whole_hash(
+    host: &VerterHost,
+    canonical: &str,
+) -> verter_session_query::analysis::types::Hash16 {
     let snapshot = host
         .scheduler
         .try_get_source(canonical)
@@ -12106,8 +12115,8 @@ fn esm_fallback_normalization_parity_between_route_edge_and_known_miss() {
         owner,
         vec![verter_workspace::ExactResolution {
             specifier: "runtimedep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
             possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
         }],
@@ -12165,8 +12174,8 @@ fn overlay_materializer_esm_fallback_normalizes_like_shared_route_edge_policy() 
         barrel,
         vec![verter_workspace::ExactResolution {
             specifier: "runtimedep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
             possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
         }],
@@ -12400,7 +12409,7 @@ fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
 struct DecliningOverlayView {
     base: crate::session_view::HostView,
     canonical: String,
-    hash: verter_semantic::analysis::Hash16,
+    hash: verter_session_query::analysis::types::Hash16,
 }
 
 impl crate::session_view::SessionView for DecliningOverlayView {
@@ -12411,22 +12420,25 @@ impl crate::session_view::SessionView for DecliningOverlayView {
         crate::session_view::SessionView::source(&self.base, canonical)
     }
 
-    fn content_hash_for(&self, canonical: &str) -> Option<verter_semantic::analysis::Hash16> {
+    fn content_hash_for(
+        &self,
+        canonical: &str,
+    ) -> Option<verter_session_query::analysis::types::Hash16> {
         crate::session_view::SessionView::content_hash_for(&self.base, canonical)
     }
 
     fn overlay_content_hash_for(
         &self,
         canonical: &str,
-    ) -> Option<verter_semantic::analysis::Hash16> {
+    ) -> Option<verter_session_query::analysis::types::Hash16> {
         (canonical == self.canonical).then_some(self.hash)
     }
 
-    fn project_identity(&self) -> verter_semantic::resolver_core::ProjectIdentity {
+    fn project_identity(&self) -> verter_session_query::resolution::ProjectIdentity {
         crate::session_view::SessionView::project_identity(&self.base)
     }
 
-    fn env_hashes(&self) -> &verter_semantic::resolver_core::EnvHashes {
+    fn env_hashes(&self) -> &verter_session_query::resolution::EnvHashes {
         crate::session_view::SessionView::env_hashes(&self.base)
     }
 
@@ -14304,7 +14316,7 @@ export interface Props { label: string }
         analysis.declaration_entries.iter().any(|entry| {
             entry.name == "Props"
                 && entry.owner == verter_type_expr::TopLevelOwnerId::module(0)
-                && entry.kind == verter_semantic::analysis::LocalDeclarationKind::Type
+                && entry.kind == verter_session_query::analysis::types::LocalDeclarationKind::Type
         }),
         "the fixture must expose a type-only symbol in the module-script owner",
     );
@@ -14313,8 +14325,8 @@ export interface Props { label: string }
             entry.name == "Props"
                 && matches!(
                     entry.kind,
-                    verter_semantic::analysis::LocalDeclarationKind::Value
-                        | verter_semantic::analysis::LocalDeclarationKind::TypeAndValue
+                    verter_session_query::analysis::types::LocalDeclarationKind::Value
+                        | verter_session_query::analysis::types::LocalDeclarationKind::TypeAndValue
                 )
         }),
         "the fixture must not let a value-space fallback hide a type-space regression",
@@ -14421,7 +14433,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
             fact,
             crate::resolver_core::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/index.ts"
-                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
+                    && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "fast imported-root proof must track the provider's parse-owned route interface",
     );
@@ -14438,7 +14450,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
             fact,
             crate::resolver_core::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/target.ts"
-                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
+                    && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "direct imported-root proof should not need the child's route interface when the parent directly names the target reexport",
     );
@@ -14597,7 +14609,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
             fact,
             crate::resolver_core::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/index.ts"
-                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
+                    && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "fast imported-root proof must track the provider's parse-owned route interface",
     );
@@ -14614,7 +14626,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
             fact,
             crate::resolver_core::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/target.ts"
-                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
+                    && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "direct imported-root proof should not need the child's route interface when the provider only re-exports the imported local binding",
     );
@@ -14686,7 +14698,7 @@ fn current_dependency_fact_versions_keeps_imported_barrel_route_facts_shallow() 
             fact,
             crate::resolver_core::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/types/index.ts"
-                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
+                    && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
         "captured fact-version lookup should reuse the snapshotted parse-owned route interface for a shallow imported barrel without live wildcard replay",
     );
@@ -18449,7 +18461,7 @@ mod manifest_types_entry_routing_tests {
                 workspace_root: "/ws/node_modules/@scope/local-pkg".to_string(),
                 workspace_aliases: vec![],
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: vec![],
                 membership: verter_workspace::configured_membership_match_all_under_root(
                     &verter_workspace::CanonicalPath::new("/ws/node_modules/@scope/local-pkg"),

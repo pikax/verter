@@ -1173,9 +1173,9 @@ impl super::ProjectSemanticDispatch<'_> {
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> verter_semantic::analysis::type_solver::host::ResolvedRootIdentity {
+    ) -> verter_session_query::type_solver::host::ResolvedRootIdentity {
         let pool = &self.binding.identities;
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+        verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
             pool.intern(canonical),
             owner,
             pool.intern(name),
@@ -1494,18 +1494,18 @@ impl super::ProjectSemanticDispatch<'_> {
             // DISTINCT target identities (never string-matched at consumers).
             let header_index = &indexed_for_body.shallow_state.headers;
             let mut augmentation_targets: Vec<(
-                verter_semantic::facts::AugmentationScopeKindTag,
+                verter_session_query::facts::AugmentationScopeKindTag,
                 String,
                 verter_type_expr::TopLevelOwnerId,
             )> = Vec::new();
             for block in &header_index.augmentation_blocks {
                 let (scope_kind_tag, specifier) = match &block.scope {
                     AugmentationScopeKind::Global => (
-                        verter_semantic::facts::AugmentationScopeKindTag::Global,
+                        verter_session_query::facts::AugmentationScopeKindTag::Global,
                         crate::fact_emission::GLOBAL_AUGMENTATION_TAG.to_string(),
                     ),
                     AugmentationScopeKind::Module(specifier) => (
-                        verter_semantic::facts::AugmentationScopeKindTag::Module,
+                        verter_session_query::facts::AugmentationScopeKindTag::Module,
                         specifier.clone(),
                     ),
                 };
@@ -1578,23 +1578,23 @@ use crate::binder_identity_facts::{
     BinderIdentityFactsKey,
 };
 #[cfg(any(test, feature = "test-support"))]
-use verter_semantic::{
-    analysis::type_eval::AugmentationScopeKind,
+use verter_session_query::{
+    declarations::AugmentationScopeKind,
     facts::{FactKey, FactLane},
 };
 #[cfg(any(test, feature = "test-support"))]
 fn fact_space(
     space: crate::semantic_query::SemanticSymbolSpace,
-) -> verter_semantic::facts::SymbolSpace {
+) -> verter_session_query::facts::SymbolSpace {
     match space {
         crate::semantic_query::SemanticSymbolSpace::Type => {
-            verter_semantic::facts::SymbolSpace::Type
+            verter_session_query::facts::SymbolSpace::Type
         }
         crate::semantic_query::SemanticSymbolSpace::Value => {
-            verter_semantic::facts::SymbolSpace::Value
+            verter_session_query::facts::SymbolSpace::Value
         }
         crate::semantic_query::SemanticSymbolSpace::Namespace => {
-            verter_semantic::facts::SymbolSpace::Namespace
+            verter_session_query::facts::SymbolSpace::Namespace
         }
     }
 }

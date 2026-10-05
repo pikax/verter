@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
-use verter_semantic::analysis::types::AnalyzedPropField;
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedPropField;
 use verter_type_expr::{
     PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypeExprScope,
     TypePublication, UnknownValue,
@@ -254,7 +254,7 @@ pub(crate) fn props_from_typeinfo_surface(
                         type_expr_scope,
                         description,
                         tags,
-                        resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                        resolution_source: verter_session_query::analysis::types::TypeResolutionSource::Rust,
                         resolution_error: None,
                         declared_in_macro_type_arg,
                         constructor_bindings: Vec::new(),
@@ -433,7 +433,7 @@ pub(crate) fn exposed_from_typeinfo_surface(
                     verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
                 ));
             Some(crate::typeinfo::framework_surface::results::ResolvedExposeField {
-                analysis: verter_semantic::analysis::types::AnalyzedExposeField {
+                analysis: verter_session_query::analysis::types::AnalyzedExposeField {
                     name: member_name,
                     span: None,
                     payload: None,

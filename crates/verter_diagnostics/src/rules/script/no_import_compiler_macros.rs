@@ -10,7 +10,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{ScriptAnalysisSnapshot, VueApiClassification};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::VueApiClassification;
 
 pub struct NoImportCompilerMacros;
 
@@ -69,8 +70,10 @@ impl LintRule for NoImportCompilerMacros {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::types::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedImportBinding;
+    use verter_session_query::analysis::types::ImportBindingKind;
 
-    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

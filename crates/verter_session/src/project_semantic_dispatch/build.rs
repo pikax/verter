@@ -8,9 +8,9 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-use verter_semantic::analysis::type_solver::PreparedTypeDecl;
+use verter_session_query::type_solver::builtin::BuiltinUtility;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::PreparedTypeDecl;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
 use super::signature_discovery::PositionalArgument;
@@ -37,7 +37,7 @@ pub(super) const SELF_ROOT_WALK_CAP: usize = 4096;
 /// expression, and an object shape — the anonymous object type whose
 /// members `build_typeof` lowers from the literal's own positions.
 pub(super) fn value_is_own_object_literal(
-    prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+    prepared: &verter_session_query::type_solver::PreparedValueDecl,
 ) -> bool {
     use verter_type_expr::facts::{SemanticTypeSource, ValueAnnotationClass};
     let annotation = &prepared.type_annotation;
@@ -69,7 +69,7 @@ pub(super) type EffectivePreparedValueDecl = (
     Arc<str>,
     verter_type_expr::TopLevelOwnerId,
     Arc<str>,
-    Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
+    Arc<verter_session_query::type_solver::PreparedValueDecl>,
 );
 
 /// One folded cross-file augmentation contributor: its version self-root
@@ -850,7 +850,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     value_root.scope.owner,
                     value_root.name.as_ref()
                 ),
-                Some(verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(_))
+                Some(verter_session_query::declarations::AugmentationScopeKind::Module(_))
             ));
         let has_import_local = matches!(
             visible_value,
@@ -988,7 +988,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // Only a `var` and a function are properties of the global
             // object; `let`, `const`, `class` and `enum` are global by
             // name alone (the checker's TS2339 on `globalThis.x`).
-            use verter_semantic::analysis::type_eval::ValueDeclKind;
+            use verter_session_query::declarations::ValueDeclKind;
             match self
                 .global_value_declarations(value_root.scope.canonical_id.as_ref(), member)
                 .as_deref()
@@ -1303,7 +1303,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // time, so `typeof C.m` whose return names `C` does not build `C`.
         if let (Some(first), None) = (path.first(), synthesised_default) {
             let is_class =
-                prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
+                prepared.kind == verter_session_query::declarations::ValueDeclKind::Class;
             let own_literal = !is_class && value_is_own_object_literal(&prepared);
             if (is_class && first.as_ref() != "prototype") || own_literal {
                 let member_context = if is_class {
@@ -1380,7 +1380,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 root_identity.owner,
                 &scope,
             )
-        } else if prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class {
+        } else if prepared.kind == verter_session_query::declarations::ValueDeclKind::Class {
             // Class value root — `typeof C` IS the class's STATIC surface,
             // whose owning composer is `ResolveClassSurface::Static` (own
             // statics + ctor PLUS heritage statics). Delegate through the
@@ -1433,8 +1433,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     Some(node)
                         if matches!(
                             prepared.kind,
-                            verter_semantic::analysis::type_eval::ValueDeclKind::Let
-                                | verter_semantic::analysis::type_eval::ValueDeclKind::Var
+                            verter_session_query::declarations::ValueDeclKind::Let
+                                | verter_session_query::declarations::ValueDeclKind::Var
                         ) && self
                             .semantic_expression_source_is_fresh(source, effective_owner) =>
                     {
@@ -1481,7 +1481,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     Some(verter_type_expr::facts::SemanticTypeSource::Authored(locator)) => self
                         .lower_located_body_with_provenance(
                             locator.clone(),
-                            verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                            verter_session_query::declarations::TypeDeclKind::Alias,
                             &[],
                             &prepared.name_resolution,
                             &empty_env,
@@ -1507,7 +1507,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 path: Arc::from(Vec::new().into_boxed_slice()),
                             },
                         ),
-                        verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                        verter_session_query::declarations::TypeDeclKind::Alias,
                         &[],
                         &prepared.name_resolution,
                         &empty_env,
@@ -1536,7 +1536,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         path: Arc::from(Vec::new().into_boxed_slice()),
                     },
                 ),
-                verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                verter_session_query::declarations::TypeDeclKind::Alias,
                 &[],
                 &prepared.name_resolution,
                 &empty_env,
@@ -1549,7 +1549,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         } else if !prepared.signatures.is_empty() {
             // The composed constructor-like object is interned directly.
             let is_class =
-                prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
+                prepared.kind == verter_session_query::declarations::ValueDeclKind::Class;
             // One signature group per declaration the function merges, in
             // declaration order: every later file's declaration of a global
             // function follows the first's.
@@ -1661,7 +1661,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// under that name.
     fn exported_function_augmentations(
         &self,
-        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<AugmentationContributions> {
         let canonical = &prepared.root_identity.canonical_id;
@@ -1740,7 +1740,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     #[allow(clippy::too_many_arguments)]
     fn prepared_signature_groups(
         &self,
-        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
         scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
@@ -1799,7 +1799,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             );
             let node = self.lower_located_body_with_provenance(
                 locator,
-                verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                verter_session_query::declarations::TypeDeclKind::Alias,
                 &[],
                 &prepared.name_resolution,
                 env,
@@ -2046,7 +2046,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if let Some(member) = static_member {
             // Every enum member declares the fresh literal type of its
             // value, so a read of one widens as a bare literal does.
-            if prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Enum {
+            if prepared.kind == verter_session_query::declarations::ValueDeclKind::Enum {
                 return prepared.enum_members.as_ref().is_some_and(|members| {
                     members
                         .members
@@ -2064,7 +2064,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // A `const` initialized by a call reads as fresh as the call's
             // result is (`const m = f(1)` over `f<T>(x: T): T`).
             DeclaredLiteralFreshness::Regular
-                if prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Const =>
+                if prepared.kind == verter_session_query::declarations::ValueDeclKind::Const =>
             {
                 prepared
                     .type_annotation
@@ -2332,9 +2332,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 || (visible.is_none()
                     && matches!(
                         shallow.value_fallback_augmentation_scope(owner, &name),
-                        Some(
-                            verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(_)
-                        )
+                        Some(verter_session_query::declarations::AugmentationScopeKind::Module(_))
                     ))
                 || (unbound
                     && value_root.name.as_ref() != "globalThis"
@@ -2356,7 +2354,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         base: SemanticNodeId,
         path: &[Arc<str>],
         context: crate::semantic_query::ProjectionReductionContext,
-        observed_hash: verter_semantic::analysis::Hash16,
+        observed_hash: verter_session_query::analysis::types::Hash16,
         value_root: &ValueRootKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         let projection_path: Arc<[PathSegment]> = Arc::from(
@@ -3165,7 +3163,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
-        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
         let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
@@ -3216,7 +3214,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     path: Arc::from(Vec::new().into_boxed_slice()),
                 },
             ),
-            verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+            verter_session_query::declarations::TypeDeclKind::Alias,
             &class_type_params,
             &prepared.name_resolution,
             &env,
@@ -3848,7 +3846,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         symbol: &str,
         interfaces: bool,
     ) -> ClassHeritageReading {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_session_query::declarations::TypeDeclKind;
         let Some(prepared) = self
             .ctx
             .prepared_type_decl_return_only(canonical, owner, symbol)
@@ -4042,8 +4040,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
                     self.prepared_decl_kind(identity),
                     Some(
-                        verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                            | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                        verter_session_query::declarations::TypeDeclKind::Interface
+                            | verter_session_query::declarations::TypeDeclKind::Class
                     )
                 ),
                 SemanticNodeData::Intersection(arms) => {
@@ -5661,7 +5659,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         excluded_contributor: Option<&str>,
     ) -> Option<AugmentationContributions> {
         use crate::file_artifact_store::AugmentationTargetKind;
-        use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+        use verter_session_query::declarations::AugmentationScopeKind;
 
         // The source boundary captures the same session population and host
         // environment, ingests program roots, and returns an owned index read.
@@ -5712,7 +5710,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
-                    lane: verter_semantic::facts::FactLane::Semantic,
+                    lane: verter_session_query::facts::FactLane::Semantic,
                     expected_hash: augmenter_set.fingerprint,
                 },
             ),
@@ -5736,7 +5734,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     key: crate::global_contributors::population_contributor_fact_key(
                         &target, decl_name,
                     ),
-                    lane: verter_semantic::facts::FactLane::Semantic,
+                    lane: verter_session_query::facts::FactLane::Semantic,
                     expected_hash: population_answer.population_fingerprint,
                 },
             ),
@@ -5774,7 +5772,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         struct OrderedCandidate {
             rank: u32,
             canonical: Arc<str>,
-            parse_stable_hash: verter_semantic::analysis::Hash16,
+            parse_stable_hash: verter_session_query::analysis::types::Hash16,
             origin: OrderedOrigin,
         }
         let file_scope_entries: Vec<&crate::global_contributors::ContributorEntry> = population_hit
@@ -5894,7 +5892,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                             continue;
                         }
                         let relative = if matches!(key.target, crate::file_artifact_store::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                            && verter_semantic::resolver_core::is_relative_specifier(fact.specifier.as_ref()) {
+                            && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
                             resolve_rel(augmenter_canonical.as_ref(), fact.specifier.as_ref())
                         } else { None };
                         if !crate::file_artifact_store::augmenter_matches_target(
@@ -6002,7 +6000,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                     let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
                                     self.lower_located_body_with_provenance(
                                         locator,
-                                        verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                                        verter_session_query::declarations::TypeDeclKind::Alias,
                                         &[],
                                         &prepared.name_resolution,
                                         &FxHashMap::default(),
@@ -6437,9 +6435,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// found no block.
     pub(super) fn ambient_module_blocks(&self, specifier: &str) -> Vec<AmbientModuleBlock> {
         use crate::file_artifact_store::{AugmentationTargetKind, InternedSpecifier};
-        let scope = verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(
-            specifier.to_owned(),
-        );
+        let scope =
+            verter_session_query::declarations::AugmentationScopeKind::Module(specifier.to_owned());
         self.module_augmentation_blocks(
             AugmentationTargetKind::ExternalSpecifier(InternedSpecifier::from(specifier)),
             specifier,
@@ -6455,7 +6452,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// observes it.
     pub(super) fn module_file_augmentation_blocks(&self, module: &str) -> Vec<AmbientModuleBlock> {
         use crate::file_artifact_store::AugmentationTargetKind;
-        use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+        use verter_session_query::declarations::AugmentationScopeKind;
         for rdep in self.ctx.reverse_dependency_canonicals(module) {
             let _ = self.ctx.ensure_indexed_ready_serve(&rdep);
         }
@@ -6480,7 +6477,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         target: crate::file_artifact_store::AugmentationTargetKind,
         attribution: &str,
-        declares: impl Fn(&str, &verter_semantic::analysis::type_eval::AugmentationScopeKind) -> bool,
+        declares: impl Fn(&str, &verter_session_query::declarations::AugmentationScopeKind) -> bool,
     ) -> Vec<AmbientModuleBlock> {
         let (_, augmenter_set) = self.ctx.augmentation_index(target.clone());
         crate::resolver_core::resolver_context::observe_fan_out(
@@ -6490,7 +6487,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
                         &target,
                     ),
-                    lane: verter_semantic::facts::FactLane::Semantic,
+                    lane: verter_session_query::facts::FactLane::Semantic,
                     expected_hash: augmenter_set.fingerprint,
                 },
             ),
@@ -6690,7 +6687,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         demand_canonical: &str,
         name: &str,
-        space: verter_semantic::facts::SymbolSpace,
+        space: verter_session_query::facts::SymbolSpace,
     ) -> crate::global_contributors::SymbolContributors {
         use crate::file_artifact_store::AugmentationTargetKind;
         let target = AugmentationTargetKind::GlobalAugmentation;
@@ -6700,7 +6697,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 crate::resolver_core::RouteSurfaceFactRef {
                     canonical_id: String::new(),
                     key: crate::global_contributors::population_contributor_fact_key(&target, name),
-                    lane: verter_semantic::facts::FactLane::Semantic,
+                    lane: verter_session_query::facts::FactLane::Semantic,
                     expected_hash: answer.population_fingerprint,
                 },
             ),
@@ -6796,7 +6793,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let population = self.global_contributors_in(
             demand_canonical,
             name,
-            verter_semantic::facts::SymbolSpace::Type,
+            verter_session_query::facts::SymbolSpace::Type,
         );
         let first = population
             .entries
@@ -6852,7 +6849,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let population = self.global_contributors_in(
             demand_canonical,
             head,
-            verter_semantic::facts::SymbolSpace::Namespace,
+            verter_session_query::facts::SymbolSpace::Namespace,
         );
         let mut declarations: Vec<&crate::global_contributors::ContributorEntry> = population
             .entries
@@ -6907,7 +6904,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         name: &str,
     ) -> Option<(
         ResolvedRootIdentity,
-        verter_semantic::analysis::type_eval::ValueDeclKind,
+        verter_session_query::declarations::ValueDeclKind,
     )> {
         self.global_value_declarations(demand_canonical, name)?
             .into_iter()
@@ -6939,11 +6936,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Option<
         Vec<(
             ResolvedRootIdentity,
-            verter_semantic::analysis::type_eval::ValueDeclKind,
+            verter_session_query::declarations::ValueDeclKind,
         )>,
     > {
         use crate::global_contributors::{ContributorOrigin, FileModuleKind};
-        use verter_semantic::analysis::type_eval::ValueDeclKind;
+        use verter_session_query::declarations::ValueDeclKind;
         let lib = self
             .lib_global_declaration(demand_canonical, name, GlobalSpace::Value)
             .and_then(|identity| {
@@ -6961,7 +6958,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let population = self.global_contributors_in(
             demand_canonical,
             name,
-            verter_semantic::facts::SymbolSpace::Value,
+            verter_session_query::facts::SymbolSpace::Value,
         );
         let mut declarations: Vec<(&crate::global_contributors::ContributorEntry, ValueDeclKind)> =
             Vec::new();
@@ -6991,7 +6988,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }
                 headers
                     .augmentation_value_header_in(
-                        &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                        &verter_session_query::declarations::AugmentationScopeKind::Global,
                         entry.owner,
                         name,
                     )?
@@ -7121,9 +7118,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-        kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        kind: verter_session_query::declarations::TypeDeclKind,
     ) -> bool {
-        if kind != verter_semantic::analysis::type_eval::TypeDeclKind::Interface
+        if kind != verter_session_query::declarations::TypeDeclKind::Interface
             || owner != verter_type_expr::TopLevelOwnerId::ordinary_file()
         {
             return false;
@@ -7295,7 +7292,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn prepared_decl_kind(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
-    ) -> Option<verter_semantic::analysis::type_eval::TypeDeclKind> {
+    ) -> Option<verter_session_query::declarations::TypeDeclKind> {
         self.prepared_type_decl(identity)
             .map(|prepared| prepared.kind)
     }
@@ -7432,7 +7429,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     pub(super) fn lower_located_body_with_provenance(
         &self,
         locator: verter_type_expr::locators::AuthoredBodyLocator,
-        decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        decl_kind: verter_session_query::declarations::TypeDeclKind,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
         name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         env: &FxHashMap<String, SemanticNodeId>,
@@ -7461,7 +7458,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn lower_located_body_with_resolution_debt(
         &self,
         locator: verter_type_expr::locators::AuthoredBodyLocator,
-        decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        decl_kind: verter_session_query::declarations::TypeDeclKind,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
         name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         env: &FxHashMap<String, SemanticNodeId>,
@@ -7494,7 +7491,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn lower_located_body_with_vue_heritage_policy(
         &self,
         locator: verter_type_expr::locators::AuthoredBodyLocator,
-        decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        decl_kind: verter_session_query::declarations::TypeDeclKind,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
         name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
         env: &FxHashMap<String, SemanticNodeId>,
@@ -7551,7 +7548,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn begin_located_body_lowering(
         &self,
         locator: verter_type_expr::locators::AuthoredBodyLocator,
-        decl_kind: verter_semantic::analysis::type_eval::TypeDeclKind,
+        decl_kind: verter_session_query::declarations::TypeDeclKind,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
@@ -7814,7 +7811,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let prepared = self
             .ctx
             .prepared_type_decl_return_only(canonical, owner, class)?;
-        if prepared.kind != verter_semantic::analysis::type_eval::TypeDeclKind::Class {
+        if prepared.kind != verter_session_query::declarations::TypeDeclKind::Class {
             return None;
         }
         let body_slot = prepared.body_facts.body_slot.clone();
@@ -7988,7 +7985,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol: &str,
-        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
@@ -8060,7 +8057,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         );
         // A class's own type parameters bind as the shells its constructor
         // shape lowers them to (statics cannot name them otherwise).
-        let is_class = prepared.kind == verter_semantic::analysis::type_eval::ValueDeclKind::Class;
+        let is_class = prepared.kind == verter_session_query::declarations::ValueDeclKind::Class;
         let (env, class_type_params) = if is_class {
             (
                 self.class_type_param_shell_env(
@@ -8099,7 +8096,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         ),
                     },
                 ),
-                verter_semantic::analysis::type_eval::TypeDeclKind::Alias,
+                verter_session_query::declarations::TypeDeclKind::Alias,
                 &class_type_params,
                 &prepared.name_resolution,
                 &env,
@@ -9296,8 +9293,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .is_some_and(|prepared| {
                             matches!(
                                 prepared.kind,
-                                verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                                    | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                                verter_session_query::declarations::TypeDeclKind::Interface
+                                    | verter_session_query::declarations::TypeDeclKind::Class
                             )
                         })
                 };
@@ -11694,7 +11691,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // heritage resolves to an intersection.
         let composite = named.as_ref().is_some_and(|identity| {
             self.prepared_decl_kind(identity)
-                == Some(verter_semantic::analysis::type_eval::TypeDeclKind::Alias)
+                == Some(verter_session_query::declarations::TypeDeclKind::Alias)
         }) && matches!(
             self.graph().node_data(settled).as_deref(),
             Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
@@ -16469,11 +16466,11 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         owner: &crate::semantic_query::ResolvedDeclSlotIdentity,
         macro_index: usize,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
         type_args: &Arc<[SemanticNodeId]>,
         mode: ProjectionMode,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        use verter_semantic::analysis::AnalyzedMacroKind;
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
 
         // R6 / R20: the key is content-free. Re-source the owning
         // SFC's content version from the live indexed view at
@@ -17067,7 +17064,7 @@ pub(super) struct AmbientModuleBlock {
     /// The file owner the block's members are declared in.
     pub(super) owner: verter_type_expr::TopLevelOwnerId,
     /// The block's augmentation scope.
-    pub(super) scope: verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    pub(super) scope: verter_session_query::declarations::AugmentationScopeKind,
     /// The name its `export default` declaration declares.
     pub(super) default_export: Option<Arc<str>>,
     /// The name it assigns the module to with `export = X`.

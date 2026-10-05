@@ -211,8 +211,13 @@ use crate::utils::{find_all_word_occurrences, word_at_offset};
 mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
-    use verter_semantic::analysis::types::ImportBindingKind;
-    use verter_semantic::analysis::*;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedImportBinding;
+    use verter_session_query::analysis::types::ImportBindingKind;
+    use verter_session_query::analysis::types::ReactivityKind;
+    use verter_session_query::analysis::types::VueApiClassification;
 
     fn make_analysis(
         bindings: Vec<AnalyzedBinding>,

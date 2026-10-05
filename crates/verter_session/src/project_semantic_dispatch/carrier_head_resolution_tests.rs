@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::TypeExpr;
 
 use super::carrier::CarrierResolverContext;
@@ -1721,7 +1721,9 @@ defineProps<Copy<ImportedProps>>()
         .expect("fixture must publish script analysis")
         .macros
         .iter()
-        .position(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .position(|mac| {
+            mac.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        })
         .expect("fixture must publish defineProps");
     let mac = &indexed
         .script_analysis
@@ -2042,7 +2044,7 @@ fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relati
 /// the one gate decision is the builtin AND carries its proven identity.
 #[test]
 fn unshadowed_awaited_resolves_to_the_builtin_identity_in_one_gate_decision() {
-    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+    use verter_session_query::type_solver::builtin::BuiltinUtility;
 
     let host = host();
     upsert_ts(

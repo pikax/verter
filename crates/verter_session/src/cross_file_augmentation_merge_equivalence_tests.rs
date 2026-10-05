@@ -31,7 +31,7 @@
 use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+use verter_session_query::declarations::AugmentationScopeKind;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
 use crate::semantic_query::{ProjectionMode, SemanticNodeData};
@@ -126,7 +126,7 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
     use crate::file_artifact_store::{
         AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
     };
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
     use verter_type_expr::TopLevelOwnerId;
 
     let host = make_host();
@@ -221,7 +221,7 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
         crate::resolver_core::prepared_decl::ImportCanonicalization {
             final_resolution: rustc_hash::FxHashMap::from_iter([(
                 verter_type_expr::DeclBindingKey::new(TopLevelOwnerId::module(1), "Foo"),
-                verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+                verter_session_query::type_solver::ResolvedRootIdentity::new_in_owner(
                     "/types.ts",
                     TopLevelOwnerId::ordinary_file(),
                     "Foo",

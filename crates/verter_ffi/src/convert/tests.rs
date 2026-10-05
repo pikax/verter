@@ -1167,9 +1167,9 @@ fn config_all_fields() {
 #[test]
 fn expansion_metadata_to_ffi_preserves_exactness_and_execution_status() {
     let ffi = expansion_metadata_to_ffi(verter_semantic::analysis::type_expand::ExpansionMetadata {
-        exactness: verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
+        exactness: verter_session_query::type_solver::result::SolverExactness::ExactSymbolic,
         execution_status:
-            verter_semantic::analysis::type_solver::result::ExecutionStatus::HardStop,
+            verter_session_query::type_solver::result::ExecutionStatus::HardStop,
         diagnostics: vec![
             verter_semantic::analysis::type_expand::ExpansionDiagnostic {
                 reason:
@@ -3141,7 +3141,7 @@ fn resolution_less_conversion_reports_typed_unavailable_status_never_silent_succ
 #[test]
 fn binding_return_wrapper_role_crosses_the_ffi_boundary_with_exactness_intact() {
     use verter_semantic::analysis::component_meta::{BindingAnalysis, BindingKindAnalysis};
-    use verter_semantic::analysis::types::ReactivityKind;
+    use verter_session_query::analysis::types::ReactivityKind;
 
     let binding =
         |name: &str,

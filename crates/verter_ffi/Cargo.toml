@@ -13,6 +13,7 @@ publish = false
 default = []
 
 [dependencies]
+verter_session_query = { workspace = true }
 verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
 verter_semantic = { path = "../verter_semantic" }
 verter_type_expr = { workspace = true }

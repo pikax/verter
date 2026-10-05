@@ -17,7 +17,7 @@ use crate::semantic_query::{CanonicalTypeSubstitution, ResultEvaluationContextId
 #[cfg(test)]
 use crate::semantic_query::{SemanticContext, SemanticContextId, SemanticPolicySet};
 #[cfg(test)]
-use verter_semantic::resolver_core::{EnvHashes, SemanticCompilerOptions};
+use verter_session_query::resolution::{EnvHashes, SemanticCompilerOptions};
 
 /// Store plus one inline candidate used by the warm positional canary.
 pub struct WarmPositionalStore {

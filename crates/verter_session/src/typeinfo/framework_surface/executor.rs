@@ -544,7 +544,7 @@ impl ExecutorResolveCtx<'_> {
         requested_kind: FrameworkSurfaceKind,
         _selector: &crate::typeinfo::framework_surface::plan::MacroPayloadSelector,
     ) -> ResolvedMacroPayload {
-        use verter_semantic::analysis::types::AnalyzedMacroKind;
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
 
         // The owner snapshot AND every macro DTO read flow through the ONE
         // request-bound `ctx`, so the whole response resolves against a single

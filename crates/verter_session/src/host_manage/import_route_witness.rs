@@ -139,7 +139,7 @@ pub(crate) struct ImportRouteObservationKey {
     canonical: std::sync::Arc<str>,
     specifiers: Vec<(
         String,
-        Option<verter_semantic::resolver_core::ResolveRequestKind>,
+        Option<verter_session_query::resolution::ResolveRequestKind>,
     )>,
     load_generation: u64,
     store_view_epoch: u64,
@@ -350,7 +350,7 @@ impl VerterHost {
         canonical_id: &str,
         specifiers: &[(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
     ) -> Option<Vec<FactVersionRef>> {
         #[cfg(test)]
@@ -384,7 +384,7 @@ impl VerterHost {
         canonical_id: &str,
         specifiers: &[(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
     ) -> Option<Vec<FactVersionRef>> {
         let observation = self.import_route_observation(canonical_id, specifiers);
@@ -416,7 +416,7 @@ impl VerterHost {
         canonical_id: &str,
         specifiers: &[(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
     ) -> std::sync::Arc<ImportRouteObservation> {
         let request = crate::request_context::current_request_context();
@@ -567,12 +567,12 @@ impl VerterHost {
     ) -> Option<
         Vec<(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )>,
     > {
         let mut specifiers: Vec<(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )> = Vec::new();
         let mut readable = false;
 
@@ -588,7 +588,7 @@ impl VerterHost {
                 specifiers.extend(data.parse.external_requests.iter().map(|request| {
                     (
                         request.specifier.clone(),
-                        Some(verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr),
+                        Some(verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr),
                     )
                 }));
                 let analysis = &data.parse.script_analysis;

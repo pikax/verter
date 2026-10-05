@@ -40,9 +40,9 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_semantic::analysis::decl_headers::MemberHeader;
-use verter_semantic::analysis::types::hash_16;
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::{
+use verter_session_query::analysis::types::hash_16;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::{
     compute_member_presence_hash, compute_member_shape_hash, CrossDeclLens, CrossDeclRef, Fact,
     FactKey, FactRegistry, HashOutcome, MemberKind, SymbolSpace,
 };
@@ -113,7 +113,7 @@ mod inventory_view {
     use std::cell::Cell;
 
     use verter_semantic::analysis::decl_headers::{MemberHeader, ValueDeclHeader};
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
 
     use crate::resolver_core::shallow_file_state::{
         ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
@@ -650,7 +650,7 @@ pub(crate) struct RouteLens {
     canonical_id: Arc<str>,
     type_symbols: FxHashSet<verter_type_expr::DeclBindingKey>,
     import_targets:
-        FxHashMap<verter_type_expr::DeclBindingKey, verter_semantic::facts::ImportRouteTarget>,
+        FxHashMap<verter_type_expr::DeclBindingKey, verter_session_query::facts::ImportRouteTarget>,
 }
 
 impl RouteLens {
@@ -666,7 +666,7 @@ impl RouteLens {
                 .map(|(local, target)| {
                     (
                         local.clone(),
-                        verter_semantic::facts::ImportRouteTarget {
+                        verter_session_query::facts::ImportRouteTarget {
                             source_specifier: Arc::from(target.source_specifier.as_str()),
                             imported_name: Arc::from(target.imported_name.as_str()),
                         },
@@ -686,12 +686,12 @@ pub(crate) struct OwnedRouteLens<'a> {
     owner: verter_type_expr::TopLevelOwnerId,
 }
 
-impl verter_semantic::facts::RouteFactLens for OwnedRouteLens<'_> {
+impl verter_session_query::facts::RouteFactLens for OwnedRouteLens<'_> {
     fn resolve_import_route(
         &self,
         local: &str,
         _space: SymbolSpace,
-    ) -> Option<verter_semantic::facts::ImportRouteTarget> {
+    ) -> Option<verter_session_query::facts::ImportRouteTarget> {
         self.base
             .import_targets
             .get(&verter_type_expr::DeclBindingKey::new(self.owner, local))
@@ -1107,7 +1107,7 @@ fn hash16_from_pair(lo: u64, hi: u64) -> Hash16 {
 /// (member add/remove/rename, kind change, contributor add/remove);
 /// body-VALUE sensitivity is the per-contributor `FileWholeHash` rail.
 pub(crate) fn augmentation_header_fingerprint(
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
     kind: &str,

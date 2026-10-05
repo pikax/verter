@@ -154,7 +154,7 @@ enum FunctionKindFacet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowReturnWrap {
     /// The function's authored kind.
-    pub kind: verter_semantic::analysis::flow::FunctionBodyKind,
+    pub kind: verter_session_query::flow::skeleton::FunctionBodyKind,
     /// The joined YIELD parameter of a generator / async-generator body
     /// (`None` for plain async). The evaluator joins the yielded
     /// expressions' types with the return join's own arm rules (dedupe,

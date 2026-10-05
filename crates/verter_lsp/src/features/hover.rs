@@ -1474,13 +1474,13 @@ fn find_component_usage_at_tag_offset<'a>(
 /// Check if the offset is on a Vue API call site name, and if so return a hover
 /// with Vue API context (category, sync requirement, description).
 /// Client-only lifecycle hooks that never fire during SSR.
-const CLIENT_ONLY_HOOKS: &[verter_semantic::analysis::VueApiClassification] = &[
-    verter_semantic::analysis::VueApiClassification::OnMounted,
-    verter_semantic::analysis::VueApiClassification::OnUpdated,
-    verter_semantic::analysis::VueApiClassification::OnActivated,
-    verter_semantic::analysis::VueApiClassification::OnDeactivated,
-    verter_semantic::analysis::VueApiClassification::OnBeforeUpdate,
-    verter_semantic::analysis::VueApiClassification::OnBeforeMount,
+const CLIENT_ONLY_HOOKS: &[verter_session_query::analysis::types::VueApiClassification] = &[
+    verter_session_query::analysis::types::VueApiClassification::OnMounted,
+    verter_session_query::analysis::types::VueApiClassification::OnUpdated,
+    verter_session_query::analysis::types::VueApiClassification::OnActivated,
+    verter_session_query::analysis::types::VueApiClassification::OnDeactivated,
+    verter_session_query::analysis::types::VueApiClassification::OnBeforeUpdate,
+    verter_session_query::analysis::types::VueApiClassification::OnBeforeMount,
 ];
 
 mod vue_api;

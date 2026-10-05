@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::semantic_query::{DepSignature, DepVersion};
 

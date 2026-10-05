@@ -72,7 +72,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TopLevelOwnerKind};
 
 use crate::analysis::runtime_survival_erasure::{ErasureDelta, RuntimeSurvivalProjection};
-use crate::analysis::top_level_owners::TopLevelOwnerTable;
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
 
 /// Per-consumer resolution start scope (v3 amendment).
 ///

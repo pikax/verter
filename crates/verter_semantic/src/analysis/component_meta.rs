@@ -11,7 +11,7 @@
 //! - [`ComponentMetaAnalysis`] is the analysis-domain result (no serde)
 //! - Conversion to transport-facing DTOs happens via `verter_protocol` and its adapter layers
 
-use crate::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedExposeField, AnalyzedImport, AnalyzedMacro,
     AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedPropField, AnalyzedSlotField, ImportBindingKind,
     JsdocTag, StoreUsage, VueApiCallSite,
@@ -189,7 +189,7 @@ pub struct ResolvedEmitInput {
     /// Authored producer description.
     pub description: Option<String>,
     /// Authored producer JSDoc tags.
-    pub tags: Vec<crate::analysis::types::JsdocTag>,
+    pub tags: Vec<verter_session_query::analysis::types::JsdocTag>,
     /// The payload's published source position.
     pub payload_source: SourcePosition,
     /// Atomic payload publication owned by this occurrence.
@@ -619,7 +619,7 @@ pub enum BindingKindAnalysis {
 pub struct BindingAnalysis {
     pub name: String,
     pub kind: BindingKindAnalysis,
-    pub reactivity_kind: crate::analysis::types::ReactivityKind,
+    pub reactivity_kind: verter_session_query::analysis::types::ReactivityKind,
     /// The EXACTNESS carrier for a composable binding's whole-return type.
     ///
     /// [`Self::reactivity_kind`] is a collapsed decoration vocabulary with no
@@ -648,7 +648,7 @@ pub struct BindingAnalysis {
 /// A Vue API call site.
 #[derive(Debug, Clone)]
 pub struct VueApiCallAnalysis {
-    pub api: crate::analysis::types::VueApiClassification,
+    pub api: verter_session_query::analysis::types::VueApiClassification,
     pub arg_value: Option<String>,
 }
 
@@ -2276,7 +2276,7 @@ fn extract_events_from_macro(emit_fields: &[ResolvedEmitInput], out: &mut Vec<Ev
 
 fn extract_slots_from_macro(
     macro_index: usize,
-    slot_fields: &[crate::analysis::types::AnalyzedSlotField],
+    slot_fields: &[verter_session_query::analysis::types::AnalyzedSlotField],
     slot_return_publications: &[Option<TypePublication>],
     evaluated: Option<&crate::analysis::type_expand::ExpandedComponentTypes>,
     out: &mut Vec<SlotAnalysis>,
@@ -2358,7 +2358,7 @@ fn extract_slots_from_macro(
 }
 
 fn slot_return_publication_from_field(
-    field: &crate::analysis::types::AnalyzedSlotField,
+    field: &verter_session_query::analysis::types::AnalyzedSlotField,
 ) -> Option<TypePublication> {
     let position = SourcePosition::Present(authored_payload_source(field.payload.as_ref())?);
     Some(publication_from_position(
@@ -2446,7 +2446,7 @@ fn expanded_slot_bindings(
 }
 
 fn merge_slot_bindings_with_source(
-    source_field: &crate::analysis::types::AnalyzedSlotField,
+    source_field: &verter_session_query::analysis::types::AnalyzedSlotField,
     expanded_bindings: Vec<SlotBindingAnalysis>,
 ) -> Vec<SlotBindingAnalysis> {
     // Order discipline: source-captured bindings (parser-side
@@ -3126,7 +3126,7 @@ fn canonical_emit_occurrences(
 }
 
 struct MergedSlotFields {
-    fields: Vec<crate::analysis::types::AnalyzedSlotField>,
+    fields: Vec<verter_session_query::analysis::types::AnalyzedSlotField>,
     return_publications: Vec<Option<TypePublication>>,
 }
 
@@ -3407,10 +3407,10 @@ fn extract_imports(imports: &[AnalyzedImport]) -> Vec<ImportAnalysis> {
 /// - A typed degradation refines nothing; the reason is published on the
 ///   binding's `return_wrapper_role` sidecar instead.
 fn refined_reactivity_kind(
-    current: crate::analysis::types::ReactivityKind,
+    current: verter_session_query::analysis::types::ReactivityKind,
     role: &verter_type_expr::ReactiveWrapperRole,
-) -> crate::analysis::types::ReactivityKind {
-    use crate::analysis::types::ReactivityKind;
+) -> verter_session_query::analysis::types::ReactivityKind {
+    use verter_session_query::analysis::types::ReactivityKind;
     use verter_type_expr::ReactiveWrapperRole;
     match role {
         ReactiveWrapperRole::Ref
@@ -3450,16 +3450,24 @@ fn extract_bindings(
         .map(|(binding_index, binding)| BindingAnalysis {
             name: binding.name.clone(),
             kind: match binding.kind {
-                crate::analysis::types::AnalyzedBindingKind::Const => BindingKindAnalysis::Const,
-                crate::analysis::types::AnalyzedBindingKind::Let => BindingKindAnalysis::Let,
-                crate::analysis::types::AnalyzedBindingKind::Var => BindingKindAnalysis::Var,
-                crate::analysis::types::AnalyzedBindingKind::Function => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::Const => {
+                    BindingKindAnalysis::Const
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::Let => {
+                    BindingKindAnalysis::Let
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::Var => {
+                    BindingKindAnalysis::Var
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::Function => {
                     BindingKindAnalysis::Function
                 }
-                crate::analysis::types::AnalyzedBindingKind::AsyncFunction => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
                     BindingKindAnalysis::AsyncFunction
                 }
-                crate::analysis::types::AnalyzedBindingKind::Class => BindingKindAnalysis::Class,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+                    BindingKindAnalysis::Class
+                }
             },
             reactivity_kind: match resolved_roles.get(&binding_index) {
                 Some(role) => refined_reactivity_kind(binding.reactivity_kind, role),

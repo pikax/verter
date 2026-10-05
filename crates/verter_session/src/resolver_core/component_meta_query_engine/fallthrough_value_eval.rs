@@ -12,8 +12,8 @@ use indexmap::IndexSet;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::sync::Arc;
 use verter_semantic::analysis::template::TemplatePropUsage;
-use verter_semantic::analysis::type_eval::EvalEnv;
-use verter_semantic::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::declarations::EvalEnv;
 use verter_type_expr::{IndexedValueCallKind, IndexedValueExpression, LiteralValue, TypeExpr};
 
 use super::ComponentMetaQueryEngine;

@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
 
@@ -74,7 +74,7 @@ pub fn collect_requested_binding_demands(
 /// for a question this index already answered authoritatively.
 pub fn collect_local_constructor_binding_keys(
     macros: &[AnalyzedMacro],
-    options_api: Option<&verter_semantic::analysis::AnalyzedOptionsApi>,
+    options_api: Option<&verter_session_query::analysis::types::AnalyzedOptionsApi>,
 ) -> BTreeSet<verter_type_expr::DeclBindingKey> {
     fn local_key(
         entry: &verter_type_expr::ConstructorBindingEntry,
@@ -102,7 +102,7 @@ pub fn collect_local_constructor_binding_keys(
 mod collect_local_constructor_binding_keys_tests {
     use super::collect_local_constructor_binding_keys;
     use std::collections::BTreeSet;
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedOptionsProp,
         AnalyzedPropField, TypeResolutionSource,
     };

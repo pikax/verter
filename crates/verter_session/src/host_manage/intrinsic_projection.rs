@@ -27,7 +27,7 @@ impl VerterHost {
     fn owning_project_ownership(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_semantic::resolver_core::ProjectOwnership> {
+    ) -> Option<verter_session_query::resolution::ProjectOwnership> {
         use verter_workspace::workspace_snapshot::ConfiguredOwnerResolution;
         let root = self.ws().published_root()?;
         let snapshot = &root.snapshot;
@@ -39,7 +39,7 @@ impl VerterHost {
             }
         };
         let project = snapshot.project(id);
-        Some(verter_semantic::resolver_core::ProjectOwnership {
+        Some(verter_session_query::resolution::ProjectOwnership {
             project_root: project.root.as_str().to_string(),
             tsconfig_path: snapshot.tsconfig_path(id).map(|p| p.as_str().to_string()),
         })
@@ -115,9 +115,9 @@ impl VerterHost {
             .resolve_import_for_project_outcome(
                 &owner,
                 specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             )
             .into_publication();

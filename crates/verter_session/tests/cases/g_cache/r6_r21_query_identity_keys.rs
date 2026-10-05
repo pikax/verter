@@ -366,9 +366,9 @@ fn route_db_does_not_key_routes_or_barrels_on_bare_strings() {
 /// exhaustive destructure pins the field set.
 #[test]
 fn route_keys_env_axes_discriminate() {
-    use verter_semantic::facts::registry::SymbolSpace;
     use verter_session::file_artifact_store::ProjectIdentity;
     use verter_session::resolver_core::{BarrelSurfaceKey, RouteNameKey};
+    use verter_session_query::facts::registry::SymbolSpace;
 
     let route = RouteNameKey {
         provider_canonical: Arc::from("/w/index.ts"),

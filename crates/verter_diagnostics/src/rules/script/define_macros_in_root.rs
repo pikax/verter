@@ -46,7 +46,8 @@ impl LintRule for DefineMacrosInRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::types::{NestedMacroCall, ScriptAnalysisSnapshot};
+    use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::types::NestedMacroCall;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

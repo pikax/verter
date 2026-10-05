@@ -83,9 +83,9 @@ fn host_with_owner() -> (Arc<VerterHost>, [u8; 16]) {
         .resolve_for_persistent_state(
             "/workspace/owner.ts",
             "./helper",
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            verter_session_query::resolution::ResolutionContext {
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             },
         )
     {

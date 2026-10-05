@@ -9,10 +9,10 @@
 //! derivation disagree). It is DISCRIMINATING: a column edit that diverges from
 //! the production formula fails here.
 
-use verter_semantic::resolver_core::ModuleResolverCore;
 use verter_session::framework::descriptor::{
     svelte_descriptor, vue_descriptor, VirtualFileNaming, VirtualPathPolicy,
 };
+use verter_session_query::resolution::ModuleResolverCore;
 
 /// Apply a `VirtualPathPolicy` to a carrier canonical (append-to-full
 /// semantics, `is_jsx = false` — a TypeScript carrier — for the conditional

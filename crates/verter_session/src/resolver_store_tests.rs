@@ -288,7 +288,7 @@ mod route_surface_hash {
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
-    use verter_semantic::analysis::Hash16;
+    use verter_session_query::analysis::types::Hash16;
 
     fn parsed_state(
         canonical: &str,
@@ -640,8 +640,8 @@ mod route_surface_hash {
             canonical,
             vec![verter_workspace::ExactResolution {
                 specifier: "./dep".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some("/src/other.ts".to_string()),
                 possible_canonical_ids: vec!["/src/other.ts".to_string()],
             }],
@@ -727,7 +727,7 @@ mod syntactic_route_interface_fact {
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use std::sync::Arc;
-    use verter_semantic::facts::{FactKey, FactLane};
+    use verter_session_query::facts::{FactKey, FactLane};
 
     fn upsert(host: &VerterHost, source: &str) {
         let _ = host

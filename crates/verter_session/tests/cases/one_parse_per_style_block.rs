@@ -5,11 +5,11 @@ use std::sync::Arc;
 use verter_css_syntax::{
     parse_inline_style_declarations_thread_invocations, parse_style_ir_thread_invocations,
 };
-use verter_semantic::analysis::DomQueryKind;
 use verter_session::{
     CompileProfile, CompileTarget, FileLanguage, HostConfig, UpsertRequest, VerterHost,
     VirtualNodeKind, VirtualQuery,
 };
+use verter_session_query::analysis::types::DomQueryKind;
 
 fn parse_count() -> u64 {
     parse_style_ir_thread_invocations()

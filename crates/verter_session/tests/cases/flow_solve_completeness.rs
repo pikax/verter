@@ -20,10 +20,6 @@ use std::sync::Arc;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_language::{FileLanguage, ScriptSourceType};
-use verter_semantic::analysis::flow::flow_graph::FlowEdgeClass;
-use verter_semantic::analysis::flow::peeker::{
-    FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded,
-};
 use verter_session::for_tests::{
     degraded_flow_return_result_for_tests, dispatch_flow_demand_footprint_for_tests,
     finalize_flow_solve, flow_family_route, flow_graph_fixture_for_tests,
@@ -48,6 +44,10 @@ use verter_session::semantic_query::{
     SubstitutionCanonicalHash,
 };
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::flow::flow_graph::FlowEdgeClass;
+use verter_session_query::flow::peeker::{
+    FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded,
+};
 
 /// The fixture body: one parameter, one local, one object-literal return
 /// with a call entry, so the demand plan exercises binding-slot, return-site,
@@ -2408,7 +2408,7 @@ fn concrete_captures(
     source: &str,
     body_hash_tag: u8,
     name: &str,
-) -> Vec<verter_semantic::analysis::function_program::FlowBindingIdentity> {
+) -> Vec<verter_session_query::function_program::FlowBindingIdentity> {
     let fixture = flow_graph_fixture_for_tests(source, body_hash_tag);
     let plan = fixture
         .build_plan(request_named(name))
@@ -2428,7 +2428,7 @@ fn concrete_captures(
 /// the old planner "proved" by examining no closure site at all.
 #[test]
 fn closure_expression_captures_are_concrete_subjects() {
-    use verter_semantic::analysis::function_program::FunctionBindingKind;
+    use verter_session_query::function_program::FunctionBindingKind;
 
     // An arrow returning the outer parameter captures exactly `x`.
     let captures = concrete_captures(ARROW_CAPTURE_FIXTURE_SOURCE, 21, "arrow_capture");
@@ -2564,7 +2564,7 @@ fn captured_class_identity_installs_a_pending_evidence_obligation() {
     assert_eq!(identity.name.as_ref(), "C");
     assert_eq!(
         identity.kind,
-        verter_semantic::analysis::function_program::FunctionBindingKind::Class
+        verter_session_query::function_program::FunctionBindingKind::Class
     );
     assert_eq!(
         identity.defining_function.declaration.name.as_ref(),
@@ -2589,9 +2589,9 @@ fn captured_class_identity_installs_a_pending_evidence_obligation() {
 
 #[test]
 fn captured_hubs_and_shadowed_closures_keep_exact_binding_subjects() {
-    use verter_semantic::analysis::flow::flow_graph::FlowNodeKind;
-    use verter_semantic::analysis::flow::FlowBindingRef;
     use verter_session::for_tests::flow_graph_fixture_for_tests_nested;
+    use verter_session_query::flow::binding::FlowBindingRef;
+    use verter_session_query::flow::flow_graph::FlowNodeKind;
 
     let fixture = flow_graph_fixture_for_tests_nested(
         "function root(x) { function middle() { const first = () => x; { let x = 1; return [first, () => x]; } } return middle; }",
@@ -3098,8 +3098,8 @@ fn discharge_report_is_bound_to_the_installed_demands_basis() {
 
 #[test]
 fn effect_only_capture_retains_effect_obligations_without_value_products() {
-    use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeKind};
     use verter_session::for_tests::FlowCaptureDemand;
+    use verter_session_query::flow::flow_graph::{FlowEdgeClass, FlowNodeKind};
     let fixture = verter_session::for_tests::flow_graph_fixture_for_tests_nested(
         "function root(x) { function middle() { return () => { x = 1; return 0; }; } return middle; }",
         63,

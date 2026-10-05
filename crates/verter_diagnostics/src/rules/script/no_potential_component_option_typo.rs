@@ -131,8 +131,10 @@ impl LintRule for NoPotentialComponentOptionTypo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::ReactivityKind;
 
-    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

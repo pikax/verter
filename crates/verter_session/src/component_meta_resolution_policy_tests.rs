@@ -94,7 +94,7 @@ fn run_policy_with_macro_participation(
     macro_participating_names: &[&str],
 ) {
     use rustc_hash::FxHashSet;
-    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+    use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
     let mut participating: FxHashSet<ResolvedRootIdentity> = FxHashSet::default();
     for name in macro_participating_names.iter() {

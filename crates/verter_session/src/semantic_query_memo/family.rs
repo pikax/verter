@@ -380,7 +380,7 @@ pub(super) enum FamilyKey {
     ResolveMacroPayload {
         owner: crate::semantic_query::ResolvedDeclSlotIdentity,
         macro_index: usize,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
         type_args: Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
     },

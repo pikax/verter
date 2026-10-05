@@ -14,9 +14,9 @@ use verter_diagnostics::LintDiagnostic;
 use verter_semantic::analysis::template::{
     TemplateAnalysisSnapshot, TemplateElement, TemplateTextSegment,
 };
-use verter_semantic::analysis::types::{
-    AnalyzedMacroKind, BindingInitializer, ReactivityKind, ScriptAnalysisSnapshot,
-    VueApiClassification,
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::{
+    AnalyzedMacroKind, BindingInitializer, ReactivityKind, VueApiClassification,
 };
 use verter_span::Span;
 
@@ -253,7 +253,9 @@ fn generate_name(el: &TemplateElement, source: &str) -> String {
 }
 
 /// Check if an `AnalyzedBinding` came from `defineProps` via its initializer.
-fn is_define_props_binding(binding: &verter_semantic::analysis::types::AnalyzedBinding) -> bool {
+fn is_define_props_binding(
+    binding: &verter_session_query::analysis::types::AnalyzedBinding,
+) -> bool {
     matches!(
         &binding.initializer,
         Some(BindingInitializer::FunctionCall {

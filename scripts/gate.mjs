@@ -356,7 +356,7 @@ const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
   "crates/verter_semantic/src/analysis/style.rs",
   "crates/verter_semantic/src/analysis/template.rs",
   "crates/verter_semantic/src/analysis/type_eval_build.rs",
-  "crates/verter_semantic/src/analysis/type_solver/prepared.rs",
+  "crates/verter_session_query/src/type_solver/prepared.rs",
   "crates/verter_semantic/src/analysis/types.rs",
   "crates/verter_session/src/component_meta_audit/mod.rs",
   "crates/verter_session/src/component_meta_caches.rs",

@@ -1,4 +1,20 @@
 use super::*;
+use verter_session_query::analysis::types::AnalysisFlags;
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::BindingInitializer;
+use verter_session_query::analysis::types::ComposableReturn;
+use verter_session_query::analysis::types::CssVarManipulationKind;
+use verter_session_query::analysis::types::LiteralKind;
+use verter_session_query::analysis::types::LocalDeclarationKind;
+use verter_session_query::analysis::types::MacroTypeDepUsage;
+use verter_session_query::analysis::types::ModuleReferenceAnalyzability;
+use verter_session_query::analysis::types::ModuleReferenceSyntax;
+use verter_session_query::analysis::types::ReactivityKind;
+use verter_session_query::analysis::types::ScriptUsageKind;
+use verter_session_query::analysis::types::StableDeclarationId;
+use verter_session_query::analysis::types::StoreApiClassification;
+use verter_session_query::analysis::types::VueApiClassification;
 
 fn analyze(code: &str) -> ScriptAnalysisSnapshot {
     let alloc = Allocator::new();
@@ -2494,10 +2510,10 @@ fn define_model_default_modelvalue() {
 
 #[test]
 fn owner_aware_analysis_stamps_imports_macros_and_declarations_at_production() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = r#"
@@ -2542,10 +2558,10 @@ const props = defineProps<SetupProps>();
 
 #[test]
 fn declaration_content_hash_discriminates_owner_only_role_changes() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = "interface Shared { value: string }";
@@ -2587,10 +2603,10 @@ fn declaration_content_hash_discriminates_owner_only_role_changes() {
 
 #[test]
 fn macro_local_type_resolution_is_scoped_by_owner() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::TopLevelOwnerId;
 
     let source = r#"
@@ -2627,10 +2643,10 @@ const instanceProps = defineProps<Props>();
 
 #[test]
 fn macro_local_type_resolution_uses_only_the_validated_one_way_parent() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::TopLevelOwnerId;
 
     let analyze = |source: &str, statement_owners: &[TopLevelOwnerId]| {

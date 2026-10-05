@@ -34,11 +34,11 @@ use std::sync::Arc;
 
 use static_assertions::assert_not_impl_any;
 use verter_identity::identity::ResultContractId;
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 // Re-export the solver's primitive enum so semantic nodes and the type
 // solver agree on the same set of primitive kinds.
-pub use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
+pub use verter_session_query::type_solver::arena::PrimitiveKind;
 
 // Literal-value carrier for [`SemanticNodeData::Literal`]. Re-exported
 // so callers working with the semantic graph can match on exact literal
@@ -728,7 +728,7 @@ pub struct ScopeId {
     ///
     /// Ambient `declare module "X"` / `declare global` augmentation inventories
     /// are addressed separately by the live
-    /// [`AugmentationScopeKind`](verter_semantic::analysis::type_eval::AugmentationScopeKind)
+    /// [`AugmentationScopeKind`](verter_session_query::declarations::AugmentationScopeKind)
     /// path (the binder's `EvalEnv.augmentation_scopes`), not through this key —
     /// a `ResolveDecl` always targets the file top-level surface.
     pub local_scope: Option<u32>,
@@ -1658,9 +1658,11 @@ impl FlowFunctionSlotIdentity {
             owner: self.declaration_slot.owner,
             merged_symbol_name: Arc::clone(&self.declaration_slot.merged_symbol_name),
             symbol_space: match self.declaration_slot.symbol_space {
-                SemanticSymbolSpace::Type => verter_semantic::facts::SymbolSpace::Type,
-                SemanticSymbolSpace::Value => verter_semantic::facts::SymbolSpace::Value,
-                SemanticSymbolSpace::Namespace => verter_semantic::facts::SymbolSpace::Namespace,
+                SemanticSymbolSpace::Type => verter_session_query::facts::SymbolSpace::Type,
+                SemanticSymbolSpace::Value => verter_session_query::facts::SymbolSpace::Value,
+                SemanticSymbolSpace::Namespace => {
+                    verter_session_query::facts::SymbolSpace::Namespace
+                }
             },
             function_part: self.function_part.clone(),
             overload_ordinal: self.overload_ordinal,
@@ -1768,7 +1770,7 @@ impl FlowReturnPolicy {
     /// The flow policy one project's effective compiler options select.
     #[must_use]
     pub fn from_compiler_options(
-        options: &verter_semantic::resolver_core::SemanticCompilerOptions,
+        options: &verter_session_query::resolution::SemanticCompilerOptions,
     ) -> Self {
         Self {
             nullability: NullabilityPolicy::from_strict_null_checks(options.strict_null_checks),
@@ -3050,8 +3052,10 @@ impl MacroOwnBodyStamp {
     /// concern consumed by the published surface policy); every other macro
     /// is structural.
     #[must_use]
-    pub const fn from_macro_kind(kind: verter_semantic::analysis::AnalyzedMacroKind) -> Self {
-        use verter_semantic::analysis::AnalyzedMacroKind;
+    pub const fn from_macro_kind(
+        kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+    ) -> Self {
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
         match kind {
             AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => Self(true),
             AnalyzedMacroKind::DefineEmits
@@ -8570,7 +8574,7 @@ pub enum SemanticQueryKey {
     ResolveMacroPayload {
         owner: ResolvedDeclSlotIdentity,
         macro_index: usize,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
         type_args: Arc<[SemanticNodeId]>,
         context: MacroPayloadContext,
     },
@@ -9775,7 +9779,7 @@ pub enum SemanticNodeData {
     /// (`"idle"`, `42`, `true`) so unions of literals don't collapse
     /// into their broader primitive kind. This is the semantic-graph
     /// equivalent of the solver-arena [`Node::Literal`]
-    /// (see [`verter_semantic::analysis::type_solver::arena::SolverLiteral`]).
+    /// (see [`verter_session_query::type_solver::arena::SolverLiteral`]).
     ///
     /// Matching discipline: consumers that previously matched
     /// `Primitive(String)` for any string-like node should now match

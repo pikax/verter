@@ -56,8 +56,8 @@ use crate::fact_signature_helpers::ReadSetSignature;
 use crate::project_type_store::IndexedReady;
 use crate::semantic_query::{BinderScopeId, DeclarationSlotSeed, SemanticSymbolSpace};
 use dashmap::DashMap;
-use verter_semantic::analysis::type_eval::{AugmentationScopeKind, ValueDeclKind};
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::declarations::{AugmentationScopeKind, ValueDeclKind};
 
 // ===========================================================================
 // Artifact payload (scope tree + declaration-slot seeds + provenance)
@@ -833,7 +833,7 @@ pub(crate) mod tests {
             outer_facts.iter().any(|fact| matches!(
                 fact,
                 crate::resolver_core::FactVersionRef::Parse(parse_fact)
-                    if matches!(parse_fact.key, verter_semantic::facts::FactKey::SyntacticExportSet)
+                    if matches!(parse_fact.key, verter_session_query::facts::FactKey::SyntacticExportSet)
             )),
             "the outer read-set must contain the bubbled SyntacticExportSet binder fact. \
              Got: {outer_facts:?}"
@@ -842,7 +842,7 @@ pub(crate) mod tests {
             outer_facts.iter().any(|fact| matches!(
                 fact,
                 crate::resolver_core::FactVersionRef::Parse(parse_fact)
-                    if matches!(parse_fact.key, verter_semantic::facts::FactKey::DeclContributionOrder { .. })
+                    if matches!(parse_fact.key, verter_session_query::facts::FactKey::DeclContributionOrder { .. })
             )),
             "the outer read-set must contain the bubbled DeclContributionOrder binder fact. \
              Got: {outer_facts:?}"

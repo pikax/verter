@@ -535,8 +535,8 @@ fn route_mutation_refreshes_edges_without_reparse() {
         owner,
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some(dep2.to_string()),
             possible_canonical_ids: vec![dep2.to_string()],
         }],
@@ -820,8 +820,8 @@ fn follower_arriving_after_mutation_does_not_adopt_fenced_flight_result() {
             owner,
             vec![verter_workspace::ExactResolution {
                 specifier: "./dep".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(dep2.to_string()),
                 possible_canonical_ids: vec![dep2.to_string()],
             }],
@@ -1108,8 +1108,8 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
             owner,
             vec![verter_workspace::ExactResolution {
                 specifier: "./dep".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(target.to_string()),
                 possible_canonical_ids: vec![target.to_string()],
             }],
@@ -1522,8 +1522,8 @@ fn overlay_mid_flight_mutation_trips_the_overlay_publish_fence() {
             other,
             vec![verter_workspace::ExactResolution {
                 specifier: "./fence_probe".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(canonical.to_string()),
                 possible_canonical_ids: vec![canonical.to_string()],
             }],
@@ -1775,8 +1775,8 @@ fn route_fact_capture_is_side_effect_free() {
         owner,
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some(dep2.to_string()),
             possible_canonical_ids: vec![dep2.to_string()],
         }],
@@ -2003,8 +2003,8 @@ fn scheduler_tracked_canonical_never_turns_artifact_only_on_route_mutation() {
         SCRATCH_ID,
         vec![verter_workspace::ExactResolution {
             specifier: "./somewhere".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some("/workspace/src/somewhere.ts".to_string()),
             possible_canonical_ids: vec!["/workspace/src/somewhere.ts".to_string()],
         }],
@@ -2050,8 +2050,8 @@ fn set_exact_resolutions_replacement_reroutes_and_identical_repush_is_noop() {
     let exact = |target: &str| {
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some(target.to_string()),
             possible_canonical_ids: vec![target.to_string()],
         }]
@@ -3520,8 +3520,8 @@ fn fenced_serve_baked_edges_reresolve_in_dependency_candidates() {
             owner,
             vec![verter_workspace::ExactResolution {
                 specifier: "./dep".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(dep2.to_string()),
                 possible_canonical_ids: vec![dep2.to_string()],
             }],

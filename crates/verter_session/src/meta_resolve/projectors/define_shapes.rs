@@ -41,8 +41,8 @@ use verter_semantic::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedObjectShape,
     ExpandedProperty, ExpansionExecutionStatus, ExpansionResult,
 };
-use verter_semantic::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::type_solver::result::{ExecutionStatus, SolverExactness};
 
 use crate::resolver_core::ResolverContext;
 use crate::types::FileAnalysisSnapshot;
@@ -415,7 +415,7 @@ fn dto_request(
 /// `SemanticNodeData::Signature` carrier — node synthesis is demand-driven at
 /// the consuming dispatch, never eager here. No source-text reparse.
 pub(crate) fn slot_field_function_source(
-    slot: &verter_semantic::analysis::AnalyzedSlotField,
+    slot: &verter_session_query::analysis::types::AnalyzedSlotField,
 ) -> verter_type_expr::facts::SemanticTypeSource {
     use verter_type_expr::facts::{
         ClosedTypeFact, FunctionParamFact, FunctionSignatureFact, SemanticTypeSource,

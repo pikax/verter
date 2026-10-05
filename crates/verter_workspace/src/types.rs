@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::{ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolvePhase, ResolveRequestKind};
 
 /// A parsed edge from a file's imports, recorded during upsert.
 #[derive(Debug, Clone, PartialEq, Eq)]

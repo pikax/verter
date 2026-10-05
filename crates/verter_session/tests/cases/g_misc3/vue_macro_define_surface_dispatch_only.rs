@@ -712,8 +712,8 @@ defineProps<UnionAlias>();
 
 #[test]
 fn p2a_aliased_union_define_props_enumerates_both_arms() {
-    use verter_semantic::analysis::AnalyzedMacroKind;
     use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let host = harness::build_hermetic_host_with_lib(
         &[("/AliasedUnionProps.vue", ALIASED_UNION_PROPS_VUE)],
@@ -811,8 +811,8 @@ defineProps<Props<T>>();
 
 #[test]
 fn open_conditional_props_root_enumerates_both_branches() {
-    use verter_semantic::analysis::AnalyzedMacroKind;
     use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let host = harness::build_hermetic_host_with_lib(
         &[("/OpenConditionalProps.vue", OPEN_CONDITIONAL_PROPS_VUE)],

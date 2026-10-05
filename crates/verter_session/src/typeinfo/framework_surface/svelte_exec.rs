@@ -27,7 +27,7 @@ use verter_compiler::svelte::parser::template_ast::{
 use verter_semantic::analysis::framework_facts::svelte::{
     ExactSveltePropsCalls, SvelteInstanceExport, SvelteLegacyProp, SvelteScriptFacts,
 };
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding,
     TypeResolutionSource,
 };
@@ -290,7 +290,7 @@ struct SvelteFactObservations<'a> {
     /// `$props()` call, not "not computed". `None` on the conservative
     /// arm so partial/unavailable evidence cannot synthesise a surface.
     props_calls: Option<&'a ExactSveltePropsCalls>,
-    prop_defaults: Vec<&'a verter_semantic::analysis::types::AnalyzedDefaultValue>,
+    prop_defaults: Vec<&'a verter_session_query::analysis::types::AnalyzedDefaultValue>,
     bindable_members: Vec<&'a String>,
     legacy_props: Vec<&'a SvelteLegacyProp>,
     snippet_imports: Vec<SvelteSnippetImportFact>,
@@ -1096,8 +1096,8 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 // A resolved-surface snippet slot has no authored props-object
                 // member list at an addressable position in this file — the
                 // honest typed miss, never a guessed offset.
-                props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
-                    verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                props_anchor: verter_session_query::analysis::types::MacroAnchor::Unsupported(
+                    verter_session_query::analysis::types::MacroAnchorUnsupported::NoMemberList,
                 ),
                 return_type,
                 payload: None,
@@ -1315,8 +1315,8 @@ fn collect_slot_elements(
                             bindings,
                             // A markup `<slot>` element declares no authored
                             // props-object member list: honest typed miss.
-                            props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
-                                verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                            props_anchor: verter_session_query::analysis::types::MacroAnchor::Unsupported(
+                                verter_session_query::analysis::types::MacroAnchorUnsupported::NoMemberList,
                             ),
                             return_type: None,
                             payload: None,

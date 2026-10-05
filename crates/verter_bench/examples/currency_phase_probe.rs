@@ -25,9 +25,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use verter_diagnostics::{LintConfig, Linter};
-use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 use verter_session::component_meta_host::ComponentMetaHost;
 use verter_session::{FileAnalysisSnapshot, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::analysis::types::AnalysisFlags;
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 // ─────────────────────────── stats ───────────────────────────

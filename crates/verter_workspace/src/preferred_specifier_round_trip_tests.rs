@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::{IdeProjectCompilerOptions, WorkspaceAlias};
+use verter_session_query::resolution::{IdeProjectCompilerOptions, WorkspaceAlias};
 
 use crate::canonical_path::CanonicalPath;
 use crate::memory::{MemoryOptions, MemoryWorkspace};
@@ -147,9 +147,9 @@ fn preferred_specifier_round_trips() {
         .resolve_import(
             "/workspace/src/App.ts",
             &specifier,
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            verter_session_query::resolution::ResolutionContext {
+                phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             },
         )
         .expect("forward resolve of preferred specifier should succeed");

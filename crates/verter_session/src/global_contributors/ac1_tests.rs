@@ -285,14 +285,14 @@ fn type_and_namespace_spaces_have_distinct_fingerprints() {
         "N",
         None,
         true,
-        verter_semantic::facts::SymbolSpace::Type,
+        verter_session_query::facts::SymbolSpace::Type,
     );
     let namespaces = store.global_contributor_index().snapshot().lookup_in_space(
         &AugmentationTargetKind::GlobalAugmentation,
         "N",
         None,
         true,
-        verter_semantic::facts::SymbolSpace::Namespace,
+        verter_session_query::facts::SymbolSpace::Namespace,
     );
     assert_eq!(types.entries.len(), 1);
     assert_eq!(namespaces.entries.len(), 1);

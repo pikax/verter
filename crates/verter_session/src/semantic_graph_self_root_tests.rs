@@ -41,7 +41,7 @@
 use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 
-use verter_semantic::facts::{FactKey, FactLane};
+use verter_session_query::facts::{FactKey, FactLane};
 
 use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt};
 use crate::resolver_core::{
@@ -372,7 +372,7 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
             Arc::from("<sfc-script-setup>"),
         ),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
         context: crate::semantic_query::MacroPayloadContext::new(
             Default::default(),
@@ -1729,7 +1729,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
             Arc::from("<sfc-script-setup>"),
         ),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg_node].into_boxed_slice()),
         context: crate::semantic_query::MacroPayloadContext::new(
             Default::default(),

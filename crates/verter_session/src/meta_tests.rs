@@ -150,7 +150,7 @@ fn prop_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
     snapshot
         .macros
         .iter()
-        .filter(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .flat_map(|m| m.prop_fields.iter())
         .map(|f| f.name.clone())
         .collect()
@@ -170,7 +170,9 @@ fn resolved_macro_prop_names(
     state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| {
+            m.macro_kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        })
         .filter(|m| seen.insert(m.macro_index))
         .flat_map(|m| {
             host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
@@ -990,7 +992,7 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
                     ..
                 }
                 | crate::resolver_core::FactVersionRef::Parse(crate::resolver_core::ParseFactRef {
-                    key: verter_semantic::facts::FactKey::SyntacticRouteInterface,
+                    key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
                     ..
                 })
                 | crate::resolver_core::FactVersionRef::ResolveImports(_)
@@ -1714,7 +1716,7 @@ defineProps<Props>()
     let define_props = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .expect("defineProps macro should exist");
 
     let names: Vec<&str> = define_props
@@ -1762,7 +1764,7 @@ defineProps<Props>()
     let define_props = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .expect("defineProps macro should exist");
 
     let names: Vec<&str> = define_props
@@ -5158,7 +5160,7 @@ defineProps<{
     assert_eq!(analysis.imports[0].bindings.len(), 1);
     assert_eq!(
         analysis.imports[0].bindings[0].kind,
-        verter_semantic::analysis::types::ImportBindingKind::Default,
+        verter_session_query::analysis::types::ImportBindingKind::Default,
     );
     assert_eq!(
         analysis.imports[0].bindings[0].imported_name.as_deref(),
@@ -5861,7 +5863,7 @@ defineProps<Props>()
 fn owner_local_index_signature_only_props_root_passes_authority_gate() {
     use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
     use crate::resolver_core::component_meta::ComponentMetaResolverHost;
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let project = make_project();
     project
@@ -5929,7 +5931,7 @@ defineProps<Props>()
 fn projectable_owner_local_pre_filter_admits_index_signature_only_props_root() {
     use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
     use crate::resolver_core::component_meta::ComponentMetaResolverHost;
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let project = make_project();
     project
@@ -6002,7 +6004,7 @@ defineProps<Props>()
 fn owner_local_macro_root_construct_signature_only_passes_props_gate() {
     use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
     use crate::resolver_core::component_meta::ComponentMetaResolverHost;
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let project = make_project();
     project
@@ -6057,7 +6059,7 @@ defineProps<Props>()
 fn owner_local_macro_root_index_signature_counts_for_props_not_emits() {
     use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
     use crate::resolver_core::component_meta::ComponentMetaResolverHost;
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let project = make_project();
     project
@@ -6121,7 +6123,7 @@ defineProps<Root>()
 fn owner_local_macro_root_call_signature_only_props_yes_expose_no() {
     use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
     use crate::resolver_core::component_meta::ComponentMetaResolverHost;
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let project = make_project();
     project
@@ -6177,7 +6179,7 @@ defineProps<Root>()
 fn owner_local_macro_root_authority_gate_isolates_same_name_module_and_instance_roots() {
     use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
     use crate::resolver_core::component_meta::ComponentMetaResolverHost;
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let project = make_project();
     project
@@ -6305,7 +6307,7 @@ defineProps<{ (): void }>()
     let valid = crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from("/CallSigProps.vue"),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         root_identity: wh,
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
@@ -8235,7 +8237,7 @@ defineSlots<OpenMappedSlots<T>>()
         resolved.snapshot.macros.iter().any(|m| {
             matches!(
                 m.kind,
-                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
             ) && m.type_references.iter().any(|r| r == "OpenMappedSlots")
         }),
         "the analyzer must consume `defineSlots<OpenMappedSlots<T>>()`, got macros: {:?}",
@@ -10818,10 +10820,9 @@ defineProps<Props>()
         .expect("analysis should work before dependency removal");
     // Raw analysis may not resolve cross-file props, but should succeed
     assert!(
-        before
-            .macros
-            .iter()
-            .any(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps),
+        before.macros.iter().any(
+            |m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        ),
         "should have defineProps macro before removal"
     );
 
@@ -15541,7 +15542,7 @@ onMounted(() => {
     assert!(
         meta.vue_api_calls.iter().any(|call| matches!(
             call.api,
-            verter_semantic::analysis::types::VueApiClassification::OnMounted,
+            verter_session_query::analysis::types::VueApiClassification::OnMounted,
         )),
         "Vue API calls should be preserved"
     );

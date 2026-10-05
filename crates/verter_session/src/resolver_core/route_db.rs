@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::facts::registry::SymbolSpace;
+use verter_session_query::facts::registry::SymbolSpace;
 
 use crate::file_artifact_store::{AugmentationTargetKind, ProjectIdentity};
 #[cfg(any(test, feature = "test-support"))]
@@ -127,11 +127,11 @@ impl BarrelSurfaceKey {
 /// discriminates.
 pub(crate) fn build_module_augmentation_index_shape_fact_key(
     target: &AugmentationTargetKind,
-) -> verter_semantic::facts::FactKey {
-    use verter_semantic::facts::registry::AugmentationTargetKindTag;
+) -> verter_session_query::facts::FactKey {
+    use verter_session_query::facts::registry::AugmentationTargetKindTag;
     match target {
         AugmentationTargetKind::ExternalSpecifier(spec) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
                 external_specifier: Some(spec.clone()),
                 resolved_relative_canonical: None,
@@ -139,7 +139,7 @@ pub(crate) fn build_module_augmentation_index_shape_fact_key(
             }
         }
         AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag: AugmentationTargetKindTag::ResolvedRelativeCanonical,
                 external_specifier: None,
                 resolved_relative_canonical: Some(Arc::clone(canon)),
@@ -147,7 +147,7 @@ pub(crate) fn build_module_augmentation_index_shape_fact_key(
             }
         }
         AugmentationTargetKind::WildcardAmbient(pat) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag: AugmentationTargetKindTag::WildcardAmbient,
                 external_specifier: None,
                 resolved_relative_canonical: None,
@@ -155,7 +155,7 @@ pub(crate) fn build_module_augmentation_index_shape_fact_key(
             }
         }
         AugmentationTargetKind::GlobalAugmentation => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
+            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
                 external_specifier: None,
                 resolved_relative_canonical: None,

@@ -1,14 +1,14 @@
 //! Ambient lib registration types and engine storage.
 //!
 //! sub-plan: per-project ambient TypeScript libs (e.g. lib.es5.d.ts)
-//! are registered against a [`verter_semantic::resolver_core::ProjectStableKey`] and stored
+//! are registered against a [`verter_session_query::resolution::ProjectStableKey`] and stored
 //! lock-free on the [`crate::engine::Engine`] via `ArcSwap`. They are visible
 //! only via [`WorkspaceAccess::read_ambient_lib`] / `lookup_ambient_symbol`,
 //! and shadow under user files via [`WorkspaceAccess::file_exists`] (A5).
 //!
 //! Identity rule (A3): keys include the workspace root so multi-root setups
 //! with the same `tsconfig.json` paths produce distinct keys. See
-//! [`verter_semantic::resolver_core::ProjectStableKey`].
+//! [`verter_session_query::resolution::ProjectStableKey`].
 //!
 //! Path normalization (A7): `register_ambient_lib` and `read_ambient_lib`
 //! normalize via [`normalize_canonical_id`] (`\` -> `/`, trim leading `/`)
@@ -21,7 +21,7 @@ use rustc_hash::FxHashMap;
 use verter_scheduler::invalidation::Hash16;
 
 use crate::workspace_snapshot::ProjectId;
-use verter_semantic::resolver_core::ProjectStableKey;
+use verter_session_query::resolution::ProjectStableKey;
 
 /// Public spec passed to [`crate::traits::WorkspaceAccess::register_ambient_lib`].
 ///

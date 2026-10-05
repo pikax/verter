@@ -1782,9 +1782,9 @@ pub struct ScriptImportInfo {
 #[derive(Debug, Clone)]
 pub struct ScriptModuleReference {
     /// Syntax form that introduced the reference.
-    pub syntax: verter_semantic::analysis::ModuleReferenceSyntax,
+    pub syntax: verter_session_query::analysis::types::ModuleReferenceSyntax,
     /// Import vs require semantics.
-    pub semantics: verter_semantic::analysis::ModuleReferenceSemantics,
+    pub semantics: verter_session_query::analysis::types::ModuleReferenceSemantics,
     /// Whether the site is declaration-level type-only.
     pub is_type_only: bool,
     /// Raw source text for the specifier expression.
@@ -1796,7 +1796,7 @@ pub struct ScriptModuleReference {
     /// Static prefix for dynamic expressions, if any.
     pub static_prefix: Option<String>,
     /// Static analyzability classification.
-    pub analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
+    pub analyzability: verter_session_query::analysis::types::ModuleReferenceAnalyzability,
     /// Span of the containing statement or call expression.
     pub span: verter_span::Span,
     /// Span of the specifier expression.
@@ -1810,12 +1810,14 @@ pub struct ScriptModuleReference {
 /// view of source-stage parse products and is therefore safe on LSP hot paths.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptIngressSnapshot {
-    pub imports: Arc<Vec<verter_semantic::analysis::AnalyzedImport>>,
-    pub module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
+    pub imports: Arc<Vec<verter_session_query::analysis::types::AnalyzedImport>>,
+    pub module_references: Arc<Vec<verter_session_query::analysis::types::AnalyzedModuleReference>>,
 }
 
-impl From<&verter_semantic::analysis::AnalyzedModuleReference> for ScriptModuleReference {
-    fn from(reference: &verter_semantic::analysis::AnalyzedModuleReference) -> Self {
+impl From<&verter_session_query::analysis::types::AnalyzedModuleReference>
+    for ScriptModuleReference
+{
+    fn from(reference: &verter_session_query::analysis::types::AnalyzedModuleReference) -> Self {
         ScriptModuleReference {
             syntax: reference.syntax,
             semantics: reference.semantics,
@@ -1873,7 +1875,7 @@ pub struct HostUpdateResult {
     pub preprocessor_requests: Vec<PreprocessorRequest>,
     /// Export signatures extracted from the file's script block.
     /// For `.ts`/`.js` files these include re-export metadata for barrel file resolution.
-    pub export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    pub export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
     /// Time spent in the parse phase (ms).
     pub parse_duration_ms: f64,
 }
@@ -1921,17 +1923,17 @@ impl HostUpdateResult {
 pub struct FileAnalysisSnapshot {
     /// Import statements found in script blocks.
     /// Owned because `resolve_snapshot_imports` mutates `resolved_canonical_id`.
-    pub imports: Vec<verter_semantic::analysis::AnalyzedImport>,
+    pub imports: Vec<verter_session_query::analysis::types::AnalyzedImport>,
     /// Module reference sites found in script blocks.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub module_references: Arc<Vec<verter_semantic::analysis::AnalyzedModuleReference>>,
+    pub module_references: Arc<Vec<verter_session_query::analysis::types::AnalyzedModuleReference>>,
     /// Variable/function bindings declared in script blocks.
     /// Owned because `enrich_destructured_bindings` mutates `reactivity_kind`.
-    pub bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
+    pub bindings: Vec<verter_session_query::analysis::types::AnalyzedBinding>,
     /// Vue compiler macros used (defineProps, defineEmits, etc.).
-    pub macros: Arc<Vec<verter_semantic::analysis::AnalyzedMacro>>,
+    pub macros: Arc<Vec<verter_session_query::analysis::types::AnalyzedMacro>>,
     /// Type dependencies from macros that reference external files.
-    pub macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
+    pub macro_type_deps: Arc<Vec<verter_session_query::analysis::types::MacroTypeDep>>,
     /// Bitflags representing script characteristics (see `verter_semantic::analysis::ScriptFlags`).
     pub script_flags: u32,
     /// Per-style-block analysis (scoped, modules, v-bind usage).
@@ -1941,19 +1943,19 @@ pub struct FileAnalysisSnapshot {
     pub template: Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
     /// Vue API call sites (lifecycle hooks, watchers, provide/inject, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub vue_api_calls: Arc<Vec<verter_semantic::analysis::types::VueApiCallSite>>,
+    pub vue_api_calls: Arc<Vec<verter_session_query::analysis::types::VueApiCallSite>>,
     /// DOM query call sites (querySelector, getElementById, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
 
     /// CSS variable manipulations via DOM style APIs.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub css_var_manipulations: Arc<Vec<verter_semantic::analysis::types::CssVarManipulation>>,
+    pub css_var_manipulations: Arc<Vec<verter_session_query::analysis::types::CssVarManipulation>>,
 
     /// Script-side binding usage occurrences with exact spans.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub script_binding_occurrences:
-        Arc<Vec<verter_semantic::analysis::types::ScriptBindingOccurrence>>,
+        Arc<Vec<verter_session_query::analysis::types::ScriptBindingOccurrence>>,
 
     /// Script-side usage facts for macro-declared members (unused-declaration
     /// diagnostics). `None` for files without Vue macros.
@@ -1973,18 +1975,18 @@ pub struct FileAnalysisSnapshot {
 
     /// Export signatures extracted from the file's script block.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub export_signatures: Arc<Vec<verter_semantic::analysis::ExportSignature>>,
+    pub export_signatures: Arc<Vec<verter_session_query::analysis::types::ExportSignature>>,
 
     /// Options API analysis (`export default { ... }` or `export default defineComponent({ ... })`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options_api: Option<verter_semantic::analysis::AnalyzedOptionsApi>,
+    pub options_api: Option<verter_session_query::analysis::types::AnalyzedOptionsApi>,
 
     /// Store usage sites (Pinia, Vuex, convention-based composables).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub store_usages: Arc<Vec<verter_semantic::analysis::types::StoreUsage>>,
+    pub store_usages: Arc<Vec<verter_session_query::analysis::types::StoreUsage>>,
     /// Store definitions (defineStore, createStore, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub store_definitions: Arc<Vec<verter_semantic::analysis::types::StoreDefinition>>,
+    pub store_definitions: Arc<Vec<verter_session_query::analysis::types::StoreDefinition>>,
 
     /// Whether the script block uses TypeScript (`lang="ts"`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2008,7 +2010,7 @@ pub struct CompileBlockersSnapshot {
     /// External `src="..."` blocks referenced by the SFC.
     pub external_source_requests: Vec<ExternalSourceRequest>,
     /// Macro type dependencies referenced from the SFC script.
-    pub macro_type_deps: Arc<Vec<verter_semantic::analysis::MacroTypeDep>>,
+    pub macro_type_deps: Arc<Vec<verter_session_query::analysis::types::MacroTypeDep>>,
 }
 
 /// A fully resolved export after following re-export chains.
@@ -3011,7 +3013,7 @@ pub(crate) struct ParseSnapshot {
     /// reuse path bump a refcount instead of deep-copying ~18 owned vectors
     /// for callers that read one or two scalar fields.
     pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
-    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
     pub(crate) style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis>,
     /// Prepared style IRs retained beside this snapshot, inventory order.
     /// Not a field on public `StyleBlockAnalysis`.
@@ -3519,22 +3521,22 @@ pub(crate) struct CompileInput {
     pub(crate) has_supplied_block_content: bool,
     pub(crate) block_content_inputs: verter_compiler::framework_common::RuntimeBlockContentInputs,
     /// Macro type dependencies for cross-file type resolution.
-    pub(crate) macro_type_deps: Vec<verter_semantic::analysis::MacroTypeDep>,
+    pub(crate) macro_type_deps: Vec<verter_session_query::analysis::types::MacroTypeDep>,
     /// Import declarations from the SFC script analysis.
     /// Used to attach precise spans to unresolved compile blockers.
-    pub(crate) script_imports: Vec<verter_semantic::analysis::AnalyzedImport>,
+    pub(crate) script_imports: Vec<verter_session_query::analysis::types::AnalyzedImport>,
     /// Macro calls from the effective script analysis.
     /// Used when converting template compiler metadata into host analysis.
-    pub(crate) script_macros: Vec<verter_semantic::analysis::AnalyzedMacro>,
+    pub(crate) script_macros: Vec<verter_session_query::analysis::types::AnalyzedMacro>,
     /// Local/exported bindings from the effective script analysis.
     /// Used when converting template compiler metadata into host analysis.
-    pub(crate) script_bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
+    pub(crate) script_bindings: Vec<verter_session_query::analysis::types::AnalyzedBinding>,
     /// Script-side macro-member usage facts from the effective script analysis.
     /// Feeds the unused-declaration inventories during template conversion.
     pub(crate) script_macro_usage: Option<verter_semantic::analysis::macro_usage::MacroUsageFacts>,
     /// Vue API call sites from the effective script analysis (the `useSlots()`
     /// fail-open gate for unused-slot diagnostics).
-    pub(crate) script_vue_api_calls: Vec<verter_semantic::analysis::types::VueApiCallSite>,
+    pub(crate) script_vue_api_calls: Vec<verter_session_query::analysis::types::VueApiCallSite>,
     /// Framework-neutral parse artifact from upsert, reused during
     /// compilation to avoid re-parsing.
     pub(crate) framework_parse:

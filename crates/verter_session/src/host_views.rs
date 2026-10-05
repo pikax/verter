@@ -103,7 +103,7 @@ impl VerterHost {
     pub fn scheduler_export_signatures(
         &self,
         canonical_id: &str,
-    ) -> Option<Vec<verter_semantic::analysis::ExportSignature>> {
+    ) -> Option<Vec<verter_session_query::analysis::types::ExportSignature>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(data.export_signatures.clone())

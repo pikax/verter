@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedDefaultValue, AnalyzedExposeField, AnalyzedPropField, AnalyzedSlotField,
 };
 
@@ -168,7 +168,7 @@ pub struct ResolvedEmitOccurrence {
     /// Authored producer description.
     pub description: Option<String>,
     /// Authored producer JSDoc tags.
-    pub tags: Vec<verter_semantic::analysis::types::JsdocTag>,
+    pub tags: Vec<verter_session_query::analysis::types::JsdocTag>,
     /// The payload's published source position.
     pub payload_source: verter_type_expr::facts::SourcePosition,
     /// Atomic payload authority, exactness, degradation, provenance, and

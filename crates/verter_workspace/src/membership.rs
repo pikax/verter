@@ -13,7 +13,7 @@
 use crate::canonical_path::CanonicalPath;
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     typescript_default_excludes, CompiledGlob, ConfiguredMembership, NormalizedGlob,
     StaticMembershipSpec,
 };

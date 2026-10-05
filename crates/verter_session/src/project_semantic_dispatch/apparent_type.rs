@@ -41,7 +41,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::ProjectStableKey;
+use verter_session_query::resolution::ProjectStableKey;
 
 use crate::semantic_query::{
     ApparentDemandScope, ApparentTypeContext, IndexKey, LiteralValue, PathSegment, PrimitiveKind,

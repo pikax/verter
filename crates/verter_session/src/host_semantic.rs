@@ -46,7 +46,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> verter_semantic::query::QueryResult<
-        Option<verter_semantic::facts::component::ComponentSurface>,
+        Option<verter_session_query::facts::component::ComponentSurface>,
     > {
         use verter_semantic::query::QueryResult;
         use verter_semantic::refs::FileRef;
@@ -83,8 +83,8 @@ impl VerterHost {
     ) -> verter_semantic::query::QueryResult<
         Option<
             Vec<(
-                verter_semantic::facts::binding::BindingDeclaration,
-                verter_semantic::facts::reactivity::ReactivityFact,
+                verter_session_query::facts::binding::BindingDeclaration,
+                verter_session_query::facts::reactivity::ReactivityFact,
             )>,
         >,
     > {
@@ -189,7 +189,7 @@ impl VerterHost {
         canonical_id: &str,
         binding_name: &str,
     ) -> verter_semantic::query::QueryResult<
-        Option<verter_semantic::facts::reactivity::ReactivityFact>,
+        Option<verter_session_query::facts::reactivity::ReactivityFact>,
     > {
         use verter_semantic::query::QueryResult;
 
@@ -250,10 +250,10 @@ impl VerterHost {
         &self,
         component_ref: &verter_semantic::refs::ComponentRef,
     ) -> verter_semantic::query::QueryResult<
-        Option<verter_semantic::facts::runtime_schema::ComponentRuntimeSchema>,
+        Option<verter_session_query::facts::runtime_schema::ComponentRuntimeSchema>,
     > {
-        use verter_semantic::facts::runtime_schema::extract_runtime_schema;
         use verter_semantic::query::QueryResult;
+        use verter_session_query::facts::runtime_schema::extract_runtime_schema;
 
         let revision = self.semantic_revision();
         let surface_result = self.semantic_component_surface(&component_ref.file_id);

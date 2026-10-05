@@ -5401,7 +5401,7 @@ fn dispatch_host_adapter_routes_per_base_scope() {
     assert_eq!(
         adapter.resolve_builtin_utility(anchor_a, "Partial"),
         BuiltinUtilityResolution::Builtin(Some(
-            verter_semantic::analysis::type_solver::builtin::BuiltinUtility::Partial
+            verter_session_query::type_solver::builtin::BuiltinUtility::Partial
         )),
     );
 }
@@ -21840,7 +21840,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 // obligations.
 // ──────────────────────────────────────────────────────────────────────────
 
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 fn synthetic_macro_owner(
     _host: &VerterHost,

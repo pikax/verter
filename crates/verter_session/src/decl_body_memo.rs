@@ -43,24 +43,24 @@ use verter_semantic::analysis::framework_facts::svelte::{
     lower_props_annotation_at_with_owners, lower_svelte_type_argument_at_with_owners,
     PropsAnnotationLowering, SvelteTypeArgumentLowering,
 };
-use verter_semantic::analysis::type_eval::{
-    AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclKind,
-    ValueDeclGroup, ValueDeclKind,
-};
 use verter_semantic::analysis::type_eval_build::{
     lower_jsdoc_typedef_at_comment, lower_statement_parts, lower_svelte_runes_statement_parts,
     register_statement_parts, BuildEvalEnvContext, LoweredSignatureParts, LoweredTypeDeclParts,
     LoweredValueDeclParts, StatementLowerCtx,
 };
-use verter_semantic::analysis::type_solver::prepared::{
-    collect_heritage_base_facts, collect_key_domain_closedness_fact,
+use verter_session_query::declarations::{
+    AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclKind,
+    ValueDeclGroup, ValueDeclKind,
 };
-use verter_semantic::analysis::type_solver::{PreparedTypeDecl, ResolvedRootIdentity};
-use verter_semantic::facts::{
+use verter_session_query::facts::{
     produce_shallow_route_facts, type_body_fingerprint, value_body_fingerprint, CrossDeclLens,
     EmptyRouteFactLens, HashOutcome, RouteFactLens, TransientTypeBody, UnresolvedLens,
     ValueBodyFingerprintInput,
 };
+use verter_session_query::type_solver::prepared::{
+    collect_heritage_base_facts, collect_key_domain_closedness_fact,
+};
+use verter_session_query::type_solver::{PreparedTypeDecl, ResolvedRootIdentity};
 use verter_type_expr::facts::{
     EnumScalar, HeritageBaseFact, KeyDomainClosednessFact, NarrowTypeParam, PreparedMemberFact,
     TypeDependencyPathFact, ValueAnnotationClass, VueIgnoredHeritageFact,
@@ -78,9 +78,9 @@ pub(crate) mod locator_deref;
 pub(crate) use locator_deref::{DerefedBodyShape, LocatorBodyDerefError};
 
 /// Dependency-neutral lowered declaration values are owned by
-/// `verter_semantic::resolver_core::lowered_decl`. This module re-exports
+/// `verter_session_query::resolution::lowered_decl`. This module re-exports
 /// them for the session-owned lazy-lowering machinery and its consumers.
-pub use verter_semantic::resolver_core::{LoweredTypeDecl, LoweredValueDecl, ValueBodyHashFact};
+pub use verter_session_query::resolution::{LoweredTypeDecl, LoweredValueDecl, ValueBodyHashFact};
 
 /// Transient call lowering and the exact source origins used to evaluate its
 /// argument/receiver types. Value reads and authored type queries retain
@@ -373,15 +373,15 @@ impl SnapshotDemandLease {
 /// retaining the declaration memo or its preparation services.
 struct FunctionIndexDemand {
     snapshot: Arc<SnapshotDemandLease>,
-    owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
+    owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
     class_fields: Arc<verter_semantic::analysis::class_field_value::ClassFieldValues>,
     function_program_index:
-        OnceLock<Arc<verter_semantic::analysis::function_program::FunctionProgramIndex>>,
+        OnceLock<Arc<verter_session_query::function_program::FunctionProgramIndex>>,
 }
 impl FunctionIndexDemand {
     pub fn function_program_index(
         &self,
-    ) -> Arc<verter_semantic::analysis::function_program::FunctionProgramIndex> {
+    ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
         if let Some(cached) = self.function_program_index.get() {
             return cached.clone();
         }
@@ -448,12 +448,12 @@ pub struct IndexedExpressionDemand {
 impl IndexedExpressionDemand {
     pub(crate) fn function_program_index(
         &self,
-    ) -> Arc<verter_semantic::analysis::function_program::FunctionProgramIndex> {
+    ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
         self.index.function_program_index()
     }
     pub fn indexed_program_expression_ir(
         &self,
-        record: &verter_semantic::analysis::function_program::ProgramExpressionRecord,
+        record: &verter_session_query::function_program::ProgramExpressionRecord,
     ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
         let service = self.snapshot.service.as_ref()?;
         self.snapshot.ensure_lease();
@@ -526,7 +526,7 @@ impl IndexedExpressionDemand {
 
     pub(crate) fn function_type_param_clause(
         &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
     ) -> Option<Vec<crate::flow_slice_content::SliceTypeParam>> {
         let service = self.snapshot.service.as_ref()?;
         // Pin the retained snapshot for this memo's lifetime; the
@@ -558,7 +558,7 @@ impl IndexedExpressionDemand {
 
     pub(crate) fn flow_slice_content(
         &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
         selection: crate::flow_slice_content::FlowSliceSelection,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
         policy: crate::semantic_query::FlowReturnPolicy,
@@ -568,7 +568,7 @@ impl IndexedExpressionDemand {
 
     pub(crate) fn flow_slice_content_with_context(
         &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
         selection: Option<crate::flow_slice_content::FlowSliceSelection>,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
         context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
@@ -723,7 +723,7 @@ pub struct DeclBodyMemo {
     #[cfg(test)]
     eval_source: Arc<str>,
     framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
-    owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
+    owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
     /// Scope-aware component mode captured from the SAME retained eval program
     /// during cold indexing. This is separate from `.svelte.ts`/`.svelte.js`
     /// rune-module classification: a `.svelte` carrier may be legacy or runes
@@ -792,7 +792,7 @@ impl DeclBodyMemo {
         eval_source: Arc<str>,
         framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         source_type: oxc_span::SourceType,
-        owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
+        owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
         svelte_component_runes_mode: bool,
         service: Arc<DeclLoweringService>,
         header_index: Arc<DeclHeaderIndex>,
@@ -866,7 +866,11 @@ impl DeclBodyMemo {
         });
         let function_index = Arc::new(FunctionIndexDemand {
             snapshot: Arc::clone(&snapshot),
-            owner_table: Arc::new(verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0)),
+            owner_table: Arc::new(
+                verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+                    0,
+                ),
+            ),
             class_fields: Arc::clone(&header_index.class_field_values),
             function_program_index: OnceLock::new(),
         });
@@ -879,7 +883,11 @@ impl DeclBodyMemo {
             #[cfg(test)]
             eval_source: Arc::from(""),
             framework_parse: None,
-            owner_table: Arc::new(verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0)),
+            owner_table: Arc::new(
+                verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+                    0,
+                ),
+            ),
             svelte_component_runes_mode: false,
             service: None,
             snapshot,
@@ -979,7 +987,9 @@ impl DeclBodyMemo {
         &self.header_index
     }
 
-    pub(crate) fn owner_table(&self) -> &Arc<verter_semantic::analysis::TopLevelOwnerTable> {
+    pub(crate) fn owner_table(
+        &self,
+    ) -> &Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable> {
         &self.owner_table
     }
 
@@ -1219,8 +1229,8 @@ impl DeclBodyMemo {
         canonical: &str,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> verter_semantic::resolver_core::AttemptOutcome<Option<Arc<LoweredTypeDecl>>> {
-        use verter_semantic::resolver_core::AttemptOutcome;
+    ) -> verter_session_query::resolution::AttemptOutcome<Option<Arc<LoweredTypeDecl>>> {
+        use verter_session_query::resolution::AttemptOutcome;
 
         if self.header_index.type_header_in(owner, name).is_none() {
             return AttemptOutcome::Complete(None);
@@ -1234,7 +1244,7 @@ impl DeclBodyMemo {
                     canonical,
                     owner,
                     name,
-                    verter_semantic::resolver_core::DeclarationSpace::Type,
+                    verter_session_query::resolution::DeclarationSpace::Type,
                 ))
             }
         }
@@ -1249,8 +1259,8 @@ impl DeclBodyMemo {
         canonical: &str,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> verter_semantic::resolver_core::AttemptOutcome<Option<Arc<LoweredValueDecl>>> {
-        use verter_semantic::resolver_core::AttemptOutcome;
+    ) -> verter_session_query::resolution::AttemptOutcome<Option<Arc<LoweredValueDecl>>> {
+        use verter_session_query::resolution::AttemptOutcome;
 
         if self.header_index.value_header_in(owner, name).is_none() {
             return AttemptOutcome::Complete(None);
@@ -1264,7 +1274,7 @@ impl DeclBodyMemo {
                     canonical,
                     owner,
                     name,
-                    verter_semantic::resolver_core::DeclarationSpace::Value,
+                    verter_session_query::resolution::DeclarationSpace::Value,
                 ))
             }
         }
@@ -1273,7 +1283,7 @@ impl DeclBodyMemo {
     /// Shared `LoadSet` construction for [`Self::peek_type_decl`]/
     /// [`Self::peek_value_decl`]'s `NeedInputs` arm. `space` disambiguates
     /// which lowering space demanded the key (see
-    /// [`verter_semantic::resolver_core::DeclarationSpace`]'s docs): the
+    /// [`verter_session_query::resolution::DeclarationSpace`]'s docs): the
     /// same `(canonical, owner, name)` triple can independently miss in
     /// both spaces for the same declaration name.
     ///
@@ -1285,9 +1295,9 @@ impl DeclBodyMemo {
         canonical: &str,
         owner: TopLevelOwnerId,
         name: &str,
-        space: verter_semantic::resolver_core::DeclarationSpace,
-    ) -> verter_semantic::resolver_core::LoadSet {
-        use verter_semantic::resolver_core::{InputKey, LoadSet, ResolutionBasis};
+        space: verter_session_query::resolution::DeclarationSpace,
+    ) -> verter_session_query::resolution::LoadSet {
+        use verter_session_query::resolution::{InputKey, LoadSet, ResolutionBasis};
         LoadSet::new(
             vec![InputKey::DeclBody {
                 canonical: std::sync::Arc::from(canonical),
@@ -1548,7 +1558,7 @@ impl DeclBodyMemo {
     /// functions are not lowered — the index is structural only.
     pub fn function_program_index(
         &self,
-    ) -> Arc<verter_semantic::analysis::function_program::FunctionProgramIndex> {
+    ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
         self.function_index.function_program_index()
     }
 
@@ -1563,7 +1573,7 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn flow_bound_graph_for_tests(
         &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
     ) -> crate::cache_runtime::flow_slice_node::BoundFlowGraph {
         let file_language =
             verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
@@ -1597,7 +1607,7 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn flow_slice_content(
         &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
         selection: crate::flow_slice_content::FlowSliceSelection,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
         policy: crate::semantic_query::FlowReturnPolicy,
@@ -1609,7 +1619,7 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn flow_slice_content_with_context(
         &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
         selection: Option<crate::flow_slice_content::FlowSliceSelection>,
         bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
         context: Option<Arc<crate::flow_slice_content::NestedFlowContext>>,
@@ -1658,11 +1668,11 @@ impl DeclBodyMemo {
     /// miss (a typed miss, never a panic) or on a seeded memo / broken
     /// lease pin.
     ///
-    /// [`FunctionBodySkeleton`]: verter_semantic::analysis::flow::FunctionBodySkeleton
+    /// [`FunctionBodySkeleton`]: verter_session_query::flow::skeleton::FunctionBodySkeleton
     pub fn function_body_skeleton(
         &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
-    ) -> Option<verter_semantic::analysis::flow::FunctionBodySkeleton> {
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
+    ) -> Option<verter_session_query::flow::skeleton::FunctionBodySkeleton> {
         self.function_flow_structure(entry)
             .ok()
             .flatten()
@@ -1673,10 +1683,10 @@ impl DeclBodyMemo {
     /// returning its exact binding map with the structure for shared publication.
     pub fn function_flow_structure(
         &self,
-        entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
     ) -> Result<
-        Option<verter_semantic::analysis::flow::PreparedFunctionBodySkeleton>,
-        verter_semantic::analysis::flow::FlowBindingMapError,
+        Option<verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton>,
+        verter_session_query::flow::binding::FlowBindingMapError,
     > {
         let Some(service) = self.service.as_ref() else {
             return Ok(None);
@@ -1733,7 +1743,7 @@ impl DeclBodyMemo {
     /// AST is reborrowed on demand; no body `TypeExpr` is memo-owned.
     pub fn indexed_program_expression_ir(
         &self,
-        record: &verter_semantic::analysis::function_program::ProgramExpressionRecord,
+        record: &verter_session_query::function_program::ProgramExpressionRecord,
     ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
         self.indexed_expression_demand()
             .indexed_program_expression_ir(record)
@@ -2077,7 +2087,7 @@ impl DeclBodyMemo {
                     StatementLowerCtx {
                         build: &build_ctx,
                         contributor_index: index,
-                        statement_owner: verter_semantic::analysis::TopLevelStatementOwner {
+                        statement_owner: verter_session_query::analysis::top_level_owners::TopLevelStatementOwner {
                             owner,
                             owner_local_ordinal: contributor.anchor.owner_local_ordinal,
                         },
@@ -2410,7 +2420,7 @@ pub struct TransientValueParts {
     /// The owning declaration's kind (strict last-wins, the annotation rule)
     /// — the whole-signature recovery reads it to name the served function
     /// position of a body-derived return (declaration body vs initializer).
-    pub(crate) kind: Option<verter_semantic::analysis::type_eval::ValueDeclKind>,
+    pub(crate) kind: Option<verter_session_query::declarations::ValueDeclKind>,
     /// The owning declaration's HEADER type parameters — populated for a
     /// dual-space declaration (a `class K<T>` whose VALUE side's constructor
     /// shape references `T`) from the SAME statements' type-side parts,
@@ -3139,7 +3149,7 @@ pub(crate) fn lowered_decls_from_env_and_program(
 /// order) + unioned type-parameter headers — the fingerprint / dep-derivation
 /// inputs, read in place and dropped by the caller.
 fn lowered_type_decl_from_group(
-    group: &verter_semantic::analysis::type_eval::TypeDeclGroup,
+    group: &verter_session_query::declarations::TypeDeclGroup,
     dependencies: &DeclDependencyFacts,
     enum_type_arms: Option<Vec<EnumScalar>>,
     retained: &RetainedTypeTransients,
@@ -3152,7 +3162,7 @@ fn lowered_type_decl_from_group(
     // `enum` group merges (every contributor slot retained) even though its
     // type-space kind is the structural `Alias`.
     let body = group.merged_body_dual_space(enum_type_arms.is_some());
-    let space = verter_semantic::facts::SymbolSpace::Type;
+    let space = verter_session_query::facts::SymbolSpace::Type;
 
     // The fingerprint + member/typeof dep derivation read the SAME transient
     // view the legacy folded-body read observed: the enum scalar-union arms
@@ -3490,7 +3500,7 @@ fn fold_lowered_value_decl(
             transient_shape,
             enum_tuples.as_deref(),
         ),
-        verter_semantic::facts::SymbolSpace::Value,
+        verter_session_query::facts::SymbolSpace::Value,
         lens,
     );
     if degraded {
@@ -3617,10 +3627,10 @@ fn collect_augmentation_statement_dependencies(
 /// mix is what makes a parse-env move or a parser/language flip miss
 /// exactly the affected artifact slots without re-walking the body.
 pub(crate) fn fold_flow_body_env_identity(
-    index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
+    index: &verter_session_query::function_program::FunctionProgramIndex,
     parse_env_hash: &crate::types::Hash16,
     source_type: oxc_span::SourceType,
-) -> verter_semantic::analysis::function_program::FunctionProgramIndex {
+) -> verter_session_query::function_program::FunctionProgramIndex {
     const SALT: &[u8] = b"verter-flow-body-env-identity:v1";
     index.map_stable_hashes(|stable| {
         let mut buf = Vec::with_capacity(64);

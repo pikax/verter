@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::semantic_query::{PathSegment, ProjectionMode};
 use crate::typeinfo::framework_surface::results::{ResolvedMacroPayload, ResolvedOutcome};

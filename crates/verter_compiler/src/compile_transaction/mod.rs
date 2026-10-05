@@ -41,10 +41,10 @@ use std::sync::Arc;
 use verter_identity::identity::InputBasisId;
 use verter_macro_dto::RuntimePropType;
 use verter_semantic::analysis::ScriptAnalysisSnapshot;
-use verter_semantic::resolver_core::ResolutionBasis;
 use verter_semantic::type_info::{ImportedComponentResolution, ObservedMacroSurface};
+use verter_session_query::resolution::ResolutionBasis;
 
-pub use verter_semantic::resolver_core::ProjectIdentity;
+pub use verter_session_query::resolution::ProjectIdentity;
 
 use crate::assembly::publish::ArtifactSchemaError;
 use crate::compile::types::VueMacroSemanticInput;

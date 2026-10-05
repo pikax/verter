@@ -341,7 +341,7 @@ fn has_syntactic_route_fact(facts: &[FactVersionRef], canonical: &str) -> bool {
             f,
             FactVersionRef::Parse(parse)
                 if parse.canonical_id == canonical
-                    && parse.key == verter_semantic::facts::FactKey::SyntacticRouteInterface
+                    && parse.key == verter_session_query::facts::FactKey::SyntacticRouteInterface
         )
     })
 }
@@ -368,7 +368,7 @@ fn syntactic_route_hash(facts: &[FactVersionRef], owner: &str) -> Option<Hash16>
     facts.iter().find_map(|fact| match fact {
         FactVersionRef::Parse(parse)
             if parse.canonical_id == owner
-                && parse.key == verter_semantic::facts::FactKey::SyntacticRouteInterface =>
+                && parse.key == verter_session_query::facts::FactKey::SyntacticRouteInterface =>
         {
             Some(parse.expected_hash)
         }

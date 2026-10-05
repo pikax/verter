@@ -941,7 +941,7 @@ mod tests {
     fn normalize_nodes_discriminates_resolved_nested_generic_args() {
         use rustc_hash::FxHashSet;
         use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
-        use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+        use verter_session_query::type_solver::host::ResolvedRootIdentity;
         use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
         use verter_type_expr::LiteralValue;
 

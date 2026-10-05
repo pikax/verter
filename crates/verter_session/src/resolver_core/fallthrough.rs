@@ -9,7 +9,7 @@ use verter_semantic::analysis::component_meta::{
 use verter_semantic::analysis::html_intrinsics::{
     html_intrinsic_catalog, IntrinsicMemberKind, IntrinsicTypeShape,
 };
-use verter_semantic::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImport;
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource, SourcePosition};
 use verter_type_expr::intrinsics::StaticIntrinsicTypeId;
 use verter_type_expr::{
@@ -1091,7 +1091,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
 pub fn structural_substitute_typeof_refs(
     expr: &TypeExpr,
     owner: verter_type_expr::TopLevelOwnerId,
-    env: &verter_semantic::analysis::type_eval::EvalEnv,
+    env: &verter_session_query::declarations::EvalEnv,
 ) -> TypeExpr {
     match expr {
         TypeExpr::TypeOf(value_ref) if value_ref.path.len() == 1 => env
@@ -1249,13 +1249,13 @@ pub fn component_import_candidate_for_binding(
                     import_source: import.source.clone(),
                     imported_name: binding.imported_name.clone(),
                     binding_kind: Some(match binding.kind {
-                        verter_semantic::analysis::types::ImportBindingKind::Named => {
+                        verter_session_query::analysis::types::ImportBindingKind::Named => {
                             crate::resolver_core::ImportBindingKind::Named
                         }
-                        verter_semantic::analysis::types::ImportBindingKind::Default => {
+                        verter_session_query::analysis::types::ImportBindingKind::Default => {
                             crate::resolver_core::ImportBindingKind::Default
                         }
-                        verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                        verter_session_query::analysis::types::ImportBindingKind::Namespace => {
                             crate::resolver_core::ImportBindingKind::Namespace
                         }
                     }),
@@ -1738,7 +1738,7 @@ mod tests {
         html_intrinsic_catalog, intrinsic_listeners_for_tag, owned_intrinsic_members_for_tag,
         IntrinsicMemberKind, IntrinsicTypeShape,
     };
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::types::{
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
     };
     use verter_span::Span;
@@ -2604,16 +2604,16 @@ mod tests {
     fn leaf_annotated_const(
         name: &str,
         literal: &str,
-    ) -> verter_semantic::analysis::type_eval::ValueDeclInfo {
+    ) -> verter_session_query::declarations::ValueDeclInfo {
         use verter_type_expr::facts::{
             ClosedTypeFact, LeafTypeFact, SemanticTypeSource, ValueAnnotationClass,
             ValueTypeAnnotationFact,
         };
-        verter_semantic::analysis::type_eval::ValueDeclInfo {
+        verter_session_query::declarations::ValueDeclInfo {
             name: name.to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
@@ -2638,16 +2638,16 @@ mod tests {
         name: &str,
         target_owner: verter_type_expr::TopLevelOwnerId,
         target: &str,
-    ) -> verter_semantic::analysis::type_eval::ValueDeclInfo {
+    ) -> verter_session_query::declarations::ValueDeclInfo {
         use verter_type_expr::facts::{
             ValueAnnotationClass, ValueDeclIdentityPart, ValueTypeAnnotationFact,
         };
 
-        verter_semantic::analysis::type_eval::ValueDeclInfo {
+        verter_session_query::declarations::ValueDeclInfo {
             name: name.to_string(),
             owner,
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
@@ -2672,7 +2672,7 @@ mod tests {
 
     #[test]
     fn structural_substitute_typeof_refs_substitutes_length_one_value_refs() {
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(leaf_annotated_const("as", "input"));
 
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
@@ -2692,7 +2692,7 @@ mod tests {
 
     #[test]
     fn structural_substitute_typeof_refs_preserves_unresolved_refs() {
-        let env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let env = verter_session_query::declarations::EvalEnv::new();
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["missing".to_string()],
             type_args: Vec::new(),
@@ -2714,12 +2714,12 @@ mod tests {
         use verter_type_expr::facts::{
             ValueAnnotationClass, ValueDeclIdentityPart, ValueTypeAnnotationFact,
         };
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+        let mut env = verter_session_query::declarations::EvalEnv::new();
+        env.add_value(verter_session_query::declarations::ValueDeclInfo {
             name: "alias".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
@@ -2764,7 +2764,7 @@ mod tests {
     fn structural_substitute_typeof_refs_selects_same_name_in_exact_owner() {
         let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
         let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(typeof_alias_const(
             module_owner,
             "alias",
@@ -2801,7 +2801,7 @@ mod tests {
     #[test]
     fn structural_substitute_typeof_refs_peels_ordinary_file_alias() {
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(typeof_alias_const(owner, "alias", owner, "target"));
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["alias".to_string()],
@@ -2825,12 +2825,12 @@ mod tests {
         use verter_type_expr::locators::{
             AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
         };
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+        let mut env = verter_session_query::declarations::EvalEnv::new();
+        env.add_value(verter_session_query::declarations::ValueDeclInfo {
             name: "routes".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
@@ -2876,7 +2876,7 @@ mod tests {
 
     #[test]
     fn structural_substitute_typeof_refs_recurses_into_union_and_intersection() {
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(leaf_annotated_const("a", "A"));
         env.add_value(leaf_annotated_const("b", "B"));
 
@@ -2906,7 +2906,7 @@ mod tests {
 
     #[test]
     fn structural_substitute_typeof_refs_leaves_multi_segment_paths_untouched() {
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(leaf_annotated_const("props", "ignored"));
 
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {

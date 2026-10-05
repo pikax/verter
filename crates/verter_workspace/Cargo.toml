@@ -32,6 +32,7 @@ external-corpus = []
 test-support = []
 
 [dependencies]
+verter_session_query = { workspace = true }
 verter_execution = { path = "../verter_execution" }
 verter_debug_assert = { workspace = true }
 arc-swap = "1.9"

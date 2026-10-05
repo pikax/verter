@@ -96,9 +96,9 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::flow::flow_ir::{FlowCallee, FlowEffect, FlowExprRole, FlowSliceIR};
-use verter_semantic::analysis::flow::{FrameSpan, NameMeaning};
-use verter_semantic::analysis::function_program::{
+use verter_session_query::flow::flow_ir::{FlowCallee, FlowEffect, FlowExprRole, FlowSliceIR};
+use verter_session_query::flow::{frame_span::FrameSpan, skeleton::NameMeaning};
+use verter_session_query::function_program::{
     FunctionBindingKind, FunctionEffectCallee, FunctionProgramEntry, FunctionProgramIndex,
     FunctionProgramKey, FunctionReferenceBinding, FunctionTypeQueryPosition,
 };
@@ -1488,9 +1488,7 @@ struct CallableSignature {
 
 /// Whether a value declaration carries an AUTHORED annotation, which types
 /// it instead of its initializer's body.
-fn annotated(
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedValueDecl,
-) -> bool {
+fn annotated(prepared: &verter_session_query::type_solver::prepared::PreparedValueDecl) -> bool {
     matches!(
         prepared.type_annotation.classification,
         verter_type_expr::facts::ValueAnnotationClass::Direct
@@ -1522,20 +1520,18 @@ fn callee_is_free(entry: &FunctionProgramEntry, name: &str, span: verter_span::S
 /// declared type.
 fn parameter_written(
     entry: &FunctionProgramEntry,
-    binding: &verter_semantic::analysis::function_program::FlowBindingIdentity,
+    binding: &verter_session_query::function_program::FlowBindingIdentity,
 ) -> bool {
     entry.writes.iter().any(|write| {
         write.targets.iter().any(|target| match target {
-            verter_semantic::analysis::function_program::FunctionWriteTarget::Binding {
+            verter_session_query::function_program::FunctionWriteTarget::Binding {
                 reference,
                 ..
             } => match &reference.binding {
                 FunctionReferenceBinding::Resolved(written) => written == binding,
                 _ => false,
             },
-            verter_semantic::analysis::function_program::FunctionWriteTarget::Unsupported {
-                ..
-            } => true,
+            verter_session_query::function_program::FunctionWriteTarget::Unsupported { .. } => true,
         })
     })
 }
@@ -1592,7 +1588,7 @@ struct CallNest<'e> {
     enclosing: rustc_hash::FxHashMap<verter_span::Span, verter_span::Span>,
     sites: rustc_hash::FxHashMap<
         verter_span::Span,
-        &'e verter_semantic::analysis::function_program::FunctionCallSiteRecord,
+        &'e verter_session_query::function_program::FunctionCallSiteRecord,
     >,
     /// Whether each call decided so far is evaluated
     /// ([`ProjectSemanticDispatch::call_is_evaluated`]).

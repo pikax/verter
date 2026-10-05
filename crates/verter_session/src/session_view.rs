@@ -57,7 +57,7 @@ use crate::VerterHost;
 /// [`crate::VerterHost::host_view_env_hashes_for`]); the implicit
 /// project-identity context is held alongside on the view, not part of
 /// this bundle.
-pub use verter_semantic::resolver_core::EnvHashes;
+pub use verter_session_query::resolution::EnvHashes;
 
 /// Read-only view over the base host's source / artifact state.
 ///
@@ -372,7 +372,7 @@ impl HostView {
 fn resolved_import_facts_for_view(
     base: &VerterHost,
     canonical: &str,
-    content_hash: verter_semantic::analysis::Hash16,
+    content_hash: verter_session_query::analysis::types::Hash16,
     key_env_override: Option<&EnvHashes>,
 ) -> Option<Arc<crate::resolved_import_facts::ResolvedImportFacts>> {
     let (view, _is_current) = base.resolver_store_view_with_currentness();
@@ -416,7 +416,7 @@ fn resolved_import_facts_for_view(
 fn current_content_hash_from_scheduler(
     base: &VerterHost,
     canonical: &str,
-) -> Option<verter_semantic::analysis::Hash16> {
+) -> Option<verter_session_query::analysis::types::Hash16> {
     base.authoritative_current_content_hash(canonical)
 }
 

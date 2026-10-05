@@ -607,7 +607,7 @@ impl ProjectSemanticDispatch<'_> {
         field_index: u32,
         context: ProjectionReductionContext,
     ) -> Option<HotTypeRef> {
-        use verter_semantic::analysis::AnalyzedMacroKind;
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
         let canonical = payload.anchor.canonical_id.as_ref();
         let member_name: Arc<str> = {
             let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;

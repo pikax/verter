@@ -2,7 +2,6 @@
 use std::sync::Arc;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::InputBasisId;
-use verter_semantic::analysis::flow::flow_graph::{FlowNodeId, FlowNodeKind};
 use verter_session::for_tests::*;
 use verter_session::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
@@ -10,6 +9,7 @@ use verter_session::semantic_query::{
     ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData, SemanticNodeId,
     SemanticQueryKey,
 };
+use verter_session_query::flow::flow_graph::{FlowNodeId, FlowNodeKind};
 
 const SOURCE: &str = "function products(x) { const y = x; return y; }";
 

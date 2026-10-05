@@ -25,20 +25,20 @@
 
 // The core DTOs, named individually. A glob import would compile even if most
 // of them had never arrived, so each is named and each is load-bearing.
-use verter_semantic::resolver_core::dto::ProjectOwnership;
-use verter_semantic::resolver_core::dto::ProviderTarget;
-use verter_semantic::resolver_core::dto::ResolutionContext;
-use verter_semantic::resolver_core::dto::ResolutionKind;
-use verter_semantic::resolver_core::dto::ResolvePhase;
-use verter_semantic::resolver_core::dto::ResolveRequest;
-use verter_semantic::resolver_core::dto::ResolveRequestKind;
-use verter_semantic::resolver_core::dto::ResolveResult;
+use verter_session_query::resolution::dto::ProjectOwnership;
+use verter_session_query::resolution::dto::ProviderTarget;
+use verter_session_query::resolution::dto::ResolutionContext;
+use verter_session_query::resolution::dto::ResolutionKind;
+use verter_session_query::resolution::dto::ResolvePhase;
+use verter_session_query::resolution::dto::ResolveRequest;
+use verter_session_query::resolution::dto::ResolveRequestKind;
+use verter_session_query::resolution::dto::ResolveResult;
 // Project configuration has its own module rather than the shared DTO one.
 // Each import names the path the crate actually exposes, so the compiler
 // checks the concrete ownership boundary rather than a parallel inventory.
-use verter_semantic::resolver_core::project_config::IdeProjectCompilerOptions;
-use verter_semantic::resolver_core::project_config::IdeProjectConfig;
-use verter_semantic::resolver_core::project_config::WorkspaceAlias;
+use verter_session_query::resolution::project_config::IdeProjectCompilerOptions;
+use verter_session_query::resolution::project_config::IdeProjectConfig;
+use verter_session_query::resolution::project_config::WorkspaceAlias;
 
 /// Binds each imported name to a value slot, so an unused-import lint can never
 /// be "fixed" by deleting the import and silently dropping the assertion with

@@ -5,9 +5,9 @@ use super::request_inputs::{IndexedInputRecord, IndexedInputServe, PreparedInput
 use super::shallow_file_state::ShallowInputRecord;
 
 use std::sync::Arc;
-use verter_semantic::analysis::type_eval::DeclarationId;
-use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
-use verter_semantic::resolver_core::{AmbientSymbolHit, ProjectStableKey};
+use verter_session_query::declarations::DeclarationId;
+use verter_session_query::resolution::{AmbientSymbolHit, ProjectStableKey};
+use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use super::resolver_context::{
     note_non_cacheable_read_fan_out, MaterializeScopeObservation, NonCacheableReadReason,
@@ -45,7 +45,7 @@ pub trait IndexedInputs {
     fn project_stable_key_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_semantic::resolver_core::ProjectStableKey>;
+    ) -> Option<verter_session_query::resolution::ProjectStableKey>;
     fn host_view_env_hashes(&self) -> crate::session_view::EnvHashes;
     fn host_view_env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes;
     fn host_view_project_identity(&self) -> crate::file_artifact_store::ProjectIdentity;
@@ -56,7 +56,7 @@ pub trait IndexedInputs {
     fn semantic_compiler_options_for(
         &self,
         canonical: &str,
-    ) -> verter_semantic::resolver_core::SemanticCompilerOptions;
+    ) -> verter_session_query::resolution::SemanticCompilerOptions;
     fn resolve_project_for_canonical(
         &self,
         canonical: &str,
@@ -271,7 +271,7 @@ pub trait RouteLookup {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>;
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity>;
 
     /// Like [`Self::resolve_imported_type_root`] but ALSO returns the full
     /// route-chain fact list the resolution observed (every barrel /
@@ -287,7 +287,7 @@ pub trait RouteLookup {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     );
 
@@ -442,7 +442,7 @@ pub trait OwnedLowering {
         &self,
         canonical: &str,
         observed: crate::types::Hash16,
-        key: verter_semantic::facts::registry::FactKey,
+        key: verter_session_query::facts::registry::FactKey,
     ) -> Option<bool>;
     fn terminal_macro_inventory(&self, canonical: &str) -> TerminalMacroInventory;
     fn svelte_script_facts(
@@ -538,14 +538,14 @@ pub trait OwnedLowering {
     fn global_contributor_answer(
         &self,
         name: &str,
-        space: verter_semantic::facts::SymbolSpace,
+        space: verter_session_query::facts::SymbolSpace,
     ) -> ContributorAnswer;
     fn contributor_answer(
         &self,
         target: &crate::file_artifact_store::AugmentationTargetKind,
         name: &str,
         allow_automatic_libs: bool,
-        space: Option<verter_semantic::facts::SymbolSpace>,
+        space: Option<verter_session_query::facts::SymbolSpace>,
     ) -> ContributorAnswer;
     fn augmenter_artifact_answer(
         &self,
@@ -569,8 +569,8 @@ pub trait OwnedLowering {
         &self,
         canonical: &str,
         observed_hash: crate::types::Hash16,
-        key: verter_semantic::facts::registry::FactKey,
-        lane: verter_semantic::facts::registry::FactLane,
+        key: verter_session_query::facts::registry::FactKey,
+        lane: verter_session_query::facts::registry::FactLane,
     ) -> Option<super::ParseFactRef>;
     fn indexed_flow_source(
         &self,
@@ -621,14 +621,14 @@ pub trait OwnedLowering {
     fn prepare_augmentation_type(
         &self,
         input: &PreparedInputRecord,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> crate::resolver_core::prepared_decl::PreparedDeclOutcome<PreparedTypeDecl>;
     fn prepare_augmentation_value(
         &self,
         input: &PreparedInputRecord,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> crate::resolver_core::prepared_decl::PreparedDeclOutcome<PreparedValueDecl>;
@@ -637,7 +637,7 @@ pub trait OwnedLowering {
     fn function_program_index(
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,
-    ) -> Option<Arc<verter_semantic::analysis::function_program::FunctionProgramIndex>>;
+    ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>>;
 
     fn transient_type_parts(
         &self,
@@ -716,7 +716,7 @@ pub trait OwnedLowering {
         &self,
         key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
     ) -> Result<
-        Option<verter_semantic::analysis::flow::PreparedFunctionBodySkeleton>,
-        verter_semantic::analysis::flow::FlowBindingMapError,
+        Option<verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton>,
+        verter_session_query::flow::binding::FlowBindingMapError,
     >;
 }

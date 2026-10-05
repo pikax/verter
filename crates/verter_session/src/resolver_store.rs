@@ -366,12 +366,12 @@ const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 /// `StoreViewOverlayIdentity` is named distinctly to avoid colliding with
 /// `crate::cache_runtime::world_snapshot::OverlayIdentity`, an unrelated
 /// type).
-pub(crate) use verter_semantic::resolver_core::StoreViewOverlayIdentity as OverlayIdentity;
-pub(crate) use verter_semantic::resolver_core::StoreViewProjectIdentity;
+pub(crate) use verter_session_query::resolution::StoreViewOverlayIdentity as OverlayIdentity;
+pub(crate) use verter_session_query::resolution::StoreViewProjectIdentity;
 /// Complete validity oracle for a [`StoreViewSnapshot`]. The semantic-owned
 /// value is dependency-neutral; this crate owns the host-facing construction
 /// entry point ([`capture_store_view_validation_token`]).
-pub(crate) use verter_semantic::resolver_core::StoreViewValidationToken;
+pub(crate) use verter_session_query::resolution::StoreViewValidationToken;
 
 /// Capture the current [`StoreViewValidationToken`] from the host (base, no
 /// session overlay). The `overlay_identity` is `None`; a session-overlaid
@@ -2727,8 +2727,8 @@ impl HostStoreView {
         fact: &crate::resolver_core::ResolveImportsFactRef,
         content_hash: Hash16,
     ) -> bool {
-        use verter_semantic::facts::registry::FactLane;
-        use verter_semantic::facts::FactKey;
+        use verter_session_query::facts::registry::FactLane;
+        use verter_session_query::facts::FactKey;
         let crate::resolver_core::ResolveImportsFactRef::Semantic {
             canonical_id,
             key: fact_key,
@@ -2777,7 +2777,8 @@ impl HostStoreView {
         };
 
         // Pick the lane that the consumer observed under.
-        let pick_lane = |f: &std::sync::Arc<verter_semantic::facts::registry::Fact>| match lane {
+        let pick_lane = |f: &std::sync::Arc<verter_session_query::facts::registry::Fact>| match lane
+        {
             FactLane::Semantic => f.semantic_hash,
             FactLane::Display => f.display_hash,
         };
@@ -2973,13 +2974,13 @@ fn hash16_from_sorted(f: impl Fn(&mut rustc_hash::FxHasher)) -> Hash16 {
 /// Returns `None` when the payload does not match the tag — a malformed
 /// shape names no entry, and the validator fails closed on it.
 fn augmentation_target_kind_from_shape(
-    tag: verter_semantic::facts::registry::AugmentationTargetKindTag,
+    tag: verter_session_query::facts::registry::AugmentationTargetKindTag,
     external_specifier: Option<&str>,
     resolved_relative_canonical: Option<&str>,
     wildcard_pattern: Option<&str>,
 ) -> Option<crate::file_artifact_store::AugmentationTargetKind> {
     use crate::file_artifact_store::AugmentationTargetKind;
-    use verter_semantic::facts::registry::{
+    use verter_session_query::facts::registry::{
         AugmentationTargetKindTag, InternedGlobPattern, InternedSpecifier,
     };
     match tag {
@@ -3280,8 +3281,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
         match facts.lookup_or_compute(&fact.key) {
             Some(stored) => {
                 let stored_hash = match fact.lane {
-                    verter_semantic::facts::registry::FactLane::Semantic => stored.semantic_hash,
-                    verter_semantic::facts::registry::FactLane::Display => stored.display_hash,
+                    verter_session_query::facts::registry::FactLane::Semantic => {
+                        stored.semantic_hash
+                    }
+                    verter_session_query::facts::registry::FactLane::Display => stored.display_hash,
                 };
                 stored_hash == fact.expected_hash
             }
@@ -3362,7 +3365,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
         &self,
         fact: &crate::resolver_core::RouteSurfaceFactRef,
     ) -> bool {
-        use verter_semantic::facts::FactKey;
+        use verter_session_query::facts::FactKey;
         match &fact.key {
             FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag,
@@ -3384,8 +3387,8 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 // augmentations can no longer land in one slot.
                 let ext_for_target = if matches!(
                     target_kind_tag,
-                    verter_semantic::facts::registry::AugmentationTargetKindTag::GlobalAugmentation
-                        | verter_semantic::facts::registry::AugmentationTargetKindTag::WildcardAmbient
+                    verter_session_query::facts::registry::AugmentationTargetKindTag::GlobalAugmentation
+                        | verter_session_query::facts::registry::AugmentationTargetKindTag::WildcardAmbient
                 ) {
                     None
                 } else {
@@ -3393,8 +3396,8 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 };
                 let wild_for_target = if matches!(
                     target_kind_tag,
-                    verter_semantic::facts::registry::AugmentationTargetKindTag::ExternalSpecifier
-                        | verter_semantic::facts::registry::AugmentationTargetKindTag::ResolvedRelativeCanonical
+                    verter_session_query::facts::registry::AugmentationTargetKindTag::ExternalSpecifier
+                        | verter_session_query::facts::registry::AugmentationTargetKindTag::ResolvedRelativeCanonical
                 ) && population_decl.is_some()
                 {
                     None
@@ -3485,13 +3488,12 @@ impl crate::resolver_core::StoreView for HostStoreView {
                 // The KEYED lookup: the fact names one function position,
                 // and validity is that position's own live body hash —
                 // never "some entry in this file matches closely enough".
-                let key = verter_semantic::analysis::function_program::FunctionProgramKey {
-                    declaration:
-                        verter_semantic::analysis::function_program::FunctionDeclarationRef {
-                            owner: function.owner,
-                            name: Arc::clone(&function.merged_symbol_name),
-                            space: function.symbol_space,
-                        },
+                let key = verter_session_query::function_program::FunctionProgramKey {
+                    declaration: verter_session_query::function_program::FunctionDeclarationRef {
+                        owner: function.owner,
+                        name: Arc::clone(&function.merged_symbol_name),
+                        space: function.symbol_space,
+                    },
                     part: function.function_part.clone(),
                     overload_ordinal: function.overload_ordinal,
                 };

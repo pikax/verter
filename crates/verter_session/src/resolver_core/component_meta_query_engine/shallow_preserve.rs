@@ -157,7 +157,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         payload: &verter_type_expr::locators::MacroPayloadLocator,
         field_value: crate::semantic_query::HotTypeRef,
     ) -> Option<FastShallowFieldExpr> {
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        use verter_session_query::type_solver::host::BareRefOrigin;
         let scope_owner = payload.anchor.owner;
 
         let authored_source = || {
@@ -205,7 +205,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             // A pre-resolved generic application whose base lives outside the
             // owner scope is the imported-generic class.
             if base.canonical_id.as_ref() != scope_canonical_id
-                && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                && verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
                     base.decl_name.as_ref(),
                 )
                 .is_none()
@@ -447,7 +447,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> bool {
         use crate::graph_walk::Reach;
         use crate::semantic_query::SemanticNodeData;
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        use verter_session_query::type_solver::host::BareRefOrigin;
 
         crate::graph_walk::reaches(UtilityQuestion::Route(node), |question| match question {
             UtilityQuestion::Route(node) => {
@@ -460,7 +460,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     data_ref if data_ref.bare_ref_head().is_some() => {
                         let args = data_ref.carrier_type_args();
                         let utility = data_ref.bare_ref_head().is_some_and(|(name, _)| {
-                            verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                            verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
                                 name.as_ref(),
                             )
                             .is_some()
@@ -469,7 +469,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     }
                     SemanticNodeData::InstantiationRef { base, args } => {
                         let utility =
-                            verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                            verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
                                 base.decl_name.as_ref(),
                             )
                             .is_some();
@@ -588,7 +588,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> bool {
         use crate::graph_walk::Reach;
         use crate::semantic_query::SemanticNodeData;
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+        use verter_session_query::type_solver::host::BareRefOrigin;
 
         // The scopes the walk reads nodes in: the field's, then each local
         // alias declaration's it hops into.
@@ -664,7 +664,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             Reach::Parts(match data.as_ref() {
                 SemanticNodeData::InstantiationRef { base, args } => {
                     if base.canonical_id.as_ref() != scope_canonical_id.as_ref()
-                        && verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+                        && verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
                             base.decl_name.as_ref(),
                         )
                         .is_none()
@@ -699,8 +699,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> verter_semantic::analysis::type_solver::host::BareRefOrigin {
-        use verter_semantic::analysis::type_solver::host::BareRefOrigin;
+    ) -> verter_session_query::type_solver::host::BareRefOrigin {
+        use verter_session_query::type_solver::host::BareRefOrigin;
         if let Some(state) = self.ctx.shallow_file_state(scope_canonical_id) {
             if state.import_target_in(scope_owner, name).is_some() {
                 return BareRefOrigin::Imported;
@@ -737,7 +737,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::host::ResolvedRootIdentity> {
         let payload = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
         crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             self.ctx,

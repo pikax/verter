@@ -8,8 +8,8 @@
 //! (`ProjectSemanticDispatch::lib_global_declaration`) is its caller, and
 //! every reader of a library global asks that lookup.
 
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-use verter_semantic::resolver_core::ProjectStableKey;
+use verter_session_query::resolution::ProjectStableKey;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 use crate::resolver_core::ResolverContext;
 
@@ -66,7 +66,7 @@ mod tests {
                 workspace_root: "/ws".to_string(),
                 workspace_aliases: vec![],
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: vec![],
                 membership: verter_workspace::configured_membership_match_all_under_root(
                     &verter_workspace::CanonicalPath::new("/ws"),

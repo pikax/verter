@@ -32,9 +32,7 @@ pub mod enum_constant;
 #[path = "decl_dependencies_tests.rs"]
 mod decl_dependencies_tests;
 mod exports;
-mod fact_projection;
 #[doc(hidden)]
-pub use fact_projection::macro_payload_reference_head_fact;
 pub mod file_usage;
 pub mod flow;
 pub mod framework_facts;
@@ -75,11 +73,8 @@ pub mod style;
 mod style_syntax;
 pub mod template;
 pub mod template_class_facts;
-pub mod top_level_owners;
-pub mod type_eval;
 pub mod type_eval_build;
 pub mod type_expand;
-pub mod type_solver;
 pub mod types;
 
 #[cfg(test)]
@@ -147,23 +142,5 @@ pub use template_class_facts::{
     ReactiveWrapperProof, TemplateClassFactsCompleteness, TemplateClassSemanticFactRow,
     TemplateClassSemanticFacts, TemplateClassSubject,
 };
-pub use top_level_owners::{
-    DeclMap, DeclMapKey, TopLevelAttachedOwner, TopLevelOwnerRegion, TopLevelOwnerRegionError,
-    TopLevelOwnerTable, TopLevelOwnerTableError, TopLevelStatementOwner,
-};
-pub use types::hash_16;
-pub use types::{
-    AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedDefaultValue, AnalyzedEmitField,
-    AnalyzedExportedFunction, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro,
-    AnalyzedMacroKind, AnalyzedModuleReference, AnalyzedOptionsApi, AnalyzedOptionsComponent,
-    AnalyzedOptionsField, AnalyzedOptionsProp, AnalyzedPropField, AnalyzedSlotField,
-    AnalyzedSlotFieldBinding, BindingInitializer, ComposableInfo, ComposableReturn,
-    ComposableReturnField, CssVarManipulation, CssVarManipulationKind, DomQueryCallSite,
-    DomQueryKind, ExportSignature, FunctionParam, Hash16, ImportSourceInfo, LiteralKind,
-    LocalDeclarationEntry, LocalDeclarationKind, MacroAnchor, MacroAnchorUnsupported,
-    MacroEditAnchors, MacroTypeDep, MacroTypeDepUsage, MemberListAnchor,
-    ModuleReferenceAnalyzability, ModuleReferenceSemantics, ModuleReferenceSyntax, NestedMacroCall,
-    ReactivityKind, ResolvedLocalType, ResolvedTypeInfo, ScriptAnalysisSnapshot,
-    ScriptTypeEnhancements, StableDeclarationId, StoreApiClassification, StoreDefinition,
-    StoreUsage, TypeResolutionSource, VueApiClassification,
-};
+
+pub use types::{DomQueryCallSite, ScriptAnalysisSnapshot};

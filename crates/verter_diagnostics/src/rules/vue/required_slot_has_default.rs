@@ -1,4 +1,4 @@
-﻿//! Rule: required-slot-has-default
+//! Rule: required-slot-has-default
 //!
 //! Warns when `defineSlots` marks a slot as required (no `?`) but the
 //! corresponding `<slot>` element has fallback content. A required slot should
@@ -32,7 +32,7 @@ use std::collections::HashSet;
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct RequiredSlotHasDefault;
 
@@ -105,8 +105,11 @@ impl LintRule for RequiredSlotHasDefault {
 mod tests {
     use super::*;
     use verter_semantic::analysis::template::{DefinedSlot, TemplateAnalysisSnapshot};
-    use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
-    use verter_semantic::analysis::types::{AnalyzedMacro, AnalyzedMacroKind, AnalyzedSlotField};
+    use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::types::AnalysisFlags;
+    use verter_session_query::analysis::types::{
+        AnalyzedMacro, AnalyzedMacroKind, AnalyzedSlotField,
+    };
     use verter_span::Span;
 
     fn run(file: &FileContext<'_>) -> Vec<crate::diagnostic::LintDiagnostic> {

@@ -470,8 +470,8 @@ fn observed_scope_export_set(
         ctx,
         scope,
         observed_whole_hash,
-        verter_semantic::facts::FactKey::SyntacticExportSet,
-        verter_semantic::facts::FactLane::Semantic,
+        verter_session_query::facts::FactKey::SyntacticExportSet,
+        verter_session_query::facts::FactLane::Semantic,
     )
     .unwrap_or_else(|| {
         panic!(

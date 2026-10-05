@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
 
@@ -177,7 +177,7 @@ pub(super) fn macro_dep_exported_type_name<'a>(
 
             if matches!(
                 binding.kind,
-                verter_semantic::analysis::types::ImportBindingKind::Namespace
+                verter_session_query::analysis::types::ImportBindingKind::Namespace
             ) {
                 let prefix = format!("{}.", binding.name);
                 if let Some(member_name) = dep.type_name.strip_prefix(&prefix) {

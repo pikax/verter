@@ -6,5 +6,5 @@
 //! (the fixture would still fail to compile, and trybuild would still pass).
 
 fn main() {
-    let _forged = verter_semantic::analysis::types::MemberListAnchor::new(4, false);
+    let _forged = verter_session_query::analysis::types::MemberListAnchor::new(4, false);
 }

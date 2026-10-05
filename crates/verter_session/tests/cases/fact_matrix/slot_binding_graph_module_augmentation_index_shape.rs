@@ -10,11 +10,11 @@
 
 #![cfg(test)]
 
-use verter_semantic::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
-use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::for_tests::install_fact_tracer_for_tests;
 use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, RouteSurfaceFactRef};
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_session_query::facts::{FactKey, FactLane};
 
 #[test]
 fn slot_binding_graph_signature_carries_module_augmentation_index_shape() {

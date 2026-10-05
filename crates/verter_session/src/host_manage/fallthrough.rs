@@ -57,7 +57,7 @@ pub(crate) struct FallthroughComputeOutcome {
 /// names only values that were successfully hydrated. `BTreeSet` preserves
 /// exact canonical/lexical-owner/name identity with deterministic dedup.
 pub(super) struct FallthroughEvalInputs {
-    pub(super) env: std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>,
+    pub(super) env: std::sync::Arc<verter_session_query::declarations::EvalEnv>,
     pub(super) materialized_runtime_values:
         std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity>,
 }
@@ -72,7 +72,7 @@ fn static_is_names_native_tag(name: &str) -> bool {
 }
 
 impl std::ops::Deref for FallthroughEvalInputs {
-    type Target = verter_semantic::analysis::type_eval::EvalEnv;
+    type Target = verter_session_query::declarations::EvalEnv;
 
     fn deref(&self) -> &Self::Target {
         self.env.as_ref()
@@ -193,7 +193,7 @@ impl VerterHost {
         owner_canonical_id: &str,
         child_canonical_id: &str,
     ) -> Option<(String, String)> {
-        use verter_semantic::analysis::types::ImportBindingKind;
+        use verter_session_query::analysis::types::ImportBindingKind;
 
         let ingress = self.get_script_ingress(owner_canonical_id)?;
         let mut best: Option<(bool, String, String)> = None;
@@ -204,7 +204,7 @@ impl VerterHost {
             let dep_canonical = match self.resolve_loaded_dependency_canonical(
                 owner_canonical_id,
                 import.source.as_str(),
-                verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                verter_session_query::resolution::ResolveRequestKind::EsmImport,
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     let Some(dep_canonical) = admitted.into_result() else {
@@ -242,7 +242,7 @@ impl VerterHost {
                     continue;
                 }
                 let is_relative =
-                    verter_semantic::resolver_core::is_relative_specifier(import.source.as_str());
+                    verter_session_query::resolution::is_relative_specifier(import.source.as_str());
                 let candidate = (!is_relative, import.source.clone(), export_name);
                 if best.as_ref().is_none_or(|known| candidate < *known) {
                     best = Some(candidate);
@@ -566,9 +566,10 @@ impl VerterHost {
             imports: &resolved.snapshot.imports,
             template: resolved.snapshot.template.as_deref(),
             options_api: resolved.snapshot.options_api.as_ref(),
-            analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
-                resolved.snapshot.script_flags,
-            ),
+            analysis_flags:
+                verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
+                    resolved.snapshot.script_flags,
+                ),
             styles: &resolved.snapshot.styles,
             vue_api_calls: &resolved.snapshot.vue_api_calls,
             store_usages: &resolved.snapshot.store_usages,
@@ -782,7 +783,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
     ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
-        use verter_semantic::analysis::types::ImportBindingKind;
+        use verter_session_query::analysis::types::ImportBindingKind;
 
         let required_runtime_value_names = match root_reachability {
             Some(root_reachability) => {
@@ -861,7 +862,7 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         owner_local_value_names: &rustc_hash::FxHashSet<verter_type_expr::DeclBindingKey>,
         required_runtime_value_names: Option<&rustc_hash::FxHashSet<String>>,
-        env: &mut verter_semantic::analysis::type_eval::EvalEnv,
+        env: &mut verter_session_query::declarations::EvalEnv,
     ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
         component_meta_trace_custom!(
             "materialize_runtime_values",
@@ -907,7 +908,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
-        eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
+        eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         overrides_in: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
@@ -967,7 +968,7 @@ impl VerterHost {
         element_index: u32,
         base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
-        eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
+        eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
@@ -1083,7 +1084,7 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
-        eval_env: &mut Option<std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>>,
+        eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,

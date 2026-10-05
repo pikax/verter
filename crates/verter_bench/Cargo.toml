@@ -64,6 +64,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 libc = "0.2"
 
 [dev-dependencies]
+verter_session_query = { workspace = true }
 # Activates `test-support` on `verter_compiler` for THIS crate's own
 # bench/example targets only — `real_world_compile_bench.rs` and the
 # `new_impl_check`/`profile_ast`/`vapor_check` examples measure the raw

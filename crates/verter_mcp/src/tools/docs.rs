@@ -1,8 +1,9 @@
 //! Component documentation generation.
 
 use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
-use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 use verter_semantic::analysis::StyleBlockAnalysis;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 /// Generate Markdown documentation for a Vue component.
 pub fn generate_docs(

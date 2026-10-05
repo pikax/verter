@@ -3,6 +3,43 @@ use oxc_ast::ast::*;
 use oxc_parser::ParseOptions;
 use oxc_span::{GetSpan, SourceType};
 use verter_parser::oxc_parse::Parser;
+use verter_session_query::analysis::types::AnalysisFlags;
+use verter_session_query::analysis::types::AnalyzedBinding;
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+use verter_session_query::analysis::types::AnalyzedExportedFunction;
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedMacro;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedModuleReference;
+use verter_session_query::analysis::types::AnalyzedOptionsApi;
+use verter_session_query::analysis::types::BindingInitializer;
+use verter_session_query::analysis::types::ComposableInfo;
+use verter_session_query::analysis::types::ComposableReturn;
+use verter_session_query::analysis::types::ComposableReturnField;
+use verter_session_query::analysis::types::CssVarManipulation;
+use verter_session_query::analysis::types::CssVarManipulationKind;
+use verter_session_query::analysis::types::DomQueryKind;
+use verter_session_query::analysis::types::ExportSignature;
+use verter_session_query::analysis::types::FunctionParam;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::analysis::types::LiteralKind;
+use verter_session_query::analysis::types::LocalDeclarationEntry;
+use verter_session_query::analysis::types::MacroTypeDep;
+use verter_session_query::analysis::types::MacroTypeDepUsage;
+use verter_session_query::analysis::types::ModuleReferenceAnalyzability;
+use verter_session_query::analysis::types::ModuleReferenceSemantics;
+use verter_session_query::analysis::types::ModuleReferenceSyntax;
+use verter_session_query::analysis::types::NestedMacroCall;
+use verter_session_query::analysis::types::ReactivityKind;
+use verter_session_query::analysis::types::ReturnReactivity;
+use verter_session_query::analysis::types::ScriptBindingOccurrence;
+use verter_session_query::analysis::types::ScriptUsageKind;
+use verter_session_query::analysis::types::StoreApiClassification;
+use verter_session_query::analysis::types::StoreDefinition;
+use verter_session_query::analysis::types::StoreUsage;
+use verter_session_query::analysis::types::VueApiCallSite;
+use verter_session_query::analysis::types::VueApiCallbackParam;
+use verter_session_query::analysis::types::VueApiClassification;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
@@ -20,8 +57,8 @@ use crate::analysis::macros::{
     stamp_macro_payload_locators, try_extract_macro_from_expr, try_extract_macro_from_var_decl,
 };
 use crate::analysis::scope::AnalysisScope;
-use crate::analysis::top_level_owners::TopLevelOwnerTable;
 use crate::analysis::types::*;
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
 
 /// Whether `statements` declare a `TSInterfaceDeclaration` named exactly
 /// `AppConfig`: at the statement level, in an `export` declaration, in an
@@ -1834,7 +1871,7 @@ fn extract_callback_params(
     call: &oxc_ast::ast::CallExpression<'_>,
     api: VueApiClassification,
 ) -> Vec<VueApiCallbackParam> {
-    use crate::analysis::types::VueApiCallbackParam;
+    use verter_session_query::analysis::types::VueApiCallbackParam;
 
     // Determine which argument index has the callback
     let cb_index = match api {
@@ -2887,7 +2924,7 @@ fn collect_declaration_entries(
     program: &Program<'_>,
     owners: &TopLevelOwnerTable,
 ) -> Vec<LocalDeclarationEntry> {
-    use crate::analysis::types::{LocalDeclarationEntry, LocalDeclarationKind};
+    use verter_session_query::analysis::types::{LocalDeclarationEntry, LocalDeclarationKind};
 
     fn entry_from_span(
         content: &str,

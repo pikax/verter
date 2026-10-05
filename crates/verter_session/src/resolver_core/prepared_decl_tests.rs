@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_eval::ValueDeclKind;
+use verter_session_query::declarations::ValueDeclKind;
 
 use super::*;
 
@@ -570,7 +570,7 @@ fn module_augmentation_namespace_decl_does_not_bind_global_sibling() {
     // Module-scope decl's `name_resolution`, crossing scopes. Module
     // siblings are not consumable today (no Module-scope prepared-decl
     // slot), so the Module arm binds NOTHING.
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
     let source = r#"
 export {};
 declare global { namespace NS { type GlobalOnly = { g: string } } }
@@ -1159,7 +1159,7 @@ fn broken_lease_type_deps_is_not_cached_as_absence() {
 /// a correct implementation from one that collapses the lease-miss.
 #[test]
 fn broken_lease_augmentation_prepared_build_surfaces_lease_miss() {
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
 
     let source = "declare module \"ext\" { interface A { x: string } }\n\
                       declare module \"ext\" { interface B { y: number } }\n";

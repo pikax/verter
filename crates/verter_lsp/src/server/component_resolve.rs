@@ -232,9 +232,9 @@ impl VerterLanguageServer {
             .resolve_for_persistent_state(
                 parent_canonical_id,
                 specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                 },
             )
             .map_result(|resolved| resolved.source_id)
@@ -307,7 +307,7 @@ impl VerterLanguageServer {
 
         let mut emit_locations = Vec::new();
         for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineEmits {
+            if mac.kind != verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits {
                 continue;
             }
             for emit_field in &mac.emit_fields {
@@ -926,7 +926,7 @@ impl VerterLanguageServer {
 
         // Tier 1: defineModel macro
         for mac in child.analysis.macros.iter() {
-            if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineModel {
+            if mac.kind != verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel {
                 continue;
             }
             let macro_model_name = mac.model_name.as_deref().unwrap_or("modelValue");
@@ -1001,7 +1001,10 @@ impl VerterLanguageServer {
                 .analysis
                 .macros
                 .iter()
-                .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+                .filter(|mac| {
+                    mac.kind
+                        == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
+                })
                 .flat_map(|mac| mac.slot_fields.iter())
                 .filter_map(|slot_field| {
                     attr_name_match_rank(slot_name, &slot_field.name)
@@ -1048,7 +1051,10 @@ impl VerterLanguageServer {
                 .analysis
                 .macros
                 .iter()
-                .filter(|mac| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+                .filter(|mac| {
+                    mac.kind
+                        == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
+                })
                 .flat_map(|mac| mac.slot_fields.iter())
                 .filter_map(|slot_field| {
                     attr_name_match_rank(slot_name, &slot_field.name)
@@ -1293,7 +1299,7 @@ mod canonicalize_provider_path_tests {
 #[cfg(test)]
 mod imported_component_candidate_tests {
     use super::imported_component_canonical_candidates;
-    use verter_semantic::analysis::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedImport;
 
     // @ai-generated - Verifies parent-analysis identity outranks mutable fallbacks.
     #[test]

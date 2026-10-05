@@ -337,7 +337,7 @@ impl KeyFamily {
                 SemanticQueryKey::ResolveMacroPayload { macro_kind, .. },
             ) => matches!(
                 macro_kind,
-                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
             ),
             _ => false,
         }

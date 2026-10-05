@@ -19,8 +19,8 @@
 //!   env.
 
 pub(crate) fn template_converter_inputs(
-    imports: &[verter_semantic::analysis::AnalyzedImport],
-    bindings: &[verter_semantic::analysis::AnalyzedBinding],
+    imports: &[verter_session_query::analysis::types::AnalyzedImport],
+    bindings: &[verter_session_query::analysis::types::AnalyzedBinding],
 ) -> Vec<(String, String)> {
     // Carrier-linkage map for template components. A `import type { X }` (or a
     // per-specifier `import { type X }`) is a TYPE-ONLY binding — it has no
@@ -45,7 +45,7 @@ pub(crate) fn template_converter_inputs(
     // it in the linkage map so a `<X>` tag links to its `.vue` carrier exactly
     // like a static default import.
     for binding in bindings {
-        if let Some(verter_semantic::analysis::BindingInitializer::FunctionCall {
+        if let Some(verter_session_query::analysis::types::BindingInitializer::FunctionCall {
             async_component_source: Some(source),
             ..
         }) = &binding.initializer

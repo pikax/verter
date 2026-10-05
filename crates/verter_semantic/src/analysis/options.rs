@@ -13,7 +13,7 @@ use crate::analysis::macros::{
     resolve_runtime_constructor_identifier,
 };
 use crate::analysis::root_binding_index::RootBindingIndex;
-use crate::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedEmitField, AnalyzedOptionsApi, AnalyzedOptionsComponent, AnalyzedOptionsField,
     AnalyzedOptionsProp,
 };

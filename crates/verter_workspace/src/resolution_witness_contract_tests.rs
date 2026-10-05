@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use super::ModuleResolverCoreTestExt;
 use crate::traits::WorkspaceRead;
 use crate::types::{ResolutionKind, ResolvePhase, ResolveRequest, ResolveRequestKind};
-use verter_semantic::resolver_core::{normalize_canonical_id, AttemptFailure, ModuleResolverCore};
+use verter_session_query::resolution::{normalize_canonical_id, AttemptFailure, ModuleResolverCore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResolverObservation {
@@ -79,8 +79,8 @@ impl TraceReader {
 impl WorkspaceRead for TraceReader {
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
         crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
     }

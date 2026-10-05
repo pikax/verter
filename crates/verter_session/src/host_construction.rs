@@ -99,15 +99,15 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
             } else {
                 format!("{}**/*", root)
             };
-            membership.spec.include = vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::new(&include),
+            membership.spec.include = vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::new(&include),
             )];
             membership.spec.exclude =
                 ["node_modules/**", "bower_components/**", "jspm_packages/**"]
                     .into_iter()
                     .map(|pattern| {
-                        verter_semantic::resolver_core::CompiledGlob::new(
-                            verter_semantic::resolver_core::NormalizedGlob::new(&format!(
+                        verter_session_query::resolution::CompiledGlob::new(
+                            verter_session_query::resolution::NormalizedGlob::new(&format!(
                                 "{root}{pattern}"
                             )),
                         )
@@ -730,7 +730,7 @@ impl VerterHost {
         let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
-        let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+        let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
             .iter()
             .map(|(root, tsconfig_json)| {
                 let root = root.trim_end_matches('/').to_string();
@@ -1058,7 +1058,7 @@ impl VerterHost {
     pub fn semantic_compiler_options_for(
         &self,
         canonical: &str,
-    ) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+    ) -> verter_session_query::resolution::SemanticCompilerOptions {
         let workspace = self.workspace();
         self.resolve_project_for_canonical(canonical)
             .and_then(|p| workspace.semantic_compiler_options_for_project(p))
@@ -1363,7 +1363,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         state: &mut crate::resolver_core::ShallowFileState,
-        macros: &[verter_semantic::analysis::types::AnalyzedMacro],
+        macros: &[verter_session_query::analysis::types::AnalyzedMacro],
         eval_source: Option<&str>,
         framework_parse: Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     ) {

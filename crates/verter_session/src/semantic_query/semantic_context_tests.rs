@@ -1,4 +1,4 @@
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     EnvHashes, RawSemanticCompilerOptions, SemanticCompilerOptions,
 };
 

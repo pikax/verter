@@ -27,7 +27,7 @@ fn rk(provider: &str, name: &str) -> crate::resolver_core::RouteNameKey {
     crate::resolver_core::RouteNameKey::new(
         provider,
         name,
-        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session_query::facts::registry::SymbolSpace::Type,
         crate::file_artifact_store::ProjectIdentity([0u8; 16]),
         [0u8; 16],
         [0u8; 16],
@@ -225,7 +225,7 @@ impl verter_workspace::WorkspaceRead for CountingWs {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         self.inner
             .resolve_import_outcome(importer_id, specifier, ctx)
@@ -287,7 +287,10 @@ impl WorkspaceAccess for CountingWs {
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
     }
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
@@ -390,7 +393,10 @@ impl WorkspaceAccess for BumpOrderProbeWs {
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
     }
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
@@ -421,8 +427,8 @@ fn set_exact_resolutions_preserves_project_generation_and_advances_route_witness
         canonical,
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some("/lib/dep.ts".to_string()),
             possible_canonical_ids: vec!["/lib/dep.ts".to_string()],
         }],
@@ -560,7 +566,10 @@ impl WorkspaceAccess for RouteSyncProbeWs {
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
     }
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {

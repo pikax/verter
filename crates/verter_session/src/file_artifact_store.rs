@@ -32,8 +32,8 @@ use dashmap::mapref::entry::Entry as AugmentationIndexEntry;
 use dashmap::DashMap;
 use smallvec::SmallVec;
 use verter_language::FileLanguage;
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::registry as fact_registry;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::registry as fact_registry;
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::project_type_store::IndexedReady;
@@ -44,7 +44,7 @@ use crate::resolver_core::bracketed_generation::BracketedGeneration;
 // them here so existing callers continue to see them under the
 // `verter_session::file_artifact_store::*` paths they already use
 // (no `pub use as` shimming — the types are identical, not renamed).
-pub use verter_semantic::facts::registry::{
+pub use verter_session_query::facts::registry::{
     InternedGlobPattern, InternedName, InternedSpecifier, SymbolSpace,
 };
 
@@ -52,7 +52,7 @@ pub use verter_semantic::facts::registry::{
 
 // Dependency-neutral project identity shared with the semantic observation
 // boundary (a plain `Hash16` newtype with no session/host behavior).
-pub use verter_semantic::resolver_core::ProjectIdentity;
+pub use verter_session_query::resolution::ProjectIdentity;
 
 // ── FileArtifactKey ──
 
@@ -450,7 +450,7 @@ pub struct ModuleAugmentationFact {
 // registry values, and these key types contain no session/host behavior.
 // Their ordering supports `InputKey` load-set normalization; the store's
 // DashMap uses their `Hash`/`Eq` identity.
-pub use verter_semantic::resolver_core::{
+pub use verter_session_query::resolution::{
     AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
 };
 
@@ -3774,7 +3774,7 @@ pub(crate) fn augmenter_matches_target(
     target_key: &AugmentationTargetKey,
     resolved_relative_canonical: Option<&str>,
 ) -> bool {
-    use verter_semantic::resolver_core::is_relative_specifier;
+    use verter_session_query::resolution::is_relative_specifier;
     let specifier: &str = fact.specifier.as_ref();
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
@@ -3828,7 +3828,7 @@ fn augmenter_fact_could_contribute(
     // which facts are relative, or a `declare module '..'` fact would
     // be exact-matched as relative but never invalidate relative-target
     // entries.
-    let is_relative = verter_semantic::resolver_core::is_relative_specifier(specifier);
+    let is_relative = verter_session_query::resolution::is_relative_specifier(specifier);
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
             let is_wildcard = specifier.contains('*');

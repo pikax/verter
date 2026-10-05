@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
+use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
@@ -249,8 +249,8 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
                     ctx,
                     canonical,
                     overlay_hash,
-                    verter_semantic::facts::FactKey::SyntacticExportSet,
-                    verter_semantic::facts::FactLane::Semantic,
+                    verter_session_query::facts::FactKey::SyntacticExportSet,
+                    verter_session_query::facts::FactLane::Semantic,
                 );
             return Some(MaterializeScopeObservation {
                 canonical_id: Arc::from(canonical),

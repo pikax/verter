@@ -5,7 +5,7 @@ use crate::workspace_snapshot::{
     ConfiguredOwnerResolution, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
 };
 use crate::ProjectMembership;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     CompiledGlob, ConfiguredMembership, IdeProjectCompilerOptions, NormalizedGlob,
     StaticMembershipSpec,
 };

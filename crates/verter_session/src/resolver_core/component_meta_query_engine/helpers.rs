@@ -30,13 +30,13 @@ pub(super) fn is_package_canonical(ctx: &dyn ResolverContext, canonical_id: &str
 }
 
 pub(super) fn is_builtin_name(name: &str) -> bool {
-    verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
+    verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
         || matches!(name, "Array" | "ReadonlyArray" | "Promise")
 }
 
 pub(super) fn prepared_type_decl_canonical_dependencies(
     resolved_id: &str,
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
 ) -> BTreeSet<String> {
     let mut canonical_dependencies = BTreeSet::from([resolved_id.to_string()]);
     if let Some((defining_file, _)) = prepared.cache_deps.defining_file.as_ref() {
@@ -96,7 +96,7 @@ where
         .prepared_type_decl_return_only(canonical_id, source_owner, exported_name)
         .is_some()
     {
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+        verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
             canonical_id,
             source_owner,
             exported_name,
@@ -106,7 +106,7 @@ where
             .shallow_file_state(canonical_id)
             .and_then(|state| state.export_target(exported_name).cloned())
         {
-            verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+            verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
                 canonical_id,
                 owner,
                 symbol_name,

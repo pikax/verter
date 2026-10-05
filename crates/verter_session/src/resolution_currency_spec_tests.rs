@@ -612,14 +612,14 @@ fn existing_resolution_fact_rail_is_fact_version_ref_resolve_imports() {
 
     let fact = ResolveImportsFactRef::Semantic {
         canonical_id: "/p/main.ts".to_string(),
-        key: verter_semantic::facts::FactKey::ResolvedImportClause {
-            specifier: verter_semantic::facts::registry::InternedSpecifier::from("./dep"),
-            binding: verter_semantic::facts::registry::InternedName::from("Dep"),
-            space: verter_semantic::facts::SymbolSpace::Type,
+        key: verter_session_query::facts::FactKey::ResolvedImportClause {
+            specifier: verter_session_query::facts::registry::InternedSpecifier::from("./dep"),
+            binding: verter_session_query::facts::registry::InternedName::from("Dep"),
+            space: verter_session_query::facts::SymbolSpace::Type,
             resolved_canonical: Arc::from("/p/dep.ts"),
-            resolved_source_name: verter_semantic::facts::registry::InternedName::from("Dep"),
+            resolved_source_name: verter_session_query::facts::registry::InternedName::from("Dep"),
         },
-        lane: verter_semantic::facts::FactLane::Semantic,
+        lane: verter_session_query::facts::FactLane::Semantic,
         expected_hash: [0; 16],
     };
     assert_eq!(

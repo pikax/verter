@@ -5,7 +5,7 @@ use oxc_span::SourceType;
 use verter_parser::oxc_parse::Parser;
 
 use crate::analysis::classify::classify_vue_api;
-use crate::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, ImportBindingKind, ImportSourceInfo,
 };
 use verter_type_expr::TopLevelOwnerId;
@@ -157,7 +157,7 @@ fn is_vue_source(source: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::types::VueApiClassification;
+    use verter_session_query::analysis::types::VueApiClassification;
 
     fn parse_imports(code: &str) -> Vec<ImportSourceInfo> {
         let alloc = Allocator::new();

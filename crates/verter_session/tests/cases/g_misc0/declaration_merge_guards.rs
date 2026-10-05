@@ -47,7 +47,7 @@ fn walk_rs(path: &PathBuf, out: &mut Vec<PathBuf>) {
 /// never a last-wins `FxHashMap<String, TypeDeclInfo>` / `…ValueDeclInfo>` map.
 #[test]
 fn eval_env_type_symbols_are_grouped_not_last_wins_map() {
-    let src = read("crates/verter_semantic/src/analysis/type_eval.rs");
+    let src = read("crates/verter_session_query/src/declarations.rs");
     // The owner-aware `DeclMap<..Group>` carrier preserves the ordered
     // contributor-GROUP semantics (values stay `TypeDeclGroup` /
     // `ValueDeclGroup`) while keying canonically by `(owner, name)`.
@@ -79,7 +79,7 @@ fn eval_env_type_symbols_are_grouped_not_last_wins_map() {
 /// `insert` over an existing mergeable-kind name).
 #[test]
 fn eval_env_add_decl_appends_not_overwrites() {
-    let src = read("crates/verter_semantic/src/analysis/type_eval.rs");
+    let src = read("crates/verter_session_query/src/declarations.rs");
     let appends = src.matches("group.contributors.push(decl)").count();
     assert!(
         appends >= 2,

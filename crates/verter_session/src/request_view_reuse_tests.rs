@@ -490,7 +490,9 @@ fn request_store_view_validates_resolve_imports_for_overlay_promoted_canonical()
     use crate::session_view::{HostView, SessionView};
     use crate::types::DependencyResolution;
     use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
-    use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
+    use verter_session_query::facts::registry::{
+        FactKey, FactLane, InternedName, InternedSpecifier,
+    };
 
     let host = VerterHost::new_standalone(HostConfig {
         dev_mode: false,

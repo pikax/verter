@@ -10,7 +10,7 @@ use verter_semantic::type_info::{
 fn main() {
     let core = TypeInfoCore::from_observation_snapshot(
         Arc::new(NonFlowObservationSnapshot::new()),
-        verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder(),
+        verter_session_query::resolution::ResolutionBasis::unbound_placeholder(),
     );
     // An alternate dispatch entry must not exist.
     let _ = core.attempt_unchecked(&NonFlowOperation::ProjectExposeSurface {

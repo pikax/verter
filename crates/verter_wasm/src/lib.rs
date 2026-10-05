@@ -267,22 +267,30 @@ fn host_err(err: host::HostError) -> JsValue {
 
 fn ffi_module_reference_syntax_from_str(
     syntax: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceSyntax, JsValue> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceSyntax, JsValue> {
     match syntax {
-        "staticImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::StaticImport),
-        "exportFrom" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom),
-        "dynamicImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport),
-        "requireCall" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::RequireCall),
+        "staticImport" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport)
+        }
+        "exportFrom" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom)
+        }
+        "dynamicImport" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport)
+        }
+        "requireCall" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::RequireCall)
+        }
         other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
     }
 }
 
 fn ffi_module_reference_semantics_from_str(
     semantics: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceSemantics, JsValue> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceSemantics, JsValue> {
     match semantics {
-        "import" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Import),
-        "require" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Require),
+        "import" => Ok(verter_session_query::analysis::types::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_session_query::analysis::types::ModuleReferenceSemantics::Require),
         other => Err(ffi_err(format!(
             "unknown module reference semantics: {other}"
         ))),
@@ -291,12 +299,14 @@ fn ffi_module_reference_semantics_from_str(
 
 fn ffi_module_reference_analyzability_from_str(
     analyzability: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceAnalyzability, JsValue> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceAnalyzability, JsValue> {
     match analyzability {
-        "exact" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::Exact),
-        "finiteSet" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "exact" => Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet)
+        }
         "unknownDynamic" => {
-            Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic)
+            Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::UnknownDynamic)
         }
         other => Err(ffi_err(format!(
             "unknown module reference analyzability: {other}"
@@ -306,19 +316,21 @@ fn ffi_module_reference_analyzability_from_str(
 
 fn ffi_module_reference_to_analysis(
     input: FfiModuleReference,
-) -> Result<verter_semantic::analysis::AnalyzedModuleReference, JsValue> {
-    Ok(verter_semantic::analysis::AnalyzedModuleReference {
-        syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
-        semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
-        is_type_only: input.is_type_only,
-        span: verter_span::Span::new(input.span_start, input.span_end),
-        expr_span: verter_span::Span::new(input.expr_span_start, input.expr_span_end),
-        raw_text: input.raw_text,
-        literal_specifier: input.literal_specifier,
-        finite_specifiers: input.finite_specifiers,
-        static_prefix: input.static_prefix,
-        analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
-    })
+) -> Result<verter_session_query::analysis::types::AnalyzedModuleReference, JsValue> {
+    Ok(
+        verter_session_query::analysis::types::AnalyzedModuleReference {
+            syntax: ffi_module_reference_syntax_from_str(&input.syntax)?,
+            semantics: ffi_module_reference_semantics_from_str(&input.semantics)?,
+            is_type_only: input.is_type_only,
+            span: verter_span::Span::new(input.span_start, input.span_end),
+            expr_span: verter_span::Span::new(input.expr_span_start, input.expr_span_end),
+            raw_text: input.raw_text,
+            literal_specifier: input.literal_specifier,
+            finite_specifiers: input.finite_specifiers,
+            static_prefix: input.static_prefix,
+            analyzability: ffi_module_reference_analyzability_from_str(&input.analyzability)?,
+        },
+    )
 }
 
 fn default_known_dependency_extensions() -> Vec<String> {
@@ -852,7 +864,7 @@ impl WasmVerterHost {
             .map(ffi_module_reference_to_analysis)
             .collect::<Result<Vec<_>, _>>()?;
         let specifiers =
-            verter_semantic::resolver_core::collect_resolvable_module_reference_specifiers(
+            verter_session_query::resolution::collect_resolvable_module_reference_specifiers(
                 &module_references,
             );
         to_wasm_value(&specifiers)
@@ -878,12 +890,13 @@ impl WasmVerterHost {
         } else {
             parse_wasm_input::<Vec<String>>(extensions)?
         };
-        let resolved = verter_semantic::resolver_core::resolve_known_module_reference_dependencies(
-            owner_id,
-            &module_references,
-            &known_ids,
-            &extensions,
-        );
+        let resolved =
+            verter_session_query::resolution::resolve_known_module_reference_dependencies(
+                owner_id,
+                &module_references,
+                &known_ids,
+                &extensions,
+            );
         to_wasm_value(&resolved)
     }
 
@@ -1618,7 +1631,7 @@ fn build_script_snapshot(
         bindings: snapshot.bindings.clone(),
         macros: snapshot.macros.to_vec(),
         macro_type_deps: snapshot.macro_type_deps.to_vec(),
-        flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+        flags: verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
             snapshot.script_flags,
         ),
         exported_functions: Vec::new(),
@@ -1688,11 +1701,13 @@ fn build_document_symbols_from_analysis(
 
         for binding in &snapshot.bindings {
             let kind = match binding.kind {
-                verter_semantic::analysis::AnalyzedBindingKind::Function
-                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::Function
+                | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
                     symbol_kind::FUNCTION
                 }
-                verter_semantic::analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+                    symbol_kind::CLASS
+                }
                 _ => symbol_kind::VARIABLE,
             };
             children.push(FfiDocumentSymbol {

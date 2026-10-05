@@ -11,7 +11,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use verter_semantic::facts::registry::InternedSpecifier;
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{
     AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
@@ -19,6 +18,7 @@ use verter_session::file_artifact_store::{
 };
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
+use verter_session_query::facts::registry::InternedSpecifier;
 
 // ────────────────────────────────────────────────────────────────
 // Test helpers

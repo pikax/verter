@@ -1,7 +1,7 @@
 use crate::provider_surface_store::ContentHash;
 use dashmap::DashMap;
-use verter_semantic::analysis::types::Hash16;
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::resolution::ModuleResolverCore;
 use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1197,7 +1197,7 @@ pub fn open_unresolved_carrier_state(
     // single naming authority, so a `.svelte` carrier projects `.tsx` exactly
     // as the column dictates.
     let desired_ide_path =
-        verter_semantic::resolver_core::carrier_ide_provider_path(source_id, is_jsx);
+        verter_session_query::resolution::carrier_ide_provider_path(source_id, is_jsx);
     // Syncability hint: the desired path is already live ONLY when the prior IDE
     // path is the SAME desired-extension artifact AND was genuinely loaded. The
     // caller reads this to choose `sync_tsx` (update) vs `open_tsx` (first open).

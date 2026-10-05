@@ -290,7 +290,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// application of `declaration`: an interface's or a class's (a
     /// library one included), never an alias's.
     fn defers_type_arguments(&self, declaration: &crate::semantic_query::DeclIdentity) -> bool {
-        use verter_semantic::analysis::type_eval::TypeDeclKind;
+        use verter_session_query::declarations::TypeDeclKind;
         if declaration.canonical_id.as_ref() == "__builtin__" {
             return true;
         }

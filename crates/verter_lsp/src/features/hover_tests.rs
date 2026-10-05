@@ -1,8 +1,6 @@
 use super::*;
 use crate::documents::carrier_structure::test_carrier_blocks;
 use std::sync::Arc;
-use verter_semantic::analysis::types::ImportBindingKind;
-use verter_semantic::analysis::types::VueApiCallSite;
 use verter_semantic::analysis::*;
 use verter_session::framework::{
     ComponentContractAvailability, ComponentPublicContract, ContractExactness, ContractProvenance,
@@ -10,6 +8,16 @@ use verter_session::framework::{
     PublicHandlerSignature, PublicParameter, PublicProp, PublicSlot, PublicSlotBinding,
     PublicSlotInput, PublicTypeReference,
 };
+use verter_session_query::analysis::types::AnalyzedBinding;
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImportBinding;
+use verter_session_query::analysis::types::AnalyzedMacro;
+use verter_session_query::analysis::types::BindingInitializer;
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::analysis::types::ReactivityKind;
+use verter_session_query::analysis::types::VueApiCallSite;
+use verter_session_query::analysis::types::VueApiClassification;
 use verter_type_expr::{PrimitiveName, TupleElement, TypeExpr};
 
 fn make_analysis(

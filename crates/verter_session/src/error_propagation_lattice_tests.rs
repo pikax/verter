@@ -17,7 +17,7 @@ use crate::semantic_query::{
     RelationResult, ResultTaint, SemanticNodeData, SemanticNodeId,
 };
 use crate::{CompileErrorPolicy, HostConfig, VerterHost};
-use verter_semantic::facts::registry::{
+use verter_session_query::facts::registry::{
     FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
 };
 

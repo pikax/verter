@@ -10,11 +10,10 @@ use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
 use tower_lsp_server::ls_types::{InlayHint, InlayHintLabel};
 use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
-use verter_semantic::analysis::types::{
-    DomQueryCallSite, DomQueryKind, VueApiCallSite, VueApiClassification,
-};
+use verter_semantic::analysis::types::DomQueryCallSite;
 use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::{DomQueryKind, VueApiCallSite, VueApiClassification};
 
 /// Generate Verter-specific inlay hints for a Vue SFC.
 ///

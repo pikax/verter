@@ -60,7 +60,7 @@
 //! ## The macro hot mirror
 //!
 //! The hot mirror is the SINGLE-ENTRY producer of a macro's type argument
-//! ([`AnalyzedMacro.parsed_type_argument`](verter_semantic::analysis::AnalyzedMacro))
+//! ([`AnalyzedMacro.parsed_type_argument`](verter_session_query::analysis::types::AnalyzedMacro))
 //! graph node. The eager, CONTEXT-SHAPED (per the caller's
 //! [`ProjectionMode`](crate::semantic_query::ProjectionMode)) per-site lowering
 //! it replaced produced a one-demand-only reduction — not a storable, shared,
@@ -1555,7 +1555,11 @@ fn build_macro_hot_ref(
         .map(|field| {
             let payload = field.payload.as_ref()?;
             let ty = inline_macro_object_property_type(parsed_arg, field.name.as_str())?;
-            Some(verter_semantic::analysis::macro_payload_reference_head_fact(ty, payload))
+            Some(
+                verter_session_query::analysis::fact_projection::macro_payload_reference_head_fact(
+                    ty, payload,
+                ),
+            )
         })
         .collect::<Vec<_>>();
 

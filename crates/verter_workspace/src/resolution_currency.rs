@@ -17,8 +17,8 @@ use crate::{
     SignatureAdmission,
 };
 #[cfg(test)]
-use verter_semantic::resolver_core::SessionFingerprint;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::SessionFingerprint;
+use verter_session_query::resolution::{
     PathProbe, ResolutionContext, ResolutionPopulation, ResolutionWorldId, ResolvePhase,
     ResolveRequestKind, ResolveResult,
 };
@@ -30,7 +30,7 @@ use verter_semantic::resolver_core::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentRevision([u8; 16]);
 
-pub use verter_semantic::facts::resolution::{
+pub use verter_session_query::facts::resolution::{
     CanonicalResolutionId, NormalizedSpecifier, ProjectIdentity, ProviderPolicyIdentity,
     RawSpecifier, ResolutionEntry, ResolutionFactKey, ResolutionFactRef, ResolutionFactVersion,
     ResolutionQueryKey, ResolveContextId, ResolveEnvHash, ResolverPolicyIdentity,
@@ -153,13 +153,13 @@ impl ResolutionOverlaySnapshot {
         let mut entries = HashMap::new();
         for (canonical, source) in upserts {
             entries.insert(
-                verter_semantic::resolver_core::normalize_canonical_id(&canonical),
+                verter_session_query::resolution::normalize_canonical_id(&canonical),
                 Some(source),
             );
         }
         for canonical in tombstones {
             entries.insert(
-                verter_semantic::resolver_core::normalize_canonical_id(&canonical),
+                verter_session_query::resolution::normalize_canonical_id(&canonical),
                 None,
             );
         }
@@ -278,7 +278,7 @@ impl ResolutionOverlaySnapshot {
         #[cfg(test)]
         OVERLAY_LOOKUP_NORMALIZE_CALLS.with(|calls| calls.set(calls.get() + 1));
         self.entries
-            .get(&verter_semantic::resolver_core::normalize_canonical_id(
+            .get(&verter_session_query::resolution::normalize_canonical_id(
                 canonical_id,
             ))
             .cloned()
@@ -566,7 +566,7 @@ impl ResolutionFactRoot {
     ) -> Vec<ResolutionFactKey> {
         self.owner_decisions
             .get(&(
-                verter_semantic::resolver_core::normalize_canonical_id(owner),
+                verter_session_query::resolution::normalize_canonical_id(owner),
                 population,
             ))
             .map(|decisions| decisions.iter().cloned().collect())
@@ -1334,15 +1334,15 @@ impl std::fmt::Debug for PublishedContextSelection {
 
 fn project_for_config<'a>(
     published: &'a PublishedRoot,
-    config: &verter_semantic::resolver_core::IdeProjectConfig,
+    config: &verter_session_query::resolution::IdeProjectConfig,
 ) -> Option<&'a crate::workspace_snapshot::OwnershipProject> {
-    let root = verter_semantic::resolver_core::normalize_canonical_id(&config.root);
+    let root = verter_session_query::resolution::normalize_canonical_id(&config.root);
     let workspace_root =
-        verter_semantic::resolver_core::normalize_canonical_id(&config.workspace_root);
+        verter_session_query::resolution::normalize_canonical_id(&config.workspace_root);
     let tsconfig = config
         .tsconfig_path
         .as_deref()
-        .map(verter_semantic::resolver_core::normalize_canonical_id);
+        .map(verter_session_query::resolution::normalize_canonical_id);
     published.snapshot.projects.iter().find(|project| {
         if project.root.as_str() != root || project.workspace_root.as_str() != workspace_root {
             return false;
@@ -1446,18 +1446,18 @@ fn evaluate_selected_context(
 
 pub(crate) fn explicit_context(
     world: &ResolutionWorldRoot,
-    owner: &verter_semantic::resolver_core::ProjectOwnership,
+    owner: &verter_session_query::resolution::ProjectOwnership,
 ) -> Result<(ProjectIdentity, ResolveContextId), ContextProvenanceError> {
     let published = world
         .published
         .as_ref()
         .ok_or(ContextProvenanceError::NoPublishedRoot)?;
     let normalized_root =
-        verter_semantic::resolver_core::normalize_canonical_id(&owner.project_root);
+        verter_session_query::resolution::normalize_canonical_id(&owner.project_root);
     let normalized_tsconfig = owner
         .tsconfig_path
         .as_deref()
-        .map(verter_semantic::resolver_core::normalize_canonical_id);
+        .map(verter_session_query::resolution::normalize_canonical_id);
     let project = published
         .snapshot
         .projects
@@ -2381,7 +2381,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         match self.overlay.get(canonical_id) {
-            Some(Some(_)) => Some(verter_semantic::resolver_core::normalize_canonical_id(
+            Some(Some(_)) => Some(verter_session_query::resolution::normalize_canonical_id(
                 canonical_id,
             )),
             Some(None) => None,
@@ -2399,11 +2399,11 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
 
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<
         crate::resolver::ResolutionInputReservationBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         crate::resolver::preflight_supported_resolution_inputs(
             keys,
@@ -2432,9 +2432,9 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
                             directories,
                             ..
                         }) => Ok((*present, *raw_bytes, directories.clone())),
-                        _ => Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        _ => Err(verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                             unresolved: vec![key.clone()],
-                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                            reason: verter_session_query::resolution::InputLoadIntegrityReason::KeySetMismatch,
                         }),
                     }
                 }
@@ -2447,7 +2447,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
         reservation: &crate::resolver::ResolutionInputReservationBatch,
     ) -> Result<
         crate::resolver::LoadedResolutionInputBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         crate::resolver::load_supported_resolution_inputs(
             reservation,
@@ -2457,18 +2457,18 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
             {
                 Some(source) => {
                     if source.is_some() != expected_present {
-                        return Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        return Err(verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::IncompleteBoundedCapture,
                             });
                     }
                     let Some(source) = source else {
                         return Ok(None);
                     };
                     if source.len() as u64 > reserved_raw_bytes {
-                        return Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        return Err(verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
                             });
                     }
                     Ok(Some(self.overlay.parse_manifest(&source)))
@@ -2479,18 +2479,18 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
                             .iter()
                             .find(|entry| entry.key() == key)
                             .cloned()
-                            .ok_or_else(|| verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            .ok_or_else(|| verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::KeySetMismatch,
                             })?;
                     let batch = crate::resolver::ResolutionInputReservationBatch::new(
                             vec![key.clone()],
                             reservation.basis(),
                             vec![entry],
                         )
-                        .ok_or_else(|| verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                        .ok_or_else(|| verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                             unresolved: vec![key.clone()],
-                            reason: verter_semantic::resolver_core::InputLoadIntegrityReason::ActualOverReservation,
+                            reason: verter_session_query::resolution::InputLoadIntegrityReason::ActualOverReservation,
                         })?;
                     let loaded = self.inner.load_preflighted_resolution_inputs(&batch)?;
                     match loaded.entries().first() {
@@ -2498,9 +2498,9 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
                                 value,
                                 ..
                             }) => Ok(value.as_deref().cloned()),
-                            _ => Err(verter_semantic::resolver_core::AttemptFailure::InputLoadIntegrity {
+                            _ => Err(verter_session_query::resolution::AttemptFailure::InputLoadIntegrity {
                                 unresolved: vec![key.clone()],
-                                reason: verter_semantic::resolver_core::InputLoadIntegrityReason::KeySetMismatch,
+                                reason: verter_session_query::resolution::InputLoadIntegrityReason::KeySetMismatch,
                             }),
                         }
                 }
@@ -2639,8 +2639,8 @@ impl<'a> TransactionReader<'a> {
 
 pub(crate) fn resolution_basis_for_reader(
     reader: &dyn crate::traits::WorkspaceRead,
-) -> Option<verter_semantic::resolver_core::ResolutionBasis> {
-    let authority = verter_semantic::resolver_core::WorkspaceAuthorityId::from_raw(
+) -> Option<verter_session_query::resolution::ResolutionBasis> {
+    let authority = verter_session_query::resolution::WorkspaceAuthorityId::from_raw(
         reader.strict_self_root_authority_id()?,
     );
     let population = reader.resolution_population();
@@ -2650,8 +2650,8 @@ pub(crate) fn resolution_basis_for_reader(
     else {
         return None;
     };
-    Some(verter_semantic::resolver_core::ResolutionBasis::new(
-        verter_semantic::resolver_core::ResolutionWorldBasis::new(
+    Some(verter_session_query::resolution::ResolutionBasis::new(
+        verter_session_query::resolution::ResolutionWorldBasis::new(
             authority, population, base, session,
         ),
         None,
@@ -2695,7 +2695,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn note_input_resolution_budget_exhausted(
         &self,
-        _event: verter_semantic::resolver_core::InputResolutionBudgetExhaustion,
+        _event: verter_session_query::resolution::InputResolutionBudgetExhaustion,
     ) {
         self.transaction.lock().mark_budget_exhausted();
     }
@@ -2714,11 +2714,11 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<
         crate::resolver::ResolutionInputReservationBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         self.inner.preflight_resolution_inputs_bounded(keys, basis)
     }
@@ -2728,7 +2728,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
         reservation: &crate::resolver::ResolutionInputReservationBatch,
     ) -> Result<
         crate::resolver::LoadedResolutionInputBatch,
-        verter_semantic::resolver_core::AttemptFailure,
+        verter_session_query::resolution::AttemptFailure,
     > {
         self.inner.load_preflighted_resolution_inputs(reservation)
     }
@@ -2854,7 +2854,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn read_ambient_lib(
         &self,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
         self.inner.read_ambient_lib(stable_key, canonical_id)
@@ -2862,7 +2862,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn ambient_virtual_canonical_id(
         &self,
-        stable_key: verter_semantic::resolver_core::ProjectStableKey,
+        stable_key: verter_session_query::resolution::ProjectStableKey,
         canonical_id: &str,
     ) -> Arc<str> {
         self.inner
@@ -2872,15 +2872,15 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
     fn project_stable_key(
         &self,
         project_id: crate::workspace_snapshot::ProjectId,
-    ) -> Option<verter_semantic::resolver_core::ProjectStableKey> {
+    ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         self.inner.project_stable_key(project_id)
     }
 
     fn lookup_ambient_symbol(
         &self,
-        consumer_project: verter_semantic::resolver_core::ProjectStableKey,
+        consumer_project: verter_session_query::resolution::ProjectStableKey,
         symbol: &str,
-    ) -> Option<verter_semantic::resolver_core::AmbientSymbolHit> {
+    ) -> Option<verter_session_query::resolution::AmbientSymbolHit> {
         self.inner.lookup_ambient_symbol(consumer_project, symbol)
     }
 
@@ -3057,7 +3057,7 @@ impl ResolutionTransaction {
     }
 
     pub(crate) fn observe_path(&mut self, canonical: &str, outcome: PathProbe) {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical);
         self.observe_canonical_path(&canonical, outcome);
     }
 
@@ -3087,7 +3087,7 @@ impl ResolutionTransaction {
     /// A manifest observed as ABSENT records `None` — that is a value, not
     /// an absence of one.
     pub(crate) fn observe_manifest(&mut self, canonical: &str, fingerprint: Option<[u8; 16]>) {
-        let canonical = verter_semantic::resolver_core::normalize_canonical_id(canonical);
+        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical);
         self.observe_canonical_manifest(&canonical, fingerprint);
     }
 
@@ -3102,8 +3102,8 @@ impl ResolutionTransaction {
     }
 
     pub(crate) fn observe_realpath(&mut self, requested: &str, resolved: Option<&str>) {
-        let requested = verter_semantic::resolver_core::normalize_canonical_id(requested);
-        let resolved = resolved.map(verter_semantic::resolver_core::normalize_canonical_id);
+        let requested = verter_session_query::resolution::normalize_canonical_id(requested);
+        let resolved = resolved.map(verter_session_query::resolution::normalize_canonical_id);
         self.observe_canonical_realpath(&requested, resolved.as_deref());
     }
 
@@ -3131,7 +3131,7 @@ impl ResolutionTransaction {
     pub(crate) fn observe_directory(&mut self, canonical: &str) {
         self.observe(ResolutionFactKey::DirectoryMembers {
             canonical: CanonicalResolutionId::new(
-                verter_semantic::resolver_core::normalize_canonical_id(canonical),
+                verter_session_query::resolution::normalize_canonical_id(canonical),
             ),
             population: self.population(),
         });
@@ -3282,12 +3282,12 @@ mod transaction_contract_tests {
         let raw_realpath = r"C:\repo\real\main.ts";
         let raw_manifest = r"C:\repo\node_modules\pkg\package.json";
         let raw_scope = r"C:\repo\src";
-        let canonical_path = verter_semantic::resolver_core::normalize_canonical_id(raw_path);
+        let canonical_path = verter_session_query::resolution::normalize_canonical_id(raw_path);
         let canonical_realpath =
-            verter_semantic::resolver_core::normalize_canonical_id(raw_realpath);
+            verter_session_query::resolution::normalize_canonical_id(raw_realpath);
         let canonical_manifest =
-            verter_semantic::resolver_core::normalize_canonical_id(raw_manifest);
-        let canonical_scope = verter_semantic::resolver_core::normalize_canonical_id(raw_scope);
+            verter_session_query::resolution::normalize_canonical_id(raw_manifest);
+        let canonical_scope = verter_session_query::resolution::normalize_canonical_id(raw_scope);
         let fingerprint = Some([0xA5; 16]);
 
         let mut raw = ResolutionTransaction::new(captured_world());

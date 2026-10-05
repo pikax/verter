@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::host_test_audit::DispatchCounter;
 use crate::semantic_query::{

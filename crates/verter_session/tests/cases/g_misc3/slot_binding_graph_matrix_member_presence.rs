@@ -20,13 +20,13 @@
 
 #![cfg(test)]
 
-use verter_semantic::facts::registry::{InternedName, SymbolSpace};
-use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::for_tests::{
     dep_signature_to_fact_signature_for_tests, install_fact_tracer_for_tests,
 };
 use verter_session::resolver_core::FactReadSetFinalise;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::registry::{InternedName, SymbolSpace};
+use verter_session_query::facts::{FactKey, FactLane};
 
 #[test]
 fn slot_binding_graph_fact_tracer_carries_member_presence() {

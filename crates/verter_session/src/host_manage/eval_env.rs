@@ -48,7 +48,7 @@ impl VerterHost {
     pub(crate) fn base_eval_env_arc(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_session_query::declarations::EvalEnv>> {
         component_meta_trace_custom!(
             "base_eval_env",
             format!("owner={} store_view={}", canonical_id, false),
@@ -77,7 +77,7 @@ impl VerterHost {
         &self,
         canonical_source: &str,
         resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_session_query::declarations::DeclarationId> {
         // Resolve the owner from the cached declaration-header inventory
         // before consulting the whole env. A Vue canonical can contain both
         // module and setup owners; the legacy ordinary-owner lookup lost a
@@ -177,7 +177,7 @@ impl VerterHost {
         &self,
         canonical_source: &str,
         resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_session_query::declarations::DeclarationId> {
         let state = self.routed_shallow_state(canonical_source)?;
         let owner = Self::unique_local_type_declaration_owner_in(&state, resolved_name)?;
         // Presence WITHOUT body lowering — a header miss is `None`,
@@ -377,14 +377,14 @@ impl VerterHost {
     pub(crate) fn dependency_value_symbol_graph_native(
         &self,
         source: &ValueDeclIdentity,
-    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+    ) -> Option<verter_session_query::declarations::ValueDeclInfo> {
         let state = self.routed_shallow_state(&source.canonical_id)?;
         // The CENTRALIZED effective lookup applies user-wins → rune-ambient →
         // miss, so a Svelte rune module's ambient `$state`/`$derived`/`$effect`/
         // `$inspect` resolve here WITHOUT this reader knowing anything about the
         // rune prelude — the single authority lives on `ShallowFileState`.
         let lowered = state.effective_value_decl_in(source.owner, &source.name)?;
-        Some(verter_semantic::analysis::type_eval::ValueDeclInfo {
+        Some(verter_session_query::declarations::ValueDeclInfo {
             owner: source.owner,
             name: source.name.clone(),
             declaration_id: 0,
@@ -403,7 +403,7 @@ impl VerterHost {
         &self,
         source_canonical_id: &str,
         source_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+    ) -> Option<verter_session_query::declarations::ValueDeclInfo> {
         self.dependency_value_symbol_graph_native(&ValueDeclIdentity {
             canonical_id: source_canonical_id.to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -840,9 +840,9 @@ impl VerterHost {
                 match self.resolve_for_persistent_state(
                     canonical_id,
                     candidate,
-                    verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                    verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                        kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                     },
                 ) {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -1082,7 +1082,7 @@ impl VerterHost {
     /// carries no demandable type at all — that is the proven `Absent` case,
     /// not a gate omission.
     fn prepared_value_decl_has_demandable_type(
-        decl: &verter_semantic::analysis::type_solver::prepared::PreparedValueDecl,
+        decl: &verter_session_query::type_solver::prepared::PreparedValueDecl,
     ) -> bool {
         !matches!(
             decl.type_annotation.classification,
@@ -1092,7 +1092,7 @@ impl VerterHost {
             || decl.enum_members.is_some()
             || matches!(
                 decl.kind,
-                verter_semantic::analysis::type_eval::ValueDeclKind::Class
+                verter_session_query::declarations::ValueDeclKind::Class
             )
     }
 
@@ -1404,7 +1404,7 @@ impl VerterHost {
                         let fast_path_applied = !ctx.output_path.is_empty()
                             && !matches!(
                                 macro_kind,
-                                Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+                                Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel)
                             )
                             && macro_type_arg.is_some()
                             && !engine.field_needs_parent_projection(
@@ -1438,7 +1438,7 @@ impl VerterHost {
                             // from 5k per §5.13 r15 table).
                             if matches!(
                                 macro_kind,
-                                Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+                                Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel)
                             ) {
                                 if macro_type_arg.is_some() {
                                     // Sink-owned demand: the model value type IS
@@ -1842,9 +1842,9 @@ impl VerterHost {
                     ),
                     authored_evidence: None,
                     optional: false,
-                    exactness: verter_semantic::analysis::type_solver::SolverExactness::Incomplete,
+                    exactness: verter_session_query::type_solver::SolverExactness::Incomplete,
                     execution_status:
-                        verter_semantic::analysis::type_solver::ExecutionStatus::Completed,
+                        verter_session_query::type_solver::ExecutionStatus::Completed,
                     diagnostics: Vec::new(),
                     declared_in_macro_type_arg: false,
                 });

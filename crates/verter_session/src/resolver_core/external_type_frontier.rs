@@ -754,7 +754,7 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
-    use verter_semantic::analysis::Hash16;
+    use verter_session_query::analysis::types::Hash16;
     use verter_type_expr::locators::{TypeBodyPathStep, TypeParamBoundPosition};
 
     /// Mock host for testing the frontier engine.

@@ -2,7 +2,7 @@
 //!
 //! `ExternalTsProjectResolver` maps a source URI to one of the explicit
 //! carrier-ownership resolution states. This is distinct from module resolution,
-//! which is owned by `verter_semantic::resolver_core::ModuleResolverCore`;
+//! which is owned by `verter_session_query::resolution::ModuleResolverCore`;
 //! consumers reach this ownership resolver as
 //! `external_ts::ExternalTsProjectResolver`.
 //!
@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     normalize_canonical_id, path_is_carrier, strip_carrier_extension,
 };
 use verter_workspace::traits::WorkspaceRead;

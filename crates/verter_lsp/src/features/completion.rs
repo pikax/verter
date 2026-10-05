@@ -1165,12 +1165,12 @@ fn template_completions(
 
         // Add reactivity indicator
         let reactivity_tag = match binding.reactivity_kind {
-            verter_semantic::analysis::ReactivityKind::Ref => Some("ref"),
-            verter_semantic::analysis::ReactivityKind::Computed => Some("computed"),
-            verter_semantic::analysis::ReactivityKind::Reactive => Some("reactive"),
-            verter_semantic::analysis::ReactivityKind::MaybeRef => Some("maybe-ref"),
-            verter_semantic::analysis::ReactivityKind::Mutable => Some("mutable"),
-            verter_semantic::analysis::ReactivityKind::None => {
+            verter_session_query::analysis::types::ReactivityKind::Ref => Some("ref"),
+            verter_session_query::analysis::types::ReactivityKind::Computed => Some("computed"),
+            verter_session_query::analysis::types::ReactivityKind::Reactive => Some("reactive"),
+            verter_session_query::analysis::types::ReactivityKind::MaybeRef => Some("maybe-ref"),
+            verter_session_query::analysis::types::ReactivityKind::Mutable => Some("mutable"),
+            verter_session_query::analysis::types::ReactivityKind::None => {
                 if binding.is_reactive {
                     Some("reactive")
                 } else {
@@ -1311,28 +1311,36 @@ fn extract_vfor_variable_names(pattern: &str) -> Vec<&str> {
 }
 
 fn binding_completion_kind(
-    kind: &verter_semantic::analysis::AnalyzedBindingKind,
+    kind: &verter_session_query::analysis::types::AnalyzedBindingKind,
 ) -> CompletionItemKind {
     match kind {
-        verter_semantic::analysis::AnalyzedBindingKind::Const => CompletionItemKind::VARIABLE,
-        verter_semantic::analysis::AnalyzedBindingKind::Let
-        | verter_semantic::analysis::AnalyzedBindingKind::Var => CompletionItemKind::VARIABLE,
-        verter_semantic::analysis::AnalyzedBindingKind::Function
-        | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+        verter_session_query::analysis::types::AnalyzedBindingKind::Const => {
+            CompletionItemKind::VARIABLE
+        }
+        verter_session_query::analysis::types::AnalyzedBindingKind::Let
+        | verter_session_query::analysis::types::AnalyzedBindingKind::Var => {
+            CompletionItemKind::VARIABLE
+        }
+        verter_session_query::analysis::types::AnalyzedBindingKind::Function
+        | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
             CompletionItemKind::FUNCTION
         }
-        verter_semantic::analysis::AnalyzedBindingKind::Class => CompletionItemKind::CLASS,
+        verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+            CompletionItemKind::CLASS
+        }
     }
 }
 
-fn binding_detail(binding: &verter_semantic::analysis::AnalyzedBinding) -> String {
+fn binding_detail(binding: &verter_session_query::analysis::types::AnalyzedBinding) -> String {
     let kind = match binding.kind {
-        verter_semantic::analysis::AnalyzedBindingKind::Const => "const",
-        verter_semantic::analysis::AnalyzedBindingKind::Let => "let",
-        verter_semantic::analysis::AnalyzedBindingKind::Var => "var",
-        verter_semantic::analysis::AnalyzedBindingKind::Function => "function",
-        verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => "async function",
-        verter_semantic::analysis::AnalyzedBindingKind::Class => "class",
+        verter_session_query::analysis::types::AnalyzedBindingKind::Const => "const",
+        verter_session_query::analysis::types::AnalyzedBindingKind::Let => "let",
+        verter_session_query::analysis::types::AnalyzedBindingKind::Var => "var",
+        verter_session_query::analysis::types::AnalyzedBindingKind::Function => "function",
+        verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
+            "async function"
+        }
+        verter_session_query::analysis::types::AnalyzedBindingKind::Class => "class",
     };
     kind.to_string()
 }
@@ -1524,7 +1532,7 @@ fn component_prop_completions(
     } else {
         // Fall back to macro prop_fields
         for m in child_analysis.macros.iter() {
-            if m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps {
+            if m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps {
                 for field in &m.prop_fields {
                     let label = if uses_svelte_syntax {
                         field.name.clone()
@@ -1577,7 +1585,7 @@ fn component_prop_completions(
     } else {
         // Fall back to macro emit_fields
         for m in child_analysis.macros.iter() {
-            if m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits {
+            if m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits {
                 for field in &m.emit_fields {
                     let label = format!("@{}", to_kebab_case(&field.name));
                     let insert_text = Some(format!("@{}=\"$1\"", to_kebab_case(&field.name)));
@@ -1824,7 +1832,7 @@ fn slot_name_completions(
     let mut items = Vec::new();
     let mut declared_default = false;
     for mac in child_analysis.macros.iter() {
-        if mac.kind != verter_semantic::analysis::AnalyzedMacroKind::DefineSlots {
+        if mac.kind != verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots {
             continue;
         }
         for field in &mac.slot_fields {
@@ -2166,15 +2174,17 @@ fn to_pascal_case(s: &str) -> String {
     result
 }
 
-fn macro_kind_label(kind: &verter_semantic::analysis::AnalyzedMacroKind) -> &'static str {
+fn macro_kind_label(
+    kind: &verter_session_query::analysis::types::AnalyzedMacroKind,
+) -> &'static str {
     match kind {
-        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions",
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots",
-        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps => "defineProps",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits => "defineEmits",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel => "defineModel",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose => "defineExpose",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineOptions => "defineOptions",
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots => "defineSlots",
+        verter_session_query::analysis::types::AnalyzedMacroKind::WithDefaults => "withDefaults",
     }
 }
 

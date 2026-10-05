@@ -10,7 +10,7 @@
 //! The four env-hash dimensions and `project_identity` enter through
 //! [`WorldSnapshotDims`], which the host populates at the request
 //! entry boundary by calling the existing
-//! [`verter_semantic::resolver_core::IdeProjectConfig`] accessors
+//! [`verter_session_query::resolution::IdeProjectConfig`] accessors
 //! (`parse_env_hash`, `resolve_env_hash`, `type_env_hash`,
 //! `lib_env_hash`, `project_identity`). The trio
 //! `compiler_version` / `plugin_versions` / `world_generation` does
@@ -55,7 +55,7 @@ pub struct OverlayIdentity(pub u64);
 ///
 /// Carrying the dims as a struct keeps [`WorldSnapshot::from_request`]
 /// substrate-friendly: the four env-hash accessors on
-/// [`verter_semantic::resolver_core::IdeProjectConfig`] take an
+/// [`verter_session_query::resolution::IdeProjectConfig`] take an
 /// `&EnvHashInputs<'_>` argument; the caller computes the four
 /// `Hash16`s once and packs them here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

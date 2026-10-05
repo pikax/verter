@@ -89,7 +89,9 @@ impl LintRule for NoLifecycleAfterAwait {
 mod tests {
     use super::*;
 
-    use verter_semantic::analysis::types::{AnalysisFlags, VueApiCallSite, VueApiClassification};
+    use verter_session_query::analysis::types::{
+        AnalysisFlags, VueApiCallSite, VueApiClassification,
+    };
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

@@ -221,7 +221,7 @@ pub use traits::{
 pub use types::{
     ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge, VfsProvenanceSnapshot,
 };
-pub use verter_semantic::resolver_core::InputResolutionBudgets;
+pub use verter_session_query::resolution::InputResolutionBudgets;
 #[cfg(not(target_arch = "wasm32"))]
 pub use virtual_config::{compute_virtual_config_identity, VirtualConfigIdentity};
 #[cfg(not(target_arch = "wasm32"))]

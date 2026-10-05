@@ -125,7 +125,7 @@ fn r6_semantic_query_key_resolve_macro_payload_owner_is_content_free_decl_key() 
     let key = SemanticQueryKey::ResolveMacroPayload {
         owner: owner.clone(),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         context: MacroPayloadContext::new(Default::default(), ProjectionMode::Expanded),
     };

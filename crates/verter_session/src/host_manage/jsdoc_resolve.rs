@@ -84,7 +84,7 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_session_query::declarations::DeclarationId> {
         (owner == verter_type_expr::TopLevelOwnerId::ordinary_file())
             .then(|| {
                 self.host
@@ -175,13 +175,13 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
             .headers
             .type_header_in(owner, resolved_name)?;
         let kind = match header.kind {
-            verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
+            verter_session_query::declarations::TypeDeclKind::Alias => {
                 crate::resolver_core::ResolvedDeclarationKind::TypeAlias
             }
-            verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
+            verter_session_query::declarations::TypeDeclKind::Interface => {
                 crate::resolver_core::ResolvedDeclarationKind::Interface
             }
-            verter_semantic::analysis::type_eval::TypeDeclKind::Class => {
+            verter_session_query::declarations::TypeDeclKind::Class => {
                 crate::resolver_core::ResolvedDeclarationKind::Class
             }
         };
@@ -214,9 +214,9 @@ impl HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>> {
         owner_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         root_name: &str,
-        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
     ) -> bool {
-        use verter_semantic::analysis::AnalyzedMacroKind;
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
 
         let root_ref = verter_type_expr::TypeExpr::Ref {
             name: std::sync::Arc::from(root_name),
@@ -293,21 +293,21 @@ impl crate::resolver_core::ComponentMetaResolverHost
     fn snapshot_imports<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_semantic::analysis::types::AnalyzedImport] {
+    ) -> &'a [verter_session_query::analysis::types::AnalyzedImport] {
         snapshot.imports.as_slice()
     }
 
     fn snapshot_macros<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_semantic::analysis::types::AnalyzedMacro] {
+    ) -> &'a [verter_session_query::analysis::types::AnalyzedMacro] {
         snapshot.macros.as_slice()
     }
 
     fn snapshot_macro_type_deps<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_semantic::analysis::types::MacroTypeDep] {
+    ) -> &'a [verter_session_query::analysis::types::MacroTypeDep] {
         snapshot.macro_type_deps.as_slice()
     }
 
@@ -390,7 +390,7 @@ impl crate::resolver_core::ComponentMetaResolverHost
     fn macro_type_arg_has_direct_reference(
         &self,
         owner_canonical: &str,
-        mac: &verter_semantic::analysis::types::AnalyzedMacro,
+        mac: &verter_session_query::analysis::types::AnalyzedMacro,
         type_name: &str,
     ) -> Option<bool> {
         let locator = mac.parsed_type_argument.as_ref()?;
@@ -416,21 +416,21 @@ impl crate::resolver_core::ComponentMetaResolverHost
     fn projectable_owner_local_macro_roots(
         &self,
         owner_canonical: &str,
-        mac: &verter_semantic::analysis::types::AnalyzedMacro,
+        mac: &verter_session_query::analysis::types::AnalyzedMacro,
     ) -> Vec<String> {
         fn macro_lacks_direct_local_surface(
-            mac: &verter_semantic::analysis::types::AnalyzedMacro,
+            mac: &verter_session_query::analysis::types::AnalyzedMacro,
         ) -> bool {
             match mac.kind {
-                verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-                | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
-                | verter_semantic::analysis::AnalyzedMacroKind::DefineModel => {
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+                | verter_session_query::analysis::types::AnalyzedMacroKind::WithDefaults
+                | verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel => {
                     mac.prop_fields.is_empty()
                 }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits => {
                     mac.emit_fields.is_empty()
                 }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots => {
                     mac.slot_fields.is_empty()
                 }
                 // `expose_fields` holds only the object-literal fields and
@@ -440,8 +440,10 @@ impl crate::resolver_core::ComponentMetaResolverHost
                 // discover its owner-local root. Presence gate on the type
                 // argument (mirrors `raw_macro_surface_is_authoritative`),
                 // not on the literal's absence.
-                verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => mac.is_type_based,
-                verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose => {
+                    mac.is_type_based
+                }
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineOptions => false,
             }
         }
 
@@ -508,7 +510,7 @@ impl crate::resolver_core::ComponentMetaResolverHost
         owner_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         root_name: &str,
-        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
     ) -> bool {
         // Authority gate for the cold resolver's owner-local arm: does the
         // owner-local type `root_name` resolve to a non-empty macro surface?
@@ -853,7 +855,7 @@ pub(crate) fn map_jsdoc_tag(
     canonical_source: &str,
     mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    tag: verter_semantic::analysis::types::JsdocTag,
+    tag: verter_session_query::analysis::types::JsdocTag,
 ) -> ResolvedJsdocTag {
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);
     let resolved_type = if mode == ProjectionMode::Expanded {

@@ -20,7 +20,7 @@ pub(super) fn macro_expansion_kind_to_string(
         }
     }
 }
-pub(super) fn jsdoc_to_ffi(tag: verter_semantic::analysis::types::JsdocTag) -> FfiJsdocTag {
+pub(super) fn jsdoc_to_ffi(tag: verter_session_query::analysis::types::JsdocTag) -> FfiJsdocTag {
     FfiJsdocTag {
         name: tag.name,
         text: tag.text,
@@ -480,15 +480,15 @@ pub(super) fn binding_kind_to_string(
 }
 
 pub(super) fn reactivity_kind_to_string(
-    kind: verter_semantic::analysis::types::ReactivityKind,
+    kind: verter_session_query::analysis::types::ReactivityKind,
 ) -> String {
     match kind {
-        verter_semantic::analysis::types::ReactivityKind::None => "none".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::Ref => "ref".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::Computed => "computed".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::Reactive => "reactive".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::MaybeRef => "maybeRef".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::Mutable => "mutable".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::None => "none".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::Ref => "ref".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::Computed => "computed".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::Reactive => "reactive".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::MaybeRef => "maybeRef".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::Mutable => "mutable".to_string(),
     }
 }
 
@@ -547,7 +547,7 @@ pub(super) fn reactive_wrapper_unresolved_reason_to_string(
 }
 
 pub(super) fn vue_api_to_string(
-    api: verter_semantic::analysis::types::VueApiClassification,
+    api: verter_session_query::analysis::types::VueApiClassification,
 ) -> String {
     format!("{api:?}")
 }
@@ -568,15 +568,31 @@ pub(super) fn projection_mode_to_string(mode: host::ProjectionMode) -> String {
     }
 }
 
-pub(super) fn macro_kind_to_string(kind: verter_semantic::analysis::AnalyzedMacroKind) -> String {
+pub(super) fn macro_kind_to_string(
+    kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+) -> String {
     match kind {
-        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions".to_string(),
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps => {
+            "defineProps".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::WithDefaults => {
+            "withDefaults".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits => {
+            "defineEmits".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots => {
+            "defineSlots".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel => {
+            "defineModel".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose => {
+            "defineExpose".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineOptions => {
+            "defineOptions".to_string()
+        }
     }
 }
 

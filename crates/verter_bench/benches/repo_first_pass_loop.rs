@@ -39,7 +39,7 @@ use std::time::Instant;
 use verter_session::HostConfig;
 use verter_session::VerterHost;
 
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 use verter_workspace::{
     MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };

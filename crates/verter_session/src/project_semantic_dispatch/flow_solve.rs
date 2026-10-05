@@ -44,15 +44,16 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
-use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
-use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
-use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
-use verter_semantic::analysis::flow::peeker::{
+use verter_session_query::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
+use verter_session_query::flow::flow_ir::ReturnSlicePlan;
+use verter_session_query::flow::hashing::compute_flow_slice_hash;
+use verter_session_query::flow::peeker::{
     DemandSegment, FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded, SliceDemand,
     SliceOrigin,
 };
-use verter_semantic::analysis::flow::{
-    FlowBindingRef, SkeletonBindingKind, SkeletonClosureCorrelation, SkeletonClosureId,
+use verter_session_query::flow::{
+    binding::FlowBindingRef,
+    skeleton::{SkeletonBindingKind, SkeletonClosureCorrelation, SkeletonClosureId},
 };
 
 use super::dispatch_txn::flow_obligation_state::{
@@ -953,13 +954,13 @@ fn require_query_names_bound_graph(
     let slot = &key.function.declaration_slot;
     let query_space = match slot.symbol_space {
         crate::semantic_query::SemanticSymbolSpace::Type => {
-            verter_semantic::facts::SymbolSpace::Type
+            verter_session_query::facts::SymbolSpace::Type
         }
         crate::semantic_query::SemanticSymbolSpace::Value => {
-            verter_semantic::facts::SymbolSpace::Value
+            verter_session_query::facts::SymbolSpace::Value
         }
         crate::semantic_query::SemanticSymbolSpace::Namespace => {
-            verter_semantic::facts::SymbolSpace::Namespace
+            verter_session_query::facts::SymbolSpace::Namespace
         }
     };
     let coherent = slot.defining_canonical.as_ref() == bound.canonical_id.as_ref()
@@ -1251,7 +1252,7 @@ pub(crate) fn build_flow_demand_plan_from_execution(
     };
     // The call occurrences planned by the `CallSite` route: the dynamic
     // `SemanticRelation` facts anchor on these registered expansion events.
-    let mut call_obligations: Vec<(FlowNodeId, verter_semantic::analysis::flow::SkeletonExprSiteId, u32, FlowObligationId)> = Vec::new();
+    let mut call_obligations: Vec<(FlowNodeId, verter_session_query::flow::skeleton::SkeletonExprSiteId, u32, FlowObligationId)> = Vec::new();
 
     // The exhaustive, wildcard-free expansion dispatcher: EVERY required
     // family is iterated through its registered route. Node-kind facts

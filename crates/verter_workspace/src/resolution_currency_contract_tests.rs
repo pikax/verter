@@ -13,7 +13,7 @@ use crate::resolution_currency::{
 };
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge, VfsProvenanceSnapshot};
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     normalize_canonical_id, AttemptFailure, IdeProjectConfig, PathProbe as ProbeOutcome,
     ResolutionContext, ResolutionPopulation, ResolvePhase, ResolveRequestKind, ResolveResult,
     SessionFingerprint, WorkspaceAlias,
@@ -120,8 +120,8 @@ impl ContractReader {
 impl WorkspaceRead for ContractReader {
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
         crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
     }
@@ -238,7 +238,8 @@ fn engine_with_fallback_project(root: &str) -> Engine {
             extensions: vec![".ts".to_string()],
             workspace_root: root.to_string(),
             workspace_aliases: Vec::new(),
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: Vec::new(),
             membership: crate::membership::configured_membership_match_all_under_root(
                 &crate::CanonicalPath::new(root),
@@ -3787,13 +3788,13 @@ fn engine_with_chain_tail(len: usize, specifier: &str, tail_references: Vec<Stri
                 )]
             };
             let compiler_options = if index + 1 == len {
-                verter_semantic::resolver_core::IdeProjectCompilerOptions {
+                verter_session_query::resolution::IdeProjectCompilerOptions {
                     base_url: Some(format!("{root}/src")),
                     paths: vec![(specifier.to_string(), vec!["index".to_string()])],
                     ..Default::default()
                 }
             } else {
-                verter_semantic::resolver_core::IdeProjectCompilerOptions::default()
+                verter_session_query::resolution::IdeProjectCompilerOptions::default()
             };
             crate::project_graph::VfsProjectConfig {
                 root: root.clone(),

@@ -183,7 +183,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         let macro_key = SemanticQueryKey::ResolveMacroPayload {
             owner,
             macro_index: 0,
-            macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+            macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
             type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: crate::semantic_query::MacroPayloadContext::new(
                 Default::default(),

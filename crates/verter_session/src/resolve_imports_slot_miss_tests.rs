@@ -30,7 +30,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
+use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
 
 use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef, StoreView};
 use crate::types::FileLanguage;
@@ -72,7 +72,7 @@ fn import_clause_fact(expected_hash: crate::types::Hash16) -> FactVersionRef {
         key: FactKey::ResolvedImportClause {
             specifier: InternedSpecifier::from("./dep"),
             binding: InternedName::from("a"),
-            space: verter_semantic::facts::registry::SymbolSpace::Value,
+            space: verter_session_query::facts::registry::SymbolSpace::Value,
             resolved_canonical: Arc::from(DEP),
             resolved_source_name: InternedName::from("a"),
         },

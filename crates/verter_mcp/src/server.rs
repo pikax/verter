@@ -12,8 +12,10 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 
 use verter_diagnostics::{Linter, Severity};
-use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedMacroKind, VueApiClassification};
 use verter_session::VerterHost;
+use verter_session_query::analysis::types::{
+    AnalysisFlags, AnalyzedMacroKind, VueApiClassification,
+};
 
 use crate::config::McpServerConfig;
 use crate::helpers::{
@@ -1636,7 +1638,7 @@ impl VerterMcpServer {
                 if matches!(
                     &binding.initializer,
                     Some(
-                        verter_semantic::analysis::types::BindingInitializer::FunctionCall {
+                        verter_session_query::analysis::types::BindingInitializer::FunctionCall {
                             vue_api: Some(_),
                             ..
                         }
@@ -1646,10 +1648,12 @@ impl VerterMcpServer {
                 }
                 // Skip bindings initialized by external composable calls (useSomething())
                 // These often have side effects or are consumed by other composables
-                if let Some(verter_semantic::analysis::types::BindingInitializer::FunctionCall {
-                    callee,
-                    ..
-                }) = &binding.initializer
+                if let Some(
+                    verter_session_query::analysis::types::BindingInitializer::FunctionCall {
+                        callee,
+                        ..
+                    },
+                ) = &binding.initializer
                 {
                     if callee.starts_with("use") {
                         continue;
@@ -2761,7 +2765,7 @@ impl VerterMcpServer {
                 }
             }
 
-            if !found_test && verter_semantic::resolver_core::path_is_carrier(file) {
+            if !found_test && verter_session_query::resolution::path_is_carrier(file) {
                 untested.push(file.clone());
             }
         }
@@ -3604,8 +3608,8 @@ mod tests {
     use verter_macro_dto::{
         MacroFailure, MacroInvalidReason, MacroPartialReason, UnresolvedReason, UnsupportedReason,
     };
-    use verter_semantic::analysis::types::TypeResolutionSource;
     use verter_session::{HostConfig, UpsertRequest};
+    use verter_session_query::analysis::types::TypeResolutionSource;
 
     fn make_host() -> Arc<VerterHost> {
         Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -3940,7 +3944,7 @@ const count = ref(0)
         // Construct a script snapshot with many type_references but few prop_fields
         let script = verter_semantic::analysis::types::ScriptAnalysisSnapshot {
             module_references: Vec::new(),
-            macros: vec![verter_semantic::analysis::types::AnalyzedMacro {
+            macros: vec![verter_session_query::analysis::types::AnalyzedMacro {
                 edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
@@ -3964,7 +3968,7 @@ const count = ref(0)
                 has_inherit_attrs_false: false,
                 prop_fields: vec![
                     // Only 3 actual props — should NOT be penalized
-                    verter_semantic::analysis::types::AnalyzedPropField {
+                    verter_session_query::analysis::types::AnalyzedPropField {
                         name: "a".into(),
                         is_optional: false,
                         span: verter_span::Span::new(0, 1),
@@ -3978,7 +3982,7 @@ const count = ref(0)
                         declared_in_macro_type_arg: false,
                         constructor_bindings: Vec::new(),
                     },
-                    verter_semantic::analysis::types::AnalyzedPropField {
+                    verter_session_query::analysis::types::AnalyzedPropField {
                         name: "b".into(),
                         is_optional: false,
                         span: verter_span::Span::new(2, 3),
@@ -3992,7 +3996,7 @@ const count = ref(0)
                         declared_in_macro_type_arg: false,
                         constructor_bindings: Vec::new(),
                     },
-                    verter_semantic::analysis::types::AnalyzedPropField {
+                    verter_session_query::analysis::types::AnalyzedPropField {
                         name: "c".into(),
                         is_optional: false,
                         span: verter_span::Span::new(4, 5),
@@ -4020,7 +4024,7 @@ const count = ref(0)
             bindings: vec![],
             imports: vec![],
             macro_type_deps: vec![],
-            flags: verter_semantic::analysis::types::AnalysisFlags::empty(),
+            flags: verter_session_query::analysis::types::AnalysisFlags::empty(),
             exported_functions: vec![],
             vue_api_calls: vec![],
             dom_query_calls: vec![],

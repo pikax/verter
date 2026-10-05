@@ -52,12 +52,12 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 use verter_workspace::FactVersionRef;
 
 use crate::resolver_core::bracketed_generation::BracketedGeneration;
 use crate::resolver_core::{StoreView, ValidatedFactCache};
-use verter_semantic::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
+use verter_session_query::facts::registry::{Fact, InternedName, InternedSpecifier, SymbolSpace};
 
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,7 +131,7 @@ pub struct ResolvedSpecifier {
 
 /// One resolved import-clause binding.
 ///
-/// Mirrors the payload of [`verter_semantic::facts::FactKey::ResolvedImportClause`]:
+/// Mirrors the payload of [`verter_session_query::facts::FactKey::ResolvedImportClause`]:
 /// `(specifier, binding, space, resolved_canonical,
 /// resolved_source_name)` — the resolver's claim that a particular
 /// `import { binding } from "spec"` (or default / namespace import)
@@ -160,7 +160,7 @@ pub struct ResolvedImportClauseEntry {
 
 /// One resolved re-export-binding entry.
 ///
-/// Mirrors the payload of [`verter_semantic::facts::FactKey::ResolvedReexportBinding`]:
+/// Mirrors the payload of [`verter_session_query::facts::FactKey::ResolvedReexportBinding`]:
 /// `(specifier, source_name, target_name, space, resolved_canonical,
 /// resolved_source_name)` — the resolver's claim that
 /// `export { source_name as target_name } from "specifier"` reaches a

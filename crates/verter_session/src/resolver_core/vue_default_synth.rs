@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 use verter_type_expr::facts::{
     FactOrLocator, ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact,
 };
@@ -178,8 +178,8 @@ pub fn is_typeinfo_scratch(canonical_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::type_eval::ValueDeclKind;
-    use verter_semantic::analysis::types::AnalyzedMacro;
+    use verter_session_query::analysis::types::AnalyzedMacro;
+    use verter_session_query::declarations::ValueDeclKind;
     use verter_span::Span;
     use verter_type_expr::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,

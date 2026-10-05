@@ -7,7 +7,7 @@ use oxc_ast::ast::{
 use oxc_span::GetSpan;
 use std::sync::Arc;
 
-use super::{
+use verter_session_query::function_program::{
     FunctionReadRole, FunctionReferenceBinding, FunctionReferenceRecord, FunctionWriteKind,
     FunctionWriteTarget,
 };

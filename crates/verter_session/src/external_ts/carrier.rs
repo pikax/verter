@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// The role of a carrier surface. Mirrors the existing `ProviderSurfaceStore`
 /// roles (`CarrierIde`/`CarrierApi`/`Shadow`/`Real`).

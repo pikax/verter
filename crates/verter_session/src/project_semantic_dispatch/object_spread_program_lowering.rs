@@ -13,7 +13,7 @@ use crate::semantic_query::{
     NodeScopeId, ObjectConstructionEffect, ObjectSpreadProgram, ProjectionReductionContext,
     SemanticNodeData, SemanticNodeId, SurfaceView,
 };
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 /// The DIRECT construction effect one already-resolved surface member
 /// performs — the single translation from "a member of a surface" to "an

@@ -691,21 +691,21 @@ impl crate::resolver_core::ImportedRuntimeValueResolver for RecordingRuntimeValu
     fn dependency_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_session_query::declarations::EvalEnv>> {
         self.host.base_eval_env_arc(canonical_id)
     }
 
     fn dependency_value_symbol_graph_native(
         &self,
         source: &crate::resolver_core::ValueDeclIdentity,
-    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+    ) -> Option<verter_session_query::declarations::ValueDeclInfo> {
         self.host.dependency_value_symbol_graph_native(source)
     }
 
     fn prepared_value_decl(
         &self,
         source: &crate::resolver_core::ValueDeclIdentity,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
         self.host
             .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
     }
@@ -770,7 +770,7 @@ fn materializer_touched_source_pairs(
         host,
         touched: std::cell::RefCell::new(std::collections::BTreeSet::new()),
     };
-    let mut disposable_env = verter_semantic::analysis::type_eval::EvalEnv::new();
+    let mut disposable_env = verter_session_query::declarations::EvalEnv::new();
     crate::resolver_core::materialize_imported_runtime_values_into_env(
         snapshot.imports.as_slice(),
         &owner_local_value_names,
@@ -962,9 +962,9 @@ fn c3_fallthrough_oracle_value_symbol_surface_matches_graph_native_dep_set() {
     // import's lexical Instance owner, so presence is checked by NAME
     // across owners (the owner-aware DeclMap's bare-str view is the
     // ordinary-file compatibility view only).
-    let has_value_named = |env: &verter_semantic::analysis::type_eval::EvalEnv,
-                           name: &str|
-     -> bool { env.value_symbols.keys().any(|key| &*key.name == name) };
+    let has_value_named = |env: &verter_session_query::declarations::EvalEnv, name: &str| -> bool {
+        env.value_symbols.keys().any(|key| &*key.name == name)
+    };
     assert!(
         has_value_named(&env, "theme"),
         "the oracle must hydrate the required cross-file binding `theme` into its \

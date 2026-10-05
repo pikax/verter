@@ -10,11 +10,11 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
-use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
 use verter_session::for_tests::ReadSetSignature;
 use verter_session::resolver_core::{FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView};
+use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {
     let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))

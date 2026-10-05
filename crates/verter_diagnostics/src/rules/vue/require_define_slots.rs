@@ -1,4 +1,4 @@
-﻿//! Rule: require-define-slots
+//! Rule: require-define-slots
 //!
 //! When `$slots` is used in the template but no `defineSlots()` macro is present
 //! in script setup, report a warning. `defineSlots()` declares slot types for
@@ -31,7 +31,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
-use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedMacroKind};
+use verter_session_query::analysis::types::{AnalysisFlags, AnalyzedMacroKind};
 
 pub struct RequireDefineSlots;
 
@@ -101,6 +101,7 @@ mod tests {
     use crate::visitor::LintVisitor;
     use verter_semantic::analysis::template::*;
     use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::types::AnalyzedMacro;
     use verter_span::Span;
 
     fn run_file(

@@ -133,7 +133,7 @@ impl StrictFamilyConfig {
     /// Project the reducer-relevant members out of a project's effective
     /// option set.
     pub(crate) fn from_options(
-        options: &verter_semantic::resolver_core::SemanticCompilerOptions,
+        options: &verter_session_query::resolution::SemanticCompilerOptions,
     ) -> Self {
         Self {
             strict_null_checks: options.strict_null_checks,
@@ -1199,12 +1199,15 @@ pub(crate) mod flow_obligation_state {
 
     use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
     use verter_identity::identity::{InputBasisId, ResultContractId};
-    use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
-    use verter_semantic::analysis::flow::{
-        FlowBindingRef, SkeletonBindingId, SkeletonBindingKind, SkeletonClosureId,
-        SkeletonExprSiteId, SkeletonRegionId,
+    use verter_session_query::flow::flow_graph::{FlowEdgeClass, FlowNodeId, FlowNodeKind};
+    use verter_session_query::flow::{
+        binding::FlowBindingRef,
+        skeleton::{
+            SkeletonBindingId, SkeletonBindingKind, SkeletonClosureId, SkeletonExprSiteId,
+            SkeletonRegionId,
+        },
     };
-    use verter_semantic::analysis::function_program::FlowBindingIdentity;
+    use verter_session_query::function_program::FlowBindingIdentity;
 
     use super::super::flow_solve::{
         flow_family_route, flow_operation_contract, require_registered_flow_requirement,

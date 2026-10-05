@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::{AttemptOutcome, ResolverAttemptView};
+use verter_session_query::resolution::{AttemptOutcome, ResolverAttemptView};
 
 struct HostShapedState {
     generation: u64,

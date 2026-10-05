@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use verter_audit::{FlowSliceBudgetAxisTag, StructuredAuditEvent};
 
-use verter_semantic::analysis::flow::peeker::FlowSliceBudgetExceeded;
+use verter_session_query::flow::peeker::FlowSliceBudgetExceeded;
 
 /// `true` when a structured-event accumulator is installed for the
 /// current request. The event-construction gate: all payload
@@ -66,10 +66,10 @@ pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
     }
     crate::host_manage::push_structured_event(StructuredAuditEvent::FlowSliceBudgetExceeded {
         axis: match exceeded.axis {
-            verter_semantic::analysis::flow::peeker::FlowSliceBudgetAxis::SelectedNodes => {
+            verter_session_query::flow::peeker::FlowSliceBudgetAxis::SelectedNodes => {
                 FlowSliceBudgetAxisTag::SelectedNodes
             }
-            verter_semantic::analysis::flow::peeker::FlowSliceBudgetAxis::ValueStates => {
+            verter_session_query::flow::peeker::FlowSliceBudgetAxis::ValueStates => {
                 FlowSliceBudgetAxisTag::ValueStates
             }
         },

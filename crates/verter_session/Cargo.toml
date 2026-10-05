@@ -236,6 +236,7 @@ rayon = { workspace = true }
 uuid = { version = "1.23", features = ["rng-getrandom"] }
 
 [dev-dependencies]
+verter_session_query = { workspace = true, features = ["test-support"] }
 # Oracle harness snapshot-identity hashing (test-only — the harness lives under
 # `#[cfg(test)] mod typeinfo_tests`, so blake3 stays out of the production /
 # resolver dependency closure, preserving `tsgo_not_reachable_from_resolver`).

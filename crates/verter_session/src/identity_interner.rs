@@ -2,7 +2,7 @@
 //!
 //! Deduplicates the identity-carrying strings the session layer mints at
 //! high volume — canonical file ids and symbol names flowing into
-//! [`verter_semantic::analysis::type_solver::host::ResolvedRootIdentity`]
+//! [`verter_session_query::type_solver::host::ResolvedRootIdentity`]
 //! and the prepared-declaration surface — so every identity for the same
 //! `(path, name)` shares one `Arc<str>` allocation instead of cloning a
 //! fresh `String`.

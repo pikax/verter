@@ -118,8 +118,8 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         self.inner.resolve_import(importer_id, specifier, ctx)
     }
 
@@ -127,7 +127,7 @@ impl verter_workspace::WorkspaceRead for CountingWorkspace {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         self.inner
             .resolve_import_outcome(importer_id, specifier, ctx)
@@ -227,7 +227,10 @@ impl verter_workspace::WorkspaceAccess for CountingWorkspace {
         self.inner.notify_delete(canonical_id);
     }
 
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.inner.configure_resolver(projects);
     }
 }

@@ -209,7 +209,7 @@ pub(crate) struct PublishedResolutionView {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedResolverSnapshot {
-    pub(crate) resolver: verter_semantic::resolver_core::ModuleResolverCore,
+    pub(crate) resolver: verter_session_query::resolution::ModuleResolverCore,
     /// Exact Engine-backed workspace publication paired with `resolver`.
     pub(crate) resolution_view: Option<PublishedResolutionView>,
     /// `true` after `background_init` publishes a real snapshot with the
@@ -260,7 +260,7 @@ pub(crate) struct ProviderProjectionContext {
 pub(crate) struct PreparedNonCarrierProviderSync {
     pub(crate) provider_path: String,
     pub(crate) rewritten: String,
-    pub(crate) resolved_dependencies: Vec<verter_semantic::resolver_core::ResolveResult>,
+    pub(crate) resolved_dependencies: Vec<verter_session_query::resolution::ResolveResult>,
 }
 
 pub(crate) struct ResolvedComponentDocument {
@@ -354,7 +354,7 @@ struct AuthoredBarrelComponentRouteIdentity {
     source: String,
     imported_name: String,
     local_binding: String,
-    kind: verter_semantic::analysis::types::ImportBindingKind,
+    kind: verter_session_query::analysis::types::ImportBindingKind,
     import_span: verter_span::Span,
     binding_span: verter_span::Span,
 }

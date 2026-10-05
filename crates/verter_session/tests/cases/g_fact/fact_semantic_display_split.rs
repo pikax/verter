@@ -18,7 +18,6 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::{Fact, FactKey, FactLane, SymbolSpace};
 use verter_session::file_artifact_store::InternedName;
 use verter_session::member_display_fact_store::{
     make_member_display_fact, MemberDisplayFactKey, MemberDisplayFactStore,
@@ -26,6 +25,7 @@ use verter_session::member_display_fact_store::{
 use verter_session::member_semantic_fact_store::{
     make_member_fact, MemberSemanticFactKey, MemberSemanticFactStore,
 };
+use verter_session_query::facts::{Fact, FactKey, FactLane, SymbolSpace};
 
 fn psh(b: u8) -> [u8; 16] {
     let mut h = [0u8; 16];

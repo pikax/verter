@@ -38,7 +38,7 @@ use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, Macro
 use verter_semantic::analysis::type_expand::{
     ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
 };
-use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;

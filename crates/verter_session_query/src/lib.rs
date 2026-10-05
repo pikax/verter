@@ -23,6 +23,17 @@
 
 #![forbid(unsafe_code)]
 
+#[macro_use]
+extern crate verter_debug_assert;
+
+pub mod analysis;
+pub mod declarations;
+pub mod facts;
+pub mod flow;
+pub mod function_program;
+pub mod resolution;
+pub mod type_solver;
+
 use verter_type_expr::locators::{AuthoredBodyLocator, TypeParamVisibility};
 use verter_type_expr::{TypeExpr, TypeParam};
 

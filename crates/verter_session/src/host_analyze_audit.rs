@@ -365,13 +365,13 @@ fn build_payload_from_analysis(analysis: &AnalysisReady) -> SemanticAnalysisPayl
     if let Some(script) = analysis.script_analysis.as_ref() {
         for entry in &script.declaration_entries {
             match entry.kind {
-                verter_semantic::analysis::LocalDeclarationKind::Type => {
+                verter_session_query::analysis::types::LocalDeclarationKind::Type => {
                     num_type_decls = num_type_decls.saturating_add(1);
                 }
-                verter_semantic::analysis::LocalDeclarationKind::Value => {
+                verter_session_query::analysis::types::LocalDeclarationKind::Value => {
                     num_value_decls = num_value_decls.saturating_add(1);
                 }
-                verter_semantic::analysis::LocalDeclarationKind::TypeAndValue => {
+                verter_session_query::analysis::types::LocalDeclarationKind::TypeAndValue => {
                     num_type_decls = num_type_decls.saturating_add(1);
                     num_value_decls = num_value_decls.saturating_add(1);
                 }

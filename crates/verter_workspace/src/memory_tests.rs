@@ -5,8 +5,8 @@ use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{ExactResolution, ParsedEdge};
 use crate::ProjectMembership;
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::IdeProjectCompilerOptions;
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 fn set_fallback_projects(ws: &MemoryWorkspace, roots: &[&str]) {
     ws.set_project_graph(ProjectGraph::from_configs(
@@ -1778,7 +1778,7 @@ fn memory_unresolved_relative_records_stem_without_published_root() {
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     // /src/types.ts strips `.ts` → /src/types — finds the stem bucket.
@@ -1804,7 +1804,8 @@ fn memory_resolved_relative_does_not_leak_stem() {
             extensions: vec![".ts".into()],
             workspace_root: "/src".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: crate::membership::configured_membership_match_all_under_root(
                 &CanonicalPath::new("/src"),
@@ -1815,7 +1816,7 @@ fn memory_resolved_relative_does_not_leak_stem() {
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     // Canonical hit — direct query.
@@ -1866,7 +1867,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/A.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Child".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1880,7 +1881,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/B.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Helper".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1894,7 +1895,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/C.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./util".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1914,7 +1915,7 @@ fn memory_default_resolve_extensions_merges_with_probe_authoritatively() {
         "/src/D.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./Mystery".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     let carriers = verter_language::LanguageRegistry::global().carrier_extensions();
@@ -1960,7 +1961,7 @@ fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
         "/src/Comp.vue",
         &[crate::types::ParsedEdge::Relative {
             specifier: "./types".to_string(),
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         }],
     );
     assert_eq!(
@@ -1972,8 +1973,8 @@ fn memory_set_exact_resolutions_dampens_active_stem_canonical_works() {
         "/src/Comp.vue",
         vec![crate::types::ExactResolution {
             specifier: "./types".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/lib/types.ts".to_string()),
             possible_canonical_ids: vec![],
         }],

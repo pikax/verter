@@ -22,8 +22,8 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_eval::TypeDeclKind;
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::declarations::TypeDeclKind;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 use super::locator_view_worklist::{
     ProjectedViewOutcome, ProjectionPoll, ProjectionRun, ProjectionSeam,

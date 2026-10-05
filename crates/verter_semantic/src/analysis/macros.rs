@@ -4,10 +4,10 @@ use oxc_ast::Comment;
 use oxc_span::GetSpan;
 use verter_type_expr::{TopLevelOwnerId, TypeExpr};
 
-use crate::analysis::top_level_owners::TopLevelOwnerTable;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
 
-use crate::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedDefaultValue, AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacro, AnalyzedMacroKind,
     AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, MacroAnchor,
     MacroAnchorUnsupported, MacroEditAnchors, MacroTypeDepUsage, MemberListAnchor,

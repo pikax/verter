@@ -88,7 +88,7 @@ fn has_syntactic_route_fact(facts: &[FactVersionRef], owner: &str) -> bool {
             f,
             FactVersionRef::Parse(parse)
                 if parse.canonical_id == owner
-                    && parse.key == verter_semantic::facts::FactKey::SyntacticRouteInterface
+                    && parse.key == verter_session_query::facts::FactKey::SyntacticRouteInterface
         )
     })
 }

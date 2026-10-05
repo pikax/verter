@@ -48,7 +48,7 @@ use verter_session::external_ts::{
     SnapshotFile, SnapshotRole,
 };
 
-use verter_semantic::analysis::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::documents::provider_projection::ProviderPositionMapper;
 use crate::provider_surface_store::ProviderSurfaceStore;

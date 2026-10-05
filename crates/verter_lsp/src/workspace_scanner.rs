@@ -164,7 +164,7 @@ pub fn collect_carrier_paths(
             &|file: &str| {
                 // Any framework CARRIER file (`.vue` / `.svelte`), from the
                 // registry carrier-extension set — not a `.vue`-literal.
-                verter_semantic::resolver_core::path_is_carrier(file)
+                verter_session_query::resolution::path_is_carrier(file)
             },
         )
         .unwrap_or_default()
@@ -767,7 +767,7 @@ async fn sync_non_carrier_file_to_provider(
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
     vfs_workspace: &parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>>,
     sync_states: &DashMap<String, ProviderSyncState>,
-) -> Vec<verter_semantic::resolver_core::ResolveResult> {
+) -> Vec<verter_session_query::resolution::ResolveResult> {
     let snapshot = {
         let ws = vfs_workspace.read();
         ws.as_ref().and_then(|ws| {
@@ -915,7 +915,7 @@ async fn sync_non_carrier_file_to_provider(
     reason = "node_modules follow-through threads the provider-surface store alongside its sync inputs"
 )]
 async fn follow_node_modules_deps(
-    initial_deps: Vec<verter_semantic::resolver_core::ResolveResult>,
+    initial_deps: Vec<verter_session_query::resolution::ResolveResult>,
     host: &crate::documents::SharedHost,
     sync: &ProjectSync,
     provider_surfaces: &crate::provider_surface_store::ProviderSurfaceStore,
@@ -923,17 +923,19 @@ async fn follow_node_modules_deps(
     sync_states: &DashMap<String, ProviderSyncState>,
     node_modules_synced: &mut HashSet<String>,
 ) {
-    let mut pending: Vec<verter_semantic::resolver_core::ResolveResult> = initial_deps;
+    let mut pending: Vec<verter_session_query::resolution::ResolveResult> = initial_deps;
 
     while let Some(dep) = pending.pop() {
         // Handle Vue public API dependencies (sync .vue.verter.ts files)
-        if dep.provider_target == verter_semantic::resolver_core::ProviderTarget::CarrierPublicApi {
+        if dep.provider_target == verter_session_query::resolution::ProviderTarget::CarrierPublicApi
+        {
             // Vue public API files are handled in by sync_file_to_provider
             continue;
         }
 
         // Handle shadow source files (non-carrier workspace files — already in queue)
-        if dep.provider_target == verter_semantic::resolver_core::ProviderTarget::ShadowSourceFile {
+        if dep.provider_target == verter_session_query::resolution::ProviderTarget::ShadowSourceFile
+        {
             // These are workspace files already queued in source_classified
             continue;
         }
@@ -1808,7 +1810,7 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 "/workspace/pkg-a".to_string(),
                 "/workspace".to_string(),
@@ -1905,7 +1907,7 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 "/workspace/pkg-a".to_string(),
                 "/workspace".to_string(),
@@ -2006,7 +2008,7 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 "/workspace/src".to_string(),
                 "/workspace".to_string(),
@@ -2105,7 +2107,7 @@ defineProps<{ msg: string }>()
             .ensure_compiled("/workspace/src/Child.vue", &profile)
             .is_ok());
 
-        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
@@ -2337,7 +2339,7 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_configured_is_project_source() {
-        use verter_semantic::resolver_core::{
+        use verter_session_query::resolution::{
             CompiledGlob, ConfiguredMembership, ModuleResolverCore, NormalizedGlob,
         };
         use verter_workspace::workspace_snapshot::*;
@@ -2398,7 +2400,7 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_outside_all_projects_is_other() {
-        use verter_semantic::resolver_core::ModuleResolverCore;
+        use verter_session_query::resolution::ModuleResolverCore;
         use verter_workspace::workspace_snapshot::*;
 
         let snap = WorkspaceSnapshot {
@@ -2415,7 +2417,7 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_node_modules_is_other() {
-        use verter_semantic::resolver_core::{ConfiguredMembership, ModuleResolverCore};
+        use verter_session_query::resolution::{ConfiguredMembership, ModuleResolverCore};
         use verter_workspace::workspace_snapshot::*;
         use verter_workspace::CanonicalPath;
 
@@ -2479,7 +2481,7 @@ defineProps<{ msg: string }>()
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
@@ -2614,15 +2616,15 @@ defineProps<{ msg: string }>()
             verter_workspace::FilesystemOptions::default(),
         ));
         let root_cp = verter_workspace::CanonicalPath::new(root);
-        let spec = verter_semantic::resolver_core::StaticMembershipSpec {
+        let spec = verter_session_query::resolution::StaticMembershipSpec {
             files: Vec::new(),
-            include: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+            include: vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                     &root_cp, "**/*",
                 ),
             )],
-            exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+            exclude: vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                     &root_cp,
                     "node_modules/**",
                 ),
@@ -2635,17 +2637,17 @@ defineProps<{ msg: string }>()
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-                membership: verter_semantic::resolver_core::ConfiguredMembership {
+                membership: verter_session_query::resolution::ConfiguredMembership {
                     spec,
                     materialized_files: Default::default(),
                 },
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 workspace_aliases: Vec::new(),
             },
         }];
-        let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 root.to_string(),
                 root.to_string(),

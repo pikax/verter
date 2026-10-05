@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
-use verter_semantic::analysis::types::{AnalyzedMacroKind, MacroTypeDep};
+use verter_session_query::analysis::types::{AnalyzedMacroKind, MacroTypeDep};
 
 use crate::resolver_core::resolve_local_type_declaration;
 

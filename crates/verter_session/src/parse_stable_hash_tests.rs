@@ -49,7 +49,9 @@ fn indexed_for(source: &str) -> Arc<IndexedReady> {
         None,
         SourceType::ts(),
         Arc::new(
-            verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(parsed.program.body.len()),
+            verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+                parsed.program.body.len(),
+            ),
         ),
         false,
         Arc::new(DeclLoweringService::new()),

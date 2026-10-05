@@ -779,13 +779,13 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                     .map(|binding| FfiImportBindingMeta {
                         name: binding.name,
                         kind: match binding.kind {
-                            verter_semantic::analysis::types::ImportBindingKind::Named => {
+                            verter_session_query::analysis::types::ImportBindingKind::Named => {
                                 "named".to_string()
                             }
-                            verter_semantic::analysis::types::ImportBindingKind::Default => {
+                            verter_session_query::analysis::types::ImportBindingKind::Default => {
                                 "default".to_string()
                             }
-                            verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                            verter_session_query::analysis::types::ImportBindingKind::Namespace => {
                                 "namespace".to_string()
                             }
                         },

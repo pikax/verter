@@ -79,7 +79,7 @@ pub(crate) fn node_root_is_explicit_selector_operator(
     node: crate::semantic_query::SemanticNodeId,
 ) -> bool {
     use crate::semantic_query::SemanticNodeData;
-    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+    use verter_session_query::type_solver::builtin::BuiltinUtility;
     let graph = dispatch.graph();
     let is_selector_util = |name: &str| {
         matches!(

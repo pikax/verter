@@ -235,7 +235,8 @@ impl<'a> ConservativeSvelteScriptObservations<'a> {
     #[must_use]
     pub fn prop_defaults(
         self,
-    ) -> ConservativeObservations<'a, verter_semantic::analysis::types::AnalyzedDefaultValue> {
+    ) -> ConservativeObservations<'a, verter_session_query::analysis::types::AnalyzedDefaultValue>
+    {
         ConservativeObservations::new(&self.facts.syntax().prop_defaults)
     }
 
@@ -1024,9 +1025,9 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                                     })
                                 })
                                 .or_else(|| {
-                                    let ctx = verter_semantic::resolver_core::ResolutionContext {
-                                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                                        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                                    let ctx = verter_session_query::resolution::ResolutionContext {
+                                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                                        kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                                     };
                                     match host.resolve_via_vfs(canonical, specifier, ctx) {
                                         verter_workspace::ResolutionPublication::Admitted(

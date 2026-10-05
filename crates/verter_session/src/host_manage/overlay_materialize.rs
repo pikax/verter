@@ -739,7 +739,7 @@ impl VerterHost {
                 verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory,
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
             svelte_component_runes_mode: bool,
-            owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
+            owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
             /// The snapshot's walks, or a parse of its own, were refused for
             /// want of stack: the flight publishes nothing.
             refused: bool,
@@ -784,7 +784,7 @@ impl VerterHost {
                             parsed.borrow_dependent(),
                             job_framework_parse.as_deref(),
                         )?,
-                        None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
+                        None => verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(0),
                     });
                     let svelte_component_runes_mode = program.is_some_and(|parsed| {
                         job_framework_parse.as_deref().is_some_and(|artifact| {
@@ -960,9 +960,12 @@ impl VerterHost {
         let shallow_state = Arc::new(shallow_state_inner);
 
         let analysis_flags =
-            verter_semantic::analysis::AnalysisFlags::from_bits_truncate(snapshot.script_flags);
-        let declares_interface_app_config = analysis_flags
-            .contains(verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG);
+            verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
+                snapshot.script_flags,
+            );
+        let declares_interface_app_config = analysis_flags.contains(
+            verter_session_query::analysis::types::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG,
+        );
         let script_analysis = Some(Arc::new(
             verter_semantic::analysis::ScriptAnalysisSnapshot {
                 imports: snapshot.imports.clone(),

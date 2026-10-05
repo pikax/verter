@@ -159,7 +159,7 @@ mod compose_template_virtual_file_tests;
 
 pub(crate) fn vue_macro_output_matches_revision(
     output: &crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
-    expected: verter_semantic::analysis::types::Hash16,
+    expected: verter_session_query::analysis::types::Hash16,
 ) -> bool {
     output.origin_whole_hash == Some(expected)
 }
@@ -580,9 +580,9 @@ impl VerterHost {
             let resolved = match self.resolve_for_persistent_state(
                 canonical_id,
                 &request.specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                 },
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -595,7 +595,7 @@ impl VerterHost {
                     pending_routes.push((
                         request.specifier,
                         resolution.source_id.clone(),
-                        verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                        verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                     ));
                     resolution.source_id
                 }
@@ -610,9 +610,9 @@ impl VerterHost {
             let type_resolution = self.resolve_for_persistent_state(
                 canonical_id,
                 &dep.import_source,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             );
             let resolved = match type_resolution {
@@ -622,16 +622,16 @@ impl VerterHost {
                             pending_routes.push((
                                 dep.import_source.clone(),
                                 resolution.source_id.clone(),
-                                verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                                verter_session_query::resolution::ResolveRequestKind::TypeImport,
                             ));
                             Some(resolution)
                         }
                         None => match self.resolve_for_persistent_state(
                             canonical_id,
                             &dep.import_source,
-                            verter_semantic::resolver_core::ResolutionContext {
-                                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                            verter_session_query::resolution::ResolutionContext {
+                                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                             },
                         ) {
                             verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -639,7 +639,7 @@ impl VerterHost {
                                     pending_routes.push((
                                         dep.import_source.clone(),
                                         resolution.source_id.clone(),
-                                        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                                        verter_session_query::resolution::ResolveRequestKind::EsmImport,
                                     ));
                                 })
                             }
@@ -706,8 +706,8 @@ impl VerterHost {
     fn prefetch_compile_tier_observation_targets(
         &self,
         owner_canonical: &str,
-        script_imports: &[verter_semantic::analysis::AnalyzedImport],
-        macro_type_deps: &[verter_semantic::analysis::MacroTypeDep],
+        script_imports: &[verter_session_query::analysis::types::AnalyzedImport],
+        macro_type_deps: &[verter_session_query::analysis::types::MacroTypeDep],
         external_requests: &[ExternalSourceRequest],
     ) -> CompileTierPrefetchObservation {
         // Test/debug-only invocation count. The cold-compute path gates
@@ -751,28 +751,28 @@ impl VerterHost {
             let type_resolution = self.resolve_for_persistent_state(
                 owner_canonical,
                 &dep.import_source,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             );
             let resolved = match type_resolution {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     match admitted.into_result() {
                         Some(resolution) => {
-                            Some((resolution, verter_semantic::resolver_core::ResolveRequestKind::TypeImport))
+                            Some((resolution, verter_session_query::resolution::ResolveRequestKind::TypeImport))
                         }
                         None => match self.resolve_for_persistent_state(
                             owner_canonical,
                             &dep.import_source,
-                            verter_semantic::resolver_core::ResolutionContext {
-                                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                            verter_session_query::resolution::ResolutionContext {
+                                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                             },
                         ) {
                             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                                 admitted.into_result().map(|resolution| {
-                                    (resolution, verter_semantic::resolver_core::ResolveRequestKind::EsmImport)
+                                    (resolution, verter_session_query::resolution::ResolveRequestKind::EsmImport)
                                 })
                             }
                             verter_workspace::ResolutionPublication::Refused(_) => {
@@ -807,15 +807,15 @@ impl VerterHost {
         // phase; value imports use EsmImport.
         for import in script_imports {
             let kind = if import.is_type_only {
-                verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+                verter_session_query::resolution::ResolveRequestKind::TypeImport
             } else {
-                verter_semantic::resolver_core::ResolveRequestKind::EsmImport
+                verter_session_query::resolution::ResolveRequestKind::EsmImport
             };
             match self.resolve_for_persistent_state(
                 owner_canonical,
                 import.source.as_str(),
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                     kind,
                 },
             ) {
@@ -878,9 +878,9 @@ impl VerterHost {
                 let resolved = match self.resolve_for_persistent_state(
                     owner_canonical,
                     &request.specifier,
-                    verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                        kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                    verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                        kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                     },
                 ) {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
@@ -897,7 +897,7 @@ impl VerterHost {
                     pending_routes.push((
                         request.specifier.clone(),
                         resolved.clone(),
-                        verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                        verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                     ));
                 }
                 resolved

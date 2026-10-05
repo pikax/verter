@@ -163,7 +163,7 @@ impl VerterHost {
         };
         let Some(old_fact) = old_artifacts
             .facts
-            .lookup(&verter_semantic::facts::registry::FactKey::SyntacticRouteInterface)
+            .lookup(&verter_session_query::facts::registry::FactKey::SyntacticRouteInterface)
         else {
             return false;
         };
@@ -1057,7 +1057,7 @@ impl VerterHost {
         state: &crate::resolver_core::ShallowFileState,
         dep_edges: &rustc_hash::FxHashMap<String, String>,
     ) -> crate::resolver_core::prepared_decl::ImportCanonicalization {
-        use verter_semantic::analysis::type_solver::ResolvedRootIdentity;
+        use verter_session_query::type_solver::ResolvedRootIdentity;
 
         let mut canonicalization =
             crate::resolver_core::prepared_decl::ImportCanonicalization::default();
@@ -1459,7 +1459,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         symbol_name: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
+    ) -> Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>> {
         // Cold-seed-routed (see [`Self::prepared_decl_bundle`]): a stale
         // read fails the warm probe closed and the bundle materialises cold.
         let view = self.resolver_store_view_read().into_cold_seed_view();
@@ -1491,7 +1491,7 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
@@ -1519,7 +1519,7 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, services, canonical_id)
@@ -1540,7 +1540,7 @@ impl VerterHost {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
         // Cold-seed-routed (see [`Self::prepared_decl_bundle`]): a stale
         // read fails the warm probe closed and the bundle materialises cold.
         let view = self.resolver_store_view_read().into_cold_seed_view();
@@ -1573,7 +1573,7 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
@@ -1591,7 +1591,7 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, services, canonical_id)
@@ -1641,7 +1641,7 @@ impl VerterHost {
                 if state
                     .type_symbol_kind_in(owner, symbol_name)
                     .is_some_and(|kind| {
-                        kind == verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                        kind == verter_session_query::declarations::TypeDeclKind::Class
                     })
                 {
                     // A class's public declaration carrier includes member
@@ -1852,7 +1852,7 @@ impl VerterHost {
     /// generation; otherwise `None`.
     fn source_bound_file_analysis_snapshot(
         parse: &crate::ParseSnapshot,
-        export_signatures: Arc<Vec<verter_semantic::analysis::ExportSignature>>,
+        export_signatures: Arc<Vec<verter_session_query::analysis::types::ExportSignature>>,
         template: Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
     ) -> crate::types::FileAnalysisSnapshot {
         let sa = parse.script_analysis.as_ref();
@@ -2313,7 +2313,8 @@ impl VerterHost {
                 route_inventory:
                     verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory,
                 svelte_component_runes_mode: bool,
-                owner_table: Arc<verter_semantic::analysis::TopLevelOwnerTable>,
+                owner_table:
+                    Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
             }
 
             let job_framework_parse = framework_parse.clone();
@@ -2351,7 +2352,7 @@ impl VerterHost {
                                 parsed.borrow_dependent(),
                                 job_framework_parse.as_deref(),
                             )?,
-                            None => verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(0),
+                            None => verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(0),
                         });
                         let svelte_component_runes_mode = program.is_some_and(|parsed| {
                             job_framework_parse.as_deref().is_some_and(|artifact| {
@@ -2468,9 +2469,9 @@ impl VerterHost {
             // is the production input the `AppConfigNoOverrideProofDb`
             // producer consults to short-circuit files that cannot
             // contribute an override.
-            let declares_interface_app_config = script_analysis
-                .flags
-                .contains(verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG);
+            let declares_interface_app_config = script_analysis.flags.contains(
+                verter_session_query::analysis::types::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG,
+            );
 
             // Publish the canonical post-parse artifact into FileArtifactStore.
             // This is the single authoritative cache consumers read from.
@@ -2898,11 +2899,11 @@ impl VerterHost {
         }
         let fact = artifacts
             .facts
-            .lookup(&verter_semantic::facts::FactKey::SyntacticRouteInterface)?;
+            .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
         Some(crate::resolver_core::ParseFactRef {
             canonical_id: canonical_id.to_string(),
-            key: verter_semantic::facts::FactKey::SyntacticRouteInterface,
-            lane: verter_semantic::facts::FactLane::Semantic,
+            key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
+            lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: fact.semantic_hash,
         })
     }

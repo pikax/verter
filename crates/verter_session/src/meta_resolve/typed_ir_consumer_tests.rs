@@ -28,18 +28,20 @@ use super::projectors::define_shapes::slot_field_function_source;
 
 fn slot_with_payload(
     payload: Option<verter_type_expr::locators::MacroPayloadLocator>,
-) -> verter_semantic::analysis::AnalyzedSlotField {
-    verter_semantic::analysis::AnalyzedSlotField {
+) -> verter_session_query::analysis::types::AnalyzedSlotField {
+    verter_session_query::analysis::types::AnalyzedSlotField {
         props_anchor: Default::default(),
         name: "default".to_string(),
         is_required: true,
-        bindings: vec![verter_semantic::analysis::AnalyzedSlotFieldBinding {
-            name: "item".to_string(),
-            type_annotation: None,
-            payload: None,
-            binding_expr_scope: None,
-            span: verter_span::Span::default(),
-        }],
+        bindings: vec![
+            verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
+                name: "item".to_string(),
+                type_annotation: None,
+                payload: None,
+                binding_expr_scope: None,
+                span: verter_span::Span::default(),
+            },
+        ],
         span: verter_span::Span::default(),
         return_type: None,
         payload,

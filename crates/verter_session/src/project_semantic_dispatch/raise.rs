@@ -2531,7 +2531,7 @@ fn prepared_decl_body_is_closed_unguarded(
 /// in-flight guard (`push_closedness_active`).
 fn recipe_key_domain_closedness(
     dispatch: &ProjectSemanticDispatch<'_>,
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     recipe: &verter_type_expr::facts::ClosednessRecipe,
     bindings: &KeyDomainBindings<'_>,
     budget: &mut u32,
@@ -2648,7 +2648,7 @@ fn recipe_key_domain_closedness(
 /// exhausted is UNAVAILABLE (the fuse fired — a refusal, not a proof).
 fn lower_and_classify_key_domain(
     dispatch: &ProjectSemanticDispatch<'_>,
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     slot: &verter_type_expr::locators::TypeBodySlot,
     bindings: &KeyDomainBindings<'_>,
     budget: &mut u32,
@@ -2669,7 +2669,7 @@ fn lower_and_classify_key_domain(
 /// key-domain).
 fn lower_and_classify_key_domain_at(
     dispatch: &ProjectSemanticDispatch<'_>,
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     slot: &verter_type_expr::locators::TypeBodySlot,
     bindings: &KeyDomainBindings<'_>,
     budget: &mut u32,
@@ -2737,7 +2737,7 @@ struct EscapeLoweringEnv {
 
 fn escape_lowering_env(
     dispatch: &ProjectSemanticDispatch<'_>,
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     bindings: &KeyDomainBindings<'_>,
 ) -> EscapeLoweringEnv {
     let mut env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
@@ -2767,7 +2767,7 @@ fn escape_lowering_env(
 /// interns the same shell).
 fn type_param_shell_node(
     dispatch: &ProjectSemanticDispatch<'_>,
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     param: &verter_type_expr::facts::NarrowTypeParam,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
@@ -2789,7 +2789,7 @@ fn type_param_shell_node(
 /// refs intern as `DeclRef`/`InstantiationRef` carriers, never executed).
 fn lower_body_under_env(
     dispatch: &ProjectSemanticDispatch<'_>,
-    prepared: &verter_semantic::analysis::type_solver::prepared::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     slot: &verter_type_expr::locators::TypeBodySlot,
     body: &TypeExpr,
     env: &FxHashMap<String, SemanticNodeId>,
@@ -3094,7 +3094,7 @@ fn prepared_instantiation_key_domain_is_closed_unguarded(
 /// — not closed. A non-registry name is not a builtin — not closed by
 /// this rule.
 fn builtin_utility_key_domain_is_closed(decl_name: &str, args: &[KeyDomainBinding]) -> bool {
-    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+    use verter_session_query::type_solver::builtin::BuiltinUtility;
     let Some(utility) = BuiltinUtility::from_name(decl_name) else {
         return false;
     };
@@ -3160,7 +3160,7 @@ pub(super) fn is_l1_object_filter_utility(decl_name: &str) -> bool {
 /// Name-keyed core of [`enumeration_domain_arg_index`] — see that
 /// function's family rationale.
 fn enumeration_domain_arg_index_for_name(decl_name: &str) -> Option<usize> {
-    use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+    use verter_session_query::type_solver::builtin::BuiltinUtility;
     // Utility identity is decided by the shared `BuiltinUtility` registry,
     // NOT a local name string match — a single source of truth for which
     // names are builtin utilities (the registry also owns arity / intrinsic
@@ -4418,7 +4418,7 @@ fn instantiation_base_is_resolvable(
     budget: &mut u32,
 ) -> bool {
     if base.canonical_id.as_ref() == "__builtin__" {
-        return verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
+        return verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
             base.decl_name.as_ref(),
         )
         .is_some();

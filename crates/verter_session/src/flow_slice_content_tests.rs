@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::flow::lower::lower_slice_plan;
-use verter_semantic::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
-use verter_semantic::analysis::function_program::{
+use verter_session_query::flow::lower::lower_slice_plan;
+use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+use verter_session_query::function_program::{
     FunctionDescentStep, FunctionProgramEntry, FunctionProgramIndex,
 };
 use verter_type_expr::facts::FunctionPartIdentity;
@@ -618,7 +618,7 @@ fn selected_annotation_descent_inspects_logarithmic_siblings() {
 
 #[test]
 fn slice_binding_references_preserve_shadowed_capture_frames() {
-    use verter_semantic::analysis::flow::FlowBindingRef;
+    use verter_session_query::flow::binding::FlowBindingRef;
     let source = "function f(flag: boolean) { if (flag) { let twin = 1; return () => twin; } else { let twin = 2; return () => twin; } }";
     let content = content_for(source, "f");
     let memo = memo_for(source);
@@ -4397,7 +4397,7 @@ fn local_reaching_definition_is_binding_and_local() {
         node.body.statements[1],
         SliceStatement::Return {
             argument: Some(SliceExpr::Local {
-                binding: verter_semantic::analysis::flow::FlowBindingRef::Local(*binding),
+                binding: verter_session_query::flow::binding::FlowBindingRef::Local(*binding),
                 name: Arc::from("x"),
                 param: None,
                 captured: false,
@@ -4868,12 +4868,10 @@ fn locator_miss_is_typed_none() {
     );
 
     let mut bad_descent = entry.clone();
-    bad_descent.locator.descent =
-        verter_semantic::analysis::function_program::FunctionDescent::new().then(
-            FunctionDescentStep::VariableInitializer {
-                declarator_ordinal: 99,
-            },
-        );
+    bad_descent.locator.descent = verter_session_query::function_program::FunctionDescent::new()
+        .then(FunctionDescentStep::VariableInitializer {
+            declarator_ordinal: 99,
+        });
     assert!(
         memo.flow_slice_content(
             &bad_descent,
@@ -6033,7 +6031,7 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
         .unwrap();
     let mut ir = lower_slice_plan(&plan, graph, skeleton);
     let rhs_start = source.find("x=1").unwrap() + 2;
-    let rhs_span = verter_semantic::analysis::flow::FrameSpan::rebase(
+    let rhs_span = verter_session_query::flow::frame_span::FrameSpan::rebase(
         entry.span.start,
         verter_span::Span::new(rhs_start as u32, (rhs_start + 1) as u32),
     );
@@ -6061,7 +6059,7 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
         )
         .unwrap();
     assert!(content.body.statements.iter().any(|statement| matches!(statement,SliceStatement::Assignment{definition,..} if *definition==original.site)),"repeated identical addresses preserve the same selected site");
-    expressions.push(verter_semantic::analysis::flow::flow_ir::FlowExpr {
+    expressions.push(verter_session_query::flow::flow_ir::FlowExpr {
         site: distinct_site,
         ..original
     });

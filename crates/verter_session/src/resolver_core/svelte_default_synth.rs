@@ -181,7 +181,7 @@ mod tests {
     use verter_semantic::analysis::framework_facts::svelte::{
         SvelteInstanceExport, SvelteLegacyProp, SveltePropsCandidate,
     };
-    use verter_semantic::analysis::type_eval::ValueDeclKind;
+    use verter_session_query::declarations::ValueDeclKind;
     use verter_type_expr::locators::{MacroPayloadLocator, MacroPayloadPosition};
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 

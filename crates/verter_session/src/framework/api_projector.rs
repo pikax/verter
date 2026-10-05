@@ -29,7 +29,7 @@ use crate::VerterHost;
 #[derive(Clone)]
 pub struct ComponentApiProjectionWitness {
     owner_canonical: std::sync::Arc<str>,
-    owner_whole_hash: verter_semantic::analysis::Hash16,
+    owner_whole_hash: verter_session_query::analysis::types::Hash16,
     result_key: crate::component_meta_result_db::ComponentMetaResultKey,
     producer_project_generation: u64,
     admitted_read_set: crate::fact_signature_helpers::ReadSetSignature,
@@ -136,8 +136,8 @@ impl ComponentApiProjectionWitness {
                     crate::resolver_core::FactVersionRef::RouteSurface(route)
                         if matches!(
                             &route.key,
-                            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                                target_kind_tag: verter_semantic::facts::registry::AugmentationTargetKindTag::ResolvedRelativeCanonical,
+                            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
+                                target_kind_tag: verter_session_query::facts::registry::AugmentationTargetKindTag::ResolvedRelativeCanonical,
                                 resolved_relative_canonical: Some(canonical),
                                 ..
                             } if canonical.as_ref() == target_canonical

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use parking_lot::Mutex;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     AttemptFailure, AttemptOutcome, AttemptOutput, CompletedAttempt,
     ConsumedResolutionObservationKey, IdeProjectConfig, InputKey, ModuleResolverCore, PathProbe,
     ProjectOwnership, ResolutionBasis, ResolutionContext, ResolutionObservationSnapshot,
@@ -193,7 +193,7 @@ impl crate::traits::WorkspaceRead for FixtureReader<'_> {
                 if manifest.is_some() != expected_present {
                     return Err(AttemptFailure::InputLoadIntegrity {
                         unresolved: vec![key.clone()],
-                        reason: verter_semantic::resolver_core::InputLoadIntegrityReason::IncompleteBoundedCapture,
+                        reason: verter_session_query::resolution::InputLoadIntegrityReason::IncompleteBoundedCapture,
                     });
                 }
                 Ok(manifest)
@@ -419,9 +419,9 @@ fn kernel_basis() -> ResolutionBasis {
 fn basis_for(raw: u64) -> ResolutionBasis {
     ResolutionBasis::new(
         ResolutionWorldBasis::new(
-            verter_semantic::resolver_core::WorkspaceAuthorityId::from_raw(raw),
-            verter_semantic::resolver_core::ResolutionPopulation::Base,
-            verter_semantic::resolver_core::ResolutionWorldId::from_raw(raw),
+            verter_session_query::resolution::WorkspaceAuthorityId::from_raw(raw),
+            verter_session_query::resolution::ResolutionPopulation::Base,
+            verter_session_query::resolution::ResolutionWorldId::from_raw(raw),
             None,
         ),
         None,
@@ -487,7 +487,7 @@ fn load_full_snapshot(
 pub(super) struct KernelCoreRunResult {
     pub(super) result: Option<ResolveResult>,
     pub(super) resolved: Option<String>,
-    pub(super) resolution_kind: Option<verter_semantic::resolver_core::ResolutionKind>,
+    pub(super) resolution_kind: Option<verter_session_query::resolution::ResolutionKind>,
     pub(super) ordered_selectors: Vec<ConsumedResolutionObservationKey>,
     pub(super) replayed_facts: Vec<crate::resolution_currency::ResolutionFactKey>,
     pub(super) path_probes: Vec<(String, PathProbe)>,
@@ -759,7 +759,7 @@ pub(super) fn with_aliases(
     project.workspace_aliases = aliases
         .iter()
         .map(
-            |(find, replacement)| verter_semantic::resolver_core::WorkspaceAlias {
+            |(find, replacement)| verter_session_query::resolution::WorkspaceAlias {
                 find: find.to_string(),
                 replacement: replacement.to_string(),
             },
@@ -933,7 +933,7 @@ fn full_driver_resolves_a_relative_specifier_for_an_owned_importer() {
     assert_eq!(kernel.resolved.as_deref(), Some("/proj/src/sibling.ts"));
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::Relative)
+        Some(verter_session_query::resolution::ResolutionKind::Relative)
     );
 }
 
@@ -950,7 +950,7 @@ fn full_driver_resolves_via_a_workspace_alias() {
     assert_eq!(kernel.resolved.as_deref(), Some("/proj/src/util.ts"));
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::WorkspaceAlias)
+        Some(verter_session_query::resolution::ResolutionKind::WorkspaceAlias)
     );
 
     // The driver
@@ -974,26 +974,26 @@ fn full_driver_resolves_via_a_workspace_alias() {
     let manifest_pos = kernel.ordered_selectors.iter().position(|k| {
         matches!(
             k,
-            verter_semantic::resolver_core::ConsumedResolutionObservationKey::PackageManifest {
+            verter_session_query::resolution::ConsumedResolutionObservationKey::PackageManifest {
                 directory
             } if directory.as_ref() == "/proj/src/util"
         ) || matches!(
             k,
-            verter_semantic::resolver_core::ConsumedResolutionObservationKey::PathProbe { path }
+            verter_session_query::resolution::ConsumedResolutionObservationKey::PathProbe { path }
                 if path.as_ref() == "/proj/src/util/package.json"
         )
     });
     let probe_pos = kernel.ordered_selectors.iter().position(|k| {
         matches!(
             k,
-            verter_semantic::resolver_core::ConsumedResolutionObservationKey::PathProbe { path }
+            verter_session_query::resolution::ConsumedResolutionObservationKey::PathProbe { path }
                 if path.as_ref() == "/proj/src/util.ts"
         )
     });
     let realpath_pos = kernel.ordered_selectors.iter().position(|k| {
         matches!(
             k,
-            verter_semantic::resolver_core::ConsumedResolutionObservationKey::RealPath { .. }
+            verter_session_query::resolution::ConsumedResolutionObservationKey::RealPath { .. }
         )
     });
     match (manifest_pos, probe_pos, realpath_pos) {
@@ -1021,7 +1021,7 @@ fn full_driver_resolves_via_tsconfig_paths() {
     assert_eq!(kernel.resolved.as_deref(), Some("/proj/src/app/thing.ts"));
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::TsConfigPath)
+        Some(verter_session_query::resolution::ResolutionKind::TsConfigPath)
     );
 }
 
@@ -1037,7 +1037,7 @@ fn full_driver_resolves_via_the_base_url_fallback() {
     assert_eq!(kernel.resolved.as_deref(), Some("/proj/src2/thing.ts"));
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::TsConfigPath)
+        Some(verter_session_query::resolution::ResolutionKind::TsConfigPath)
     );
 }
 
@@ -1059,7 +1059,7 @@ fn full_driver_resolves_via_a_project_reference() {
     assert_eq!(kernel.resolved.as_deref(), Some("/proj/b/src/thing.ts"));
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::ProjectReference)
+        Some(verter_session_query::resolution::ResolutionKind::ProjectReference)
     );
 }
 
@@ -1094,7 +1094,7 @@ fn full_driver_a_project_reference_cycle_terminates_on_both_engines() {
 fn full_driver_resolves_via_hash_imports() {
     let fixture = ResolutionFixture::new(&["/proj/src/utils/format.ts"]).with_manifest(
         "/proj",
-        verter_semantic::resolver_core::ResolutionPackageManifest {
+        verter_session_query::resolution::ResolutionPackageManifest {
             imports: Some(serde_json::json!({ "#utils/*": "./src/utils/*.ts" })),
             ..empty_manifest()
         },
@@ -1109,7 +1109,7 @@ fn full_driver_resolves_via_hash_imports() {
     );
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::PackageImports)
+        Some(verter_session_query::resolution::ResolutionKind::PackageImports)
     );
 }
 
@@ -1118,7 +1118,7 @@ fn full_driver_resolves_via_node_modules_exports_with_conditions() {
     let fixture = ResolutionFixture::new(&["/proj/node_modules/lodash/esm/index.js"])
         .with_manifest(
             "/proj/node_modules/lodash",
-            verter_semantic::resolver_core::ResolutionPackageManifest {
+            verter_session_query::resolution::ResolutionPackageManifest {
                 exports: Some(serde_json::json!({
                     ".": { "import": "./esm/index.js", "require": "./cjs/index.js" }
                 })),
@@ -1135,7 +1135,7 @@ fn full_driver_resolves_via_node_modules_exports_with_conditions() {
     );
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::PackageExports)
+        Some(verter_session_query::resolution::ResolutionKind::PackageExports)
     );
 }
 
@@ -1144,7 +1144,7 @@ fn full_driver_resolves_a_scoped_package_via_legacy_main_field() {
     let fixture = ResolutionFixture::new(&["/proj/node_modules/@scope/pkg/index.js"])
         .with_manifest(
             "/proj/node_modules/@scope/pkg",
-            verter_semantic::resolver_core::ResolutionPackageManifest {
+            verter_session_query::resolution::ResolutionPackageManifest {
                 main: Some("./index.js".to_string()),
                 ..empty_manifest()
             },
@@ -1159,7 +1159,7 @@ fn full_driver_resolves_a_scoped_package_via_legacy_main_field() {
     );
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::NodeModules)
+        Some(verter_session_query::resolution::ResolutionKind::NodeModules)
     );
 }
 
@@ -1170,7 +1170,7 @@ fn full_driver_resolves_via_explicit_project_ownership() {
         project("/proj", "/proj/tsconfig.json"),
         &[("@/", "/proj/src")],
     )];
-    let owner = verter_semantic::resolver_core::ProjectOwnership {
+    let owner = verter_session_query::resolution::ProjectOwnership {
         project_root: "/proj".to_string(),
         tsconfig_path: Some("/proj/tsconfig.json".to_string()),
     };
@@ -1235,7 +1235,7 @@ fn full_driver_resolves_an_absolute_specifier_for_an_owned_importer() {
     assert_eq!(kernel.resolved.as_deref(), Some("/abs/target.ts"));
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::Relative)
+        Some(verter_session_query::resolution::ResolutionKind::Relative)
     );
 }
 
@@ -1268,7 +1268,7 @@ fn full_driver_workspace_alias_wins_over_tsconfig_paths_and_base_url() {
     assert_eq!(kernel.resolved.as_deref(), Some("/proj/alias/thing.ts"));
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::WorkspaceAlias)
+        Some(verter_session_query::resolution::ResolutionKind::WorkspaceAlias)
     );
 }
 
@@ -1298,7 +1298,7 @@ fn full_driver_a_dangling_project_reference_falls_through_without_panicking() {
 fn full_driver_resolves_via_node_modules_exports_array_form() {
     let fixture = ResolutionFixture::new(&["/proj/node_modules/pkg/dist/second.js"]).with_manifest(
         "/proj/node_modules/pkg",
-        verter_semantic::resolver_core::ResolutionPackageManifest {
+        verter_session_query::resolution::ResolutionPackageManifest {
             exports: Some(serde_json::json!({ ".": ["./dist/first.js", "./dist/second.js"] })),
             ..empty_manifest()
         },
@@ -1313,7 +1313,7 @@ fn full_driver_resolves_via_node_modules_exports_array_form() {
     );
     assert_eq!(
         kernel.resolution_kind,
-        Some(verter_semantic::resolver_core::ResolutionKind::PackageExports)
+        Some(verter_session_query::resolution::ResolutionKind::PackageExports)
     );
 }
 
@@ -1331,7 +1331,7 @@ fn full_driver_carrier_import_provider_projection_matches_legacy_end_to_end() {
     assert_eq!(result.provider_id, "/proj/src/Comp.vue.verter.ts");
     assert_eq!(
         result.provider_target,
-        verter_semantic::resolver_core::ProviderTarget::CarrierPublicApi
+        verter_session_query::resolution::ProviderTarget::CarrierPublicApi
     );
     assert_eq!(result.provider_specifier, "./Comp.vue.verter.ts");
     assert_eq!(
@@ -1340,7 +1340,7 @@ fn full_driver_carrier_import_provider_projection_matches_legacy_end_to_end() {
     );
     assert_eq!(
         result.resolution_kind,
-        verter_semantic::resolver_core::ResolutionKind::Relative
+        verter_session_query::resolution::ResolutionKind::Relative
     );
 }
 
@@ -1393,7 +1393,7 @@ fn full_driver_project_exact_result_agrees_with_legacy() {
     assert_eq!(result.provider_specifier, "whatever");
     assert_eq!(
         result.provider_target,
-        verter_semantic::resolver_core::ProviderTarget::ShadowSourceFile
+        verter_session_query::resolution::ProviderTarget::ShadowSourceFile
     );
     assert_eq!(
         result.owner_tsconfig_path.as_deref(),
@@ -1401,7 +1401,7 @@ fn full_driver_project_exact_result_agrees_with_legacy() {
     );
     assert_eq!(
         result.resolution_kind,
-        verter_semantic::resolver_core::ResolutionKind::Bundler
+        verter_session_query::resolution::ResolutionKind::Bundler
     );
 }
 

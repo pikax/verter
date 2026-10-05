@@ -46,7 +46,7 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
     verter_session::resolver_core::RouteNameKey::new(
         provider,
         name,
-        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session_query::facts::registry::SymbolSpace::Type,
         verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
         [0u8; 16],
         [0u8; 16],

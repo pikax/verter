@@ -26,9 +26,9 @@ use verter_protocol::verter::v1::{
     graph_closure_policy, type_info_graph_request as wire_request, type_info_graph_response,
     type_info_request_error,
 };
-use verter_semantic::analysis::types::AnalyzedMacroKind;
 use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use verter_session::VerterHost;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use super::harness;
 

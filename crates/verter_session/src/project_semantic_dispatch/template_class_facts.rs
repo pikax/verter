@@ -5,9 +5,10 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 use verter_compiler::compile::template_data::RawTemplateData;
 use verter_semantic::analysis::{
-    AnalyzedBinding, AnalyzedMacro, AnalyzedMacroKind, TemplateClassFactsCompleteness,
-    TemplateClassSemanticFactRow, TemplateClassSemanticFacts, TemplateClassSubject,
+    TemplateClassFactsCompleteness, TemplateClassSemanticFactRow, TemplateClassSemanticFacts,
+    TemplateClassSubject,
 };
+use verter_session_query::analysis::types::{AnalyzedBinding, AnalyzedMacro, AnalyzedMacroKind};
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
 use verter_type_expr::locators::{AuthoredBodyLocator, MacroPayloadPosition};
 use verter_type_expr::{
@@ -120,7 +121,7 @@ enum RequestedSubject {
 pub(crate) fn build_template_class_semantic_facts(
     ctx: &dyn RequestBoundResolverContext,
     canonical: &str,
-    whole_hash: verter_semantic::analysis::Hash16,
+    whole_hash: verter_session_query::analysis::types::Hash16,
     script: TemplateClassScriptInputs<'_>,
     raw: &RawTemplateData,
     scope: TemplateClassPublicationScope,

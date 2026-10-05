@@ -18,7 +18,7 @@
 
 use verter_language::FileLanguage;
 use verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet;
-use verter_semantic::analysis::types::AnalyzedMacro;
+use verter_session_query::analysis::types::AnalyzedMacro;
 
 use crate::decl_body_memo::LoweredValueDecl;
 
@@ -136,7 +136,7 @@ impl ComponentDefaultSynth for SvelteComponentDefaultSynth {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use verter_semantic::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
+    use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
     use verter_span::Span;
     use verter_type_expr::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,
@@ -188,7 +188,7 @@ mod tests {
         let sym = synth.synthesise(cx).expect("type-based props synthesise");
         assert_eq!(
             sym.kind,
-            verter_semantic::analysis::type_eval::ValueDeclKind::Class
+            verter_session_query::declarations::ValueDeclKind::Class
         );
     }
 
@@ -215,7 +215,7 @@ mod tests {
             .expect("a macro-less genuine .vue carrier synthesises the empty default");
         assert_eq!(
             empty_default.kind,
-            verter_semantic::analysis::type_eval::ValueDeclKind::Class,
+            verter_session_query::declarations::ValueDeclKind::Class,
             "the empty-instance default keeps the class-shaped construct contract"
         );
 

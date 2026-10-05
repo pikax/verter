@@ -5,7 +5,7 @@ use verter_type_expr::facts::TypeDependencyPathFact;
 use verter_type_expr::{TypeExpr, UnknownValue};
 
 use super::decl_dependencies::{collect_type_dependency_facts, DeclDependencyNames};
-use crate::analysis::types::JsdocTag;
+use verter_session_query::analysis::types::JsdocTag;
 
 /// Parse a JSDoc `{Type}` tag-type payload string into a [`TypeExpr`].
 ///

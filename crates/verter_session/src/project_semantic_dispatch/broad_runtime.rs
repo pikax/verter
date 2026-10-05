@@ -556,8 +556,8 @@ impl ProjectSemanticDispatch<'_> {
         {
             if let BroadRuntimeSubjectRoute::Member(name) = locator.route() {
                 let provenance = match macro_kind {
-                    verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-                    | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => {
+                    verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+                    | verter_session_query::analysis::types::AnalyzedMacroKind::WithDefaults => {
                         SurfaceProvenanceContext::MacroTypeArgOwnBody
                     }
                     _ => SurfaceProvenanceContext::Structural,

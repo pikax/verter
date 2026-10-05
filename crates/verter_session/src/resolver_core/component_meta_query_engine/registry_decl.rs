@@ -103,12 +103,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> verter_semantic::analysis::type_solver::host::ResolvedRootIdentity {
+    ) -> verter_session_query::type_solver::host::ResolvedRootIdentity {
         if self
             .prepared_type_decl(canonical_source, owner, resolved_name)
             .is_some()
         {
-            return verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+            return verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
                 canonical_source,
                 owner,
                 resolved_name,
@@ -130,7 +130,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return target;
         }
 
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+        verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
             canonical_source,
             owner,
             resolved_name,
@@ -177,7 +177,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
+    ) -> Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>> {
         let key = (canonical_id.to_string(), owner, symbol_name.to_string());
         if let Some(cached) = self.prepared_type_decls.get(&key) {
             return cached.clone();
@@ -696,7 +696,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 /// the cache value and every fallback arm publish an identical
 /// representation.
 pub(super) fn prepared_decl_authored_body_locator(
-    prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::PreparedTypeDecl,
 ) -> verter_type_expr::locators::AuthoredBodyLocator {
     verter_type_expr::locators::AuthoredBodyLocator::DeclBody(prepared.body_facts.body_slot.clone())
 }

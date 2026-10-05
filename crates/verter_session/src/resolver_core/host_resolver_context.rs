@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
+use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};

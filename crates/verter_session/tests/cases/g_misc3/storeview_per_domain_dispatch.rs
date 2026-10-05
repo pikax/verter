@@ -22,13 +22,13 @@
 //! R26: "Adding a new `FactKey` extends the per-domain `*FactRef`
 //! enum but does NOT widen the trait".
 
-use verter_semantic::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
-use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 use verter_session::file_artifact_store::InternedName;
 use verter_session::resolver_core::{
     FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
     RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
 };
+use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 /// Test view that returns one of three distinct values depending on
 /// which per-domain method the dispatch picked.

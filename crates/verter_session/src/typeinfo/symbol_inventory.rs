@@ -19,8 +19,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_eval::{TypeDeclKind, ValueDeclKind};
-use verter_semantic::analysis::types::{LocalDeclarationEntry, LocalDeclarationKind};
+use verter_session_query::analysis::types::{LocalDeclarationEntry, LocalDeclarationKind};
+use verter_session_query::declarations::{TypeDeclKind, ValueDeclKind};
 
 use super::types::{SymbolEntry, SymbolKind};
 use crate::VerterHost;

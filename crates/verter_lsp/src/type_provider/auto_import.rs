@@ -24,7 +24,7 @@ use oxc_ast::ast::Statement;
 use oxc_span::SourceType;
 use tower_lsp_server::ls_types::{Position, Range, TextEdit};
 use verter_parser::oxc_parse::Parser;
-use verter_semantic::analysis::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImport;
 use verter_span::TsPosition;
 
 use crate::documents::carrier_structure::project_carrier_blocks;
@@ -152,7 +152,7 @@ impl ScriptImportInsertionAnchor {
 /// `user_import_spans` are the **SFC-absolute** `(start, end)` byte spans of the SFC's top-level
 /// imports, exactly as `AnalyzedImport.span` produces them: `verter_session` parses a
 /// position-preserving SFC-offset script source, so every analysis span is SFC-absolute by
-/// construction (see `verter_semantic::analysis::types::AnalyzedImport`). They are consumed in
+/// construction (see `verter_session_query::analysis::types::AnalyzedImport`). They are consumed in
 /// that coordinate space DIRECTLY — the selected `<script setup>` content start is NEVER re-added.
 ///
 /// * existing `<script setup>` + imports inside it → end of the last in-block import;

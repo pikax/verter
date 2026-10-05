@@ -66,7 +66,7 @@ use crate::decl_body_memo::DerefedBodyShape;
 use crate::locator_identity::{
     semantic_space_for_locator_space, LocatorLoweringKey, ParseEnvHash, ResolveEnvHash,
 };
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::locators::{TypeParamBoundPosition, TypeParamVisibility};
 
 use crate::resolver_core::bare_name_resolve::{
@@ -86,9 +86,9 @@ use crate::semantic_query::{
 /// the anchor file's own context, exactly as the augmentation stitch
 /// prepares it).
 enum AnchorPreparedDecl {
-    Type(Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>),
-    Value(Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>),
-    Augmentation(Box<verter_semantic::analysis::type_solver::PreparedTypeDecl>),
+    Type(Arc<verter_session_query::type_solver::PreparedTypeDecl>),
+    Value(Arc<verter_session_query::type_solver::PreparedValueDecl>),
+    Augmentation(Box<verter_session_query::type_solver::PreparedTypeDecl>),
 }
 
 fn register_locator_function_alias(
@@ -2597,10 +2597,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // intern the nominal `__builtin__` carrier — NEVER an executed
         // `Instantiate`, in any position.
         if self.runtime_nominal_global_name(name.as_ref()).is_some()
-            || verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                name.as_ref(),
-            )
-            .is_some()
+            || verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name.as_ref())
+                .is_some()
         {
             return LocatorRefPlan::Carrier(RefHeadResolution::Builtin(DeclIdentity {
                 canonical_id: Arc::from("__builtin__"),

@@ -2,7 +2,7 @@ use super::*;
 use verter_semantic::analysis::template::{
     AnalyzedEmitDefinition, DefinedSlot, TemplateAnalysisSnapshot,
 };
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, MacroAnchorUnsupported, ReactivityKind,
 };
 

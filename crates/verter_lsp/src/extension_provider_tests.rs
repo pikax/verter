@@ -774,7 +774,7 @@ async fn monorepo_provider_with_config(
         .await
         .expect("workspace folders sync");
 
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
         verter_workspace::ide_project_config(
             "/ws".to_string(),
             "/ws".to_string(),
@@ -1134,7 +1134,7 @@ async fn without_an_ownership_authority_no_config_is_invented() {
 /// single-folder monorepo fixture (one folder `/ws`, nested configured package
 /// `/ws/packages/app`).
 fn monorepo_authority() -> Arc<dyn crate::type_provider::traits::ConfiguredOwnerAuthority> {
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
         verter_workspace::ide_project_config(
             "/ws".to_string(),
             "/ws".to_string(),

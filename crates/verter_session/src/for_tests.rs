@@ -985,15 +985,15 @@ pub struct FlowGraphFixtureForTests {
 
 #[rustfmt::skip]
 impl FlowGraphFixtureForTests {
-    pub fn program_key(&self) -> &verter_semantic::analysis::function_program::FunctionProgramKey { &self.bound.key().function }
+    pub fn program_key(&self) -> &verter_session_query::function_program::FunctionProgramKey { &self.bound.key().function }
     /// The ONE structural plan the production hash node would retain for
     /// this demand over this fixture's bound graph: planned once by graph
     /// reachability and sealed with the slice identity minted over the
     /// SAME graph — the exact `PlannedFlowSlice` shape the production
     /// hash node's compute retains on its published outcome.
     pub fn retained_plan(&self, request: &FlowDemandRequest) -> Result<PlannedFlowSlice, FlowDemandPlanError> {
-        use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
-        use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+        use verter_session_query::flow::hashing::compute_flow_slice_hash;
+        use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
         let subject = crate::project_semantic_dispatch::flow_solve::derive_demand_subject(&request.query)?;
         let bundle = self.bound.bundle();
         let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
@@ -1041,7 +1041,7 @@ impl FlowGraphFixtureForTests {
 
     /// Exercise the interpreter-only numeric attachment against the actual
     /// pinned fixture owner. Returned handles still carry execution scope.
-    pub fn product_content_key_for_tests(&self, execution: &FlowProductExecution, node: verter_semantic::analysis::flow::flow_graph::FlowNodeId, binding: Option<&verter_semantic::analysis::flow::FlowBindingRef>) -> Result<FlowProductKey, FlowProductKeyError> {
+    pub fn product_content_key_for_tests(&self, execution: &FlowProductExecution, node: verter_session_query::flow::flow_graph::FlowNodeId, binding: Option<&verter_session_query::flow::binding::FlowBindingRef>) -> Result<FlowProductKey, FlowProductKeyError> {
         let content = execution.attach_content(&self.bound)?;
         let site = content.site(node)?;
         let key = content.key(FlowDomain::ReachingType, node)?;
@@ -1050,7 +1050,7 @@ impl FlowGraphFixtureForTests {
         Ok(key)
     }
 
-    pub fn selected_capture_identities_for_tests(&self, plan: &FlowDemandPlan) -> Vec<verter_semantic::analysis::function_program::FlowBindingIdentity> {
+    pub fn selected_capture_identities_for_tests(&self, plan: &FlowDemandPlan) -> Vec<verter_session_query::function_program::FlowBindingIdentity> {
         self.product_inputs().selected_captures(plan.structural_selection()).map(|(identity, _)| identity.clone()).collect()
     }
 }
@@ -1083,7 +1083,7 @@ pub fn flow_graph_fixture_for_tests_nested(source: &str, body_hash_tag: u8, nest
 fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_language::FileLanguage, nested: Option<&str>) -> FlowGraphFixtureForTests {
     use verter_semantic::analysis::flow::{FunctionBodySource, build_indexed_function_body_skeleton};
     use verter_semantic::analysis::function_program::{build_function_program_index_with_nodes, FunctionNode};
-    use verter_semantic::analysis::top_level_owners::TopLevelOwnerTable;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     let oxc_source_type = match &file_language {
         verter_language::FileLanguage::Script { source_type, .. } => match source_type {
             verter_language::ScriptSourceType::Ts => oxc_span::SourceType::ts(),

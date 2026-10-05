@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
+use verter_session_query::type_solver::arena::PrimitiveKind;
 
 use crate::semantic_query::{
     ProjectionReductionContext, QueryResult, SemanticContextId, SemanticNodeData, SemanticNodeId,

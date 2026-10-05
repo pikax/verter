@@ -21,7 +21,7 @@ use verter_semantic::analysis::template::{
     TemplateExpressionRecord, TemplateMemberRead, TemplatePropUsage, TemplateRef,
     TemplateTextSegment, UnresolvedBinding, VForDirective, VModelDirective,
 };
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedBinding, AnalyzedMacro, AnalyzedMacroKind, VueApiCallSite, VueApiClassification,
 };
 
@@ -939,7 +939,7 @@ impl TemplateClassDomainIndex {
     pub(crate) fn from_semantic_facts(
         facts: &crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts,
         expected_canonical: &str,
-        expected_whole_hash: verter_semantic::analysis::Hash16,
+        expected_whole_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<Self> {
         if facts.owner_canonical() != expected_canonical
             || facts.owner_whole_hash() != expected_whole_hash

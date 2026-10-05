@@ -21,8 +21,8 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_eval::AugmentationScopeKind;
-use verter_semantic::facts::FactKey;
+use verter_session_query::declarations::AugmentationScopeKind;
+use verter_session_query::facts::FactKey;
 
 use verter_session::binder_identity_facts::{
     negative_lookup_admission, BinderIdentityFacts, BinderIdentityFactsEntry,
@@ -816,7 +816,7 @@ fn contributor_order_swap_warm_misses_cosmetic_between_overloads_stays_warm() {
             matches!(
                 key,
                 FactKey::DeclContributionOrder { name, space, .. }
-                    if name.as_ref() == "f" && matches!(space, verter_semantic::facts::SymbolSpace::Value)
+                    if name.as_ref() == "f" && matches!(space, verter_session_query::facts::SymbolSpace::Value)
             )
         }),
         "the signature must pin the DeclContributionOrder fact for the overload group"
@@ -1122,7 +1122,7 @@ fn empty_augmentation_target_first_contribution_warm_misses() {
             matches!(
                 key,
                 FactKey::AugmentationContributionSet {
-                    scope_kind_tag: verter_semantic::facts::AugmentationScopeKindTag::Module,
+                    scope_kind_tag: verter_session_query::facts::AugmentationScopeKindTag::Module,
                     specifier,
                     ..
                 } if specifier.as_ref() == "m"
@@ -1178,7 +1178,7 @@ fn empty_augmentation_target_first_contribution_warm_misses() {
             matches!(
                 key,
                 FactKey::AugmentationContributionSet {
-                    scope_kind_tag: verter_semantic::facts::AugmentationScopeKindTag::Global,
+                    scope_kind_tag: verter_session_query::facts::AugmentationScopeKindTag::Global,
                     ..
                 }
             )
@@ -1383,7 +1383,7 @@ fn registry_for(source: &str) -> verter_session::file_artifact_store::FileFacts 
     verter_session::fact_emission::emit_parse_facts(&indexed).facts
 }
 
-fn set_key(tag: verter_semantic::facts::AugmentationScopeKindTag, specifier: &str) -> FactKey {
+fn set_key(tag: verter_session_query::facts::AugmentationScopeKindTag, specifier: &str) -> FactKey {
     FactKey::AugmentationContributionSet {
         scope_kind_tag: tag,
         specifier: verter_session::file_artifact_store::InternedSpecifier::from(specifier),
@@ -1391,7 +1391,10 @@ fn set_key(tag: verter_semantic::facts::AugmentationScopeKindTag, specifier: &st
     }
 }
 
-fn order_key(tag: verter_semantic::facts::AugmentationScopeKindTag, specifier: &str) -> FactKey {
+fn order_key(
+    tag: verter_session_query::facts::AugmentationScopeKindTag,
+    specifier: &str,
+) -> FactKey {
     FactKey::AugmentationContributionOrder {
         scope_kind_tag: tag,
         specifier: verter_session::file_artifact_store::InternedSpecifier::from(specifier),
@@ -1425,7 +1428,7 @@ fn global_vs_module_global_target_set_hash_differs() {
 /// identities (tagged), so a lookup for the wrong tag misses.
 #[test]
 fn global_vs_module_global_fact_keys_are_typed_distinct() {
-    use verter_semantic::facts::AugmentationScopeKindTag;
+    use verter_session_query::facts::AugmentationScopeKindTag;
     let global = registry_for("declare global { interface X {} }\n");
     let module = registry_for("declare module \"$global\" { interface X {} }\n");
 
@@ -1452,7 +1455,7 @@ fn global_vs_module_global_fact_keys_are_typed_distinct() {
 /// tag is folded into the hash bytes, not only into the key).
 #[test]
 fn global_vs_module_global_rail_hash_content_differs() {
-    use verter_semantic::facts::AugmentationScopeKindTag;
+    use verter_session_query::facts::AugmentationScopeKindTag;
     let global = registry_for("declare global {}\n");
     let module = registry_for("declare module \"$global\" {}\n");
 

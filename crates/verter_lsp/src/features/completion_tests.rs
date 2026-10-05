@@ -3,8 +3,17 @@ use crate::documents::carrier_structure::{
     project_carrier_blocks, test_carrier_blocks, test_structure,
 };
 use verter_language::parse_artifact::carrier_inventory::{MarkupElementKind, MarkupNodeKind};
-use verter_semantic::analysis::types::ImportBindingKind;
 use verter_semantic::analysis::*;
+use verter_session_query::analysis::types::AnalyzedBinding;
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImportBinding;
+use verter_session_query::analysis::types::AnalyzedMacro;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::analysis::types::ReactivityKind;
+use verter_session_query::analysis::types::TypeResolutionSource;
+use verter_session_query::analysis::types::VueApiClassification;
 
 fn svelte_snippet_role() -> verter_type_expr::PropCallableRole {
     verter_type_expr::PropCallableRole::SvelteSnippet {
@@ -2711,7 +2720,7 @@ fn test_component_prop_completions_from_macros() {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![
-                    verter_semantic::analysis::AnalyzedPropField {
+                    verter_session_query::analysis::types::AnalyzedPropField {
                         name: "foo".to_string(),
                         span: verter_span::Span::new(0, 3),
                         type_annotation: None,
@@ -2725,7 +2734,7 @@ fn test_component_prop_completions_from_macros() {
                         declared_in_macro_type_arg: false,
                         constructor_bindings: Vec::new(),
                     },
-                    verter_semantic::analysis::AnalyzedPropField {
+                    verter_session_query::analysis::types::AnalyzedPropField {
                         name: "barBaz".to_string(),
                         span: verter_span::Span::new(10, 16),
                         type_annotation: None,
@@ -2760,7 +2769,7 @@ fn test_component_prop_completions_from_macros() {
                 model_name: None,
                 has_inherit_attrs_false: false,
                 prop_fields: vec![],
-                emit_fields: vec![verter_semantic::analysis::AnalyzedEmitField {
+                emit_fields: vec![verter_session_query::analysis::types::AnalyzedEmitField {
                     name: "custom".to_string(),
                     span: verter_span::Span::new(0, 6),
                     call_signature_span: None,
@@ -3275,8 +3284,8 @@ fn d5_component(
 fn d5_slot_field(
     name: &str,
     bindings: Vec<(&str, &str)>,
-) -> verter_semantic::analysis::types::AnalyzedSlotField {
-    verter_semantic::analysis::types::AnalyzedSlotField {
+) -> verter_session_query::analysis::types::AnalyzedSlotField {
+    verter_session_query::analysis::types::AnalyzedSlotField {
         props_anchor: Default::default(),
         name: name.to_string(),
         is_required: false,
@@ -3284,7 +3293,7 @@ fn d5_slot_field(
         bindings: bindings
             .into_iter()
             .map(
-                |(name, ty)| verter_semantic::analysis::types::AnalyzedSlotFieldBinding {
+                |(name, ty)| verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
                     name: name.to_string(),
                     type_annotation: Some(ty.to_string()),
                     payload: None,
@@ -3302,7 +3311,7 @@ fn d5_slot_field(
 }
 
 fn d5_child_with_slots(
-    fields: Vec<verter_semantic::analysis::types::AnalyzedSlotField>,
+    fields: Vec<verter_session_query::analysis::types::AnalyzedSlotField>,
 ) -> FileAnalysisSnapshot {
     let mac = AnalyzedMacro {
         edit_anchors: Default::default(),

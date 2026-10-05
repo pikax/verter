@@ -29,7 +29,7 @@ use std::sync::{Arc, OnceLock};
 
 use rustc_hash::FxHashMap;
 use verter_language::FileLanguage;
-use verter_semantic::analysis::type_eval::EvalEnv;
+use verter_session_query::declarations::EvalEnv;
 
 use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 
@@ -311,11 +311,11 @@ mod tests {
         // If the module already declares a `$state` (a local shadow / import),
         // the rune ambient must NOT overwrite it.
         let mut env = EvalEnv::default();
-        let user = verter_semantic::analysis::type_eval::ValueDeclInfo {
+        let user = verter_session_query::declarations::ValueDeclInfo {
             name: "$state".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: verter_type_expr::facts::ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: Arc::from([]),

@@ -881,11 +881,11 @@ async fn handle_completion_attempt(
                     })
             })?;
             if import.resolved_canonical_id.is_none()
-                && verter_semantic::resolver_core::is_relative_specifier(&import.source)
-                && verter_semantic::resolver_core::path_is_carrier(&import.source)
+                && verter_session_query::resolution::is_relative_specifier(&import.source)
+                && verter_session_query::resolution::path_is_carrier(&import.source)
             {
-                import.resolved_canonical_id = Some(verter_semantic::resolver_core::join_paths(
-                    &verter_semantic::resolver_core::parent_dir(&canonical_id),
+                import.resolved_canonical_id = Some(verter_session_query::resolution::join_paths(
+                    &verter_session_query::resolution::parent_dir(&canonical_id),
                     &import.source,
                 ));
             }
@@ -993,11 +993,11 @@ async fn handle_completion_attempt(
                 })
                 .map(str::to_string)
                 .or_else(|| {
-                    (verter_semantic::resolver_core::is_relative_specifier(&import.source)
-                        && verter_semantic::resolver_core::path_is_carrier(&import.source))
+                    (verter_session_query::resolution::is_relative_specifier(&import.source)
+                        && verter_session_query::resolution::path_is_carrier(&import.source))
                     .then(|| {
-                        verter_semantic::resolver_core::join_paths(
-                            &verter_semantic::resolver_core::parent_dir(canonical_id),
+                        verter_session_query::resolution::join_paths(
+                            &verter_session_query::resolution::parent_dir(canonical_id),
                             &import.source,
                         )
                     })

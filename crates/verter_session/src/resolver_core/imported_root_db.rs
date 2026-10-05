@@ -41,11 +41,9 @@ impl ImportedRootResult {
         }
     }
 
-    pub fn as_identity(
-        &self,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    pub fn as_identity(&self) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         self.resolved().map(|(canonical, owner, symbol)| {
-            verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+            verter_session_query::type_solver::ResolvedRootIdentity::new_in_owner(
                 canonical, owner, symbol,
             )
         })

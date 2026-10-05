@@ -423,7 +423,7 @@ async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
     // DISCRIMINATING: a regression that re-terminals a multi-claimant carrier as
     // `Ambiguous(MultipleOwners)` while still serving `Bound` would surface a
     // `verter(project)` warning here and fail this assertion.
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
         verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
@@ -1471,7 +1471,7 @@ async fn coordinator_direct_ide_sync_must_not_pair_stale_content_with_a_mid_flig
         ),
     };
 
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     // Pause the coordinator's `open_file` call — `ide.code` is already
     // compiled from revision A by this point, and the record has not run yet.
     let (arrived, release) = provider.block_open_file(&ide_path);
@@ -1597,7 +1597,7 @@ async fn coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_afte
         ),
     };
 
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     // Pause the tick right after the compile — the pre-fix pin-capture spot.
     let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
 
@@ -1802,7 +1802,7 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
         "precondition: the live document is revision B"
     );
 
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     assert!(
         provider.file_sync_calls().is_empty(),
         "revision A must produce no provider application"
@@ -6130,7 +6130,7 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
         ),
     };
 
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     let (arrived, release) = test_hooks::block_after_ide_compile(canonical_id);
 
     let tick = sync_file(&deps, canonical_id, uri.as_str());
@@ -6399,7 +6399,7 @@ async fn the_debounced_sync_yields_the_document_lane_to_an_in_flight_transaction
 
     let provider = Arc::new(MockTypeProvider::new());
     let deps = lane_test_deps(&documents, &provider);
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let ide_path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
 
     // Park the first transaction right after its compile. From here until it is
     // released it owns the document's lane.
@@ -6477,8 +6477,8 @@ async fn contention_on_one_document_leaves_another_documents_sync_unaffected() {
         other => panic!("the held document must hand out its lane, got {other:?}"),
     };
     let contended_ide =
-        verter_semantic::resolver_core::carrier_ide_provider_path(contended_id, false);
-    let free_ide = verter_semantic::resolver_core::carrier_ide_provider_path(free_id, false);
+        verter_session_query::resolution::carrier_ide_provider_path(contended_id, false);
+    let free_ide = verter_session_query::resolution::carrier_ide_provider_path(free_id, false);
 
     let contended_outcome = sync_file(&deps, contended_id, contended_uri.as_str()).await;
     let free_outcome = sync_file(&deps, free_id, free_uri.as_str()).await;
@@ -6728,7 +6728,7 @@ async fn a_current_ide_leg_is_skipped_until_its_basis_moves() {
             Some(tsconfig),
         ));
         let ide_path =
-            verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+            verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
         let writes = || ide_companion_writes(&provider, &ide_path);
 
         assert_eq!(

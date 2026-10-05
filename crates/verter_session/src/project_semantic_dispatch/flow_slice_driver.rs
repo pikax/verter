@@ -11,11 +11,11 @@ use crate::resolver_core::request_ports::OwnedLowering;
 use crate::resolver_core::ResolverContext;
 use dashmap::DashMap;
 use std::sync::Arc;
-use verter_semantic::analysis::flow::flow_ir::FlowSliceIR;
-use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
-use verter_semantic::analysis::flow::lower::lower_slice_plan;
-use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
-use verter_semantic::analysis::flow::{FlowBindingMapError, FunctionBodySkeleton};
+use verter_session_query::flow::flow_ir::FlowSliceIR;
+use verter_session_query::flow::hashing::compute_flow_slice_hash;
+use verter_session_query::flow::lower::lower_slice_plan;
+use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
+use verter_session_query::flow::{binding::FlowBindingMapError, skeleton::FunctionBodySkeleton};
 
 /// Fixture acquisition belongs to the test driver, never shared storage.
 #[cfg(test)]

@@ -161,7 +161,7 @@ fn extract_component_meta_from_inputs(
         imports: &snapshot.imports,
         template: snapshot.template.as_deref(),
         options_api: snapshot.options_api.as_ref(),
-        analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+        analysis_flags: verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
             snapshot.script_flags,
         ),
         styles: &snapshot.styles,
@@ -240,7 +240,7 @@ pub(crate) fn resolved_binding_reactivity(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     snapshot: &FileAnalysisSnapshot,
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedBindingReactivityInput> {
-    use verter_semantic::analysis::types::{BindingInitializer, ReactivityKind};
+    use verter_session_query::analysis::types::{BindingInitializer, ReactivityKind};
 
     let mut subjects: Vec<(usize, String, String)> = Vec::new();
     for (binding_index, binding) in snapshot.bindings.iter().enumerate() {
@@ -343,7 +343,7 @@ pub(crate) fn resolve_ref_to_root_identity(
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
-) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+) -> Option<verter_session_query::type_solver::host::ResolvedRootIdentity> {
     crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
         ctx,
         dispatch,
@@ -669,7 +669,7 @@ pub(in crate::host_manage) fn resolve_ref_to_root_identity_for_test(
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
-) -> Option<verter_semantic::analysis::type_solver::host::ResolvedRootIdentity> {
+) -> Option<verter_session_query::type_solver::host::ResolvedRootIdentity> {
     resolve_ref_to_root_identity(
         host,
         &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host),

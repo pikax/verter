@@ -18,10 +18,10 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
-use verter_semantic::analysis::flow::flow_graph::{FlowNodeId, FlowNodeKind, FunctionFlowGraph};
-use verter_semantic::analysis::flow::flow_ir::ReturnSlicePlan;
-use verter_semantic::analysis::flow::{FlowBindingMap, FlowBindingRef};
-use verter_semantic::analysis::function_program::{FlowBindingIdentity, FunctionProgramKey};
+use verter_session_query::flow::binding::{FlowBindingMap, FlowBindingRef};
+use verter_session_query::flow::flow_graph::{FlowNodeId, FlowNodeKind, FunctionFlowGraph};
+use verter_session_query::flow::flow_ir::ReturnSlicePlan;
+use verter_session_query::function_program::{FlowBindingIdentity, FunctionProgramKey};
 
 // Compact offsets are private runtime addresses, never persisted identities.
 const PRODUCT_DOMAINS: [FlowDomain; 5] = [

@@ -65,7 +65,7 @@ impl LintRule for NoInlineLifecycle {
 mod tests {
     use super::*;
 
-    use verter_semantic::analysis::types::{VueApiCallSite, VueApiClassification};
+    use verter_session_query::analysis::types::{VueApiCallSite, VueApiClassification};
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

@@ -2,8 +2,8 @@
 //! `flow_body_stable_hash` discrimination tests.
 
 use super::*;
-use crate::analysis::top_level_owners::TopLevelOwnerTable;
-use crate::facts::SymbolSpace;
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
+use verter_session_query::facts::SymbolSpace;
 use verter_type_expr::facts::FunctionPartIdentity;
 
 fn index_of(source: &str) -> FunctionProgramIndex {
@@ -140,12 +140,16 @@ fn nested_value_frames_have_exact_indexed_locators() {
     let source =
         "const root = () => { let x = 1; return () => ({ method() { return () => x; } }); };";
     let index = index_of(source);
-    assert_eq!(index.entries.len(), 4, "every nested callable owns a frame");
+    assert_eq!(
+        index.entries_for_test().len(),
+        4,
+        "every nested callable owns a frame"
+    );
     let allocator = oxc_allocator::Allocator::default();
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
             .parse();
-    for entry in index.entries.iter() {
+    for entry in index.entries_for_test().iter() {
         let resolved = resolve_function_node(&parsed.program, &entry.locator)
             .expect("indexed locator resolves");
         assert_eq!(
@@ -153,7 +157,7 @@ fn nested_value_frames_have_exact_indexed_locators() {
             entry.span
         );
     }
-    for pair in index.entries.windows(2) {
+    for pair in index.entries_for_test().windows(2) {
         assert_eq!(pair[1].lexical_parent.as_deref(), Some(&pair[0].key));
     }
 }
@@ -163,7 +167,7 @@ fn captures_exclude_local_shadows_and_share_hoisted_runtime_slots() {
     let index = index_of("function root(value) { var value; return [(value) => value, () => { const value = 2; return value; }, () => value]; }");
     let root = entry_of(&index, "root");
     let children: Vec<_> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
         .collect();
@@ -194,7 +198,7 @@ fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
     let index = index_of(source);
     let root = entry_of(&index, "root");
     let children: Vec<_> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
         .collect();
@@ -234,7 +238,7 @@ fn indexed_write_targets_preserve_captures_and_sibling_shadows() {
         }
     ));
     let deepest = index
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| entry.lexical_parent.as_deref() == Some(&middle.key))
         .unwrap();
@@ -262,7 +266,7 @@ fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
     let index = index_of(source);
     let root = entry_of(&index, "root");
     let child = index
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
         .unwrap();
@@ -289,7 +293,7 @@ fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
         "a sibling value read is not a call input"
     );
     let grandchild = index
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| entry.lexical_parent.as_deref() == Some(&child.key))
         .unwrap();
@@ -302,7 +306,7 @@ fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
     let transitive = index_of("function root(payload) { return () => () => payload.selected; }");
     let root = entry_of(&transitive, "root");
     let child = transitive
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| entry.lexical_parent.as_deref() == Some(&root.key))
         .unwrap();
@@ -319,9 +323,10 @@ fn indexed_effect_reads_keep_syntactic_roles_and_transitive_capture_paths() {
 
 #[test]
 fn flow_binding_map_is_bijective_for_value_bindings() {
-    use crate::analysis::flow::{
-        build_function_body_skeleton, FlowBindingMap, FlowBindingMapError, FunctionBodySource,
-        SkeletonBindingId,
+    use crate::analysis::flow::{build_function_body_skeleton, FunctionBodySource};
+    use verter_session_query::flow::{
+        binding::{FlowBindingMap, FlowBindingMapError},
+        skeleton::SkeletonBindingId,
     };
     let source = "\n function inventory(p, {x: renamed}, ...rest) { var p; { let twin; } { let twin; } const [a, ...b] = list; try {} catch (err) {} class C {} enum E { A } namespace N {} import Alias = N; type OnlyType = string; interface OnlyInterface {} function child() {} }";
     let index = index_of(source);
@@ -344,7 +349,9 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
     let redeclaration = skeleton
         .bindings
         .iter()
-        .position(|binding| binding.kind == crate::analysis::flow::SkeletonBindingKind::Var)
+        .position(|binding| {
+            binding.kind == verter_session_query::flow::skeleton::SkeletonBindingKind::Var
+        })
         .map(|ordinal| SkeletonBindingId::from_index(ordinal as u32))
         .unwrap();
     assert_ne!(map.identity(parameter), map.identity(redeclaration));
@@ -405,10 +412,10 @@ fn flow_binding_map_is_bijective_for_value_bindings() {
     assert!(map.local(&foreign).is_none());
 }
 
-fn hash_of(source: &str, name: &str) -> crate::analysis::types::Hash16 {
+fn hash_of(source: &str, name: &str) -> verter_session_query::analysis::types::Hash16 {
     let index = index_of(source);
     let entry = index
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| entry.key.declaration.name.as_ref() == name)
         .unwrap_or_else(|| panic!("{name} must be indexed"));
@@ -417,7 +424,7 @@ fn hash_of(source: &str, name: &str) -> crate::analysis::types::Hash16 {
 
 fn entry_of<'a>(index: &'a FunctionProgramIndex, name: &str) -> &'a FunctionProgramEntry {
     index
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| entry.key.declaration.name.as_ref() == name)
         .unwrap_or_else(|| panic!("{name} must be indexed"))
@@ -429,7 +436,7 @@ fn member_entry_of<'a>(
     ordinal: u32,
 ) -> &'a FunctionProgramEntry {
     index
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| {
             entry.key.declaration.name.as_ref() == class_name
@@ -491,7 +498,7 @@ namespace Ns {
     assert_eq!(overloaded_impl.key.overload_ordinal, 1);
 
     let object_members: Vec<_> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| entry.key.declaration.name.as_ref() == "obj")
         .collect();
@@ -545,7 +552,7 @@ namespace Ns { export const nested = make(1); }
         &callback.source,
         ProgramExpressionSource::FunctionReturn(source) if source == callback_source
     ));
-    assert!(index.entries.iter().any(|entry| {
+    assert!(index.entries_for_test().iter().any(|entry| {
         entry.key.declaration.name.as_ref() == "derived"
             && matches!(entry.key.part, FunctionPartIdentity::Other { .. })
             && entry.span.start == callback.span.start
@@ -1014,7 +1021,7 @@ fn entries_with_part<'a>(
     part: &FunctionPartIdentity,
 ) -> Vec<&'a FunctionProgramEntry> {
     index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| entry.key.declaration.name.as_ref() == name && &entry.key.part == part)
         .collect()
@@ -1073,7 +1080,7 @@ function outer() {
     let outer = outers[0];
 
     let nested: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
         .collect();
@@ -1124,7 +1131,7 @@ function outer() {
 "#,
     );
     let callbacks: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
         .collect();
@@ -1170,7 +1177,7 @@ function outer() {
         matches!(&outer.call_sites[0].callee, FunctionEffectCallee::Identifier(name) if name.as_ref() == "run"),
     );
     let callbacks: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| matches!(entry.key.part, FunctionPartIdentity::Other { .. }))
         .collect();
@@ -1196,7 +1203,7 @@ function outer() {
 "#,
     );
     let callbacks: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| {
             matches!(
@@ -1249,13 +1256,13 @@ function outer(shadowed: string) {
     );
     let outer = entry_of(&index, "outer");
     let middle = index
-        .entries
+        .entries_for_test()
         .iter()
         .find(|entry| entry.nested_declaration_name.as_deref() == Some("middle"))
         .expect("the hoisted nested declaration is a served position");
 
     let mut callbacks: Vec<&FunctionProgramEntry> = index
-        .entries
+        .entries_for_test()
         .iter()
         .filter(|entry| {
             matches!(
@@ -1424,15 +1431,16 @@ fn exact_function_key_lookup_does_not_scan_sibling_functions() {
         .collect();
     let index = index_of(&source);
     let keys: Vec<_> = index
-        .entries
+        .entries_for_test()
         .iter()
         .map(|entry| entry.key.clone())
         .collect();
-    super::FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.set(0));
+    verter_session_query::function_program::FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.set(0));
     for key in &keys {
         assert_eq!(index.get(key).unwrap().key(), key);
     }
-    let visits = super::FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.get());
+    let visits = verter_session_query::function_program::FUNCTION_KEY_LOOKUP_VISITS
+        .with(|visits| visits.get());
     assert!(
         visits <= keys.len() * 2,
         "exact lookup must index keys once, not scan siblings: {visits} for {} keys",
@@ -1446,8 +1454,9 @@ fn exact_value_function_lookup_does_not_scan_sibling_functions() {
         .map(|ordinal| format!("function value{ordinal}() {{ return {ordinal}; }}"))
         .collect();
     let index = index_of(&source);
-    super::FUNCTION_VALUE_LOOKUP_VISITS.with(|visits| visits.set(0));
-    for entry in index.entries.iter() {
+    verter_session_query::function_program::FUNCTION_VALUE_LOOKUP_VISITS
+        .with(|visits| visits.set(0));
+    for entry in index.entries_for_test().iter() {
         let key = &entry.key;
         assert_eq!(
             index
@@ -1462,7 +1471,8 @@ fn exact_value_function_lookup_does_not_scan_sibling_functions() {
             key
         );
     }
-    let visits = super::FUNCTION_VALUE_LOOKUP_VISITS.with(|visits| visits.get());
+    let visits = verter_session_query::function_program::FUNCTION_VALUE_LOOKUP_VISITS
+        .with(|visits| visits.get());
     assert!(
         visits <= index.len() * 2,
         "value lookup must not scan sibling entries: {visits}"
@@ -1485,7 +1495,7 @@ fn retained_function_addresses_preserve_exact_locator_metadata() {
         Arc::from("/retained.ts"),
         &Default::default(),
     );
-    for entry in index.entries.iter() {
+    for entry in index.entries_for_test().iter() {
         let expected = resolve_function_node(&parsed.program, &entry.locator).unwrap();
         let actual = nodes.get(&entry.key).unwrap();
         assert_eq!(actual.node.span(), expected.node.span());
@@ -1637,18 +1647,18 @@ fn callables_nested_10000_deep_index_on_a_small_stack() {
             let source = format!("export const v = {}1;", "() => ".repeat(10_000));
             let index = index_of(&source);
             let deepest = index
-                .entries
+                .entries_for_test()
                 .iter()
                 .map(|entry| entry.locator.descent.len())
                 .max()
                 .unwrap_or(0);
-            let shared = index.entries.iter().all(|entry| {
+            let shared = index.entries_for_test().iter().all(|entry| {
                 entry.lexical_parent.as_deref().is_none_or(|parent| {
                     let parent = index.get(parent).expect("the parent is indexed").entry();
                     entry.locator.descent.extends(&parent.locator.descent)
                 })
             });
-            (index.entries.len(), deepest, shared)
+            (index.entries_for_test().len(), deepest, shared)
         })
         .expect("spawn the indexing thread")
         .join()
@@ -1660,11 +1670,11 @@ fn callables_nested_10000_deep_index_on_a_small_stack() {
 fn hashes_of(
     source: &str,
 ) -> Vec<(
-    crate::analysis::types::Hash16,
-    Option<crate::analysis::types::Hash16>,
+    verter_session_query::analysis::types::Hash16,
+    Option<verter_session_query::analysis::types::Hash16>,
 )> {
     index_of(source)
-        .entries
+        .entries_for_test()
         .iter()
         .map(|entry| (entry.flow_body_stable_hash, entry.flow_body_exact_hash))
         .collect()

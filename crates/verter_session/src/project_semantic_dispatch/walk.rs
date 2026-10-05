@@ -6848,8 +6848,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         let heritage_overlay_body = matches!(
                             self.dispatch.prepared_decl_kind(&identity),
                             Some(
-                                verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                                    | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                                verter_session_query::declarations::TypeDeclKind::Interface
+                                    | verter_session_query::declarations::TypeDeclKind::Class
                             )
                         );
                         work.push(Frame::Visit {
@@ -6941,8 +6941,8 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                         let heritage_overlay_body = matches!(
                             self.dispatch.prepared_decl_kind(&identity),
                             Some(
-                                verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                                    | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                                verter_session_query::declarations::TypeDeclKind::Interface
+                                    | verter_session_query::declarations::TypeDeclKind::Class
                             )
                         );
                         work.push(Frame::Visit {
@@ -7549,7 +7549,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
         body: SemanticNodeId,
         args: &[SemanticNodeId],
     ) -> Option<(SemanticNodeId, Vec<crate::semantic_query::PropertyKey>)> {
-        use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+        use verter_session_query::type_solver::builtin::BuiltinUtility;
         if identity.canonical_id.as_ref() != "__builtin__" || args.len() != 2 {
             return None;
         }
@@ -9883,8 +9883,8 @@ impl ProjectSemanticDispatch<'_> {
                 | SemanticNodeData::InstantiationRef { base: identity, .. } => matches!(
                     self.prepared_decl_kind(identity),
                     Some(
-                        verter_semantic::analysis::type_eval::TypeDeclKind::Interface
-                            | verter_semantic::analysis::type_eval::TypeDeclKind::Class
+                        verter_session_query::declarations::TypeDeclKind::Interface
+                            | verter_session_query::declarations::TypeDeclKind::Class
                     )
                 ),
                 SemanticNodeData::Intersection(arms) => {

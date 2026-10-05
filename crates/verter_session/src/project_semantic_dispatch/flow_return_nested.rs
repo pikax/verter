@@ -34,12 +34,12 @@ use super::*;
 /// is prepared from, owned, so the demand outlives the expression it was
 /// read from.
 pub(super) struct NestedDemand {
-    pub(super) function: verter_semantic::analysis::function_program::FunctionProgramKey,
+    pub(super) function: verter_session_query::function_program::FunctionProgramKey,
     pub(super) context: Arc<crate::flow_slice_content::NestedFlowContext>,
     pub(super) has_declared_return: bool,
     pub(super) extended_captures: Arc<[SkeletonBindingId]>,
     pub(super) declared_evolving_captures:
-        Arc<[verter_semantic::analysis::function_program::FlowBindingIdentity]>,
+        Arc<[verter_session_query::function_program::FlowBindingIdentity]>,
     /// The contextual signature it is checked under, if any.
     pub(super) contextual: Option<ContextualSignature>,
     /// The binder environment the function sits in when it is not the
@@ -89,20 +89,17 @@ impl NestedDemand {
 #[derive(Default)]
 pub(super) struct ResolvingFunctions {
     stack: Vec<(
-        verter_semantic::analysis::function_program::FunctionProgramKey,
+        verter_session_query::function_program::FunctionProgramKey,
         bool,
     )>,
-    first: rustc_hash::FxHashMap<
-        verter_semantic::analysis::function_program::FunctionProgramKey,
-        usize,
-    >,
+    first: rustc_hash::FxHashMap<verter_session_query::function_program::FunctionProgramKey, usize>,
 }
 
 impl ResolvingFunctions {
     /// The first position of `function` on the stack.
     fn position(
         &self,
-        function: &verter_semantic::analysis::function_program::FunctionProgramKey,
+        function: &verter_session_query::function_program::FunctionProgramKey,
     ) -> Option<usize> {
         self.first.get(function).copied()
     }
@@ -115,7 +112,7 @@ impl ResolvingFunctions {
         }
     }
 
-    fn push(&mut self, function: verter_semantic::analysis::function_program::FunctionProgramKey) {
+    fn push(&mut self, function: verter_session_query::function_program::FunctionProgramKey) {
         let position = self.stack.len();
         self.first.entry(function.clone()).or_insert(position);
         self.stack.push((function, false));
@@ -235,13 +232,13 @@ pub(super) struct NestedChildParts {
     pub(super) binder_env: FlowBinderEnv,
     pub(super) captured_products: FlowProductStore,
     pub(super) declared_capture_types: rustc_hash::FxHashMap<
-        verter_semantic::analysis::function_program::FlowBindingIdentity,
+        verter_session_query::function_program::FlowBindingIdentity,
         SemanticNodeId,
     >,
     /// The captures that entered the body extended, which stay extended
     /// for the functions the body creates.
     pub(super) extended_capture_identities:
-        rustc_hash::FxHashSet<verter_semantic::analysis::function_program::FlowBindingIdentity>,
+        rustc_hash::FxHashSet<verter_session_query::function_program::FlowBindingIdentity>,
     pub(super) execution_selection: Arc<super::super::flow_solve::FlowExecutionSelection>,
     pub(super) plan: Option<Arc<super::super::flow_solve::FlowDemandPlan>>,
     pub(super) bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
@@ -413,7 +410,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let function = &function;
         let context = &context;
         let extended_captures: &[SkeletonBindingId] = &extended_captures;
-        let declared_evolving_captures: &[verter_semantic::analysis::function_program::FlowBindingIdentity] =
+        let declared_evolving_captures: &[verter_session_query::function_program::FlowBindingIdentity] =
             &declared_evolving_captures;
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {

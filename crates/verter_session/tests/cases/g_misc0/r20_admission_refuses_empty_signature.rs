@@ -108,8 +108,8 @@ fn empty_signature_refused_per_production_cache_kind() {
 /// empty regardless of input.
 #[test]
 fn non_empty_signature_admits_normally_per_production_cache_kind() {
-    use verter_semantic::analysis::Hash16;
     use verter_session::resolver_core::FactVersionRef;
+    use verter_session_query::analysis::types::Hash16;
 
     for (idx, kind) in PRODUCTION_CACHE_KINDS.iter().enumerate() {
         let cache: ValidatedFactCache<String, u64> = ValidatedFactCache::default();

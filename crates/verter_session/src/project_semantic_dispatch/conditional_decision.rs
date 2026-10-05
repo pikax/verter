@@ -820,7 +820,7 @@ impl ProjectSemanticDispatch<'_> {
         // row or distribution reads.
         if !matches!(
             self.prepared_decl_kind(&identity),
-            Some(verter_semantic::analysis::type_eval::TypeDeclKind::Alias)
+            Some(verter_session_query::declarations::TypeDeclKind::Alias)
         ) {
             return node;
         }

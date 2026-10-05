@@ -5,8 +5,10 @@ use super::request_ports::OwnedLowering;
 use super::resolver_context::{RequestBoundAdapter, RequestBoundLifecycle};
 use crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey;
 use std::sync::Arc;
-use verter_semantic::analysis::flow::{FlowBindingMapError, PreparedFunctionBodySkeleton};
-use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
+use verter_session_query::flow::{
+    binding::FlowBindingMapError, skeleton::PreparedFunctionBodySkeleton,
+};
+use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_session_query::{QueryHostAdmission, QueryHostError, QueryHostServe};
 use verter_type_expr::locators::AuthoredBodyLocator;
 
@@ -75,7 +77,7 @@ trait SourceInputProvider {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     >;
     fn raw_prepared_value_decl(
@@ -84,7 +86,7 @@ trait SourceInputProvider {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     >;
     fn source_host(&self) -> &crate::VerterHost;
@@ -95,8 +97,8 @@ trait SourceInputProvider {
         canonical: &str,
         content: crate::types::Hash16,
         identity: &crate::file_artifact_store::FileArtifactKey,
-        key: &verter_semantic::facts::registry::FactKey,
-        lane: verter_semantic::facts::registry::FactLane,
+        key: &verter_session_query::facts::registry::FactKey,
+        lane: verter_session_query::facts::registry::FactLane,
     ) -> Option<crate::types::Hash16>;
     fn raw_serve(
         &self,
@@ -163,8 +165,8 @@ where
         canonical: &str,
         content: crate::types::Hash16,
         identity: &crate::file_artifact_store::FileArtifactKey,
-        key: &verter_semantic::facts::registry::FactKey,
-        lane: verter_semantic::facts::registry::FactLane,
+        key: &verter_session_query::facts::registry::FactKey,
+        lane: verter_session_query::facts::registry::FactLane,
     ) -> Option<crate::types::Hash16> {
         self::observed_fact_hash(self.0.host(), canonical, content, identity, key, lane)
     }
@@ -258,8 +260,8 @@ impl SourceInputProvider for crate::VerterHost {
         canonical: &str,
         content: crate::types::Hash16,
         identity: &crate::file_artifact_store::FileArtifactKey,
-        key: &verter_semantic::facts::registry::FactKey,
-        lane: verter_semantic::facts::registry::FactLane,
+        key: &verter_session_query::facts::registry::FactKey,
+        lane: verter_session_query::facts::registry::FactLane,
     ) -> Option<crate::types::Hash16> {
         self::observed_fact_hash(self, canonical, content, identity, key, lane)
     }
@@ -288,8 +290,8 @@ fn observed_fact_hash(
     canonical: &str,
     content: crate::types::Hash16,
     identity: &crate::file_artifact_store::FileArtifactKey,
-    key: &verter_semantic::facts::registry::FactKey,
-    lane: verter_semantic::facts::registry::FactLane,
+    key: &verter_session_query::facts::registry::FactKey,
+    lane: verter_session_query::facts::registry::FactLane,
 ) -> Option<crate::types::Hash16> {
     let artifacts = host
         .project_type_store()
@@ -305,8 +307,8 @@ fn observed_fact_hash(
             .facts
             .lookup_or_compute(key)
             .map_or([0; 16], |fact| match lane {
-                verter_semantic::facts::registry::FactLane::Semantic => fact.semantic_hash,
-                verter_semantic::facts::registry::FactLane::Display => fact.display_hash,
+                verter_session_query::facts::registry::FactLane::Semantic => fact.semantic_hash,
+                verter_session_query::facts::registry::FactLane::Display => fact.display_hash,
             }),
     )
 }
@@ -359,7 +361,7 @@ impl<
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
         self.raw_prepared_value_decl(canonical_id, owner, symbol_name)
@@ -371,7 +373,7 @@ impl<
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
         crate::resolver_core::prepared_decl::PreparationFailure,
     > {
         self.raw_prepared_type_decl(canonical_id, owner, symbol_name)
@@ -412,7 +414,7 @@ impl<
     fn global_contributor_answer(
         &self,
         name: &str,
-        space: verter_semantic::facts::SymbolSpace,
+        space: verter_session_query::facts::SymbolSpace,
     ) -> super::request_ports::ContributorAnswer {
         self.source_host().ingest_program_ambient_roots();
         self.contributor_answer(
@@ -427,7 +429,7 @@ impl<
         target: &crate::file_artifact_store::AugmentationTargetKind,
         name: &str,
         allow_automatic_libs: bool,
-        space: Option<verter_semantic::facts::SymbolSpace>,
+        space: Option<verter_session_query::facts::SymbolSpace>,
     ) -> super::request_ports::ContributorAnswer {
         let host = self.source_host();
         let (_, discriminator) =
@@ -513,7 +515,7 @@ impl<
         &self,
         canonical: &str,
         observed: crate::types::Hash16,
-        key: verter_semantic::facts::registry::FactKey,
+        key: verter_session_query::facts::registry::FactKey,
     ) -> Option<bool> {
         let normalized = self.normalized_analysis_canonical(canonical);
         let identity = self.artifact_key_for_current_content(canonical)?;
@@ -536,8 +538,8 @@ impl<
         &self,
         canonical: &str,
         observed_hash: crate::types::Hash16,
-        key: verter_semantic::facts::registry::FactKey,
-        lane: verter_semantic::facts::registry::FactLane,
+        key: verter_session_query::facts::registry::FactKey,
+        lane: verter_session_query::facts::registry::FactLane,
     ) -> Option<super::ParseFactRef> {
         let normalized = self.normalized_analysis_canonical(canonical);
         let identity = self.artifact_key_for_current_content(canonical)?;
@@ -616,7 +618,7 @@ impl<
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Result<
-        Option<Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
         super::prepared_decl::PreparationFailure,
     > {
         let Some(bundle) = self.prepared(input) else {
@@ -642,11 +644,11 @@ impl<
     fn prepare_augmentation_type(
         &self,
         input: &super::request_inputs::PreparedInputRecord,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> super::prepared_decl::PreparedDeclOutcome<
-        verter_semantic::analysis::type_solver::PreparedTypeDecl,
+        verter_session_query::type_solver::PreparedTypeDecl,
     > {
         let Some(bundle) = self.prepared(input) else {
             missing_source();
@@ -657,11 +659,11 @@ impl<
     fn prepare_augmentation_value(
         &self,
         input: &super::request_inputs::PreparedInputRecord,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> super::prepared_decl::PreparedDeclOutcome<
-        verter_semantic::analysis::type_solver::PreparedValueDecl,
+        verter_session_query::type_solver::PreparedValueDecl,
     > {
         let Some(bundle) = self.prepared(input) else {
             missing_source();
@@ -683,7 +685,7 @@ impl<
     fn function_program_index(
         &self,
         source: &super::shallow_file_state::ShallowInputRecord,
-    ) -> Option<Arc<verter_semantic::analysis::function_program::FunctionProgramIndex>> {
+    ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
         let Some(source) = self.source(source) else {
             missing_source();
             return None;

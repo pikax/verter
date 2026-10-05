@@ -1,11 +1,12 @@
-﻿//! Rule: define-emits-declaration
+//! Rule: define-emits-declaration
 //!
 //! Enforces type-based `defineEmits` declarations over runtime declarations.
 
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct DefineEmitsDeclaration;
 
@@ -45,8 +46,8 @@ impl LintRule for DefineEmitsDeclaration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::types::AnalyzedMacro;
 
-    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

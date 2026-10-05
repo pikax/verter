@@ -50,7 +50,8 @@ fn workspace_host_with_svelte(
             extensions: vec![],
             workspace_root: "/workspace".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace"),

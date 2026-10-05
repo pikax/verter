@@ -1,15 +1,15 @@
-use super::type_eval::*;
 use super::type_eval_build::{parse_and_build_env, parse_and_lower_parts};
 use crate::analysis::type_eval_build::{
     expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, LoweredFileParts,
     MacroExpansionScope, PathSegment, MAX_SEMANTIC_INFERENCE_WORK,
 };
 use crate::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
-use crate::analysis::types::{
+use std::sync::Arc;
+use verter_session_query::analysis::types::{
     AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, TypeResolutionSource,
 };
-use std::sync::Arc;
+use verter_session_query::declarations::*;
 use verter_type_expr::facts::{
     AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, ClosedTypeFact, EnumPrimitiveDomain,
     EnumScalar, FunctionPartIdentity, FunctionReturnSource, FunctionSignatureFact,
@@ -47,10 +47,10 @@ fn svelte_runes_statement(source: &str) -> crate::analysis::type_eval_build::Low
 
 #[test]
 fn owner_aware_eval_env_keeps_setup_and_module_locators_distinct() {
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"
@@ -108,10 +108,10 @@ namespace Ns { export class C { value!: string } }
 #[test]
 fn jsdoc_typedef_bodies_lower_by_exact_owner_qualified_comment() {
     use crate::analysis::decl_headers::build_decl_header_index_with_owners;
-    use crate::analysis::top_level_owners::TopLevelOwnerTable;
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
     use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 
     let source = r#"

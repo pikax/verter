@@ -87,7 +87,7 @@ pub struct SymbolEntry {
     /// Discriminator naming the declaration class.
     pub kind: SymbolKind,
     /// SFC-absolute span sourced from the
-    /// [`verter_semantic::analysis::types::LocalDeclarationEntry`] for
+    /// [`verter_session_query::analysis::types::LocalDeclarationEntry`] for
     /// this declaration, when one is present in the analysis snapshot.
     /// `None` when the script-analysis snapshot did not capture a span
     /// (e.g. ambient declarations synthesised at lower stages).
@@ -102,10 +102,10 @@ pub struct SymbolEntry {
 ///
 /// Mirrors the project's shallow-state taxonomy: `TypeAlias`,
 /// `Interface`, and `Class` come from
-/// [`verter_semantic::analysis::type_eval::TypeDeclKind`]; the value
+/// [`verter_session_query::declarations::TypeDeclKind`]; the value
 /// kinds (`Const`, `Let`, `Var`, `Function`, `AsyncFunction`, `Enum`)
 /// come from
-/// [`verter_semantic::analysis::type_eval::ValueDeclKind`]. Class /
+/// [`verter_session_query::declarations::ValueDeclKind`]. Class /
 /// Enum surface twice in the inventory — once as a type entry and
 /// once as a value entry — so consumers downstream of the inventory
 /// can disambiguate the two namespaces without re-analysing the file.
@@ -284,12 +284,12 @@ pub struct VueMacroSurfaceRequest {
     pub macro_index: usize,
     /// Which macro this request targets (`DefineProps` / `DefineEmits` /
     /// `DefineSlots` / `WithDefaults` / `DefineModel` / …).
-    pub macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+    pub macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
     /// The `.vue` SFC's content identity (`IndexedReady::whole_hash`) — roots
     /// the surface to the content it was extracted from so a content edit
     /// produces a distinct cache identity. Carried explicitly so the adapter
     /// does not re-derive it per call.
-    pub root_identity: verter_semantic::analysis::types::Hash16,
+    pub root_identity: verter_session_query::analysis::types::Hash16,
     /// The query level — query identity, NOT an env hash.
     pub level: TypeInfoQueryLevel,
 }

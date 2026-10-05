@@ -63,7 +63,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// Content-generation identity of one retained parse snapshot: the
 /// canonical file, its whole-content hash, and the R21 parse-env

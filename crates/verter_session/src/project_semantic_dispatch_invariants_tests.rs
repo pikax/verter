@@ -2716,7 +2716,7 @@ fn open_generic_expansion_no_longer_short_circuits_to_applied_stub() {
         .expect("workspace parent")
         .to_path_buf();
     let solve_path =
-        workspace_root.join("crates/verter_semantic/src/analysis/type_solver/solve.rs");
+        workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — the applied-stub \
@@ -2751,7 +2751,7 @@ fn path_projection_through_open_applied_does_not_short_circuit_to_symbolic_index
         .expect("workspace parent")
         .to_path_buf();
     let solve_path =
-        workspace_root.join("crates/verter_semantic/src/analysis/type_solver/solve.rs");
+        workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — the symbolic_indexed_access \
@@ -2788,7 +2788,7 @@ fn indexed_access_open_skips_counter_retired() {
         .expect("workspace parent")
         .to_path_buf();
     let audit_path =
-        workspace_root.join("crates/verter_semantic/src/analysis/type_solver/audit.rs");
+        workspace_root.join("crates/verter_session_query/src/type_solver/audit.rs");
     assert!(
         !audit_path.exists(),
         "type_solver/audit.rs must not exist; found at {}",
@@ -2808,7 +2808,7 @@ fn budget_domain_solver_resolve_steps_trips_cleanly() {
         .expect("workspace parent")
         .to_path_buf();
     let solve_path =
-        workspace_root.join("crates/verter_semantic/src/analysis/type_solver/solve.rs");
+        workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — `SolveLimits::max_resolve_steps` \
@@ -2834,7 +2834,7 @@ fn budget_domain_solver_arena_nodes_trips_cleanly() {
         .expect("workspace parent")
         .to_path_buf();
     let solve_path =
-        workspace_root.join("crates/verter_semantic/src/analysis/type_solver/solve.rs");
+        workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — `SolveLimits::max_arena_nodes` \
@@ -4520,7 +4520,7 @@ fn published_project_env_hashes_scope_strictness_and_lib_to_their_dimensions() {
     );
     assert_eq!(
         host.semantic_compiler_options_for("/nowhere/main.ts"),
-        verter_semantic::resolver_core::SemanticCompilerOptions::default(),
+        verter_session_query::resolution::SemanticCompilerOptions::default(),
         "a canonical with no owning project runs on TypeScript's defaults"
     );
 }

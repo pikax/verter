@@ -46,7 +46,8 @@ impl LintRule for NoDomQueryInSetup {
 mod tests {
     use super::*;
     use crate::test_support::{run_script_rule, run_script_rule_ssr};
-    use verter_semantic::analysis::types::{DomQueryCallSite, DomQueryKind};
+    use verter_semantic::analysis::types::DomQueryCallSite;
+    use verter_session_query::analysis::types::DomQueryKind;
     use verter_span::Span;
 
     fn dom_call(kind: DomQueryKind) -> DomQueryCallSite {

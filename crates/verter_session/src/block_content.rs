@@ -865,9 +865,9 @@ impl VerterHost {
                     let resolved = match self.resolve_for_persistent_state(
                         &canonical_id,
                         specifier,
-                        verter_semantic::resolver_core::ResolutionContext {
-                            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                            kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                        verter_session_query::resolution::ResolutionContext {
+                            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                            kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                         },
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
@@ -1334,7 +1334,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         scope: SuppliedBlockScope<'_>,
-        captured_whole_hash: verter_semantic::analysis::types::Hash16,
+        captured_whole_hash: verter_session_query::analysis::types::Hash16,
         captured_stamp: &BlockContentHashToken,
     ) -> bool {
         let owner_is_current = self

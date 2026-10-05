@@ -9,12 +9,14 @@ use std::sync::Arc;
 use crate::fact_read_set::FactReadSetFinalise;
 use crate::resolution_currency::ResolutionFactKey;
 #[cfg(test)]
-use verter_semantic::facts::registry::FactLane;
+use verter_session_query::facts::registry::FactLane;
 #[cfg(test)]
-use verter_semantic::resolver_core::ResolutionPopulation;
+use verter_session_query::resolution::ResolutionPopulation;
 
-pub use verter_semantic::facts::receipt::{drop_subsumed_receipts, ReceiptWalk, ResultReceipt};
-pub use verter_semantic::facts::version::{
+pub use verter_session_query::facts::receipt::{
+    drop_subsumed_receipts, ReceiptWalk, ResultReceipt,
+};
+pub use verter_session_query::facts::version::{
     compaction_domain, AggregatePopulation, AggregateStamp, CompactionDomain,
     CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,
     FactVersionRef, OverlayId, ParseEnvHash, ParseFactRef, ProgramAnalysisFactRef,
@@ -679,8 +681,8 @@ mod compaction_domain_tests {
     use crate::resolution_currency::{
         CanonicalResolutionId, ResolutionFactKey, ResolutionFactVersion,
     };
-    use verter_semantic::facts::registry::{FactKey, SymbolSpace};
-    use verter_semantic::resolver_core::ResolutionWorldId;
+    use verter_session_query::facts::registry::{FactKey, SymbolSpace};
+    use verter_session_query::resolution::ResolutionWorldId;
 
     fn ts_language() -> verter_language::FileLanguage {
         verter_language::LanguageRegistry::global()
@@ -865,7 +867,7 @@ mod compaction_domain_tests {
 #[cfg(test)]
 mod aggregate_basis_seed_tests {
     use super::*;
-    use verter_semantic::resolver_core::ResolutionWorldId;
+    use verter_session_query::resolution::ResolutionWorldId;
 
     /// Captured components deliberately differ from every live counter,
     /// so a composition that sourced a component from the wrong half is

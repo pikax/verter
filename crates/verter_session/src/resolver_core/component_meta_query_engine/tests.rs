@@ -1532,7 +1532,7 @@ fn step8_route_hash_pure_content_derived() {
     use crate::resolver_core::shallow_file_state::ShallowFileState;
 
     use std::sync::Arc;
-    use verter_semantic::analysis::Hash16;
+    use verter_session_query::analysis::types::Hash16;
 
     let routes = Arc::new(
         verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
@@ -1946,7 +1946,8 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
             extensions: vec![],
             workspace_root: "/workspace/node_modules/@me/inner-pkg".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace/node_modules/@me/inner-pkg"),

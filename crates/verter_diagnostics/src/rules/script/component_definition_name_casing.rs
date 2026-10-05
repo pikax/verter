@@ -1,4 +1,4 @@
-﻿//! Rule: component-definition-name-casing
+//! Rule: component-definition-name-casing
 //!
 //! Component names defined in `defineOptions` should be PascalCase.
 //! For example, `defineOptions({ name: 'my-component' })` should use
@@ -10,7 +10,8 @@ use crate::casing::is_pascal_case;
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct ComponentDefinitionNameCasing;
 
@@ -62,7 +63,8 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::types::AnalyzedMacro;
+
     use verter_span::Span;
 
     fn run_script(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

@@ -326,7 +326,7 @@ fn projection_inputs<'a>(
     scope: &'a NodeScopeId,
     names: &'a rustc_hash::FxHashMap<
         std::sync::Arc<str>,
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity,
+        verter_session_query::type_solver::host::ResolvedRootIdentity,
     >,
     shadowing: &'a ScopeShadowing,
 ) -> LocatorViewInputs<'a> {

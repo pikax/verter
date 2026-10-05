@@ -10,7 +10,7 @@ use crate::canonical_path::CanonicalPath;
 use crate::membership::configured_membership_match_all_under_root;
 #[cfg(test)]
 use crate::membership::ProjectMembership;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     AttemptFailure, AttemptOutcome, AttemptOutput, ConsumedResolutionObservationKey,
     IdeProjectCompilerOptions, IdeProjectConfig, InputKey, InputLoadIntegrityReason,
     InputResolutionBudgetExhaustion, InputResolutionBudgetMeter, InputResolutionBudgets,
@@ -25,7 +25,7 @@ use verter_semantic::resolver_core::{
 pub enum ResolutionInputReservation {
     PathProbe {
         key: InputKey,
-        value: verter_semantic::resolver_core::PathProbe,
+        value: verter_session_query::resolution::PathProbe,
         directories: Vec<String>,
     },
     RealPath {
@@ -149,7 +149,7 @@ impl ResolutionInputReservationBatch {
 pub enum LoadedResolutionInput {
     PathProbe {
         key: InputKey,
-        value: verter_semantic::resolver_core::PathProbe,
+        value: verter_session_query::resolution::PathProbe,
         directories: Vec<String>,
     },
     RealPath {
@@ -300,10 +300,10 @@ pub(crate) fn unsupported_input_failure(key: &InputKey) -> Option<AttemptFailure
     let observation = match key {
         InputKey::FileContent { .. } => ResolverObservationKind::WholeHash,
         InputKey::DeclBody { space, .. } => match space {
-            verter_semantic::resolver_core::DeclarationSpace::Type => {
+            verter_session_query::resolution::DeclarationSpace::Type => {
                 ResolverObservationKind::TypeDecl
             }
-            verter_semantic::resolver_core::DeclarationSpace::Value => {
+            verter_session_query::resolution::DeclarationSpace::Value => {
                 ResolverObservationKind::ValueDecl
             }
         },
@@ -324,7 +324,7 @@ pub(crate) fn preflight_supported_resolution_inputs(
     mut path_probe: impl FnMut(
         &str,
     ) -> Result<
-        (verter_semantic::resolver_core::PathProbe, Vec<String>),
+        (verter_session_query::resolution::PathProbe, Vec<String>),
         AttemptFailure,
     >,
     mut realpath: impl FnMut(&str) -> Result<(Option<String>, Vec<String>), AttemptFailure>,
@@ -354,7 +354,7 @@ pub(crate) fn preflight_supported_resolution_inputs(
             }
             InputKey::PackageManifest { directory } => {
                 let manifest_path =
-                    verter_semantic::resolver_core::join_paths(directory, "package.json");
+                    verter_session_query::resolution::join_paths(directory, "package.json");
                 let (present, raw_bytes, directories) = package_manifest(&manifest_path, key)?;
                 ResolutionInputReservation::PackageManifest {
                     key: key.clone(),
@@ -557,7 +557,8 @@ fn load_requested_inputs(
     keys: &[InputKey],
     mut snapshot_path_probe: impl FnMut(
         &str,
-    ) -> (verter_semantic::resolver_core::PathProbe, Vec<String>),
+    )
+        -> (verter_session_query::resolution::PathProbe, Vec<String>),
     mut snapshot_realpath: impl FnMut(&str) -> (Option<String>, Vec<String>),
     mut snapshot_package_manifest: impl FnMut(
         &str,
@@ -586,7 +587,7 @@ fn load_requested_inputs(
             }
             InputKey::PackageManifest { directory } => {
                 let manifest_path =
-                    verter_semantic::resolver_core::join_paths(directory, "package.json");
+                    verter_session_query::resolution::join_paths(directory, "package.json");
                 let (manifest, directories) = snapshot_package_manifest(&manifest_path);
                 let fingerprint = manifest
                     .as_ref()
@@ -1007,7 +1008,8 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                             .map_or_else(Vec::new, |load_set| copy_terminal_keys(load_set.keys())),
                     }));
                 }
-                let verter_semantic::resolver_core::CompletedAttempt { value, output } = completed;
+                let verter_session_query::resolution::CompletedAttempt { value, output } =
+                    completed;
                 ledger.applied_outputs.push(output);
                 ledger.last_load_set = last_load_set;
                 return Ok(value);
@@ -1402,7 +1404,7 @@ pub(crate) fn resolve_for_project_tracked(
     _capability: &crate::engine::TrackedResolutionCapability,
     reader: &crate::resolution_currency::TransactionReader<'_>,
     ledger: &mut InputResolutionLedger,
-    owner: &verter_semantic::resolver_core::ProjectOwnership,
+    owner: &verter_session_query::resolution::ProjectOwnership,
     specifier: &str,
     context: ResolutionContext,
 ) -> Result<Option<ResolveResult>, Box<AttemptFailure>> {
@@ -1439,7 +1441,7 @@ trait ModuleResolverCoreTestExt {
     fn resolve_for_project_with_reader(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         specifier: &str,
         context: ResolutionContext,
     ) -> Option<ResolveResult>;
@@ -1474,7 +1476,7 @@ impl ModuleResolverCoreTestExt for ModuleResolverCore {
     fn resolve_for_project_with_reader(
         &self,
         reader: &dyn crate::traits::WorkspaceRead,
-        owner: &verter_semantic::resolver_core::ProjectOwnership,
+        owner: &verter_session_query::resolution::ProjectOwnership,
         specifier: &str,
         context: ResolutionContext,
     ) -> Option<ResolveResult> {

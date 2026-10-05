@@ -86,7 +86,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::{AnalyzedMacroKind, JsdocTag};
+use verter_session_query::analysis::types::{AnalyzedMacroKind, JsdocTag};
 use verter_type_expr::{TypeExpr, TypeExprScope};
 
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
@@ -561,7 +561,7 @@ impl VerterHost {
     /// The member NAMES are structural, already-typed analyzer facts
     /// (`mac.expose_fields` / `mac.prop_fields`, populated for both
     /// type-based AND runtime macro forms — see their doc comments on
-    /// [`verter_semantic::analysis::types::AnalyzedMacro`]), never a
+    /// [`verter_session_query::analysis::types::AnalyzedMacro`]), never a
     /// name-string heuristic. Each member's own type is not re-derived here
     /// (a runtime object literal's member value is an arbitrary expression —
     /// resolving its real type is the same "typeof a value binding" demand
@@ -1386,7 +1386,7 @@ fn runtime_object_macro_surface(
     ctx: &dyn crate::resolver_core::ResolverContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     request: &VueMacroSurfaceRequest,
-    mac: &verter_semantic::analysis::types::AnalyzedMacro,
+    mac: &verter_session_query::analysis::types::AnalyzedMacro,
 ) -> Option<VueMacroSurface> {
     use crate::semantic_query::{
         AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp, SurfaceEntry, SurfaceMember,

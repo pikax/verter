@@ -5,7 +5,7 @@ use crate::file_artifact_store::{
 };
 use smallvec::SmallVec;
 use std::sync::Arc;
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 pub(crate) struct AugmentationRequestDriver<'a> {
     db: &'a FileArtifactStore,
@@ -52,7 +52,7 @@ impl<'a> AugmentationRequestDriver<'a> {
                 let relative = if matches!(
                     key.target,
                     AugmentationTargetKind::ResolvedRelativeCanonical(_)
-                ) && verter_semantic::resolver_core::is_relative_specifier(
+                ) && verter_session_query::resolution::is_relative_specifier(
                     fact.specifier.as_ref(),
                 ) {
                     resolve_relative_canonical(

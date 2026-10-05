@@ -602,7 +602,7 @@ fn unknown_names_are_none_without_lowering() {
 /// `acquire_lease`'s worker-thread rendezvous.
 #[test]
 fn peek_never_triggers_lowering() {
-    use verter_semantic::resolver_core::AttemptOutcome;
+    use verter_session_query::resolution::AttemptOutcome;
 
     let (memo, provenance) = memo_for(FIVE_DECLS);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
@@ -633,7 +633,7 @@ fn peek_never_triggers_lowering() {
 /// tell which space actually needed the reload.
 #[test]
 fn peek_need_inputs_carries_the_correct_declaration_space() {
-    use verter_semantic::resolver_core::{AttemptOutcome, DeclarationSpace, InputKey};
+    use verter_session_query::resolution::{AttemptOutcome, DeclarationSpace, InputKey};
 
     const BOTH_SPACES_SRC: &str = "export type Foo = string;\nexport const Foo = 1;\n";
     let (memo, _provenance) = memo_for(BOTH_SPACES_SRC);
@@ -672,7 +672,7 @@ fn peek_need_inputs_carries_the_correct_declaration_space() {
 
 #[test]
 fn peek_after_demand_serves_the_same_cached_entry() {
-    use verter_semantic::resolver_core::AttemptOutcome;
+    use verter_session_query::resolution::AttemptOutcome;
 
     let (memo, provenance) = memo_for(FIVE_DECLS);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
@@ -704,7 +704,7 @@ fn peek_after_demand_serves_the_same_cached_entry() {
 
 #[test]
 fn peek_unknown_symbol_is_a_stable_complete_none() {
-    use verter_semantic::resolver_core::AttemptOutcome;
+    use verter_session_query::resolution::AttemptOutcome;
 
     let (memo, provenance) = memo_for(FIVE_DECLS);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
@@ -728,7 +728,7 @@ fn peek_unknown_symbol_is_a_stable_complete_none() {
 
 #[test]
 fn peek_value_decl_after_demand_serves_the_same_cached_entry() {
-    use verter_semantic::resolver_core::AttemptOutcome;
+    use verter_session_query::resolution::AttemptOutcome;
 
     const VALUE_SRC: &str = "export const answer = 42;\n";
     let (memo, provenance) = memo_for(VALUE_SRC);
@@ -2345,7 +2345,7 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
 fn function_program_index_hash_folds_parse_env_identity() {
     let (memo, _provenance) = memo_for(FLOW_FIXTURE);
     let index = memo.function_program_index();
-    let alpha_of = |index: &verter_semantic::analysis::function_program::FunctionProgramIndex| {
+    let alpha_of = |index: &verter_session_query::function_program::FunctionProgramIndex| {
         index
             .value_function(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),

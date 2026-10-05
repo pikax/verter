@@ -5,7 +5,7 @@
 //! `output_sink`; these predicates inspect only the semantic graph and never
 //! cross the output-materialization boundary.
 
-use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+use verter_session_query::type_solver::builtin::BuiltinUtility;
 
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
 use crate::semantic_query_memo::SemanticGraphStore;

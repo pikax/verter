@@ -1,4 +1,4 @@
-﻿//! Rule: component-api-style
+//! Rule: component-api-style
 //!
 //! Enforce Composition API style. Detects Options API patterns (bindings named
 //! `data`, `computed`, `methods`, `watch`, etc.) when no Composition API macros
@@ -77,8 +77,12 @@ impl LintRule for ComponentApiStyle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::AnalyzedMacro;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::ReactivityKind;
 
-    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

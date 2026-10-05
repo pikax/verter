@@ -181,7 +181,7 @@ fn injected_unimported_ambient_is_ingested_without_upserting_it() {
             "x",
             None,
             true,
-            verter_semantic::facts::SymbolSpace::Value,
+            verter_session_query::facts::SymbolSpace::Value,
         );
     assert!(
         !hit.entries.is_empty(),
@@ -222,7 +222,7 @@ fn upserted_unimported_ambient_is_ingested_on_standalone_host() {
             "Cfg",
             None,
             true,
-            verter_semantic::facts::SymbolSpace::Type,
+            verter_session_query::facts::SymbolSpace::Type,
         );
     assert!(
         !hit.entries.is_empty(),
@@ -424,7 +424,7 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
 #[test]
 fn script_file_scope_values_enter_the_population_by_name() {
     use super::ContributorOrigin;
-    use verter_semantic::facts::SymbolSpace;
+    use verter_session_query::facts::SymbolSpace;
     let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));

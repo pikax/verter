@@ -36,8 +36,8 @@
 
 use rustc_hash::FxHashSet;
 use verter_semantic::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;

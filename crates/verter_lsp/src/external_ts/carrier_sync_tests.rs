@@ -12,13 +12,13 @@ use crate::provider_sync::{
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::ConfiguredMembership;
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, EnvDims, ExternalTsProjectResolver, ProjectBinding,
     WorkspaceProjectResolver,
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_session::{CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::resolution::ConfiguredMembership;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
@@ -40,7 +40,7 @@ use crate::external_ts::{
 use crate::provider_surface_store::ProviderSurfaceStore;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::workspace_scanner::{classify_from_snapshot, Tier};
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_session_query::resolution::ModuleResolverCore;
 
 fn owned_carrier_state() -> ProviderSyncState {
     ProviderSyncState {
@@ -1059,7 +1059,7 @@ fn carrier_close_target_returns_companion_paths_owner_independent() {
     // buffers must be closable regardless of its ownership state (e.g. after an owner
     // loss). A carrier path yields both companion paths under an `Unresolved` binding;
     // a non-carrier path yields `None` (the single carrier-vs-not gate).
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
         verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),

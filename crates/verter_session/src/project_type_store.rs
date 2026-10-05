@@ -24,7 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use verter_semantic::analysis::{AnalysisScope, Hash16};
+use verter_semantic::analysis::AnalysisScope;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::component_meta_caches::{
     DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, ResolvabilityDb, ShapeCacheDb,
@@ -177,7 +178,7 @@ pub struct IndexedReady {
     /// Always present after materialization.
     pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
     /// Cached per-export signatures used by smart dependent invalidation.
-    pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
+    pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
     /// File-level analysis snapshot consumed by component-meta / linter
     /// pipelines.
     pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
@@ -191,7 +192,7 @@ pub struct IndexedReady {
     /// the proof for files that demonstrably cannot contribute an
     /// `interface AppConfig` override without re-walking the analysis
     /// snapshot. Mirrored at materialization time from
-    /// [`verter_semantic::analysis::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG`].
+    /// [`verter_session_query::analysis::types::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG`].
     pub declares_interface_app_config: bool,
     /// Lazy, singleflight, content-addressed mirror of this file's Vue SFC
     /// MACRO type-argument graph handles — the
@@ -382,7 +383,7 @@ pub struct AnalysisReady {
     pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
     /// Per-export signatures for smart invalidation, when the scope requested
     /// [`AnalysisScope::EXPORT_SIGNATURES`].
-    pub export_signatures: Option<Arc<Vec<verter_semantic::analysis::ExportSignature>>>,
+    pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
     /// File-level analysis snapshot used by the existing component-meta and
     /// linter pipelines.
     pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
@@ -1072,7 +1073,7 @@ pub struct ProjectTypeStore {
     /// Dedupes the canonical-id / symbol-name `Arc<str>` allocations the
     /// session minting boundaries (prepared-decl builders, bare-name
     /// resolution, import canonicalization) hand to
-    /// [`verter_semantic::analysis::type_solver::host::ResolvedRootIdentity`].
+    /// [`verter_session_query::type_solver::host::ResolvedRootIdentity`].
     /// Bounded by retained payload bytes; see
     /// [`crate::identity_interner::IdentityInterner`].
     identity_interner: Arc<crate::identity_interner::IdentityInterner>,

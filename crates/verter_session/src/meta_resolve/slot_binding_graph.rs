@@ -28,7 +28,7 @@ use verter_semantic::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedField, ExpansionDiagnostic, ExpansionExactness,
     ExpansionExecutionStatus, ExpansionStopReason,
 };
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
@@ -1407,7 +1407,7 @@ fn typeinfo_macro_dtos(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     macro_index: usize,
-    macro_kind: verter_semantic::analysis::AnalyzedMacroKind,
+    macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
 ) -> std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos> {
     let root_identity = ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]);
     let read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
@@ -1872,8 +1872,10 @@ fn node_reaches_non_owner_ref(
 /// a lookup can never join a graph-native row with parser metadata from a
 /// different invocation. A fallback publication (the parser-only loop
 /// below) reads the real owner straight off the key.
-type ParserBindingIndex<'a> =
-    FxHashMap<SlotBindingJoinKey, &'a verter_semantic::analysis::AnalyzedSlotFieldBinding>;
+type ParserBindingIndex<'a> = FxHashMap<
+    SlotBindingJoinKey,
+    &'a verter_session_query::analysis::types::AnalyzedSlotFieldBinding,
+>;
 
 /// Build the parser-path binding index from every `defineSlots` macro's own
 /// `(owner, macro_index, slot fields)` triple. Owner and macro_index ride
@@ -1884,7 +1886,7 @@ fn build_parser_binding_index<'a>(
     slot_field_sets: &'a [(
         verter_type_expr::TopLevelOwnerId,
         usize,
-        Vec<verter_semantic::analysis::AnalyzedSlotField>,
+        Vec<verter_session_query::analysis::types::AnalyzedSlotField>,
     )],
 ) -> ParserBindingIndex<'a> {
     let mut parser_index: ParserBindingIndex<'_> = FxHashMap::default();
@@ -1910,7 +1912,7 @@ fn build_parser_binding_index<'a>(
 mod parser_binding_index_tests {
     use super::build_parser_binding_index;
     use std::sync::Arc;
-    use verter_semantic::analysis::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
+    use verter_session_query::analysis::types::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
     use verter_type_expr::TopLevelOwnerId;
 
     fn binding(name: &str) -> AnalyzedSlotFieldBinding {
@@ -2387,7 +2389,7 @@ pub(crate) fn publish_merged_bindings(
     let slot_field_sets: Vec<(
         verter_type_expr::TopLevelOwnerId,
         usize,
-        Vec<verter_semantic::analysis::AnalyzedSlotField>,
+        Vec<verter_session_query::analysis::types::AnalyzedSlotField>,
     )> = resolved_macros
         .iter()
         .filter(|r| r.macro_kind == AnalyzedMacroKind::DefineSlots)

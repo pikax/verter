@@ -886,7 +886,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         let dep_canonical = match self.host.resolve_loaded_dependency_canonical(
             parent_canonical,
             import_source,
-            verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 admitted.into_result()?
@@ -913,13 +913,13 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             .map(|binding| {
                 (
                     match binding.kind {
-                        verter_semantic::analysis::types::ImportBindingKind::Named => {
+                        verter_session_query::analysis::types::ImportBindingKind::Named => {
                             crate::resolver_core::ImportBindingKind::Named
                         }
-                        verter_semantic::analysis::types::ImportBindingKind::Default => {
+                        verter_session_query::analysis::types::ImportBindingKind::Default => {
                             crate::resolver_core::ImportBindingKind::Default
                         }
-                        verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                        verter_session_query::analysis::types::ImportBindingKind::Namespace => {
                             crate::resolver_core::ImportBindingKind::Namespace
                         }
                     },
@@ -1016,7 +1016,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
     type Snapshot = FileAnalysisSnapshot;
     // Arc-shared: the no-hydration fallthrough env is the memo-owned
     // whole-env handle itself; every consumer reads it immutably.
-    type EvalEnv = std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>;
+    type EvalEnv = std::sync::Arc<verter_session_query::declarations::EvalEnv>;
 
     fn resolve_root_consumption(
         &self,
@@ -1208,7 +1208,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         &self,
         canonical_id: &str,
         source: &str,
-        _sig: &verter_semantic::analysis::ExportSignature,
+        _sig: &verter_session_query::analysis::types::ExportSignature,
     ) -> Option<String> {
         // The shallow reexport surface names AUTHORED specifiers only,
         // so there is no artifact-baked target to prefer here: the
@@ -1218,7 +1218,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         match self.host.resolve_loaded_dependency_canonical(
             canonical_id,
             source,
-            verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 if let Some(resolved) = admitted.into_result() {
@@ -1251,21 +1251,21 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
     fn dependency_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_session_query::declarations::EvalEnv>> {
         self.host.base_eval_env_arc(canonical_id)
     }
 
     fn dependency_value_symbol_graph_native(
         &self,
         source: &ValueDeclIdentity,
-    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+    ) -> Option<verter_session_query::declarations::ValueDeclInfo> {
         self.host.dependency_value_symbol_graph_native(source)
     }
 
     fn prepared_value_decl(
         &self,
         source: &ValueDeclIdentity,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
         self.host
             .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
     }
@@ -1280,16 +1280,16 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
 }
 
 pub(in crate::host_manage) fn exact_resolution_uses_type_preferred_target(
-    phase: verter_semantic::resolver_core::ResolvePhase,
-    kind: verter_semantic::resolver_core::ResolveRequestKind,
+    phase: verter_session_query::resolution::ResolvePhase,
+    kind: verter_session_query::resolution::ResolveRequestKind,
 ) -> bool {
     matches!(
         (phase, kind),
         (
-            verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            verter_session_query::resolution::ResolveRequestKind::TypeImport,
         ) | (
-            verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
+            verter_session_query::resolution::ResolvePhase::ProviderGraph,
             _
         )
     )
@@ -1307,13 +1307,13 @@ fn is_type_preferred_target(canonical_id: &str) -> bool {
         // type-bearing virtual surface, so it is type-preferred exactly like a
         // `.vue` SFC. Sourced from the registry carrier-extension set, never a
         // hardcoded `.vue` arm that would strand other carriers.
-        || verter_semantic::resolver_core::path_is_carrier(canonical_id)
+        || verter_session_query::resolution::path_is_carrier(canonical_id)
 }
 
 fn has_file_like_extension(canonical_id: &str) -> bool {
     // Carrier-GENERIC: any registered framework carrier (`.vue`, `.svelte`, …)
     // is a real file-like path, not a bare module specifier.
-    verter_semantic::resolver_core::path_is_carrier(canonical_id)
+    verter_session_query::resolution::path_is_carrier(canonical_id)
         || canonical_id.ends_with(".ts")
         || canonical_id.ends_with(".tsx")
         || canonical_id.ends_with(".mts")

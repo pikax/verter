@@ -42,7 +42,7 @@ fn main() {
     // sealed in-crate snapshot — this construction must not compile.
     let core = TypeInfoCore::from_observation_snapshot(
         Arc::new(NonFlowObservationSnapshot::new()),
-        verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder(),
+        verter_session_query::resolution::ResolutionBasis::unbound_placeholder(),
     );
     let _ = &core;
     let _ = ForeignSource;

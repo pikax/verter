@@ -14,7 +14,7 @@ pub use request::{
     ExpansionStopReason,
 };
 
-use crate::analysis::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};
+use verter_session_query::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};
 use verter_type_expr::facts::SemanticTypeSource;
 
 // ---------------------------------------------------------------------------

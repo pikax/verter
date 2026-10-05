@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_eval::{EvalEnv, ValueDeclInfo};
-use verter_semantic::analysis::types::{AnalyzedImport, ImportBindingKind};
+use verter_session_query::analysis::types::{AnalyzedImport, ImportBindingKind};
+use verter_session_query::declarations::{EvalEnv, ValueDeclInfo};
 
 /// Exact identity of a top-level runtime value declaration.
 ///
@@ -35,7 +35,7 @@ pub trait ImportedRuntimeValueResolver {
     fn prepared_value_decl(
         &self,
         _source: &ValueDeclIdentity,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
         None
     }
 
@@ -174,7 +174,7 @@ pub fn materialize_imported_runtime_values_into_env<R: ImportedRuntimeValueResol
 }
 
 fn prepared_value_decl_to_value_decl_info(
-    prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+    prepared: &verter_session_query::type_solver::PreparedValueDecl,
 ) -> ValueDeclInfo {
     ValueDeclInfo {
         owner: prepared.root_identity.owner,
@@ -213,10 +213,10 @@ mod tests {
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::cell::RefCell;
     use std::sync::Arc;
-    use verter_semantic::analysis::type_eval::{EvalEnv, ValueDeclInfo, ValueDeclKind};
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::types::{
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
     };
+    use verter_session_query::declarations::{EvalEnv, ValueDeclInfo, ValueDeclKind};
     use verter_span::Span;
     use verter_type_expr::facts::{
         ClosedTypeFact, LeafTypeFact, SemanticTypeSource, ValueAnnotationClass,
@@ -261,10 +261,8 @@ mod tests {
     #[derive(Default)]
     struct TestResolver {
         dep_envs: FxHashMap<String, Arc<EvalEnv>>,
-        prepared_values: FxHashMap<
-            ValueDeclIdentity,
-            Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>,
-        >,
+        prepared_values:
+            FxHashMap<ValueDeclIdentity, Arc<verter_session_query::type_solver::PreparedValueDecl>>,
         lookup_counts: RefCell<FxHashMap<String, usize>>,
         value_export_targets: FxHashMap<ValueDeclIdentity, ValueDeclIdentity>,
     }
@@ -298,7 +296,7 @@ mod tests {
         fn prepared_value_decl(
             &self,
             source: &ValueDeclIdentity,
-        ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+        ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
             self.prepared_values.get(source).cloned()
         }
 
@@ -392,8 +390,8 @@ mod tests {
                 name: "theme".to_string(),
             },
             {
-                let mut decl = verter_semantic::analysis::type_solver::PreparedValueDecl::new(
-                    verter_semantic::analysis::type_solver::ResolvedRootIdentity::new(
+                let mut decl = verter_session_query::type_solver::PreparedValueDecl::new(
+                    verter_session_query::type_solver::ResolvedRootIdentity::new(
                         "/src/dep.ts",
                         "theme",
                     ),

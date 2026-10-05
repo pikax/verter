@@ -32,7 +32,7 @@ use verter_session::external_ts::{AmbiguityCause, CarrierOwnershipResolution};
 
 use verter_session::{HostConfig, VerterHost};
 
-use verter_semantic::resolver_core::ConfiguredMembership;
+use verter_session_query::resolution::ConfiguredMembership;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,

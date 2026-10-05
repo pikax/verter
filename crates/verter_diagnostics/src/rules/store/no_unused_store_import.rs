@@ -12,7 +12,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalysisFlags;
 
 pub struct NoUnusedStoreImport;
 
@@ -96,7 +97,7 @@ fn is_store_source(source: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::types::{
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind, StoreApiClassification,
         StoreUsage,
     };

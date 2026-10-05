@@ -57,7 +57,7 @@ use crate::provider_sync::{
     ProviderSyncState, ProviderSyncTransition,
 };
 use crate::server::block_in_place_guarded as block_in_place_if_available;
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_session_query::resolution::ModuleResolverCore;
 
 /// How the semantic provider receives carrier companions after durable editor
 /// membership has been reconciled.
@@ -445,7 +445,7 @@ pub(crate) fn project_ownership_diagnostics_for(
     host: &VerterHost,
     canonical_id: &str,
 ) -> Vec<tower_lsp_server::ls_types::Diagnostic> {
-    if !verter_semantic::resolver_core::path_is_carrier(canonical_id) {
+    if !verter_session_query::resolution::path_is_carrier(canonical_id) {
         return Vec::new();
     }
     let Some((resolution, _generation)) = crate::tsgo::project_binding::resolve_carrier(

@@ -76,7 +76,10 @@ mod tests {
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
     use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::ReactivityKind;
+
     use verter_span::Span;
 
     fn run_template(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

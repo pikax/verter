@@ -17,11 +17,11 @@
 //! stays 0) additionally fails against any implementation that
 //! fact-validates Content mode.
 
-use verter_semantic::resolver_core::{ResolvePhase, ResolveRequestKind};
 use verter_session::{
     CompileCacheMode, CompileErrorPolicy, CompileProfile, DowngradeReason, FileLanguage,
     HostConfig, UpsertRequest, VerterHost, VirtualNodeKind, VirtualQuery,
 };
+use verter_session_query::resolution::{ResolvePhase, ResolveRequestKind};
 use verter_workspace::ExactResolution;
 
 /// A production (non-dev) host config. The default `HostConfig` enables
@@ -260,7 +260,7 @@ fn content_request_with_bare_parent_dir_import_of_augmented_module_downgrades_to
     // rail — editing `aug.ts` would then leave the key byte-identical
     // and serve stale output. The session-side classifier must use the
     // same `pathIsRelative` class as the resolver
-    // (`verter_semantic::resolver_core::is_relative_specifier`), not a
+    // (`verter_session_query::resolution::is_relative_specifier`), not a
     // narrower `./`/`../` prefix check.
     //
     // Discriminator: with the narrow prefix check, NO reason fires

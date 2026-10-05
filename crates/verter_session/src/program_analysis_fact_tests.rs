@@ -45,7 +45,7 @@ fn alpha_fact_at(
             canonical_id: Arc::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             merged_symbol_name: Arc::from("alpha"),
-            symbol_space: verter_semantic::facts::SymbolSpace::Value,
+            symbol_space: verter_session_query::facts::SymbolSpace::Value,
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal,
         },

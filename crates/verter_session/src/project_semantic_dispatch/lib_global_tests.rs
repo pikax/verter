@@ -408,7 +408,7 @@ fn two_library_host(lib_a: &str, lib_b: &str) -> Arc<VerterHost> {
         extensions: vec![".ts".into(), ".d.ts".into()],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),

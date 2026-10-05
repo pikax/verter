@@ -6,8 +6,8 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use verter_semantic::analysis::flow::flow_graph::FlowNodeId;
-use verter_semantic::analysis::flow::FlowBindingRef;
+use verter_session_query::flow::binding::FlowBindingRef;
+use verter_session_query::flow::flow_graph::FlowNodeId;
 
 use super::flow_products::{
     DeclaredTypeProduct, DefiniteAssignmentProduct, FlowProductExecution, FlowProductFailure,
@@ -38,9 +38,9 @@ mod tests {
         ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey,
     };
     use std::sync::Arc;
-    use verter_semantic::analysis::flow::flow_graph::FlowNodeKind;
-    use verter_semantic::analysis::flow::hashing::compute_flow_slice_hash;
-    use verter_semantic::analysis::flow::peeker::{ReturnPathPeeker, SliceDemand};
+    use verter_session_query::flow::flow_graph::FlowNodeKind;
+    use verter_session_query::flow::hashing::compute_flow_slice_hash;
+    use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
 
     fn fixture(
         source: &str,
@@ -418,7 +418,7 @@ mod tests {
             .find_map(|node| match bound.bundle().graph.node_kind(node) {
                 FlowNodeKind::Binding(binding)
                     if bound.bundle().skeleton.binding(binding).kind
-                        == verter_semantic::analysis::flow::SkeletonBindingKind::Param =>
+                        == verter_session_query::flow::skeleton::SkeletonBindingKind::Param =>
                 {
                     Some(binding)
                 }
@@ -527,7 +527,7 @@ mod tests {
 
 #[derive(Clone, PartialEq, Eq)]
 struct FlowWriteSubject(
-    verter_semantic::analysis::function_program::FunctionProgramKey,
+    verter_session_query::function_program::FunctionProgramKey,
     u32,
 );
 
@@ -684,7 +684,7 @@ impl FlowFrameProducts {
     pub fn identity(
         &self,
         subject: &FlowBindingRef,
-    ) -> Option<verter_semantic::analysis::function_program::FlowBindingIdentity> {
+    ) -> Option<verter_session_query::function_program::FlowBindingIdentity> {
         self.execution
             .borrow()
             .content

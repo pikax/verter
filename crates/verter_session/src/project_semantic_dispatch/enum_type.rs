@@ -18,7 +18,7 @@ use std::sync::Arc;
 use verter_semantic::analysis::enum_constant::{
     evaluate_enum_constant, global_number_spelling, EnumConstant,
 };
-use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::facts::{EnumConstantStep, EnumMemberEntry, EnumPrimitiveDomain, EnumScalar};
 
 use super::ProjectSemanticDispatch;
@@ -85,9 +85,9 @@ impl ProjectSemanticDispatch<'_> {
         declaring_canonical: Arc<str>,
         declaring_owner: verter_type_expr::TopLevelOwnerId,
         declaring_symbol: Arc<str>,
-        prepared: &verter_semantic::analysis::type_solver::PreparedValueDecl,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
     ) -> Option<EnumDeclaration> {
-        if prepared.kind != verter_semantic::analysis::type_eval::ValueDeclKind::Enum {
+        if prepared.kind != verter_session_query::declarations::ValueDeclKind::Enum {
             return None;
         }
         let members = Arc::clone(&prepared.enum_members.as_ref()?.members);
@@ -510,7 +510,7 @@ impl ProjectSemanticDispatch<'_> {
             identity.owner,
             &identity.symbol_name,
         )?;
-        if prepared.kind != verter_semantic::analysis::type_eval::ValueDeclKind::Enum {
+        if prepared.kind != verter_session_query::declarations::ValueDeclKind::Enum {
             return None;
         }
         let whole_hash = self
@@ -542,7 +542,7 @@ impl ProjectSemanticDispatch<'_> {
             identity.owner,
             &identity.symbol_name,
         )?;
-        if prepared.kind != verter_semantic::analysis::type_eval::ValueDeclKind::Const
+        if prepared.kind != verter_session_query::declarations::ValueDeclKind::Const
             || !matches!(
                 prepared.type_annotation.literal_freshness,
                 DeclaredLiteralFreshness::Widening | DeclaredLiteralFreshness::Follows(_)

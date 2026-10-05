@@ -7,7 +7,7 @@
 //! - LSP features (references, rename, document highlights)
 //! - Linter rules (unused components, accessibility, etc.)
 
-use crate::analysis::types::ResolvedTypeInfo;
+use verter_session_query::analysis::types::ResolvedTypeInfo;
 use verter_span::Span;
 
 // =============================================================================
@@ -1434,6 +1434,21 @@ pub enum MacroKind {
     DefineExpose,
     DefineOptions,
     WithDefaults,
+}
+
+impl From<MacroKind> for verter_session_query::facts::registry::MacroKind {
+    fn from(value: MacroKind) -> Self {
+        use MacroKind as TemplateMacroKind;
+        match value {
+            TemplateMacroKind::DefineProps => Self::DefineProps,
+            TemplateMacroKind::DefineEmits => Self::DefineEmits,
+            TemplateMacroKind::DefineModel => Self::DefineModel,
+            TemplateMacroKind::DefineSlots => Self::DefineSlots,
+            TemplateMacroKind::DefineExpose => Self::DefineExpose,
+            TemplateMacroKind::DefineOptions => Self::DefineOptions,
+            TemplateMacroKind::WithDefaults => Self::WithDefaults,
+        }
+    }
 }
 
 // =============================================================================
@@ -3664,5 +3679,35 @@ mod tests {
             let j = json(&v);
             assert_flat_span(&j, 13, 40);
         }
+    }
+}
+
+#[cfg(test)]
+mod macro_kind_conversion_tests {
+    use super::MacroKind as TemplateMacroKind;
+    use verter_session_query::facts::registry::MacroKind;
+
+    #[test]
+    fn macro_kind_round_trips_with_template_kind() {
+        let pairs = [
+            (TemplateMacroKind::DefineProps, MacroKind::DefineProps),
+            (TemplateMacroKind::DefineEmits, MacroKind::DefineEmits),
+            (TemplateMacroKind::DefineModel, MacroKind::DefineModel),
+            (TemplateMacroKind::DefineSlots, MacroKind::DefineSlots),
+            (TemplateMacroKind::DefineExpose, MacroKind::DefineExpose),
+            (TemplateMacroKind::DefineOptions, MacroKind::DefineOptions),
+            (TemplateMacroKind::WithDefaults, MacroKind::WithDefaults),
+        ];
+        for (template, fact) in pairs {
+            assert_eq!(MacroKind::from(template), fact);
+        }
+        let mut distinct: Vec<MacroKind> = pairs.iter().map(|(t, _)| MacroKind::from(*t)).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            pairs.len(),
+            "the conversion must be injective"
+        );
     }
 }

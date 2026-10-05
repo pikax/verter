@@ -37,7 +37,7 @@ fn macro_dtos_for_kind(
     host: &VerterHost,
     owner: &str,
     state: &ResolvedComponentMetaState,
-    kind: verter_semantic::analysis::AnalyzedMacroKind,
+    kind: verter_session_query::analysis::types::AnalyzedMacroKind,
 ) -> Vec<std::sync::Arc<crate::typeinfo::framework_surface::MacroSurfaceDtos>> {
     let mut seen = rustc_hash::FxHashSet::default();
     state
@@ -66,7 +66,7 @@ fn prop_names_from_resolved(
         host,
         owner,
         state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
     )
     .iter()
     .flat_map(|dtos| dtos.prop_fields().iter())
@@ -83,7 +83,7 @@ fn emit_names_from_resolved(
         host,
         owner,
         state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
     )
     .iter()
     .flat_map(|dtos| dtos.emit_fields().iter())
@@ -100,7 +100,7 @@ fn slot_names_from_resolved(
         host,
         owner,
         state,
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots,
     )
     .iter()
     .flat_map(|dtos| dtos.slot_fields().iter())
@@ -441,7 +441,7 @@ defineProps<{ bar: number }>()
         .snapshot
         .macros
         .iter()
-        .filter(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .filter(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .flat_map(|m| m.prop_fields.iter())
         .map(|prop| prop.name.clone())
         .collect();
@@ -1327,7 +1327,9 @@ defineProps<Partial<C>>()
     let macro_meta = state
         .resolved_macros
         .iter()
-        .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| {
+            m.macro_kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        })
         .expect("resolved defineProps macro should be present");
     let native_visibility_of = |name: &str| -> Option<MemberVisibility> {
         macro_meta
@@ -1657,7 +1659,9 @@ defineProps<C>()
     let macro_meta = state
         .resolved_macros
         .iter()
-        .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| {
+            m.macro_kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        })
         .expect("resolved defineProps macro should be present");
 
     // Published props: public only.
@@ -1777,7 +1781,9 @@ defineProps<C>()
     let macro_meta = state
         .resolved_macros
         .iter()
-        .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| {
+            m.macro_kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        })
         .expect("resolved defineProps macro should be present");
 
     let visibility_of = |name: &str| -> Option<MemberVisibility> {
@@ -1870,7 +1876,9 @@ defineEmits<Events>()
     let macro_meta = state
         .resolved_macros
         .iter()
-        .find(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits)
+        .find(|m| {
+            m.macro_kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits
+        })
         .expect("resolved defineEmits macro should be present");
     assert!(
         macro_meta.native_props.is_empty(),
@@ -2134,7 +2142,7 @@ defineProps<Props>()
     let dp = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .expect("should have DefineProps macro");
     assert!(
         dp.prop_fields.is_empty(),
@@ -2175,13 +2183,13 @@ defineProps<Props>()
     let single_dp = single
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .unwrap();
     let batch_dp = batch[0]
         .1
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .unwrap();
 
     assert_eq!(
@@ -4435,7 +4443,9 @@ const emitB = defineEmits<Events>()
     let emit_macros: Vec<_> = state
         .resolved_macros
         .iter()
-        .filter(|m| m.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits)
+        .filter(|m| {
+            m.macro_kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits
+        })
         .collect();
 
     assert_eq!(
@@ -5885,9 +5895,10 @@ defineEmits<Emits>()
             imports: &fallthrough.snapshot.imports,
             template: fallthrough.snapshot.template.as_deref(),
             options_api: fallthrough.snapshot.options_api.as_ref(),
-            analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
-                fallthrough.snapshot.script_flags,
-            ),
+            analysis_flags:
+                verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
+                    fallthrough.snapshot.script_flags,
+                ),
             styles: &fallthrough.snapshot.styles,
             vue_api_calls: &fallthrough.snapshot.vue_api_calls,
             store_usages: &fallthrough.snapshot.store_usages,
@@ -6001,9 +6012,10 @@ defineEmits<Emits>()
             imports: &fallthrough.snapshot.imports,
             template: fallthrough.snapshot.template.as_deref(),
             options_api: fallthrough.snapshot.options_api.as_ref(),
-            analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
-                fallthrough.snapshot.script_flags,
-            ),
+            analysis_flags:
+                verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
+                    fallthrough.snapshot.script_flags,
+                ),
             styles: &fallthrough.snapshot.styles,
             vue_api_calls: &fallthrough.snapshot.vue_api_calls,
             store_usages: &fallthrough.snapshot.store_usages,
@@ -7392,7 +7404,8 @@ defineEmits<Emits>()
         .resolved_macros
         .iter()
         .find(|resolved| {
-            resolved.macro_kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
+            resolved.macro_kind
+                == verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits
         })
         .expect("defineEmits<Emits> should produce a resolved macro meta entry");
 
@@ -7512,7 +7525,7 @@ defineEmits<{ save: [id: number] }>()
     let dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from("/src/App.vue"),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
         root_identity: host
             .current_or_read_whole_hash("/src/App.vue")
             .unwrap_or([0u8; 16]),
@@ -7601,7 +7614,7 @@ defineEmits<ImportedEmits>()
     let dtos = host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from("/src/App.vue"),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineEmits,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
         root_identity: host
             .current_or_read_whole_hash("/src/App.vue")
             .unwrap_or([0u8; 16]),
@@ -8710,13 +8723,15 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         .snapshot
         .macros
         .iter()
-        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .position(|m| {
+            m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        })
         .expect("the SFC declares a defineProps macro");
 
     let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from(SFC),
         macro_index: define_props_index,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         root_identity,
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
@@ -8843,13 +8858,15 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         .snapshot
         .macros
         .iter()
-        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+        .position(|m| {
+            m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel
+        })
         .expect("the SFC declares a defineModel macro");
 
     let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from(SFC),
         macro_index: define_model_index,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineModel,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel,
         root_identity,
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
@@ -8985,13 +9002,15 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
         .snapshot
         .macros
         .iter()
-        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+        .position(|m| {
+            m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
+        })
         .expect("the SFC declares a defineSlots macro");
 
     let request_for = |root_identity: [u8; 16]| crate::typeinfo::types::VueMacroSurfaceRequest {
         owner_canonical: std::sync::Arc::from(SFC),
         macro_index: define_slots_index,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineSlots,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots,
         root_identity,
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
@@ -9247,7 +9266,9 @@ const model = defineModel<string>()
         .macros
         .iter()
         .enumerate()
-        .find(|(_, m)| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+        .find(|(_, m)| {
+            m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel
+        })
         .expect("the SFC declares a defineModel macro");
     assert!(
         mac.is_type_based,

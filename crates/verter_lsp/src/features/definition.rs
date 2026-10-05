@@ -9,9 +9,10 @@
 // - DOM query selector strings → matching template elements (with CSS rule fallback)
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::types::{DomQueryCallSite, DomQueryKind};
+use verter_semantic::analysis::types::DomQueryCallSite;
 use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::DomQueryKind;
 
 use verter_session::carrier_publication_store::RegisteredFileStructure;
 
@@ -244,9 +245,15 @@ pub fn definition_at_position(
         if in_template {
             // Navigate $props → defineProps, $emit → defineEmits, $slots → defineSlots
             let macro_kind = match word.as_str() {
-                "$props" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineProps),
-                "$emit" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineEmits),
-                "$slots" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineSlots),
+                "$props" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
+                }
+                "$emit" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits)
+                }
+                "$slots" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots)
+                }
                 _ => None,
             };
             if let Some(kind) = macro_kind {

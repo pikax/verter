@@ -1800,53 +1800,69 @@ fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
 }
 
 fn host_module_reference_syntax_to_str(
-    syntax: verter_semantic::analysis::ModuleReferenceSyntax,
+    syntax: verter_session_query::analysis::types::ModuleReferenceSyntax,
 ) -> &'static str {
     match syntax {
-        verter_semantic::analysis::ModuleReferenceSyntax::StaticImport => "staticImport",
-        verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom => "exportFrom",
-        verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport => "dynamicImport",
-        verter_semantic::analysis::ModuleReferenceSyntax::RequireCall => "requireCall",
+        verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport => {
+            "staticImport"
+        }
+        verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom => "exportFrom",
+        verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport => {
+            "dynamicImport"
+        }
+        verter_session_query::analysis::types::ModuleReferenceSyntax::RequireCall => "requireCall",
     }
 }
 
 fn host_module_reference_semantics_to_str(
-    semantics: verter_semantic::analysis::ModuleReferenceSemantics,
+    semantics: verter_session_query::analysis::types::ModuleReferenceSemantics,
 ) -> &'static str {
     match semantics {
-        verter_semantic::analysis::ModuleReferenceSemantics::Import => "import",
-        verter_semantic::analysis::ModuleReferenceSemantics::Require => "require",
+        verter_session_query::analysis::types::ModuleReferenceSemantics::Import => "import",
+        verter_session_query::analysis::types::ModuleReferenceSemantics::Require => "require",
     }
 }
 
 fn host_module_reference_analyzability_to_str(
-    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_session_query::analysis::types::ModuleReferenceAnalyzability,
 ) -> &'static str {
     match analyzability {
-        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact => "exact",
-        verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet => "finiteSet",
-        verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic => "unknownDynamic",
+        verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact => "exact",
+        verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet => {
+            "finiteSet"
+        }
+        verter_session_query::analysis::types::ModuleReferenceAnalyzability::UnknownDynamic => {
+            "unknownDynamic"
+        }
     }
 }
 
 fn napi_module_reference_syntax_from_str(
     syntax: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceSyntax> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceSyntax> {
     match syntax {
-        "staticImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::StaticImport),
-        "exportFrom" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom),
-        "dynamicImport" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport),
-        "requireCall" => Ok(verter_semantic::analysis::ModuleReferenceSyntax::RequireCall),
+        "staticImport" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport)
+        }
+        "exportFrom" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom)
+        }
+        "dynamicImport" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport)
+        }
+        "requireCall" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceSyntax::RequireCall)
+        }
         other => Err(ffi_err(format!("unknown module reference syntax: {other}"))),
     }
 }
 
 fn napi_module_reference_semantics_from_str(
     semantics: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceSemantics> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceSemantics> {
     match semantics {
-        "import" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Import),
-        "require" => Ok(verter_semantic::analysis::ModuleReferenceSemantics::Require),
+        "import" => Ok(verter_session_query::analysis::types::ModuleReferenceSemantics::Import),
+        "require" => Ok(verter_session_query::analysis::types::ModuleReferenceSemantics::Require),
         other => Err(ffi_err(format!(
             "unknown module reference semantics: {other}"
         ))),
@@ -1855,12 +1871,14 @@ fn napi_module_reference_semantics_from_str(
 
 fn napi_module_reference_analyzability_from_str(
     analyzability: &str,
-) -> Result<verter_semantic::analysis::ModuleReferenceAnalyzability> {
+) -> Result<verter_session_query::analysis::types::ModuleReferenceAnalyzability> {
     match analyzability {
-        "exact" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::Exact),
-        "finiteSet" => Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet),
+        "exact" => Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact),
+        "finiteSet" => {
+            Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet)
+        }
         "unknownDynamic" => {
-            Ok(verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic)
+            Ok(verter_session_query::analysis::types::ModuleReferenceAnalyzability::UnknownDynamic)
         }
         other => Err(ffi_err(format!(
             "unknown module reference analyzability: {other}"
@@ -1870,19 +1888,21 @@ fn napi_module_reference_analyzability_from_str(
 
 fn napi_module_reference_to_analysis(
     input: NapiModuleReference,
-) -> Result<verter_semantic::analysis::AnalyzedModuleReference> {
-    Ok(verter_semantic::analysis::AnalyzedModuleReference {
-        syntax: napi_module_reference_syntax_from_str(&input.syntax)?,
-        semantics: napi_module_reference_semantics_from_str(&input.semantics)?,
-        is_type_only: input.isTypeOnly,
-        span: verter_span::Span::new(input.spanStart, input.spanEnd),
-        expr_span: verter_span::Span::new(input.exprSpanStart, input.exprSpanEnd),
-        raw_text: input.rawText,
-        literal_specifier: input.literalSpecifier,
-        finite_specifiers: input.finiteSpecifiers,
-        static_prefix: input.staticPrefix,
-        analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
-    })
+) -> Result<verter_session_query::analysis::types::AnalyzedModuleReference> {
+    Ok(
+        verter_session_query::analysis::types::AnalyzedModuleReference {
+            syntax: napi_module_reference_syntax_from_str(&input.syntax)?,
+            semantics: napi_module_reference_semantics_from_str(&input.semantics)?,
+            is_type_only: input.isTypeOnly,
+            span: verter_span::Span::new(input.spanStart, input.spanEnd),
+            expr_span: verter_span::Span::new(input.exprSpanStart, input.exprSpanEnd),
+            raw_text: input.rawText,
+            literal_specifier: input.literalSpecifier,
+            finite_specifiers: input.finiteSpecifiers,
+            static_prefix: input.staticPrefix,
+            analyzability: napi_module_reference_analyzability_from_str(&input.analyzability)?,
+        },
+    )
 }
 
 fn default_known_dependency_extensions() -> Vec<String> {
@@ -2061,7 +2081,7 @@ fn host_virtual_file_to_napi(
 
 fn napi_project_config_to_ide(
     config: NapiIdeProjectConfig,
-) -> verter_semantic::resolver_core::IdeProjectConfig {
+) -> verter_session_query::resolution::IdeProjectConfig {
     let mut ide = verter_workspace::ide_project_config(
         config.root.clone(),
         config.workspaceRoot,
@@ -2073,7 +2093,7 @@ fn napi_project_config_to_ide(
     if let Some(aliases) = config.workspaceAliases {
         ide.workspace_aliases = aliases
             .into_iter()
-            .map(|a| verter_semantic::resolver_core::WorkspaceAlias {
+            .map(|a| verter_session_query::resolution::WorkspaceAlias {
                 find: a.find,
                 replacement: a.replacement,
             })
@@ -2304,16 +2324,16 @@ impl NapiWorkspace {
     ) -> Result<Option<String>> {
         use verter_workspace::WorkspaceRead;
         let phase = match phase.as_deref() {
-            Some("provider") => verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
-            _ => verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+            Some("provider") => verter_session_query::resolution::ResolvePhase::ProviderGraph,
+            _ => verter_session_query::resolution::ResolvePhase::CodegenBlocker,
         };
         let kind = match kind.as_deref() {
-            Some("type") => verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
-            Some("require") => verter_semantic::resolver_core::ResolveRequestKind::RequireCall,
-            Some("src") => verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
-            _ => verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            Some("type") => verter_session_query::resolution::ResolveRequestKind::TypeImport,
+            Some("require") => verter_session_query::resolution::ResolveRequestKind::RequireCall,
+            Some("src") => verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
+            _ => verter_session_query::resolution::ResolveRequestKind::EsmImport,
         };
-        let ctx = verter_semantic::resolver_core::ResolutionContext { phase, kind };
+        let ctx = verter_session_query::resolution::ResolutionContext { phase, kind };
         Ok(self
             .inner
             .resolve_import(&importer, &specifier, ctx)
@@ -2325,7 +2345,7 @@ impl NapiWorkspace {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+            let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
                 .map(napi_project_config_to_ide)
                 .collect();
@@ -3203,7 +3223,7 @@ impl NapiVerterHost {
             .map(napi_module_reference_to_analysis)
             .collect::<Result<Vec<_>>>()?;
         Ok(
-            verter_semantic::resolver_core::collect_resolvable_module_reference_specifiers(
+            verter_session_query::resolution::collect_resolvable_module_reference_specifiers(
                 &module_references,
             ),
         )
@@ -3225,7 +3245,7 @@ impl NapiVerterHost {
             .collect::<Result<Vec<_>>>()?;
         let extensions = extensions.unwrap_or_else(default_known_dependency_extensions);
         Ok(
-            verter_semantic::resolver_core::resolve_known_module_reference_dependencies(
+            verter_session_query::resolution::resolve_known_module_reference_dependencies(
                 &owner_id,
                 &module_references,
                 &known_ids,
@@ -3272,7 +3292,7 @@ impl NapiVerterHost {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+            let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
                 .map(napi_project_config_to_ide)
                 .collect();
@@ -4168,7 +4188,7 @@ fn build_script_snapshot(
         bindings: snapshot.bindings.clone(),
         macros: snapshot.macros.to_vec(),
         macro_type_deps: snapshot.macro_type_deps.to_vec(),
-        flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+        flags: verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
             snapshot.script_flags,
         ),
         exported_functions: Vec::new(),
@@ -4240,11 +4260,13 @@ fn build_document_symbols_from_analysis(
 
         for binding in &snapshot.bindings {
             let kind = match binding.kind {
-                verter_semantic::analysis::AnalyzedBindingKind::Function
-                | verter_semantic::analysis::AnalyzedBindingKind::AsyncFunction => {
+                verter_session_query::analysis::types::AnalyzedBindingKind::Function
+                | verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
                     symbol_kind::FUNCTION
                 }
-                verter_semantic::analysis::AnalyzedBindingKind::Class => symbol_kind::CLASS,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+                    symbol_kind::CLASS
+                }
                 _ => symbol_kind::VARIABLE,
             };
             children.push(FfiDocumentSymbol {
@@ -4923,15 +4945,15 @@ mod tests {
         let result = host_update_to_napi(
             host::HostUpdateResult {
                 module_references: vec![host::ScriptModuleReference {
-                    syntax: verter_semantic::analysis::ModuleReferenceSyntax::DynamicImport,
-                    semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
+                    syntax: verter_session_query::analysis::types::ModuleReferenceSyntax::DynamicImport,
+                    semantics: verter_session_query::analysis::types::ModuleReferenceSemantics::Import,
                     is_type_only: false,
                     raw_text: "`./${name}.vue`".to_string(),
                     literal_specifier: None,
                     finite_specifiers: vec!["./Foo.vue".to_string()],
                     static_prefix: Some("./".to_string()),
                     analyzability:
-                        verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
+                        verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet,
                     span: verter_span::Span::new(4, 22),
                     expr_span: verter_span::Span::new(11, 21),
                 }],

@@ -175,7 +175,7 @@ impl NapiMetaProject {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+            let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
                 .map(crate::napi_project_config_to_ide)
                 .collect();

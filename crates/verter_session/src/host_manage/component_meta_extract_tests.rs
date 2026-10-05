@@ -44,7 +44,7 @@ fn make_project() -> Arc<MetaProject> {
 /// canonical identity and the two scopes stay distinct.
 #[test]
 fn macro_participation_distinguishes_local_helper_from_imported_helper() {
-    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+    use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
     let project = make_project();
     project

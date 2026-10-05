@@ -618,6 +618,11 @@ mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::*;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedMacro;
+    use verter_session_query::analysis::types::ReactivityKind;
 
     fn make_analysis(
         bindings: Vec<AnalyzedBinding>,

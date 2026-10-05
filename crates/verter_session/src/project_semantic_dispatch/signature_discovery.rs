@@ -32,7 +32,7 @@ use crate::signature_kernel::{
     SignatureInput, SignatureKind, SignatureProvenance, SignatureResultRecipe,
     SignatureSemanticFlags, SignatureStore, SlotTypeFacts, SourceLocatorId, TypeToken,
 };
-use verter_semantic::analysis::type_solver::arena::PrimitiveKind;
+use verter_session_query::type_solver::arena::PrimitiveKind;
 
 use super::ProjectSemanticDispatch;
 

@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+use verter_session_query::declarations::AugmentationScopeKind;
 use verter_type_expr::locators::{
     AuthoredAugmentationScope, AuthoredBodyLocator, TypeBodyPathStep,
 };
@@ -387,7 +387,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             HeaderArity::Exact(0)
                 if matches!(
                     prepared.kind,
-                    verter_semantic::analysis::type_eval::ValueDeclKind::Class
+                    verter_session_query::declarations::ValueDeclKind::Class
                 ) =>
             {
                 Ok(self

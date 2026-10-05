@@ -231,8 +231,8 @@ fn is_declaration_value_position(
 /// the declaration position maps). Never a word-fallback item.
 pub fn v_bind_scope_completions(analysis: &FileAnalysisSnapshot) -> Option<Vec<CompletionItem>> {
     let mut items: Vec<CompletionItem> = Vec::new();
-    let mut reactive: Vec<&verter_semantic::analysis::AnalyzedBinding> = Vec::new();
-    let mut plain: Vec<&verter_semantic::analysis::AnalyzedBinding> = Vec::new();
+    let mut reactive: Vec<&verter_session_query::analysis::types::AnalyzedBinding> = Vec::new();
+    let mut plain: Vec<&verter_session_query::analysis::types::AnalyzedBinding> = Vec::new();
     for binding in &analysis.bindings {
         if binding.span.start == 0 && binding.span.end == 0 {
             continue;

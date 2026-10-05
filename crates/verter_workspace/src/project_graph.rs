@@ -1,14 +1,14 @@
 // Named only by the native-only `impl ProjectGraph` builder below.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::canonical_path::CanonicalPath;
-use verter_semantic::resolver_core::ConfiguredMembership;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::{
     IdeProjectCompilerOptions, IdeProjectConfig, ModuleResolverCore, WorkspaceAlias,
 };
 // Likewise native-only.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::snapshot_builder::configured_membership_from_raw;
-use verter_semantic::resolver_core::ProjectOwnership;
+use verter_session_query::resolution::ProjectOwnership;
 
 /// Source precedence rank for a project configuration.
 ///

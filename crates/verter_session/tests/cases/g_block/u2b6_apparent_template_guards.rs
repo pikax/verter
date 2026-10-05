@@ -208,7 +208,7 @@ const AMBIENT_LIB_ID: &str = "lib.function.d.ts";
 /// Build a host over one configured project at `/ws`, optionally registering
 /// the callable ambient corpus, with `/ws/owner.ts` loaded.
 fn callable_host(register_ambient: bool) -> Arc<VerterHost> {
-    use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+    use verter_session_query::resolution::IdeProjectCompilerOptions;
     use verter_workspace::{
         CanonicalPath, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
         WorkspaceAccess,

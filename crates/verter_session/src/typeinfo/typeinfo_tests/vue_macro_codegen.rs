@@ -363,7 +363,9 @@ defineProps<Props>()
         .macros
         .iter()
         .enumerate()
-        .find(|(_, mac)| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|(_, mac)| {
+            mac.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        })
         .expect("fixture must publish defineProps");
     let owner = verter_type_expr::TopLevelOwnerId::instance(0);
     assert_eq!(mac.owner, owner);

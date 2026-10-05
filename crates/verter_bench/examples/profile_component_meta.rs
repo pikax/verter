@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use verter_semantic::analysis::AnalyzedMacroKind;
 use verter_session::{FileAnalysisSnapshot, HostConfig, VerterHost};
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

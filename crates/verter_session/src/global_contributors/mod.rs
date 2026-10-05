@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::SymbolSpace;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::SymbolSpace;
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::file_artifact_store::{
@@ -310,7 +310,7 @@ impl SymbolKey {
                     (3, Arc::from(GLOBAL_AUGMENTATION_TAG))
                 } else if spec.contains('*') {
                     (2, Arc::from(spec))
-                } else if verter_semantic::resolver_core::is_relative_specifier(spec) {
+                } else if verter_session_query::resolution::is_relative_specifier(spec) {
                     (1, Arc::from(spec))
                 } else {
                     (0, Arc::from(spec))
@@ -740,16 +740,16 @@ fn collect_from_indexed(
         let headers = &indexed.shallow_state.headers;
         for (binding, header) in headers.type_headers.iter() {
             let (origin, kind) = match header.kind {
-                verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
+                verter_session_query::declarations::TypeDeclKind::Interface => {
                     (ContributorOrigin::FileScopeInterface, "Interface")
                 }
                 // A script's class, type alias or enum is a global type too;
                 // an automatic lib's are the lib environment's own.
                 _ if is_automatic_lib || binding.name.contains('.') => continue,
-                verter_semantic::analysis::type_eval::TypeDeclKind::Class => {
+                verter_session_query::declarations::TypeDeclKind::Class => {
                     (ContributorOrigin::FileScopeType, "Class")
                 }
-                verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
+                verter_session_query::declarations::TypeDeclKind::Alias => {
                     (ContributorOrigin::FileScopeType, "Alias")
                 }
             };
@@ -760,7 +760,7 @@ fn collect_from_indexed(
                 origin,
                 specifier: None,
                 fingerprint: crate::fact_emission::augmentation_header_fingerprint(
-                    &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                    &verter_session_query::declarations::AugmentationScopeKind::Global,
                     binding.owner,
                     binding.name.as_ref(),
                     kind,
@@ -800,7 +800,7 @@ fn collect_from_indexed(
                 origin: ContributorOrigin::FileScopeValue,
                 specifier: None,
                 fingerprint: crate::fact_emission::augmentation_header_fingerprint(
-                    &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                    &verter_session_query::declarations::AugmentationScopeKind::Global,
                     binding.owner,
                     binding.name.as_ref(),
                     format!("{:?}", header.kind).as_str(),
@@ -1388,11 +1388,11 @@ pub fn is_automatic_lib_canonical(canonical: &str) -> bool {
 pub fn population_contributor_fact_key(
     target: &AugmentationTargetKind,
     decl_name: &str,
-) -> verter_semantic::facts::FactKey {
-    use verter_semantic::facts::registry::{
+) -> verter_session_query::facts::FactKey {
+    use verter_session_query::facts::registry::{
         AugmentationTargetKindTag, InternedGlobPattern, InternedSpecifier,
     };
-    use verter_semantic::facts::FactKey;
+    use verter_session_query::facts::FactKey;
     match target {
         AugmentationTargetKind::GlobalAugmentation => FactKey::ModuleAugmentationIndexShape {
             target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
@@ -1426,11 +1426,11 @@ pub fn population_contributor_fact_key(
 /// `decl_name` encoded on a population fingerprint observation, if any.
 #[must_use]
 pub fn population_fact_decl_name<'a>(
-    target_kind_tag: verter_semantic::facts::registry::AugmentationTargetKindTag,
+    target_kind_tag: verter_session_query::facts::registry::AugmentationTargetKindTag,
     external_specifier: Option<&'a str>,
     wildcard_pattern: Option<&'a str>,
 ) -> Option<&'a str> {
-    use verter_semantic::facts::registry::AugmentationTargetKindTag;
+    use verter_session_query::facts::registry::AugmentationTargetKindTag;
     match target_kind_tag {
         AugmentationTargetKindTag::GlobalAugmentation => external_specifier,
         AugmentationTargetKindTag::ExternalSpecifier => wildcard_pattern,

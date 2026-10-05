@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 
-use crate::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
+use verter_session_query::type_solver::result::{ExecutionStatus, SolverExactness};
 use verter_type_expr::facts::{NarrowTypeParam, SemanticTypeSource, SourcePosition};
 use verter_type_expr::{
-    AuthoredTypeEvidence, ResolutionDiagnostic, ResolutionDiagnosticKind, ResolutionExactness,
-    ResolutionProvenance, ResolvedTypeAuthority, TopLevelOwnerId,
+    AuthoredTypeEvidence, ResolutionDiagnostic, ResolutionDiagnosticKind, ResolutionProvenance,
+    ResolvedTypeAuthority, TopLevelOwnerId,
 };
 
 pub type ExpansionExactness = SolverExactness;
@@ -419,16 +419,6 @@ impl ExpandedField {
     }
 }
 
-impl From<ExpansionExactness> for ResolutionExactness {
-    fn from(exactness: ExpansionExactness) -> Self {
-        match exactness {
-            ExpansionExactness::ExactConcrete => Self::ExactConcrete,
-            ExpansionExactness::ExactSymbolic => Self::ExactSymbolic,
-            ExpansionExactness::Incomplete => Self::Incomplete,
-        }
-    }
-}
-
 impl From<ExpansionStopReason> for ResolutionDiagnosticKind {
     fn from(reason: ExpansionStopReason) -> Self {
         match reason {
@@ -509,7 +499,7 @@ mod tests {
 
     #[test]
     fn solver_diagnostic_converts_to_expansion_diagnostic_without_downgrading_exactness() {
-        use crate::analysis::type_solver::result::{SolverDiagnostic, SolverResult};
+        use verter_session_query::type_solver::result::{SolverDiagnostic, SolverResult};
 
         // A solver result that is exact but has a non-semantic diagnostic
         let mut solver_result = SolverResult::exact_concrete(SemanticTypeSource::Closed(

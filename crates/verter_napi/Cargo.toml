@@ -39,6 +39,7 @@ path = "src/bin/generate_host_compile_request_ts.rs"
 required-features = ["generate-host-request-ts"]
 
 [dependencies]
+verter_session_query = { workspace = true }
 verter_audit = { path = "../verter_audit" }
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
 verter_css_syntax = { workspace = true }

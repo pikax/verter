@@ -6,7 +6,7 @@ use verter_parser::oxc_parse::Parser;
 
 use verter_span::Span;
 
-use crate::analysis::types::{hash_16, ExportSignature};
+use verter_session_query::analysis::types::{hash_16, ExportSignature};
 
 /// Safely slice content by span bounds, returning empty string for out-of-range spans.
 fn safe_slice(content: &str, start: u32, end: u32) -> &str {

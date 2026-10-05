@@ -61,7 +61,9 @@ mod tests {
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
     use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::types::VueApiCallSite;
+    use verter_session_query::analysis::types::VueApiClassification;
+
     use verter_span::Span;
 
     fn run_script(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

@@ -72,11 +72,11 @@ use verter_span::path::InjectedPathKey;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
-use verter_semantic::analysis::types::Hash16;
 use verter_session::semantic_retention_account::{
     RetainedFootprint, RetentionCharge, SemanticRetentionAccount, StoreAccount,
     ENTRY_OVERHEAD_BYTES,
 };
+use verter_session_query::analysis::types::Hash16;
 
 use crate::carrier_cache::{EngineRecheckState, RegenKey};
 

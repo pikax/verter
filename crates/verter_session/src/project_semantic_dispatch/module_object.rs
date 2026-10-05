@@ -302,7 +302,7 @@ impl ProjectSemanticDispatch<'_> {
         let population = self.global_contributors_in(
             demand_canonical,
             name,
-            verter_semantic::facts::SymbolSpace::Namespace,
+            verter_session_query::facts::SymbolSpace::Namespace,
         );
         let mut declarations: Vec<&crate::global_contributors::ContributorEntry> = population
             .entries
@@ -384,7 +384,7 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
-        scope: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
+        scope: Option<&verter_session_query::declarations::AugmentationScopeKind>,
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
@@ -425,7 +425,7 @@ impl ProjectSemanticDispatch<'_> {
     fn assigned_module_object(
         &self,
         assigned: &ValueRootKey,
-        scope: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
+        scope: Option<&verter_session_query::declarations::AugmentationScopeKind>,
         interop: bool,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {

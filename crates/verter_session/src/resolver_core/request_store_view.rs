@@ -1534,10 +1534,12 @@ impl<'a> StoreView for RequestStoreView<'a> {
             match overlay_facts.lookup_or_compute(&fact.key) {
                 Some(stored) => {
                     let stored_hash = match fact.lane {
-                        verter_semantic::facts::registry::FactLane::Semantic => {
+                        verter_session_query::facts::registry::FactLane::Semantic => {
                             stored.semantic_hash
                         }
-                        verter_semantic::facts::registry::FactLane::Display => stored.display_hash,
+                        verter_session_query::facts::registry::FactLane::Display => {
+                            stored.display_hash
+                        }
                     };
                     return stored_hash == fact.expected_hash;
                 }

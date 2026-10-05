@@ -9,7 +9,7 @@ use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};
 use super::script_shallow_index::{
     build_script_shallow_index, build_script_shallow_index_with_owners, ScriptShallowIndex,
 };
-use super::TopLevelOwnerTable;
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
 
 #[test]
 fn shallow_script_publish_contains_only_headers_and_routes_from_one_program() {

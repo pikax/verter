@@ -14,7 +14,7 @@ use verter_type_expr::{
     ResolvedSymbolIdentity, TypeExprScope,
 };
 
-use super::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// Exact identity of a requested dynamic-class subject.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, NoTypeExpr)]

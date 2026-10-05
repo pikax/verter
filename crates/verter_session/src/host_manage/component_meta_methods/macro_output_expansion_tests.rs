@@ -303,7 +303,9 @@ const model = defineModel<ModelValue>()
     let macro_index = snapshot
         .macros
         .iter()
-        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+        .position(|m| {
+            m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel
+        })
         .expect("the SFC declares a defineModel macro");
 
     // The model's fallback SOURCE is its own T — the macro type-argument

@@ -270,10 +270,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             .unwrap_or_else(|| Arc::from(""));
         let binding = match binding {
             FlowProductSubject::Local(binding) => {
-                verter_semantic::analysis::flow::FlowBindingRef::Local(*binding)
+                verter_session_query::flow::binding::FlowBindingRef::Local(*binding)
             }
             FlowProductSubject::Captured(captured) => {
-                verter_semantic::analysis::flow::FlowBindingRef::Captured(captured.clone())
+                verter_session_query::flow::binding::FlowBindingRef::Captured(captured.clone())
             }
         };
         SliceNarrowSubject {

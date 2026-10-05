@@ -93,7 +93,7 @@ pub(super) fn collect(
 }
 
 fn macro_import_span(
-    imports: &[verter_semantic::analysis::AnalyzedImport],
+    imports: &[verter_session_query::analysis::types::AnalyzedImport],
     owner: verter_type_expr::TopLevelOwnerId,
     import_source: &str,
     type_name: &str,
@@ -146,7 +146,7 @@ fn import_backed_surface_arm_is_missing(
     match host.resolve_loaded_dependency_canonical(
         owner_canonical,
         &import.source,
-        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        verter_session_query::resolution::ResolveRequestKind::TypeImport,
     ) {
         verter_workspace::ResolutionPublication::Admitted(admitted) => {
             let Some(target) = admitted.into_result() else {
@@ -234,7 +234,7 @@ fn follow_export_surface_route(
     match host.resolve_loaded_dependency_canonical(
         from_canonical,
         source,
-        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        verter_session_query::resolution::ResolveRequestKind::TypeImport,
     ) {
         verter_workspace::ResolutionPublication::Admitted(admitted) => {
             match admitted.into_result() {

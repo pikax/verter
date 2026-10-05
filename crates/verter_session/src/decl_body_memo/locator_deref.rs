@@ -12,9 +12,9 @@ use std::sync::Arc;
 use verter_semantic::analysis::framework_facts::svelte::{
     PropsAnnotationLowering, SvelteTypeArgumentLowering,
 };
-use verter_semantic::analysis::type_eval::AugmentationScopeKind;
 use verter_semantic::analysis::type_eval_build::LoweredSignatureParts;
 use verter_semantic::analysis::MacroFieldPayloadLowering;
+use verter_session_query::declarations::AugmentationScopeKind;
 use verter_type_expr::facts::NarrowTypeParam;
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator, LocatorSymbolSpace,
@@ -1044,7 +1044,7 @@ fn navigate_signature_parts(
     signature: &LoweredSignatureParts,
     rest: &[TypeBodyPathStep],
     anchor: &AuthoredAnchor,
-    kind: Option<verter_semantic::analysis::type_eval::ValueDeclKind>,
+    kind: Option<verter_session_query::declarations::ValueDeclKind>,
     signature_ordinal: u32,
 ) -> Result<(TypeExpr, Option<DerefedLexicalRoot>), LocatorBodyDerefError> {
     match rest.first() {
@@ -1065,8 +1065,8 @@ fn navigate_signature_parts(
                         function_part: if matches!(
                             kind,
                             Some(
-                                verter_semantic::analysis::type_eval::ValueDeclKind::Function
-                                    | verter_semantic::analysis::type_eval::ValueDeclKind::AsyncFunction
+                                verter_session_query::declarations::ValueDeclKind::Function
+                                    | verter_session_query::declarations::ValueDeclKind::AsyncFunction
                             )
                         ) {
                             verter_type_expr::facts::FunctionPartIdentity::DeclarationBody

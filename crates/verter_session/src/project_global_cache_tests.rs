@@ -695,7 +695,7 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
             fact,
             FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/w/barrel.ts"
-                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
+                    && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )
     });
     assert!(
@@ -757,7 +757,7 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
                 if parse.canonical_id == "/w/barrel.ts"
                     && matches!(
                         parse.key,
-                        verter_semantic::facts::FactKey::SyntacticRouteInterface
+                        verter_session_query::facts::FactKey::SyntacticRouteInterface
                     ) =>
             {
                 Some(parse.expected_hash)
@@ -786,7 +786,7 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
                 if parse.canonical_id == "/w/barrel.ts"
                     && matches!(
                         parse.key,
-                        verter_semantic::facts::FactKey::SyntacticRouteInterface
+                        verter_session_query::facts::FactKey::SyntacticRouteInterface
                     ) =>
             {
                 Some(parse.expected_hash)

@@ -53,9 +53,11 @@ pub(crate) enum ScriptOwnerIndexError {
         end: u32,
     },
     #[error(transparent)]
-    InvalidTable(#[from] verter_semantic::analysis::TopLevelOwnerTableError),
+    InvalidTable(#[from] verter_session_query::analysis::top_level_owners::TopLevelOwnerTableError),
     #[error(transparent)]
-    InvalidRegions(#[from] verter_semantic::analysis::TopLevelOwnerRegionError),
+    InvalidRegions(
+        #[from] verter_session_query::analysis::top_level_owners::TopLevelOwnerRegionError,
+    ),
     #[error("parser owner mapping length mismatch: program has {statement_count} statements, mapping has {owner_count}")]
     ParserTable {
         statement_count: usize,
@@ -98,10 +100,15 @@ fn script_owner_index_diagnostic(error: &ScriptOwnerIndexError, source: &str) ->
 pub(crate) fn top_level_owner_table(
     program: &Program<'_>,
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
-) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+) -> Result<
+    verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
+    ScriptOwnerIndexError,
+> {
     let Some(artifact) = framework_parse else {
         return Ok(
-            verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(program.body.len()),
+            verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+                program.body.len(),
+            ),
         );
     };
     top_level_owner_table_from_regions(program, &artifact.script_regions())
@@ -110,7 +117,10 @@ pub(crate) fn top_level_owner_table(
 fn top_level_owner_table_from_regions(
     program: &Program<'_>,
     regions: &[verter_language::ScriptRegion],
-) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+) -> Result<
+    verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
+    ScriptOwnerIndexError,
+> {
     let regions = regions
         .iter()
         .map(|region| (region.span, region.kind))
@@ -121,7 +131,10 @@ fn top_level_owner_table_from_regions(
 fn vue_top_level_owner_table(
     program: &Program<'_>,
     parsed: &ParsedSfc,
-) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+) -> Result<
+    verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
+    ScriptOwnerIndexError,
+> {
     let mut regions = Vec::new();
     if let Some(span) = parsed.script().and_then(|script| script.content) {
         regions.push((
@@ -141,7 +154,10 @@ fn vue_top_level_owner_table(
 fn top_level_owner_table_from_region_spans(
     program: &Program<'_>,
     regions: &[(verter_span::Span, verter_language::ScriptRegionKind)],
-) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+) -> Result<
+    verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
+    ScriptOwnerIndexError,
+> {
     let mut regions = regions.to_vec();
     // A script block with no inline content — an external `<script src=...>`
     // block, or a genuinely empty `<script></script>` — contributes NO
@@ -215,15 +231,15 @@ fn top_level_owner_table_from_region_spans(
         }
         owners.push(*owner);
     }
-    let table = verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
+    let table = verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
         program.body.len(),
         owners,
     )?;
-    Ok(table.try_with_regions(
-        regions
-            .into_iter()
-            .map(|(span, owner)| verter_semantic::analysis::TopLevelOwnerRegion { owner, span }),
-    )?)
+    Ok(
+        table.try_with_regions(regions.into_iter().map(|(span, owner)| {
+            verter_session_query::analysis::top_level_owners::TopLevelOwnerRegion { owner, span }
+        }))?,
+    )
 }
 
 /// Zero-copy attribute extraction: returns slices borrowed from `source`.
@@ -565,7 +581,7 @@ pub(crate) fn capture_synth_script_candidates(
         verter_semantic::analysis::framework_facts::FrameworkScriptModeHint,
     >,
     source_type: SourceType,
-    owner_table: &verter_semantic::analysis::TopLevelOwnerTable,
+    owner_table: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
 ) -> verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet {
     use verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet;
     if active_providers.is_empty() {
@@ -630,7 +646,7 @@ pub(crate) fn capture_synth_script_candidates(
 /// which also makes the pass idempotent. An empty `canonical_id` (no
 /// producing identity to absolutize to) leaves the sentinel in place.
 pub(crate) fn absolutize_macro_payload_anchors(
-    macros: &mut [verter_semantic::analysis::types::AnalyzedMacro],
+    macros: &mut [verter_session_query::analysis::types::AnalyzedMacro],
     canonical_id: &str,
 ) {
     use verter_type_expr::locators::MacroPayloadLocator;
@@ -770,7 +786,7 @@ fn build_svelte_snapshot_from_eval_source(
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     provenance: &crate::types::MetaProvenance,
     script_program: FrameworkScriptProgram<'_>,
-    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
+    script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
 
@@ -1471,7 +1487,7 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     provenance: &crate::types::MetaProvenance,
     eval_source: &str,
     script_program: VueScriptProgram<'_>,
-    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
+    script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
 
@@ -2123,7 +2139,7 @@ fn vue_oxc_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
 /// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_parsed()`.
 /// Combined `.vue` script-program outputs from a SINGLE OXC parse.
 struct VueScriptOutputs {
-    export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
     /// `None` when the caller did not request script analysis.
     script_analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot>,
     /// Panic diagnostics in production order: parse, export walk,
@@ -2171,7 +2187,7 @@ fn vue_script_walks_from_program(
     script_source: &str,
     source_type: SourceType,
     program: &Program<'_>,
-    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     needs_exports: bool,
     needs_script_analysis: bool,
     parse_errors: bool,
@@ -2200,7 +2216,7 @@ fn vue_script_walks_under_lease(
     script_source: &str,
     source_type: SourceType,
     program: &Program<'_>,
-    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     needs_exports: bool,
     needs_script_analysis: bool,
     parse_errors: bool,
@@ -2474,7 +2490,7 @@ pub(crate) fn build_carrier_snapshot_from_artifact_with_program(
     provenance: &crate::types::MetaProvenance,
     eval_source: &str,
     script_program: FrameworkScriptProgram<'_>,
-    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
+    script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     build_svelte_snapshot_from_eval_source(
         canonical_id,
@@ -2578,7 +2594,10 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     program: &Program<'_>,
     parse_errors: bool,
 ) -> ParseSnapshot {
-    let owners = verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(program.body.len());
+    let owners =
+        verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+            program.body.len(),
+        );
     build_snapshot_from_program_with_owners(
         canonical_id,
         source,
@@ -2624,7 +2643,7 @@ fn build_snapshot_from_program_with_owners(
     source: &str,
     source_type: SourceType,
     program: &Program<'_>,
-    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     parse_errors: bool,
 ) -> ParseSnapshot {
     verter_parser::oxc_parse::with_program_walk_stack_lease(program, || {
@@ -2645,7 +2664,7 @@ fn build_snapshot_under_lease(
     source: &str,
     source_type: SourceType,
     program: &Program<'_>,
-    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     parse_errors: bool,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
@@ -3700,7 +3719,9 @@ watch(count, (value, oldValue) => {
             .script_analysis
             .vue_api_calls
             .iter()
-            .find(|call| call.api == verter_semantic::analysis::VueApiClassification::Watch)
+            .find(|call| {
+                call.api == verter_session_query::analysis::types::VueApiClassification::Watch
+            })
             .expect("should find watch() call");
 
         assert_eq!(watch_call.callback_params.len(), 2);
@@ -4147,14 +4168,16 @@ onMounted(() => { console.log('mounted') })
             analysis
                 .vue_api_calls
                 .iter()
-                .any(|c| c.api == verter_semantic::analysis::VueApiClassification::Provide),
+                .any(|c| c.api
+                    == verter_session_query::analysis::types::VueApiClassification::Provide),
             "should detect provide() call"
         );
         assert!(
             analysis
                 .vue_api_calls
                 .iter()
-                .any(|c| c.api == verter_semantic::analysis::VueApiClassification::OnMounted),
+                .any(|c| c.api
+                    == verter_session_query::analysis::types::VueApiClassification::OnMounted),
             "should detect onMounted() call"
         );
         // Positive: IMPORTS should be populated
@@ -4166,10 +4189,8 @@ onMounted(() => { console.log('mounted') })
         );
         // Negative: should not have lifecycle hooks that aren't in the source
         assert!(
-            analysis
-                .vue_api_calls
-                .iter()
-                .all(|c| c.api != verter_semantic::analysis::VueApiClassification::OnUnmounted),
+            analysis.vue_api_calls.iter().all(|c| c.api
+                != verter_session_query::analysis::types::VueApiClassification::OnUnmounted),
             "should not detect onUnmounted which isn't in the source"
         );
     }

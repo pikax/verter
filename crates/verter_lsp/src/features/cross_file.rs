@@ -7,10 +7,10 @@
 use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::types::{
+use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::{
     AnalysisFlags, AnalyzedMacro, AnalyzedMacroKind, VueApiClassification,
 };
-use verter_session::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -195,7 +195,7 @@ mod tests {
         let source =
             "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot {
-            imports: vec![verter_semantic::analysis::AnalyzedImport {
+            imports: vec![verter_session_query::analysis::types::AnalyzedImport {
                 source: "vue".into(),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn has_use_attrs_detects_call() {
         let analysis = FileAnalysisSnapshot {
-            vue_api_calls: (vec![verter_semantic::analysis::types::VueApiCallSite {
+            vue_api_calls: (vec![verter_session_query::analysis::types::VueApiCallSite {
                 api: VueApiClassification::UseAttrs,
                 span: verter_span::Span::new(30, 42),
                 arg_value: None,
@@ -382,7 +382,7 @@ mod tests {
         let source =
             "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot {
-            imports: vec![verter_semantic::analysis::AnalyzedImport {
+            imports: vec![verter_session_query::analysis::types::AnalyzedImport {
                 source: "vue".into(),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,

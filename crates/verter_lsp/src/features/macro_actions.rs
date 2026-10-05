@@ -1,8 +1,8 @@
 // Macro code actions: generate/augment defineSlots and defineEmits from template usage.
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedBinding, AnalyzedMacroKind};
 use verter_session::{AnalysisSourceRevision, FileAnalysisSnapshot};
+use verter_session_query::analysis::types::{AnalysisFlags, AnalyzedBinding, AnalyzedMacroKind};
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;

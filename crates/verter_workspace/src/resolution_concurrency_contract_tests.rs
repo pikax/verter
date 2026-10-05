@@ -18,7 +18,7 @@ use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::resolver::take_input_resolution_budget_events_for_test;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     normalize_canonical_id, AttemptFailure, IdeProjectCompilerOptions, InputResolutionBudgetMeter,
     InputResolutionBudgets, ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind,
     ResolveResult, WorkspaceAlias,
@@ -73,8 +73,8 @@ impl ConcurrentReader {
 impl WorkspaceRead for ConcurrentReader {
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
         crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
     }
@@ -94,10 +94,10 @@ impl WorkspaceRead for ConcurrentReader {
     }
 
     fn file_exists(&self, canonical_id: &str) -> bool {
-        self.probe_path(canonical_id) == verter_semantic::resolver_core::PathProbe::File
+        self.probe_path(canonical_id) == verter_session_query::resolution::PathProbe::File
     }
 
-    fn probe_path(&self, canonical_id: &str) -> verter_semantic::resolver_core::PathProbe {
+    fn probe_path(&self, canonical_id: &str) -> verter_session_query::resolution::PathProbe {
         let normalized = normalize_canonical_id(canonical_id);
         let exists = self.files.read().contains_key(&normalized);
         let should_fire = self
@@ -110,9 +110,9 @@ impl WorkspaceRead for ConcurrentReader {
             resolution_test_hooks::fire(ResolutionPhase::FilesystemProbing);
         }
         if exists {
-            verter_semantic::resolver_core::PathProbe::File
+            verter_session_query::resolution::PathProbe::File
         } else {
-            verter_semantic::resolver_core::PathProbe::Absent
+            verter_session_query::resolution::PathProbe::Absent
         }
     }
 

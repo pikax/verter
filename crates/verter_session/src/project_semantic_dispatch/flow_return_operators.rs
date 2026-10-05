@@ -989,8 +989,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         target: &crate::flow_slice_content::SliceNarrowSubject,
         value: &SliceExpr,
         freshness: &crate::flow_slice_content::SliceFreshness,
-        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
-        span: verter_semantic::analysis::flow::FrameSpan,
+        definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
+        span: verter_session_query::flow::frame_span::FrameSpan,
     ) -> Positional<SemanticNodeId> {
         match self.eval_value_assignment(target, value, freshness, definition, span) {
             (Positional::Value(_), Some(assigned)) => Positional::Value(

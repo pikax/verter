@@ -3,8 +3,8 @@ use std::cell::Cell;
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_solver::prepared::PreparedExternalDep;
-use verter_semantic::analysis::type_solver::{
+use verter_session_query::type_solver::prepared::PreparedExternalDep;
+use verter_session_query::type_solver::{
     PreparedTypeDecl, PreparedValueDecl, ResolvedRootIdentity,
 };
 use verter_type_expr::TopLevelOwnerId;
@@ -307,7 +307,7 @@ fn prepare_local_type_decl_outcome_with_base(
     shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
     // A name absent from the file surface but present in the file's own
     // `declare global { ... }` inventory resolves to the merged global
     // declaration. Global augmentations are visible from any scope, so a bare
@@ -401,7 +401,7 @@ fn prepare_local_type_decl_outcome_with_base(
 pub fn prepare_augmentation_type_decl(
     canonical_id: &str,
     state: &ShallowFileState,
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
@@ -422,7 +422,7 @@ pub fn prepare_augmentation_type_decl(
 pub fn prepare_augmentation_type_decl_in(
     canonical_id: &str,
     state: &ShallowFileState,
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
@@ -448,7 +448,7 @@ pub fn prepare_augmentation_type_decl_in(
 pub(crate) fn prepare_augmentation_type_decl_outcome_in(
     canonical_id: &Arc<str>,
     state: &ShallowFileState,
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
@@ -915,7 +915,7 @@ impl PreparedTypeDeclCache {
 
     fn prepare_augmentation_type_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedDeclOutcome<PreparedTypeDecl> {
@@ -960,7 +960,7 @@ impl PreparedTypeDeclCache {
     /// `prepared_decl_bundle_with_context`) carries the overlay's
     /// `ShallowFileState`, so the hash reflects whatever view the
     /// bundle was built from.
-    pub fn defining_content_hash(&self) -> verter_semantic::analysis::Hash16 {
+    pub fn defining_content_hash(&self) -> verter_session_query::analysis::types::Hash16 {
         self.state.whole_hash
     }
 
@@ -1154,7 +1154,7 @@ impl PreparedValueDeclCache {
     /// per-owner base every value declaration of the file shares).
     fn prepare_augmentation_value_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedDeclOutcome<PreparedValueDecl> {
@@ -1395,7 +1395,7 @@ impl PreparedDeclBundle {
     /// dependency edges, and exact import canonicalization as this bundle.
     pub(crate) fn prepare_augmentation_type_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedDeclOutcome<PreparedTypeDecl> {
@@ -1408,7 +1408,7 @@ impl PreparedDeclBundle {
     /// environment as this bundle's own value declarations.
     pub(crate) fn prepare_augmentation_value_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedDeclOutcome<PreparedValueDecl> {
@@ -1424,7 +1424,7 @@ impl PreparedDeclBundle {
     #[cfg(test)]
     pub(crate) fn prepare_augmentation_type_decl_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<Option<PreparedTypeDecl>, PreparationFailure> {
@@ -1560,8 +1560,8 @@ pub fn build_prepared_type_decl_cache(
     // fallback when it is the one block declaring the name.
     for (scope, key) in state.augmentation_type_decl_keys() {
         let addressable = match scope {
-            verter_semantic::analysis::type_eval::AugmentationScopeKind::Global => true,
-            verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(_) => {
+            verter_session_query::declarations::AugmentationScopeKind::Global => true,
+            verter_session_query::declarations::AugmentationScopeKind::Module(_) => {
                 state.type_fallback_augmentation_scope(key.owner, key.name.as_ref())
                     == Some(scope.clone())
             }

@@ -10,9 +10,9 @@
 
 use std::{cell::OnceCell, rc::Rc, sync::Arc};
 use verter_semantic::analysis::function_program::{
-    build_function_program_index_with_nodes, FunctionProgramEntry, FunctionProgramIndex,
-    FunctionProgramNodes, ResolvedFunctionNode,
+    build_function_program_index_with_nodes, FunctionProgramNodes, ResolvedFunctionNode,
 };
+use verter_session_query::function_program::{FunctionProgramEntry, FunctionProgramIndex};
 
 type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
 
@@ -130,7 +130,7 @@ impl ParsedEvalProgram {
     /// whose lease is granted indexes the program.
     pub(crate) fn function_program_index(
         &self,
-        owners: &verter_semantic::analysis::top_level_owners::TopLevelOwnerTable,
+        owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
         canonical: Arc<str>,
         parse_env_hash: &crate::types::Hash16,
         class_fields: &verter_semantic::analysis::class_field_value::ClassFieldValues,
@@ -162,7 +162,7 @@ impl ParsedEvalProgram {
 
     fn index_functions(
         &self,
-        owners: &verter_semantic::analysis::top_level_owners::TopLevelOwnerTable,
+        owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
         canonical: Arc<str>,
         parse_env_hash: &crate::types::Hash16,
         class_fields: &verter_semantic::analysis::class_field_value::ClassFieldValues,

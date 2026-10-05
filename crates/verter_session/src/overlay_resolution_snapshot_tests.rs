@@ -239,8 +239,8 @@ fn the_overlay_type_route_normalizes_an_esm_fallback_like_the_workspace_one() {
         owner,
         vec![verter_workspace::ExactResolution {
             specifier: "runtimedep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some("/workspace/runtime.js".to_string()),
             possible_canonical_ids: vec!["/workspace/runtime.js".to_string()],
         }],
@@ -411,8 +411,8 @@ fn an_exact_resolution_change_reaches_the_session() {
     ]);
     let exact = |target: &str| verter_workspace::ExactResolution {
         specifier: "dep".to_string(),
-        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+        kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
         resolved_canonical_id: Some(target.to_string()),
         possible_canonical_ids: vec![target.to_string()],
     };

@@ -1837,13 +1837,13 @@ The discrimination matrix:
 
 - `crates/verter_workspace/src/env_hash.rs` — five env-hash functions on
   `IdeProjectConfig` + `EnvHashInputs<'_>`.
-- `crates/verter_semantic/src/facts/registry.rs` — the fact-schema owner:
+- `crates/verter_session_query/src/facts/registry.rs` — the fact-schema owner:
   `FactKey`, `Fact`, `FactDomain`, `FactRegistry`, `SymbolSpace`, `MemberKind`,
   `FactLane`, `ObservedFact`, `MacroKind`, `MacroTargetKey`, `InternedSpecifier`,
   `InternedName`, `InternedGlobPattern`, `AugmentationTargetKindTag`, plus the
   semantic `MacroKind` conversion. `verter_workspace` consumes it; there is no
   workspace-side registry module.
-- `crates/verter_semantic/src/facts/hashing.rs` — `compute_semantic_hash`,
+- `crates/verter_session_query/src/facts/hashing.rs` — `compute_semantic_hash`,
   `compute_member_presence_hash`, `compute_member_shape_hash`, `CrossDeclLens`,
   `CrossDeclRef`, `HashOutcome`, `MAX_HASH_DEPTH = 64`.
 - `crates/verter_session/src/file_artifact_store.rs` — `FileArtifactStore`,
@@ -1865,11 +1865,11 @@ The discrimination matrix:
   `compute_parse_stable_hash(&IndexedReady) -> Hash16`. `parse_stable_hash` is
   a structural hash over the post-shallow-analysis decl skeleton, invariant
   under cosmetic edits.
-- `crates/verter_semantic/src/facts/version.rs` — the immutable fact-version
+- `crates/verter_session_query/src/facts/version.rs` — the immutable fact-version
   value graph: `FactVersionRef`, `ParseFactRef`, `ResolveImportsFactRef`,
   `RouteSurfaceFactRef`, `ProgramAnalysisFactRef`, their hashes/stamps,
   populations, attribution, and compaction-domain values.
-- `crates/verter_semantic/src/facts/resolution.rs` — the immutable resolution
+- `crates/verter_session_query/src/facts/resolution.rs` — the immutable resolution
   identity/value graph: canonical/specifier/context/query identities plus
   `ResolutionFactVersion`, `ResolutionFactKey`, and `ResolutionFactRef`.
 - `crates/verter_workspace/src/{fact_cache,resolution_currency}.rs` — cache
@@ -1914,10 +1914,10 @@ The discrimination matrix:
   provenance, `binder_scope_id` query identity, negative lookup `ReturnOnly`).
 - `crates/verter_session/tests/cases/g_file/file_artifact_store_smoke.rs` — consumer-side
   smoke tests.
-- `crates/verter_semantic/src/facts/registry.rs` (`registry_tests` inline
+- `crates/verter_session_query/src/facts/registry.rs` (`registry_tests` inline
   module) — `FactKey::domain()` routing per R12 / R26, `SymbolSpace` tag
   stability per R11.
-- `crates/verter_semantic/src/facts/hashing.rs` (inline `tests` module) —
+- `crates/verter_session_query/src/facts/hashing.rs` (inline `tests` module) —
   alpha-normalisation under object member reorder (R16), stack-safety on
   200-deep nesting (R27), `MemberPresence`/`MemberShape` discrimination (R28).
 - `crates/verter_session/src/fact_emission.rs` (inline `tests` module) —

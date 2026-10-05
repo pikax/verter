@@ -1,6 +1,6 @@
 use super::*;
-use crate::analysis::types::AnalyzedExposeField;
 use std::sync::Arc;
+use verter_session_query::analysis::types::AnalyzedExposeField;
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace, MacroPayloadPosition};
 use verter_type_expr::{
@@ -76,7 +76,7 @@ fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
         imports: &[],
         template: None,
         options_api: None,
-        analysis_flags: crate::analysis::types::AnalysisFlags::default(),
+        analysis_flags: verter_session_query::analysis::types::AnalysisFlags::default(),
         styles: &[],
         vue_api_calls: &[],
         store_usages: &[],
@@ -199,7 +199,7 @@ fn test_authored_evidence(
 /// Wrap an analysis emit field as a host-resolved row (see
 /// [`resolved_prop_input`]).
 fn resolved_emit_input(
-    field: crate::analysis::types::AnalyzedEmitField,
+    field: verter_session_query::analysis::types::AnalyzedEmitField,
 ) -> crate::analysis::component_meta::ResolvedEmitInput {
     let payload_source = field
         .payload
@@ -242,7 +242,7 @@ fn resolved_emit_input(
 
 fn resolved_emit_macro_input(
     macro_index: usize,
-    fields: &[crate::analysis::types::AnalyzedEmitField],
+    fields: &[verter_session_query::analysis::types::AnalyzedEmitField],
 ) -> crate::analysis::component_meta::ResolvedMacroInput {
     crate::analysis::component_meta::ResolvedMacroInput {
         macro_index,
@@ -264,7 +264,7 @@ fn make_prop(name: &str, type_ann: Option<&str>, optional: bool) -> AnalyzedProp
         type_annotation: type_ann.map(|s| s.to_string()),
         description: None,
         tags: Vec::new(),
-        resolution_source: crate::analysis::types::TypeResolutionSource::Rust,
+        resolution_source: verter_session_query::analysis::types::TypeResolutionSource::Rust,
         resolution_error: None,
         payload,
         type_expr_scope,
@@ -608,7 +608,7 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
     rich.description = Some(
         "The element or component this component should render as when not a link.".to_string(),
     );
-    rich.tags = vec![crate::analysis::types::JsdocTag {
+    rich.tags = vec![verter_session_query::analysis::types::JsdocTag {
         name: "defaultValue".to_string(),
         text: Some("'button'".to_string()),
     }];
@@ -672,11 +672,13 @@ fn with_defaults_marks_props_as_having_defaults() {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::WithDefaults,
         default_keys: vec!["label".to_string()],
-        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-            key: "label".to_string(),
-            value: "\"hello\"".to_string(),
-            span: verter_span::Span::default(),
-        }],
+        default_values: vec![
+            verter_session_query::analysis::types::AnalyzedDefaultValue {
+                key: "label".to_string(),
+                value: "\"hello\"".to_string(),
+                span: verter_span::Span::default(),
+            },
+        ],
         ..make_define_props(vec![])
     };
     let macros = vec![define_props, with_defaults];
@@ -698,11 +700,13 @@ fn runtime_define_props_defaults_are_preserved() {
     let define_props = AnalyzedMacro {
         edit_anchors: Default::default(),
         default_keys: vec!["hello".to_string()],
-        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-            key: "hello".to_string(),
-            value: "\"Hello\"".to_string(),
-            span: verter_span::Span::default(),
-        }],
+        default_values: vec![
+            verter_session_query::analysis::types::AnalyzedDefaultValue {
+                key: "hello".to_string(),
+                value: "\"Hello\"".to_string(),
+                span: verter_span::Span::default(),
+            },
+        ],
         prop_fields: vec![make_prop("hello", Some("string"), false)],
         ..make_define_props(vec![])
     };
@@ -733,7 +737,7 @@ fn extracts_events_from_define_emits() {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
         emit_fields: vec![
-            crate::analysis::types::AnalyzedEmitField {
+            verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "change".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -743,7 +747,7 @@ fn extracts_events_from_define_emits() {
                 payload: lower_for_test(Some("[value: string]")).0,
                 payload_expr_scope: lower_for_test(Some("[value: string]")).1,
             },
-            crate::analysis::types::AnalyzedEmitField {
+            verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "close".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -780,7 +784,7 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
-        emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
+        emit_fields: vec![verter_session_query::analysis::types::AnalyzedEmitField {
             name: "update:searchTerm".to_string(),
             span: verter_span::Span::default(),
             call_signature_span: None,
@@ -797,7 +801,7 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
         exposed: Vec::new(),
         props: Vec::new(),
         emits: vec![
-            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+            resolved_emit_input(verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -807,7 +811,7 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
                 payload: lower_for_test(Some("[event: KeyboardEvent]")).0,
                 payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
             }),
-            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+            resolved_emit_input(verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -906,7 +910,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
         exposed: Vec::new(),
         props: Vec::new(),
         emits: vec![
-            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+            resolved_emit_input(verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "escapeKeyDown".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -916,7 +920,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
                 payload: lower_for_test(Some("[event: KeyboardEvent]")).0,
                 payload_expr_scope: lower_for_test(Some("[event: KeyboardEvent]")).1,
             }),
-            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+            resolved_emit_input(verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "closeAutoFocus".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -1014,18 +1018,20 @@ fn extracts_slots_from_define_slots() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
-        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+        slot_fields: vec![verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: true,
             span: verter_span::Span::default(),
-            bindings: vec![crate::analysis::types::AnalyzedSlotFieldBinding {
-                name: "item".to_string(),
-                type_annotation: Some("string".to_string()),
-                span: verter_span::Span::default(),
-                payload: lower_for_test(Some("string")).0,
-                binding_expr_scope: lower_for_test(Some("string")).1,
-            }],
+            bindings: vec![
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
+                    name: "item".to_string(),
+                    type_annotation: Some("string".to_string()),
+                    span: verter_span::Span::default(),
+                    payload: lower_for_test(Some("string")).0,
+                    binding_expr_scope: lower_for_test(Some("string")).1,
+                },
+            ],
             return_type: None,
             description: None,
             tags: Vec::new(),
@@ -1163,8 +1169,8 @@ fn evaluated_slots_take_bindings_from_the_per_binding_channel_only() {
     );
 }
 
-fn test_slot(name: &str) -> crate::analysis::types::AnalyzedSlotField {
-    crate::analysis::types::AnalyzedSlotField {
+fn test_slot(name: &str) -> verter_session_query::analysis::types::AnalyzedSlotField {
+    verter_session_query::analysis::types::AnalyzedSlotField {
         props_anchor: Default::default(),
         name: name.to_string(),
         is_required: false,
@@ -1257,15 +1263,15 @@ fn graph_binding_rows_join_authored_slots_when_the_expanded_shape_is_empty() {
 #[test]
 fn partial_slot_shape_merges_authored_expanded_and_binding_lanes_deterministically() {
     let mut default = test_slot("default");
-    default
-        .bindings
-        .push(crate::analysis::types::AnalyzedSlotFieldBinding {
+    default.bindings.push(
+        verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
             name: "item".to_string(),
             type_annotation: Some("AuthoredItem".to_string()),
             span: verter_span::Span::default(),
             payload: lower_for_test(Some("AuthoredItem")).0,
             binding_expr_scope: lower_for_test(Some("AuthoredItem")).1,
-        });
+        },
+    );
     let mut content = test_slot("content");
     content.is_required = true;
     content.description = Some("Authored content slot".to_string());
@@ -1394,18 +1400,20 @@ fn partial_slot_expansion_without_binding_channel_keeps_authored_binding_source(
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
-        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+        slot_fields: vec![verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: "day".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
-            bindings: vec![crate::analysis::types::AnalyzedSlotFieldBinding {
-                name: "day".to_string(),
-                type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
-                span: verter_span::Span::default(),
-                payload: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
-                binding_expr_scope: lower_for_test(Some("CalendarCellTriggerProps['day']")).1,
-            }],
+            bindings: vec![
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
+                    name: "day".to_string(),
+                    type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
+                    span: verter_span::Span::default(),
+                    payload: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
+                    binding_expr_scope: lower_for_test(Some("CalendarCellTriggerProps['day']")).1,
+                },
+            ],
             return_type: Some("VNode[]".to_string()),
             description: None,
             tags: Vec::new(),
@@ -1482,18 +1490,20 @@ fn incomplete_per_binding_evaluation_keeps_authority_and_evidence_separate() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
-        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+        slot_fields: vec![verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
-            bindings: vec![crate::analysis::types::AnalyzedSlotFieldBinding {
-                name: "ui".to_string(),
-                type_annotation: Some("Button['ui']".to_string()),
-                span: verter_span::Span::default(),
-                payload: lower_for_test(Some("Button['ui']")).0,
-                binding_expr_scope: lower_for_test(Some("Button['ui']")).1,
-            }],
+            bindings: vec![
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
+                    name: "ui".to_string(),
+                    type_annotation: Some("Button['ui']".to_string()),
+                    span: verter_span::Span::default(),
+                    payload: lower_for_test(Some("Button['ui']")).0,
+                    binding_expr_scope: lower_for_test(Some("Button['ui']")).1,
+                },
+            ],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
@@ -1574,18 +1584,20 @@ fn define_slots_prefer_exact_evaluated_slot_bindings_over_authored_sources() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
-        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+        slot_fields: vec![verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
-            bindings: vec![crate::analysis::types::AnalyzedSlotFieldBinding {
-                name: "ui".to_string(),
-                type_annotation: Some("Button['ui']".to_string()),
-                span: verter_span::Span::default(),
-                payload: lower_for_test(Some("Button['ui']")).0,
-                binding_expr_scope: lower_for_test(Some("Button['ui']")).1,
-            }],
+            bindings: vec![
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
+                    name: "ui".to_string(),
+                    type_annotation: Some("Button['ui']".to_string()),
+                    span: verter_span::Span::default(),
+                    payload: lower_for_test(Some("Button['ui']")).0,
+                    binding_expr_scope: lower_for_test(Some("Button['ui']")).1,
+                },
+            ],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
@@ -1655,18 +1667,20 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
-        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+        slot_fields: vec![verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: "day".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
-            bindings: vec![crate::analysis::types::AnalyzedSlotFieldBinding {
-                name: "day".to_string(),
-                type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
-                span: verter_span::Span::default(),
-                payload: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
-                binding_expr_scope: lower_for_test(Some("CalendarCellTriggerProps['day']")).1,
-            }],
+            bindings: vec![
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
+                    name: "day".to_string(),
+                    type_annotation: Some("CalendarCellTriggerProps['day']".to_string()),
+                    span: verter_span::Span::default(),
+                    payload: lower_for_test(Some("CalendarCellTriggerProps['day']")).0,
+                    binding_expr_scope: lower_for_test(Some("CalendarCellTriggerProps['day']")).1,
+                },
+            ],
             return_type: Some("any".to_string()),
             description: None,
             tags: Vec::new(),
@@ -2097,7 +2111,7 @@ fn partial_identifier_props_keep_resolved_authority_and_authored_evidence() {
     imported.description = Some(
         "The element or component this component should render as when not a link.".to_string(),
     );
-    imported.tags = vec![crate::analysis::types::JsdocTag {
+    imported.tags = vec![verter_session_query::analysis::types::JsdocTag {
         name: "defaultValue".to_string(),
         text: Some("'button'".to_string()),
     }];
@@ -2346,7 +2360,7 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
-        emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
+        emit_fields: vec![verter_session_query::analysis::types::AnalyzedEmitField {
             name: "update:modelValue".to_string(),
             span: verter_span::Span::default(),
             call_signature_span: None,
@@ -2413,7 +2427,7 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         AnalyzedMacro {
             edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineEmits,
-            emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
+            emit_fields: vec![verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "update:modelValue".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -2510,7 +2524,7 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineEmits,
-        emit_fields: vec![crate::analysis::types::AnalyzedEmitField {
+        emit_fields: vec![verter_session_query::analysis::types::AnalyzedEmitField {
             name: "update:modelValue".to_string(),
             span: verter_span::Span::default(),
             call_signature_span: None,
@@ -2573,27 +2587,27 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
-        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+        slot_fields: vec![verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
             bindings: vec![
-                crate::analysis::types::AnalyzedSlotFieldBinding {
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
                     name: "item".to_string(),
                     type_annotation: Some("T".to_string()),
                     span: verter_span::Span::default(),
                     payload: lower_for_test(Some("T")).0,
                     binding_expr_scope: lower_for_test(Some("T")).1,
                 },
-                crate::analysis::types::AnalyzedSlotFieldBinding {
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
                     name: "index".to_string(),
                     type_annotation: Some("number".to_string()),
                     span: verter_span::Span::default(),
                     payload: lower_for_test(Some("number")).0,
                     binding_expr_scope: lower_for_test(Some("number")).1,
                 },
-                crate::analysis::types::AnalyzedSlotFieldBinding {
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
                     name: "open".to_string(),
                     type_annotation: Some("boolean".to_string()),
                     span: verter_span::Span::default(),
@@ -2659,18 +2673,20 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineSlots,
-        slot_fields: vec![crate::analysis::types::AnalyzedSlotField {
+        slot_fields: vec![verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: "default".to_string(),
             is_required: false,
             span: verter_span::Span::default(),
-            bindings: vec![crate::analysis::types::AnalyzedSlotFieldBinding {
-                name: "item".to_string(),
-                type_annotation: Some("string".to_string()),
-                span: verter_span::Span::default(),
-                payload: lower_for_test(Some("string")).0,
-                binding_expr_scope: lower_for_test(Some("string")).1,
-            }],
+            bindings: vec![
+                verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
+                    name: "item".to_string(),
+                    type_annotation: Some("string".to_string()),
+                    span: verter_span::Span::default(),
+                    payload: lower_for_test(Some("string")).0,
+                    binding_expr_scope: lower_for_test(Some("string")).1,
+                },
+            ],
             return_type: None,
             description: None,
             tags: Vec::new(),
@@ -2687,25 +2703,27 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
         default_keys: Vec::new(),
         slot_return_publications: Vec::new(),
         slots: vec![
-            crate::analysis::types::AnalyzedSlotField {
+            verter_session_query::analysis::types::AnalyzedSlotField {
                 props_anchor: Default::default(),
                 name: "default".to_string(),
                 is_required: true,
                 span: verter_span::Span::default(),
-                bindings: vec![crate::analysis::types::AnalyzedSlotFieldBinding {
-                    name: "row".to_string(),
-                    type_annotation: Some("number".to_string()),
-                    span: verter_span::Span::default(),
-                    payload: lower_for_test(Some("number")).0,
-                    binding_expr_scope: lower_for_test(Some("number")).1,
-                }],
+                bindings: vec![
+                    verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
+                        name: "row".to_string(),
+                        type_annotation: Some("number".to_string()),
+                        span: verter_span::Span::default(),
+                        payload: lower_for_test(Some("number")).0,
+                        binding_expr_scope: lower_for_test(Some("number")).1,
+                    },
+                ],
                 return_type: Some("VNode[]".to_string()),
                 description: Some("resolved default slot".to_string()),
                 tags: Vec::new(),
                 payload: lower_for_test(Some("VNode[]")).0,
                 return_expr_scope: lower_for_test(Some("VNode[]")).1,
             },
-            crate::analysis::types::AnalyzedSlotField {
+            verter_session_query::analysis::types::AnalyzedSlotField {
                 props_anchor: Default::default(),
                 name: "header".to_string(),
                 is_required: false,
@@ -2860,11 +2878,13 @@ fn define_model_with_default_emits_bare_update_event_payload() {
         model_name: Some("title".to_string()),
         prop_fields: vec![make_prop("title", Some("string"), true)],
         default_keys: vec!["title".to_string()],
-        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-            key: "title".to_string(),
-            value: "'untitled'".to_string(),
-            span: verter_span::Span::default(),
-        }],
+        default_values: vec![
+            verter_session_query::analysis::types::AnalyzedDefaultValue {
+                key: "title".to_string(),
+                value: "'untitled'".to_string(),
+                span: verter_span::Span::default(),
+            },
+        ],
         ..make_define_props(vec![])
     }];
 
@@ -2931,11 +2951,13 @@ fn define_model_threads_default_value_into_synthesized_prop() {
         model_name: Some("defaulted".to_string()),
         prop_fields: vec![make_prop("defaulted", Some("boolean"), true)],
         default_keys: vec!["defaulted".to_string()],
-        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-            key: "defaulted".to_string(),
-            value: "false".to_string(),
-            span: verter_span::Span::default(),
-        }],
+        default_values: vec![
+            verter_session_query::analysis::types::AnalyzedDefaultValue {
+                key: "defaulted".to_string(),
+                value: "false".to_string(),
+                span: verter_span::Span::default(),
+            },
+        ],
         ..make_define_props(vec![])
     }];
 
@@ -2970,11 +2992,13 @@ fn untyped_define_model_threads_default_value_into_synthesized_prop() {
         kind: AnalyzedMacroKind::DefineModel,
         model_name: Some("flag".to_string()),
         default_keys: vec!["flag".to_string()],
-        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-            key: "flag".to_string(),
-            value: "false".to_string(),
-            span: verter_span::Span::default(),
-        }],
+        default_values: vec![
+            verter_session_query::analysis::types::AnalyzedDefaultValue {
+                key: "flag".to_string(),
+                value: "false".to_string(),
+                span: verter_span::Span::default(),
+            },
+        ],
         ..make_define_props(vec![])
     }];
 
@@ -3011,11 +3035,13 @@ fn define_model_default_value_updates_existing_prop() {
             model_name: None,
             prop_fields: vec![make_prop("modelValue", Some("string"), true)],
             default_keys: vec!["modelValue".to_string()],
-            default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-                key: "modelValue".to_string(),
-                value: "'fallback'".to_string(),
-                span: verter_span::Span::default(),
-            }],
+            default_values: vec![
+                verter_session_query::analysis::types::AnalyzedDefaultValue {
+                    key: "modelValue".to_string(),
+                    value: "'fallback'".to_string(),
+                    span: verter_span::Span::default(),
+                },
+            ],
             ..make_define_props(vec![])
         },
     ];
@@ -3565,7 +3591,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
             true,
         ))],
         emits: vec![
-            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+            resolved_emit_input(verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "save".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -3575,7 +3601,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
                 description: None,
                 tags: Vec::new(),
             }),
-            resolved_emit_input(crate::analysis::types::AnalyzedEmitField {
+            resolved_emit_input(verter_session_query::analysis::types::AnalyzedEmitField {
                 name: "save".to_string(),
                 span: verter_span::Span::default(),
                 call_signature_span: None,
@@ -3586,7 +3612,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
                 tags: Vec::new(),
             }),
         ],
-        slots: vec![crate::analysis::types::AnalyzedSlotField {
+        slots: vec![verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: "itemRow".to_string(),
             is_required: false,
@@ -3667,7 +3693,7 @@ fn type_registry_comes_from_resolved_inputs_not_macro_local_types() {
 #[test]
 fn options_api_props_used_when_no_composition_props() {
     let opts = AnalyzedOptionsApi {
-        props: vec![crate::analysis::types::AnalyzedOptionsProp {
+        props: vec![verter_session_query::analysis::types::AnalyzedOptionsProp {
             name: "color".to_string(),
             type_constructor: Some("String".to_string()),
             is_required: false,
@@ -3695,7 +3721,7 @@ fn options_api_props_used_when_no_composition_props() {
         imports: &[],
         template: None,
         options_api: Some(&opts),
-        analysis_flags: crate::analysis::types::AnalysisFlags::HAS_OPTIONS_API,
+        analysis_flags: verter_session_query::analysis::types::AnalysisFlags::HAS_OPTIONS_API,
         styles: &[],
         vue_api_calls: &[],
         store_usages: &[],
@@ -3719,7 +3745,7 @@ fn options_api_props_used_when_no_composition_props() {
 #[test]
 fn options_api_prop_without_locator_does_not_fabricate_authored_evidence() {
     let opts = AnalyzedOptionsApi {
-        props: vec![crate::analysis::types::AnalyzedOptionsProp {
+        props: vec![verter_session_query::analysis::types::AnalyzedOptionsProp {
             name: "canvas".to_string(),
             type_constructor: Some("Object".to_string()),
             is_required: true,
@@ -3750,7 +3776,7 @@ fn options_api_prop_without_locator_does_not_fabricate_authored_evidence() {
         imports: &[],
         template: None,
         options_api: Some(&opts),
-        analysis_flags: crate::analysis::types::AnalysisFlags::HAS_OPTIONS_API,
+        analysis_flags: verter_session_query::analysis::types::AnalysisFlags::HAS_OPTIONS_API,
         styles: &[],
         vue_api_calls: &[],
         store_usages: &[],
@@ -3796,7 +3822,7 @@ fn runtime_prop_type_payload_wins_over_host_unknown_placeholder() {
             type_expr_scope,
             description: None,
             tags: Vec::new(),
-            resolution_source: crate::analysis::types::TypeResolutionSource::Rust,
+            resolution_source: verter_session_query::analysis::types::TypeResolutionSource::Rust,
             resolution_error: None,
             declared_in_macro_type_arg: true,
             constructor_bindings: Vec::new(),
@@ -3857,13 +3883,13 @@ fn inherit_attrs_false_flag_is_set() {
 #[test]
 fn analysis_flags_drive_component_flags() {
     let mut input = empty_input(&[]);
-    input.analysis_flags = crate::analysis::types::AnalysisFlags::ASYNC_SETUP
-        | crate::analysis::types::AnalysisFlags::HAS_REACTIVE_STATE
-        | crate::analysis::types::AnalysisFlags::HAS_COMPUTED
-        | crate::analysis::types::AnalysisFlags::HAS_WATCHERS
-        | crate::analysis::types::AnalysisFlags::HAS_LIFECYCLE_HOOKS
-        | crate::analysis::types::AnalysisFlags::HAS_PROVIDE
-        | crate::analysis::types::AnalysisFlags::HAS_INJECT;
+    input.analysis_flags = verter_session_query::analysis::types::AnalysisFlags::ASYNC_SETUP
+        | verter_session_query::analysis::types::AnalysisFlags::HAS_REACTIVE_STATE
+        | verter_session_query::analysis::types::AnalysisFlags::HAS_COMPUTED
+        | verter_session_query::analysis::types::AnalysisFlags::HAS_WATCHERS
+        | verter_session_query::analysis::types::AnalysisFlags::HAS_LIFECYCLE_HOOKS
+        | verter_session_query::analysis::types::AnalysisFlags::HAS_PROVIDE
+        | verter_session_query::analysis::types::AnalysisFlags::HAS_INJECT;
 
     let result = extract_component_meta(input);
 
@@ -3878,11 +3904,11 @@ fn analysis_flags_drive_component_flags() {
 
 #[test]
 fn store_usage_flag_is_set_from_input() {
-    let store_usage = crate::analysis::types::StoreUsage {
+    let store_usage = verter_session_query::analysis::types::StoreUsage {
         binding_name: "userStore".to_string(),
         callee: "useUserStore".to_string(),
         import_source: "@/stores/user".to_string(),
-        store_api: crate::analysis::types::StoreApiClassification::StoreComposable,
+        store_api: verter_session_query::analysis::types::StoreApiClassification::StoreComposable,
         span: verter_span::Span::default(),
         has_store_to_refs: false,
         destructured_props: Vec::new(),
@@ -5367,11 +5393,13 @@ fn synthesizes_default_value_tag_from_with_defaults() {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::WithDefaults,
         default_keys: vec!["label".to_string()],
-        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-            key: "label".to_string(),
-            value: "\"hello\"".to_string(),
-            span: verter_span::Span::default(),
-        }],
+        default_values: vec![
+            verter_session_query::analysis::types::AnalyzedDefaultValue {
+                key: "label".to_string(),
+                value: "\"hello\"".to_string(),
+                span: verter_span::Span::default(),
+            },
+        ],
         ..make_define_props(vec![])
     };
     let macros = vec![define_props, with_defaults];
@@ -5403,11 +5431,13 @@ fn does_not_duplicate_existing_default_value_tag() {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::WithDefaults,
         default_keys: vec!["as".to_string()],
-        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-            key: "as".to_string(),
-            value: "\"div\"".to_string(),
-            span: verter_span::Span::default(),
-        }],
+        default_values: vec![
+            verter_session_query::analysis::types::AnalyzedDefaultValue {
+                key: "as".to_string(),
+                value: "\"div\"".to_string(),
+                span: verter_span::Span::default(),
+            },
+        ],
         ..make_define_props(vec![])
     };
     let macros = vec![define_props, with_defaults];
@@ -5457,11 +5487,13 @@ fn synthesizes_default_value_tag_for_runtime_define_props() {
     let define_props = AnalyzedMacro {
         edit_anchors: Default::default(),
         default_keys: vec!["msg".to_string()],
-        default_values: vec![crate::analysis::types::AnalyzedDefaultValue {
-            key: "msg".to_string(),
-            value: "'hi'".to_string(),
-            span: verter_span::Span::default(),
-        }],
+        default_values: vec![
+            verter_session_query::analysis::types::AnalyzedDefaultValue {
+                key: "msg".to_string(),
+                value: "'hi'".to_string(),
+                span: verter_span::Span::default(),
+            },
+        ],
         ..make_define_props(vec![make_prop("msg", Some("string"), true)])
     };
     let macros = vec![define_props];
@@ -5528,15 +5560,15 @@ fn evaluator_only_props_publish_no_fabricated_jsdoc() {
 fn evaluator_display_perturbation_cannot_change_publication_inputs_or_result() {
     fn produce(evaluator_display: &str) -> (TypePublication, String, String) {
         let mut source = test_slot("default");
-        source
-            .bindings
-            .push(crate::analysis::types::AnalyzedSlotFieldBinding {
+        source.bindings.push(
+            verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
                 name: "item".to_string(),
                 type_annotation: Some("AuthoredAlias".to_string()),
                 payload: Some(test_payload(7)),
                 binding_expr_scope: Some(verter_type_expr::TypeExprScope::new("test:fixture")),
                 span: verter_span::Span::default(),
-            });
+            },
+        );
 
         let mut evaluated_binding = test_slot_binding("default", "item", PrimitiveName::String);
         evaluated_binding.authored_evidence = test_authored_evidence(
@@ -5615,15 +5647,15 @@ fn slot_merge_replaces_evidence_atomically_and_failed_authority_is_absorbing() {
     };
     let mut source = test_slot("default");
     let new_locator = test_payload(9);
-    source
-        .bindings
-        .push(crate::analysis::types::AnalyzedSlotFieldBinding {
+    source.bindings.push(
+        verter_session_query::analysis::types::AnalyzedSlotFieldBinding {
             name: "item".to_string(),
             type_annotation: Some("NewType".to_string()),
             payload: Some(new_locator.clone()),
             binding_expr_scope: Some(verter_type_expr::TypeExprScope::new("test:fixture")),
             span: verter_span::Span::default(),
-        });
+        },
+    );
 
     let merged = merge_slot_bindings_with_source(&source, vec![expanded]);
     let evidence = merged[0]

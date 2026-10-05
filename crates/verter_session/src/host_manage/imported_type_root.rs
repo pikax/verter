@@ -27,7 +27,7 @@ impl VerterHost {
         &self,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts(dep_canonical, imported_name)
             .0
     }
@@ -57,7 +57,7 @@ impl VerterHost {
         view: &dyn crate::resolver_core::StoreView,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts_with_store_view(
             self,
             None,
@@ -82,7 +82,7 @@ impl VerterHost {
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    ) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         self.resolve_imported_type_root_with_facts_with_context(
             ctx,
             session_view,
@@ -101,7 +101,7 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
@@ -132,7 +132,7 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         // Test-only convenience: seed the resolve-and-cache method with a
@@ -169,7 +169,7 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
@@ -189,7 +189,7 @@ impl VerterHost {
         dep_canonical: &str,
         imported_name: &str,
     ) -> (
-        Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity>,
+        Option<verter_session_query::type_solver::ResolvedRootIdentity>,
         Arc<[crate::resolver_core::FactVersionRef]>,
     ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);

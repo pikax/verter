@@ -697,8 +697,8 @@ fn element_class_props_member_access_resolved() {
 #[test]
 fn the_revision_gate_refuses_facts_stamped_with_another_revision() {
     const CANONICAL: &str = "/template-convert-test.vue";
-    let revision_a: verter_semantic::analysis::Hash16 = [1; 16];
-    let revision_b: verter_semantic::analysis::Hash16 = [2; 16];
+    let revision_a: verter_session_query::analysis::types::Hash16 = [1; 16];
+    let revision_b: verter_session_query::analysis::types::Hash16 = [2; 16];
 
     let facts: crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts =
         verter_semantic::analysis::TemplateClassSemanticFacts::new(
@@ -914,7 +914,7 @@ fn component_element_gets_component_usage_index_from_span_match() {
 mod unused_declaration_population {
     use super::*;
     use verter_semantic::analysis::macro_usage::{MacroUsageCall, MacroUsageFacts};
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::types::{
         AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     };
 
@@ -949,7 +949,7 @@ mod unused_declaration_population {
             is_optional: false,
             description: None,
             tags: vec![],
-            resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+            resolution_source: verter_session_query::analysis::types::TypeResolutionSource::Rust,
             resolution_error: None,
             payload: None,
             type_expr_scope: None,
@@ -1487,11 +1487,11 @@ mod unused_declaration_population {
         // `<style> .x { color: v-bind(props.color) } </style>` — the root
         // binding referenced from style must arm the whole-kind suppression.
         let macros = bound_with_defaults_macros();
-        let bindings = vec![verter_semantic::analysis::types::AnalyzedBinding {
+        let bindings = vec![verter_session_query::analysis::types::AnalyzedBinding {
             name: "props".to_string(),
-            kind: verter_semantic::analysis::types::AnalyzedBindingKind::Const,
+            kind: verter_session_query::analysis::types::AnalyzedBindingKind::Const,
             is_reactive: false,
-            reactivity_kind: verter_semantic::analysis::types::ReactivityKind::None,
+            reactivity_kind: verter_session_query::analysis::types::ReactivityKind::None,
             type_annotation: None,
             initializer: None,
             span: verter_span::Span::new(6, 11),

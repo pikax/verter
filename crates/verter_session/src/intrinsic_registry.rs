@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_solver::builtin::BuiltinUtility;
+use verter_session_query::type_solver::builtin::BuiltinUtility;
 
 /// Well-known intrinsic implementation identity. The resolver chooses the
 /// matching arm after the declaration resolves to `= intrinsic`.
@@ -125,7 +125,7 @@ impl RuntimeNominal {
 
 impl IntrinsicImpl {
     /// Map this intrinsic identity onto the shared dispatch's
-    /// [`BuiltinUtility`](verter_semantic::analysis::type_solver::builtin::BuiltinUtility)
+    /// [`BuiltinUtility`](verter_session_query::type_solver::builtin::BuiltinUtility)
     /// when one exists. `BuiltinIteratorReturn` has no `BuiltinUtility`
     /// equivalent today — callers are expected to return a symbolic node
     /// or emit a structured diagnostic in that case.

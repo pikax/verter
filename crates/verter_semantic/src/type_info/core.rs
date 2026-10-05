@@ -24,10 +24,9 @@ use verter_macro_dto::{
     RuntimePropType, SynthesizedRowKind,
 };
 
-use crate::analysis::{
-    AnalyzedMacro, AnalyzedMacroKind, MacroTypeDepUsage, ScriptAnalysisSnapshot,
-};
-use crate::resolver_core::ResolutionBasis;
+use crate::analysis::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind, MacroTypeDepUsage};
+use verter_session_query::resolution::ResolutionBasis;
 
 use super::non_flow::{
     authored_emit_order, containing_with_defaults_index, emit_member_anchor, expose_member_anchor,

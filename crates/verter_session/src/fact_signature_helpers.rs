@@ -69,7 +69,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
+use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
 use crate::cache_runtime::{NonAdmissionReason, SignatureAdmission};
 use crate::resolver_core::{
@@ -1616,9 +1616,9 @@ pub(crate) fn resolution_witness_fact_for_tests() -> FactVersionRef {
     let publication = host.resolve_for_persistent_state(
         "/witness_fixture/main.ts",
         "./absent",
-        verter_semantic::resolver_core::ResolutionContext {
-            phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         },
     );
     let verter_workspace::ResolutionPublication::Admitted(admitted) = publication else {

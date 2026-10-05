@@ -40,7 +40,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::bounded_query_retention::BoundedCandidateMap;
 use crate::types::ProjectionMode;

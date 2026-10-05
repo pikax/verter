@@ -286,7 +286,7 @@ impl ComponentMetaHost {
     /// Configure project-scoped path aliases.
     pub fn configure_projects(
         &self,
-        configs: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
+        configs: Vec<verter_session_query::resolution::IdeProjectConfig>,
     ) -> Result<(), ComponentMetaHostError> {
         self.check_alive()?;
         self.inner
@@ -784,7 +784,7 @@ fn extract_component_meta_from_resolved_with_evaluated(
         imports: &resolved.snapshot.imports,
         template: resolved.snapshot.template.as_deref(),
         options_api: resolved.snapshot.options_api.as_ref(),
-        analysis_flags: verter_semantic::analysis::types::AnalysisFlags::from_bits_truncate(
+        analysis_flags: verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
             resolved.snapshot.script_flags,
         ),
         styles: &resolved.snapshot.styles,

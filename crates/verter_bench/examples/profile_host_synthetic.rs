@@ -16,10 +16,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use verter_diagnostics::{LintConfig, Linter};
-use verter_semantic::analysis::types::{AnalysisFlags, ScriptAnalysisSnapshot};
+use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 use verter_session::{
     CompileProfile, CompileTarget, FileAnalysisSnapshot, HostConfig, UpsertRequest, VerterHost,
 };
+use verter_session_query::analysis::types::AnalysisFlags;
 use verter_workspace::{
     FilesystemOptions, FilesystemWorkspace, MemoryOptions, MemoryWorkspace, ProjectGraph,
     ViteConfigOptions,

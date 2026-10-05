@@ -5,8 +5,8 @@
 // component_actions, event_type_hints, etc.
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::types::MemberListAnchor;
 use verter_session::{AnalysisSourceRevision, FileAnalysisSnapshot};
+use verter_session_query::analysis::types::MemberListAnchor;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -248,7 +248,7 @@ mod tests {
         let source = "<script setup>\nimport { ref } from 'vue'\nimport { computed } from 'vue'\nconst x = 1\n</script>";
         let analysis = FileAnalysisSnapshot {
             imports: vec![
-                verter_semantic::analysis::AnalyzedImport {
+                verter_session_query::analysis::types::AnalyzedImport {
                     source: "vue".into(),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     is_type_only: false,
@@ -256,7 +256,7 @@ mod tests {
                     span: verter_span::Span::new(15, 40),
                     resolved_canonical_id: None,
                 },
-                verter_semantic::analysis::AnalyzedImport {
+                verter_session_query::analysis::types::AnalyzedImport {
                     source: "vue".into(),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     is_type_only: false,

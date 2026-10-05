@@ -1,7 +1,7 @@
 //! Demand-sliced flow content — the OWNED, arena-free content lowering
 //! of exactly one planned flow slice.
 //!
-//! The [`FunctionProgramIndex`](verter_semantic::analysis::function_program::FunctionProgramIndex)
+//! The [`FunctionProgramIndex`](verter_session_query::function_program::FunctionProgramIndex)
 //! is the eager STRUCTURAL inventory (identities + locators, no lowered
 //! types), and the flow-slice substrate (`verter_semantic::analysis::flow`)
 //! plans the demanded slice as graph reachability and lowers it into the
@@ -73,21 +73,29 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::flow_completion_inventory::{
     transports_completion, CompletionConstruction, CompletionDischarge, NormalCompletion,
 };
-use verter_semantic::analysis::flow::flow_ir::{FlowExprRole, FlowSliceIR};
 use verter_semantic::analysis::flow::{
     object_entry_descent, sequence_value_takes_await_arm, sequence_value_takes_call_rail,
-    value_descent, FlowBindingRef, FrameSpan, FunctionBodySkeleton, NameMeaning,
-    ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind, SkeletonBindingId, SkeletonBindingKind,
-    SkeletonPathSegment, ValueDescent,
+    value_descent, ObjectEntryDescent, ObjectEntryKey, ObjectEntryKind, ValueDescent,
 };
 use verter_semantic::analysis::function_program::{
-    for_each_call_expression, inventory_statement_list, FunctionControlRegion, FunctionDescentStep,
-    FunctionNode, FunctionProgramEntry, ResolvedFunctionNode,
+    for_each_call_expression, inventory_statement_list, FunctionNode, ResolvedFunctionNode,
 };
 use verter_semantic::analysis::type_eval_build::{
     embeds_call_return_carrier, expr_is_widening_nullish, infer_declaration_expression_type,
     infer_declaration_expression_type_with_nested_nullish, ExpressionInferenceCompleteness,
     NestedNullishLiterals, TopLevelLiteralPolicy,
+};
+use verter_session_query::flow::flow_ir::{FlowExprRole, FlowSliceIR};
+use verter_session_query::flow::{
+    binding::FlowBindingRef,
+    frame_span::FrameSpan,
+    skeleton::{
+        FunctionBodySkeleton, NameMeaning, SkeletonBindingId, SkeletonBindingKind,
+        SkeletonPathSegment,
+    },
+};
+use verter_session_query::function_program::{
+    FunctionControlRegion, FunctionDescentStep, FunctionProgramEntry,
 };
 use verter_type_expr::{PrimitiveName, TypeExpr};
 use verter_type_expr_oxc::{lower_return_annotation, lower_ts_type};
@@ -110,7 +118,7 @@ pub(crate) struct FlowSliceSelection {
     /// content must never attach one site's definition to another site.
     value_sites: rustc_hash::FxHashMap<
         FrameSpan,
-        Option<verter_semantic::analysis::flow::SkeletonExprSiteId>,
+        Option<verter_session_query::flow::skeleton::SkeletonExprSiteId>,
     >,
     /// Binding-identifier spans of the slice's VALUE-selected slots —
     /// DECLARATION-precise identity, so a shadowed same-named sibling
@@ -159,7 +167,7 @@ impl FlowSliceSelection {
     fn value_site(
         &self,
         span: FrameSpan,
-    ) -> Option<verter_semantic::analysis::flow::SkeletonExprSiteId> {
+    ) -> Option<verter_session_query::flow::skeleton::SkeletonExprSiteId> {
         // This also performs the pre-existing selection filter. Only an
         // admitted value position requests definition identity; no unrelated
         // write inventory is inspected after that filter.
@@ -181,7 +189,7 @@ impl FlowSliceSelection {
 /// reachability result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceContent {
-    pub bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
+    pub bindings: Arc<verter_session_query::flow::binding::FlowBindingMap>,
     pub declared_return: Option<GatedType>,
     /// The authored return's type predicate (`x is T`, `asserts x`, …),
     /// beside the `boolean` / `void` [`Self::declared_return`].
@@ -407,7 +415,7 @@ pub enum SliceStatement {
         /// The write target (a binding root; the path is always empty for
         /// this variant — a member-path write never lowers).
         target: SliceNarrowSubject,
-        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
         /// The write expression's span, in this frame's coordinates — the
         /// identity the evaluator's write-effect ledger matches against,
         /// so a lowered write and a degraded write are the same fact seen
@@ -515,7 +523,7 @@ pub enum SliceStatement {
         span: FrameSpan,
         /// The write's value site, when the skeleton records one (the
         /// right-hand side of `x += v`; an update expression has none).
-        definition: Option<verter_semantic::analysis::flow::SkeletonExprSiteId>,
+        definition: Option<verter_session_query::flow::skeleton::SkeletonExprSiteId>,
     },
     /// A write to a MEMBER PATH of a parameter or modelable local
     /// (`o.y = v;`, `o.p.q = v;`, `a["k"] = v;`, `o.n += v;`, `o.n++;`),
@@ -547,7 +555,7 @@ pub enum SliceStatement {
         pattern: SlicePattern,
         value: SliceExpr,
         /// The right-hand side's value site — the writes' definition.
-        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
     },
     /// A destructuring declarator (`const [a, b] = t`, `let { x } = o`):
     /// the parent value — the declarator's annotation, else its
@@ -644,7 +652,7 @@ pub enum SliceStatement {
     },
     /// A `const` / `let` / `var` declarator with an identifier binding.
     Binding {
-        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        binding: verter_session_query::flow::skeleton::SkeletonBindingId,
         /// The binding name.
         name: Arc<str>,
         /// The declaration kind.
@@ -686,7 +694,7 @@ pub enum SliceStatement {
         /// variable is declared as its initializer's widened type.
         auto_typed_form: bool,
         /// Whether the declaration has the checker's EVOLVING-array form
-        /// (`autoArrayType`, [`verter_semantic::analysis::flow::SkeletonBinding::evolving_array`]):
+        /// (`autoArrayType`, [`verter_session_query::flow::skeleton::SkeletonBinding::evolving_array`]):
         /// an unannotated declarator initialised to an empty array literal.
         /// Under `noImplicitAny` its type follows the
         /// [`SliceStatement::EvolvingArray`] operations that reach each
@@ -810,8 +818,8 @@ pub struct SliceLoopDependency {
 /// ([`SliceLoop::writes`]); a local is named by its canonical binding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceLoopWrite {
-    pub binding: verter_semantic::analysis::flow::FlowBindingRef,
-    pub reads: Arc<[verter_semantic::analysis::flow::FlowBindingRef]>,
+    pub binding: verter_session_query::flow::binding::FlowBindingRef,
+    pub reads: Arc<[verter_session_query::flow::binding::FlowBindingRef]>,
 }
 
 /// Where a loop tests its condition.
@@ -1092,18 +1100,18 @@ pub enum SliceNarrowRoot {
     /// A simple formal parameter, by ordinal in source order.
     Param {
         ordinal: u32,
-        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        binding: verter_session_query::flow::skeleton::SkeletonBindingId,
     },
     /// A modelable same-frame local (`const` / `let` / `var`), by name.
     Local {
         name: Arc<str>,
-        binding: verter_semantic::analysis::flow::FlowBindingRef,
+        binding: verter_session_query::flow::binding::FlowBindingRef,
     },
 }
 
 impl PartialEq for SliceNarrowRoot {
     fn eq(&self, other: &Self) -> bool {
-        use verter_semantic::analysis::flow::FlowBindingRef;
+        use verter_session_query::flow::binding::FlowBindingRef;
         match (self, other) {
             (Self::Param { binding: a, .. }, Self::Param { binding: b, .. }) => a == b,
             (Self::Local { binding: a, .. }, Self::Local { binding: b, .. }) => a == b,
@@ -1132,7 +1140,7 @@ impl std::hash::Hash for SliceNarrowRoot {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
             Self::Param { binding, .. } => std::hash::Hash::hash(
-                &verter_semantic::analysis::flow::FlowBindingRef::Local(*binding),
+                &verter_session_query::flow::binding::FlowBindingRef::Local(*binding),
                 state,
             ),
             Self::Local { binding, .. } => std::hash::Hash::hash(binding, state),
@@ -2026,7 +2034,7 @@ pub enum SliceExpr {
     /// widen, the freshness classification) covers both by construction
     /// rather than by remembering to name a second carrier.
     Local {
-        binding: verter_semantic::analysis::flow::FlowBindingRef,
+        binding: verter_session_query::flow::binding::FlowBindingRef,
         /// The binding name.
         name: Arc<str>,
         /// The ordinal of a parameter this binding REDECLARES (a hoisted
@@ -2086,7 +2094,7 @@ pub enum SliceExpr {
     /// body-derived return through the same flow evaluation, never a body
     /// scan and never a leaf fallback.
     NestedFunctionValue {
-        function: verter_semantic::analysis::function_program::FunctionProgramKey,
+        function: verter_session_query::function_program::FunctionProgramKey,
         context: Arc<NestedFlowContext>,
         has_declared_return: bool,
         gap: Option<crate::semantic_query::FlowGap>,
@@ -2106,7 +2114,7 @@ pub enum SliceExpr {
         /// function. An extended capture continues from the evolving array
         /// it holds where the function is created.
         declared_evolving_captures:
-            Arc<[verter_semantic::analysis::function_program::FlowBindingIdentity]>,
+            Arc<[verter_session_query::function_program::FlowBindingIdentity]>,
     },
     /// A value-position operation on an EVOLVING array
     /// ([`SliceEvolvingOperation`]): `a.push(v)` is the new length,
@@ -2336,7 +2344,7 @@ pub enum SliceExpr {
         /// The write target (a binding root; the path is always empty for
         /// this variant — a member-path write never lowers).
         target: SliceNarrowSubject,
-        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
         /// The write expression's span, in this frame's coordinates — the
         /// identity the evaluator's write-effect ledger matches against
         /// (recorded at the TARGET IDENTIFIER, exactly like the statement
@@ -2523,7 +2531,7 @@ pub enum SliceCaptureAuthoritySource {
 /// One mutable closure capture's authored declaration authority.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceCaptureAuthority {
-    pub binding: verter_semantic::analysis::function_program::FlowBindingIdentity,
+    pub binding: verter_session_query::function_program::FlowBindingIdentity,
     pub name: Arc<str>,
     pub declared: GatedType,
     pub source: SliceCaptureAuthoritySource,
@@ -2807,7 +2815,7 @@ pub enum SliceCall {
     /// the call's value is the binding's signature return (a shadowed
     /// name is never a flow obligation edge).
     OnBinding {
-        binding: verter_semantic::analysis::flow::FlowBindingRef,
+        binding: verter_session_query::flow::binding::FlowBindingRef,
         /// The parameter ordinal (when the callee is a parameter).
         param: Option<u32>,
         /// The binding name.
@@ -2830,7 +2838,7 @@ pub enum SliceCall {
     /// A bare-identifier call whose target the per-file function index
     /// resolves EXACTLY (a same-file served function position) — a Flow
     /// obligation edge to that target.
-    Direct(verter_semantic::analysis::function_program::FunctionProgramKey),
+    Direct(verter_session_query::function_program::FunctionProgramKey),
     /// A `super.m()` call — the callee is a static member chain rooted at
     /// `super`. The base member resolves through the HERITAGE surface: the
     /// enclosing class's `extends` expression, lowered here as a gated
@@ -3131,7 +3139,7 @@ pub enum SliceEvolvingOperationKind {
     /// is the empty literal's.
     Reset {
         /// The written value's site (the reaching definition).
-        definition: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
         /// The write's span — the identity the unapplied-write ledger
         /// subtracts, exactly like an applied assignment's.
         span: FrameSpan,
@@ -3518,7 +3526,7 @@ pub(crate) fn build_function_type_param_clause(
 /// object-literal method and a plain function expression share the
 /// declaration's OXC node type and are separated only by that position.
 fn empty_completion_of(node: &FunctionNode<'_>, entry: &FunctionProgramEntry) -> EmptyCompletion {
-    use verter_semantic::analysis::function_program::FunctionDescentStep;
+    use verter_session_query::function_program::FunctionDescentStep;
     let FunctionNode::Function(function) = node else {
         return EmptyCompletion::Never;
     };
@@ -3705,11 +3713,11 @@ fn enclosing_namespace_scopes(
 pub(crate) fn build_flow_slice_content(
     retained: FlowSliceSource<'_>,
     source: &str,
-    index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
+    index: &verter_session_query::function_program::FunctionProgramIndex,
     entry: &FunctionProgramEntry,
     selection: Option<&FlowSliceSelection>,
     skeleton: &Arc<FunctionBodySkeleton>,
-    bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
+    bindings: Arc<verter_session_query::flow::binding::FlowBindingMap>,
     carrier_module: bool,
     snapshot: &crate::decl_lowering::SnapshotKey,
     context: Option<&NestedFlowContext>,
@@ -4191,11 +4199,12 @@ pub(crate) fn build_flow_slice_content(
 fn predicate_parameters(
     declared_return: bool,
     skeleton: &FunctionBodySkeleton,
-    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
+    bindings: &verter_session_query::flow::binding::FlowBindingMap,
     entry: &FunctionProgramEntry,
     params: &[SliceParam],
 ) -> Option<Arc<[u32]>> {
-    if declared_return || skeleton.kind != verter_semantic::analysis::flow::FunctionBodyKind::Plain
+    if declared_return
+        || skeleton.kind != verter_session_query::flow::skeleton::FunctionBodyKind::Plain
     {
         return None;
     }
@@ -4222,7 +4231,7 @@ fn predicate_parameters(
 /// read or member write is not one (the checker's `isSymbolAssigned`).
 fn binding_is_assigned(
     skeleton: &FunctionBodySkeleton,
-    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
+    bindings: &verter_session_query::flow::binding::FlowBindingMap,
     entry: Option<&FunctionProgramEntry>,
     binding: SkeletonBindingId,
 ) -> bool {
@@ -4581,11 +4590,11 @@ fn modelled_pattern_bindings(
     function_end: u32,
     params: &[oxc_ast::ast::FormalParameter<'_>],
     body: verter_semantic::analysis::function_program::FunctionBodyRef<'_>,
-    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
+    bindings: &verter_session_query::flow::binding::FlowBindingMap,
     anchor: u32,
 ) -> FxHashSet<SkeletonBindingId> {
     struct Collector<'m> {
-        bindings: &'m verter_semantic::analysis::flow::FlowBindingMap,
+        bindings: &'m verter_session_query::flow::binding::FlowBindingMap,
         anchor: u32,
         out: FxHashSet<SkeletonBindingId>,
     }
@@ -4669,8 +4678,8 @@ fn modelled_pattern_bindings(
 /// The bodies of the functions nested directly in `entry`'s function,
 /// which a walk of the function's own syntax never enters.
 pub(crate) fn nested_function_bodies(
-    index: &verter_semantic::analysis::function_program::FunctionProgramIndex,
-    entry: &verter_semantic::analysis::function_program::FunctionProgramEntry,
+    index: &verter_session_query::function_program::FunctionProgramIndex,
+    entry: &verter_session_query::function_program::FunctionProgramEntry,
 ) -> Vec<verter_span::Span> {
     entry
         .nested_captures
@@ -6344,9 +6353,9 @@ enum ObjectThisMember<'p> {
     /// A property, whose value its declaration initializes it with.
     Property(&'p Expression<'p>),
     /// A method, served as its own position.
-    Method(verter_semantic::analysis::function_program::FunctionProgramKey),
+    Method(verter_session_query::function_program::FunctionProgramKey),
     /// A getter, served as its own position.
-    Getter(verter_semantic::analysis::function_program::FunctionProgramKey),
+    Getter(verter_session_query::function_program::FunctionProgramKey),
 }
 
 fn this_member_path(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> Option<Vec<Arc<str>>> {
@@ -6482,7 +6491,7 @@ fn lower_params(
     source: &str,
     scope: &SignatureScope<'_>,
     skeleton: &FunctionBodySkeleton,
-    bindings: &verter_semantic::analysis::flow::FlowBindingMap,
+    bindings: &verter_session_query::flow::binding::FlowBindingMap,
     anchor: u32,
     nullability: crate::semantic_query::NullabilityPolicy,
 ) -> Result<Vec<SliceParam>, verter_type_expr::facts::InferenceUnavailableReason> {
@@ -6826,7 +6835,7 @@ enum NameBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DefiningFrameGate {
     skeleton: Arc<FunctionBodySkeleton>,
-    bindings: Arc<verter_semantic::analysis::flow::FlowBindingMap>,
+    bindings: Arc<verter_session_query::flow::binding::FlowBindingMap>,
     type_parameters: Arc<[Arc<str>]>,
     /// The ENCLOSING declaration's clause, by name: a class member's
     /// class clause (`class C<T> { m() { … } }`), empty otherwise.
@@ -6853,7 +6862,7 @@ struct CaptureParameterLocator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CapturedFrame {
     gate: Arc<DefiningFrameGate>,
-    region: verter_semantic::analysis::flow::SkeletonRegionId,
+    region: verter_session_query::flow::skeleton::SkeletonRegionId,
 }
 
 /// What `this` reads inside a class declaration's member: the checker's
@@ -6920,8 +6929,8 @@ impl NestedFlowContext {
 /// An exact source declaration eligible to provide a selected capture's type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SliceCaptureAuthorityLocator {
-    pub binding: verter_semantic::analysis::function_program::FlowBindingIdentity,
-    pub declaration: verter_semantic::analysis::function_program::FlowBindingIdentity,
+    pub binding: verter_session_query::function_program::FlowBindingIdentity,
+    pub declaration: verter_session_query::function_program::FlowBindingIdentity,
     pub source: SliceCaptureAuthoritySource,
     parameter_ordinal: Option<usize>,
     gate: Arc<DefiningFrameGate>,
@@ -6947,7 +6956,7 @@ impl NestedFlowContext {
 
     pub(crate) fn mutable_authorities(
         &self,
-        identity: &verter_semantic::analysis::function_program::FlowBindingIdentity,
+        identity: &verter_session_query::function_program::FlowBindingIdentity,
     ) -> Vec<SliceCaptureAuthorityLocator> {
         let mut current = self.captures.enclosing.as_deref();
         while let Some(frame) = current {
@@ -7085,7 +7094,7 @@ impl CaptureScope {
     /// local slot there.
     fn defining_local(
         &self,
-        identity: &verter_semantic::analysis::function_program::FlowBindingIdentity,
+        identity: &verter_session_query::function_program::FlowBindingIdentity,
     ) -> Option<(&DefiningFrameGate, SkeletonBindingId)> {
         let mut current = self.enclosing.as_deref();
         while let Some(frame) = current {
@@ -7100,7 +7109,7 @@ impl CaptureScope {
 
     fn classify_identity(
         &self,
-        identity: &verter_semantic::analysis::function_program::FlowBindingIdentity,
+        identity: &verter_session_query::function_program::FlowBindingIdentity,
     ) -> NameBinding {
         let mut current = self.enclosing.as_deref();
         while let Some(frame) = current {
@@ -7567,8 +7576,8 @@ struct Lowerer<'a> {
     /// Whether the frame's function is `async`.
     frame_is_async: bool,
     frame_gate: Arc<DefiningFrameGate>,
-    bindings: &'a verter_semantic::analysis::flow::FlowBindingMap,
-    index: &'a verter_semantic::analysis::function_program::FunctionProgramIndex,
+    bindings: &'a verter_session_query::flow::binding::FlowBindingMap,
+    index: &'a verter_session_query::function_program::FunctionProgramIndex,
     source: &'a str,
     /// The function's own start offset — the anchor the frame's
     /// [`FunctionBodySkeleton`] (and the plan derived from it) stores
@@ -7616,7 +7625,7 @@ struct Lowerer<'a> {
     control: Arc<[FunctionControlRegion]>,
     /// The function's exact direct local call targets (from the per-file
     /// function index), keyed by call span.
-    direct_calls: &'a [verter_semantic::analysis::function_program::FunctionDirectCall],
+    direct_calls: &'a [verter_session_query::function_program::FunctionDirectCall],
     /// The whole retained parse snapshot this frame's function lives in.
     /// The guard lowering reads SAME-FILE predicate / assertion
     /// signatures from it (`isStr(u)` / `assertStr(u);` carry their
@@ -7850,7 +7859,7 @@ impl<'a> Lowerer<'a> {
     /// preparation does not visit its declarations.
     fn binding_is_selected(
         &self,
-        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        binding: verter_session_query::flow::skeleton::SkeletonBindingId,
     ) -> bool {
         self.selection
             .is_none_or(|selection| selection.value_slot_span(self.skeleton.binding(binding).span))
@@ -7861,7 +7870,7 @@ impl<'a> Lowerer<'a> {
     /// cannot affect a later selected value and does not defeat transparency.
     fn binding_is_read_after_loop(
         &self,
-        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        binding: verter_session_query::flow::skeleton::SkeletonBindingId,
         loop_span: FrameSpan,
     ) -> bool {
         self.binding_is_read_after_loop_at_path(binding, &[], loop_span)
@@ -7869,7 +7878,7 @@ impl<'a> Lowerer<'a> {
 
     fn binding_is_read_after_loop_at_path(
         &self,
-        binding: verter_semantic::analysis::flow::SkeletonBindingId,
+        binding: verter_session_query::flow::skeleton::SkeletonBindingId,
         write_path: &[SkeletonPathSegment],
         loop_span: FrameSpan,
     ) -> bool {
@@ -8389,7 +8398,7 @@ impl<'a> Lowerer<'a> {
         node: &FunctionNode<'_>,
         loop_span: FrameSpan,
     ) -> bool {
-        use verter_semantic::analysis::function_program::FunctionWriteTarget;
+        use verter_session_query::function_program::FunctionWriteTarget;
         let Some(nested) = self.index.nested_at(self.bindings.function(), {
             let span = node_span(node);
             verter_span::Span::new(span.start, span.end)
@@ -8398,7 +8407,7 @@ impl<'a> Lowerer<'a> {
         };
         let nested = nested.entry();
         let targets_downstream =
-            |identity: &verter_semantic::analysis::function_program::FlowBindingIdentity| {
+            |identity: &verter_session_query::function_program::FlowBindingIdentity| {
                 self.bindings
                     .local(identity)
                     .is_some_and(|binding| self.binding_is_read_after_loop(binding, loop_span))
@@ -8540,7 +8549,7 @@ impl<'a> Lowerer<'a> {
 
     /// Classify the exact prepared occurrence. Missing evidence is never free.
     fn classify_occurrence(&self, span: oxc_span::Span) -> NameBinding {
-        use verter_semantic::analysis::flow::FlowBindingOccurrence;
+        use verter_session_query::flow::binding::FlowBindingOccurrence;
         match self.bindings.occurrence(self.rebase(span)) {
             FlowBindingOccurrence::Resolved(FlowBindingRef::Local(binding)) => {
                 self.classify_binding(*binding)
@@ -8556,7 +8565,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn binding_at(&self, span: oxc_span::Span) -> Option<FlowBindingRef> {
-        use verter_semantic::analysis::flow::FlowBindingOccurrence;
+        use verter_session_query::flow::binding::FlowBindingOccurrence;
         match self.bindings.occurrence(self.rebase(span)) {
             FlowBindingOccurrence::Resolved(binding) => Some(binding.clone()),
             FlowBindingOccurrence::Free
@@ -8573,9 +8582,10 @@ impl<'a> Lowerer<'a> {
     ) -> Option<SliceNarrowRoot> {
         let binding = self.binding_at(span)?;
         match (ordinal, binding) {
-            (Some(ordinal), verter_semantic::analysis::flow::FlowBindingRef::Local(binding)) => {
-                Some(SliceNarrowRoot::Param { ordinal, binding })
-            }
+            (
+                Some(ordinal),
+                verter_session_query::flow::binding::FlowBindingRef::Local(binding),
+            ) => Some(SliceNarrowRoot::Param { ordinal, binding }),
             (_, binding) => Some(SliceNarrowRoot::Local {
                 name: Arc::from(name),
                 binding,
@@ -9644,7 +9654,7 @@ impl<'a> Lowerer<'a> {
     /// canonical binding, a captured one by its identity — deduplicated.
     fn site_reads(
         &self,
-        site: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        site: verter_session_query::flow::skeleton::SkeletonExprSiteId,
     ) -> Arc<[FlowBindingRef]> {
         let span = self.skeleton.expr_site(site).span;
         let mut reads: Vec<FlowBindingRef> = Vec::new();
@@ -9680,7 +9690,7 @@ impl<'a> Lowerer<'a> {
     /// deduplicated.
     fn site_binding_reads(
         &self,
-        site: verter_semantic::analysis::flow::SkeletonExprSiteId,
+        site: verter_session_query::flow::skeleton::SkeletonExprSiteId,
     ) -> Arc<[SkeletonBindingId]> {
         let span = self.skeleton.expr_site(site).span;
         let mut reads: Vec<SkeletonBindingId> = self
@@ -12735,7 +12745,7 @@ impl<'a> Lowerer<'a> {
     /// place after the call. A lone declared signature returning `never`
     /// ends the path; any other annotation is unprovable here.
     fn callee_binding_effect(&self, span: oxc_span::Span) -> Option<StatementCallEffect> {
-        use verter_semantic::analysis::flow::FlowBindingOccurrence;
+        use verter_session_query::flow::binding::FlowBindingOccurrence;
         let (gate, local) = match self.bindings.occurrence(self.rebase(span)) {
             FlowBindingOccurrence::Resolved(FlowBindingRef::Local(local)) => {
                 (&*self.frame_gate, *local)
@@ -13837,7 +13847,7 @@ impl<'a> Lowerer<'a> {
         definition_span: oxc_span::Span,
     ) -> Option<(
         SliceNarrowRoot,
-        verter_semantic::analysis::flow::SkeletonExprSiteId,
+        verter_session_query::flow::skeleton::SkeletonExprSiteId,
         FrameSpan,
     )> {
         let identifier =
@@ -16252,9 +16262,9 @@ impl<'a> Lowerer<'a> {
     /// names one: a local of this frame
     /// ([`SliceStatement::Binding::evolving_array`]) or a captured binding
     /// of an enclosing frame
-    /// ([`verter_semantic::analysis::function_program::FlowBindingIdentity::evolving_array`]).
+    /// ([`verter_session_query::function_program::FlowBindingIdentity::evolving_array`]).
     fn evolving_binding_at(&self, span: oxc_span::Span) -> Option<FlowBindingRef> {
-        use verter_semantic::analysis::flow::FlowBindingOccurrence;
+        use verter_session_query::flow::binding::FlowBindingOccurrence;
         match self.bindings.occurrence(self.rebase(span)) {
             FlowBindingOccurrence::Resolved(binding) if self.is_evolving_binding(binding) => {
                 Some(binding.clone())
@@ -17499,7 +17509,7 @@ impl<'a> Lowerer<'a> {
             {
                 continue;
             }
-            let key = || verter_semantic::analysis::function_program::FunctionProgramKey {
+            let key = || verter_session_query::function_program::FunctionProgramKey {
                 declaration: self.bindings.function().declaration.clone(),
                 part: verter_type_expr::facts::FunctionPartIdentity::Member {
                     member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
@@ -17540,14 +17550,13 @@ impl<'a> Lowerer<'a> {
             },
             _ => return None,
         };
-        let key =
-            |ordinal: usize| verter_semantic::analysis::function_program::FunctionProgramKey {
-                declaration: self.bindings.function().declaration.clone(),
-                part: verter_type_expr::facts::FunctionPartIdentity::Member {
-                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
-                },
-                overload_ordinal: 0,
-            };
+        let key = |ordinal: usize| verter_session_query::function_program::FunctionProgramKey {
+            declaration: self.bindings.function().declaration.clone(),
+            part: verter_type_expr::facts::FunctionPartIdentity::Member {
+                member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+            },
+            overload_ordinal: 0,
+        };
         let mut found = None;
         for (ordinal, element) in class.body.body.iter().enumerate() {
             match element {
@@ -17663,7 +17672,7 @@ impl<'a> Lowerer<'a> {
         &self,
         span: oxc_span::Span,
     ) -> Option<(&'a oxc_ast::ast::Function<'a>, Arc<DefiningFrameGate>, bool)> {
-        use verter_semantic::analysis::flow::FlowBindingOccurrence;
+        use verter_session_query::flow::binding::FlowBindingOccurrence;
         let (gate, local) = match self.bindings.occurrence(self.rebase(span)) {
             // The declaration the occurrence names exactly — never its
             // runtime alias (a function expression's own name and a body
@@ -18417,7 +18426,7 @@ impl<'a> Lowerer<'a> {
             .writes
             .into_iter()
             .any(|(_name, span, skeleton_hidden)| {
-                use verter_semantic::analysis::flow::FlowBindingOccurrence;
+                use verter_session_query::flow::binding::FlowBindingOccurrence;
                 // This scanner collects whole-binding targets only. A proven
                 // static-block local does not write a tracked function subject.
                 (matches!(write_policy, WritePolicy::All) || skeleton_hidden)

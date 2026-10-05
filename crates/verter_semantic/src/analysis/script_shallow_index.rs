@@ -11,7 +11,7 @@ use verter_parser::utils::oxc::script::route_inventory::{
 };
 
 use super::decl_headers::{build_decl_header_index_with_owners, DeclHeaderIndex};
-use super::TopLevelOwnerTable;
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
 
 #[derive(Debug, Clone)]
 pub struct ScriptShallowIndex {

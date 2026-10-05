@@ -12,8 +12,8 @@ use std::sync::OnceLock;
 
 use parking_lot::Mutex;
 use rustc_hash::{FxHashMap, FxHasher};
-use verter_semantic::analysis::Hash16;
-use verter_semantic::resolver_core::{EnvHashes, SemanticCompilerOptions};
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::resolution::{EnvHashes, SemanticCompilerOptions};
 
 use super::SemanticNodeId;
 

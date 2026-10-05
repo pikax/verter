@@ -46,7 +46,9 @@ impl LintRule for NoSetupPropsReactivityLoss {
         // For now, this is a stub that validates rule wiring. A full
         // implementation would check macro analysis for destructured patterns.
         for macro_call in &script.macros {
-            if macro_call.kind == verter_semantic::analysis::types::AnalyzedMacroKind::DefineProps {
+            if macro_call.kind
+                == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+            {
                 // Stub: binding_name being None could indicate destructuring
                 // in some analysis implementations. Full detection requires
                 // AST-level destructuring pattern analysis.

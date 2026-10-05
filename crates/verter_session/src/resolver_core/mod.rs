@@ -71,7 +71,7 @@ pub use route_db::{
     ROUTE_DB_RESOLVER_VERSION,
 };
 
-pub type ResolverHash16 = verter_semantic::analysis::Hash16;
+pub type ResolverHash16 = verter_session_query::analysis::types::Hash16;
 pub(crate) use component_meta::component_meta_resolved_macros;
 pub use component_meta::{
     collect_local_constructor_binding_keys, collect_requested_binding_demands,
@@ -5128,7 +5128,7 @@ mod fact_signature_fingerprint_pins {
     use super::*;
     use crate::file_artifact_store::FileArtifactKey;
     use crate::locator_identity::ParseEnvHash;
-    use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
+    use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
     fn export_key(name: &str) -> FactKey {
         FactKey::Export {

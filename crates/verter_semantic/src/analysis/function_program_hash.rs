@@ -12,8 +12,8 @@
 use oxc_ast::ast::{ArrowFunctionExpression, Expression, Function, PropertyKey, Statement};
 use oxc_ast_visit::{walk, Visit};
 
-use crate::analysis::function_program::FunctionParamRecord;
-use crate::analysis::types::{hash_16, Hash16};
+use verter_session_query::analysis::types::{hash_16, Hash16};
+use verter_session_query::function_program::FunctionParamRecord;
 
 // ---------------------------------------------------------------------------
 // Whole-function stable hash

@@ -33,8 +33,8 @@ fn make_ctx() -> Arc<RequestContext> {
 
 #[test]
 fn layer_indexed_get_misses_increment_per_request_counter() {
-    use verter_semantic::analysis::Hash16;
     use verter_session::file_artifact_store::FileArtifactStore;
+    use verter_session_query::analysis::types::Hash16;
 
     let db = FileArtifactStore::new();
     let ctx = make_ctx();
@@ -171,8 +171,8 @@ fn no_request_context_means_no_bump() {
     // `if let Some(ctx)` branch evaluates `None` and skips the
     // fetch_add — verified by the compile-time presence of the
     // bump code-path.
-    use verter_semantic::analysis::Hash16;
     use verter_session::file_artifact_store::FileArtifactStore;
+    use verter_session_query::analysis::types::Hash16;
 
     let db = FileArtifactStore::new();
     let (parse_key, language) = script_parse_identity();
@@ -183,8 +183,8 @@ fn no_request_context_means_no_bump() {
 
 #[test]
 fn cross_layer_non_leakage_indexed_to_analysis() {
-    use verter_semantic::analysis::Hash16;
     use verter_session::file_artifact_store::FileArtifactStore;
+    use verter_session_query::analysis::types::Hash16;
 
     let db = FileArtifactStore::new();
     let ctx = make_ctx();

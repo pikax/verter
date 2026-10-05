@@ -15726,7 +15726,7 @@ fn use_leaf_bound_name(tree: &syn::UseTree) -> Option<String> {
 ///
 /// The genuine `macro_arg_producer.rs` imports (`std::cell::Cell`,
 /// `std::sync::{Arc, OnceLock}`, `rustc_hash::FxHashMap`, `verter_type_expr::{…}`,
-/// `crate::…`, and the fn-local `verter_semantic::analysis::AnalyzedMacroKind`)
+/// `crate::…`, and the fn-local `verter_session_query::analysis::types::AnalyzedMacroKind`)
 /// bind NONE of the built-in-derive names and use no glob, so they pass. Skips
 /// `#[cfg(test)]`-gated items; recurses into non-test inline modules and fn-body
 /// `use` statements.

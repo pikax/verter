@@ -78,7 +78,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::type_eval::DeclarationId;
+use verter_session_query::declarations::DeclarationId;
 
 use super::declaration_metadata::{
     DeclarationMetadataResolver, ResolvedDeclarationKind, ResolvedLocalTypeSymbolMetadata,
@@ -204,7 +204,7 @@ pub(crate) fn engine_fact_signature_for_exported_type(
         ctx,
         canonical_id,
         type_name,
-        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session_query::facts::registry::SymbolSpace::Type,
         observed_hash,
     )
 }
@@ -254,8 +254,7 @@ pub(crate) struct ObservedPreparedTypeDecl {
     /// absent from the keyed canonical — a genuine absence OR a broken-lease
     /// transient (see the type docs; the two are told apart by the
     /// cacheability rail, never by this field).
-    pub(crate) decl:
-        Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+    pub(crate) decl: Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
     /// The keyed canonical the prepared decl was resolved for.
     pub(crate) canonical_id: String,
     /// The defining-file content version the prepared-decl bundle was
@@ -588,7 +587,7 @@ pub struct ComponentMetaQueryEngine<'a> {
     /// Request-local memoization for prepared declaration lookups.
     prepared_type_decls: FxHashMap<
         (String, verter_type_expr::TopLevelOwnerId, String),
-        Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>>,
+        Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
     >,
     #[cfg(test)]
     prepared_type_decl_query_count: usize,
@@ -1016,13 +1015,13 @@ fn local_type_symbol_metadata_for_known_source(
     let state = ctx.shallow_file_state(canonical_source)?;
     let (symbol_kind, span) = state.type_symbol_metadata_in(owner, resolved_name)?;
     let kind = match symbol_kind {
-        verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
+        verter_session_query::declarations::TypeDeclKind::Alias => {
             ResolvedDeclarationKind::TypeAlias
         }
-        verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
+        verter_session_query::declarations::TypeDeclKind::Interface => {
             ResolvedDeclarationKind::Interface
         }
-        verter_semantic::analysis::type_eval::TypeDeclKind::Class => ResolvedDeclarationKind::Class,
+        verter_session_query::declarations::TypeDeclKind::Class => ResolvedDeclarationKind::Class,
     };
     Some(ResolvedLocalTypeSymbolMetadata { kind, span })
 }

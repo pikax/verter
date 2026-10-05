@@ -33,7 +33,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
-use verter_semantic::analysis::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::fact_signature_helpers::ReadSetSignature;
 

@@ -15,7 +15,7 @@ use crate::canonical_path::CanonicalPath;
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 
 const STUB_LIB_ES5: &str = r#"
     interface Pick<T, K extends keyof T> { /* */ }

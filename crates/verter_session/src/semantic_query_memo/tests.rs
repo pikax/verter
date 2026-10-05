@@ -6651,8 +6651,8 @@ fn prefix_backfill_carries_traced_facts() {
     let parent_traced_facts: Arc<[FactVersionRef]> =
         Arc::from(vec![FactVersionRef::Parse(ParseFactRef {
             canonical_id: "/test/parent-dep.ts".to_string(),
-            key: verter_semantic::facts::FactKey::SyntacticExportSet,
-            lane: verter_semantic::facts::FactLane::Semantic,
+            key: verter_session_query::facts::FactKey::SyntacticExportSet,
+            lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: [0xABu8; 16],
         })]);
 
@@ -9376,7 +9376,7 @@ mod env_scoped_key_identity_guards {
     /// owner + bare `mode` would carry none of these.
     #[test]
     fn resolve_macro_payload_same_owner_different_env_or_context_do_not_warm_hit() {
-        use verter_semantic::analysis::AnalyzedMacroKind;
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
         let canonical: Arc<str> = Arc::from("/u2b9/sfc.vue");
         let name: Arc<str> = Arc::from("<sfc-script-setup>");
         let macro_key = |slot: ResolvedDeclSlotIdentity, resolve_env: HashValue| {
@@ -10870,14 +10870,16 @@ mod prepared_identity_bijection {
                 SemanticQueryKey::ResolveMacroPayload {
                     owner: type_slot("__sfc"),
                     macro_index: 0,
-                    macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+                    macro_kind:
+                        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
                     type_args: nodes(&[]),
                     context: MacroPayloadContext::new(h16(0), ProjectionMode::Navigate),
                 },
                 SemanticQueryKey::ResolveMacroPayload {
                     owner: type_slot("__sfc"),
                     macro_index: 1,
-                    macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+                    macro_kind:
+                        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
                     type_args: nodes(&[]),
                     context: MacroPayloadContext::new(h16(0), ProjectionMode::Navigate),
                 },
@@ -11932,7 +11934,7 @@ fn release_canonical_leaves_an_unrelated_inflight_build_and_its_publish_alone() 
 #[test]
 fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
     use crate::resolver_core::FactVersionRef;
-    use verter_semantic::resolver_core::{ResolutionPopulation, ResolutionWorldId};
+    use verter_session_query::resolution::{ResolutionPopulation, ResolutionWorldId};
     use verter_workspace::{
         AggregatePopulation, AggregateStamp, CompactionDomain, DomainGenerationFact,
     };

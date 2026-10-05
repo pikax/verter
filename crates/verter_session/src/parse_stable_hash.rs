@@ -58,7 +58,7 @@
 //! bodies (no member value types, no lowered clauses).
 
 use verter_semantic::analysis::decl_headers::MemberHeader;
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::project_type_store::IndexedReady;
@@ -364,8 +364,8 @@ fn write_export_target(
     }
 }
 
-fn kind_str_type(kind: &verter_semantic::analysis::type_eval::TypeDeclKind) -> &'static str {
-    use verter_semantic::analysis::type_eval::TypeDeclKind;
+fn kind_str_type(kind: &verter_session_query::declarations::TypeDeclKind) -> &'static str {
+    use verter_session_query::declarations::TypeDeclKind;
     match kind {
         TypeDeclKind::Alias => "type",
         TypeDeclKind::Interface => "interface",
@@ -373,8 +373,8 @@ fn kind_str_type(kind: &verter_semantic::analysis::type_eval::TypeDeclKind) -> &
     }
 }
 
-fn kind_str_value(kind: &verter_semantic::analysis::type_eval::ValueDeclKind) -> &'static str {
-    use verter_semantic::analysis::type_eval::ValueDeclKind;
+fn kind_str_value(kind: &verter_session_query::declarations::ValueDeclKind) -> &'static str {
+    use verter_session_query::declarations::ValueDeclKind;
     match kind {
         ValueDeclKind::Var => "var",
         ValueDeclKind::Let => "let",

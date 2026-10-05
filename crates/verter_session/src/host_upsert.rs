@@ -1117,8 +1117,8 @@ impl VerterHost {
     pub(crate) fn build_parsed_edges_from_analysis(
         _canonical_id: &str,
         external_requests: &[crate::ExternalSourceRequest],
-        imports: &[verter_semantic::analysis::AnalyzedImport],
-        module_references: &[verter_semantic::analysis::AnalyzedModuleReference],
+        imports: &[verter_session_query::analysis::types::AnalyzedImport],
+        module_references: &[verter_session_query::analysis::types::AnalyzedModuleReference],
     ) -> Vec<verter_workspace::ParsedEdge> {
         let mut parsed_edges = Vec::new();
 
@@ -1132,14 +1132,14 @@ impl VerterHost {
         // R5 dedupe by (specifier, kind) — NOT by specifier alone.
         let mut seen: rustc_hash::FxHashSet<(
             String,
-            verter_semantic::resolver_core::ResolveRequestKind,
+            verter_session_query::resolution::ResolveRequestKind,
         )> = rustc_hash::FxHashSet::default();
 
         for imp in imports {
             let kind = if imp.is_type_only {
-                verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+                verter_session_query::resolution::ResolveRequestKind::TypeImport
             } else {
-                verter_semantic::resolver_core::ResolveRequestKind::EsmImport
+                verter_session_query::resolution::ResolveRequestKind::EsmImport
             };
             if !seen.insert((imp.source.clone(), kind)) {
                 continue;
@@ -1159,9 +1159,9 @@ impl VerterHost {
 
         for modref in module_references {
             let kind = if modref.is_type_only {
-                verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+                verter_session_query::resolution::ResolveRequestKind::TypeImport
             } else {
-                verter_semantic::resolver_core::ResolveRequestKind::EsmImport
+                verter_session_query::resolution::ResolveRequestKind::EsmImport
             };
 
             if let Some(specifier) = modref.literal_specifier.as_ref() {
