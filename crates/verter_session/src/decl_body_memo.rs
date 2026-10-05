@@ -3567,7 +3567,7 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
                         if !locator.matches_snapshot(&snapshot) {
                             return None;
                         }
-                        let entry = index.get(&locator.declaration.defining_function)?;
+                        let entry = index.get(&locator.declaration().defining_function)?;
                         crate::flow_slice_content::build_flow_capture_authority(
                             program.borrow_dependent(),
                             program.source_str(),

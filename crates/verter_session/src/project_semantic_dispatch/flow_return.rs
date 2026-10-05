@@ -23640,11 +23640,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
     ) -> Option<(FlowProductStore, FlowProductSubject)> {
-        let products = if &locator.declaration.defining_function == self.bindings.function() {
+        let products = if &locator.declaration().defining_function == self.bindings.function() {
             self.products.clone()
         } else {
             self.enclosing_frames.iter().find_map(|frame| {
-                (frame.function == locator.declaration.defining_function)
+                (frame.function == locator.declaration().defining_function)
                     .then(|| frame.products.clone())
             })?
         };
@@ -23659,11 +23659,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
         authority: verter_session_query::flow::slice::SliceCaptureAuthority,
     ) -> Option<SemanticNodeId> {
-        let binder_env = if &locator.declaration.defining_function == self.bindings.function() {
+        let binder_env = if &locator.declaration().defining_function == self.bindings.function() {
             Some(self.binder_env)
         } else {
             self.enclosing_frames.iter().find_map(|frame| {
-                (frame.function == locator.declaration.defining_function)
+                (frame.function == locator.declaration().defining_function)
                     .then_some(frame.binder_env)
             })
         };
@@ -24119,7 +24119,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .as_ref()
                     .and_then(|(products, subject)| products.declared_type(subject))
                 {
-                    capture_inputs[index].apply_authority(node, &locator.source);
+                    capture_inputs[index].apply_authority(node, &locator.source());
                 } else {
                     missing.push((index, locator, source));
                 }
@@ -24153,7 +24153,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             if let Some((mut products, subject)) = source {
                                 products.set_declared_type(&subject, Some(node));
                             }
-                            capture_inputs[index].apply_authority(node, &locator.source);
+                            capture_inputs[index].apply_authority(node, &locator.source());
                         }
                     }
                 }

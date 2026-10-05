@@ -1,0 +1,5 @@
+error[E0616]: field `target` of struct `SlicePredicate` is private
+ --> tests/compile-fail/flow_slice_predicate_target_not_mutable.rs:5:15
+  |
+5 |     predicate.target = None;
+  |               ^^^^^^ private field

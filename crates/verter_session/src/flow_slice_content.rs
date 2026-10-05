@@ -60,19 +60,19 @@
 //! [`SliceCall::Construct`] over its lowered constructor value, and a
 //! tagged template is [`SliceCall::TaggedTemplate`] over its lowered tag.
 use verter_session_query::flow::slice::{
-    CaptureParameterLocator, CaptureScope, CapturedFrame, DefiningFrameGate, EmptyCompletion,
-    FlowSliceSelection, FrameShadowedName, GatedLeaf, GatedType, NameBinding, NestedFlowContext,
-    ReturnPredicateTest, SliceArithmetic, SliceArrayElement, SliceAssertion, SliceBindingKind,
-    SliceCall, SliceCallArgument, SliceCallArguments, SliceCallSite, SliceCaptureAuthority,
+    CaptureScope, DefiningFrameDiscovery, DefiningFrameGate, EmptyCompletion, FlowSliceSelection,
+    FrameAnswer, GatedLeaf, GatedType, LeafRootOccurrence, NameBinding, NestedFlowContext,
+    ParameterDeclaration, ReturnPredicateTest, SignatureParameters, SignatureScope,
+    SliceArithmetic, SliceArrayElement, SliceAssertion, SliceBindingKind, SliceCall,
+    SliceCallArgument, SliceCallArguments, SliceCallSite, SliceCaptureAuthority,
     SliceCaptureAuthorityLocator, SliceContent, SliceDestructuredElement, SliceEffectCallee,
     SliceElementKey, SliceEqOperand, SliceEqOther, SliceEvolvingOperation,
     SliceEvolvingOperationKind, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral,
     SliceLogical, SliceLoop, SliceLoopBinding, SliceLoopDependency, SliceLoopElement,
     SliceLoopTest, SliceLoopWrite, SliceMemberWrite, SliceMutationArgument, SliceNarrowRoot,
     SliceNarrowSubject, SliceObjectEntry, SliceObjectKey, SliceObjectMember, SliceParam,
-    SlicePattern, SlicePatternElement, SlicePatternKey, SlicePredicate, SliceRegion,
-    SliceStatement, SliceSwitchCase, SliceThis, SliceTypeParam, SliceTypeofKind, SliceUnsupported,
-    SliceWriteKey,
+    SlicePattern, SlicePatternElement, SlicePatternKey, SliceRegion, SliceStatement,
+    SliceSwitchCase, SliceThis, SliceTypeParam, SliceTypeofKind, SliceUnsupported, SliceWriteKey,
 };
 
 use std::sync::Arc;
@@ -526,32 +526,6 @@ fn authored_call_site(
     )
 }
 
-/// Which signature a [`lower_params`] / [`lower_slice_type_params`] call
-/// is lowering, and therefore which frame — if any — its answers are
-/// gated against.
-///
-/// NOT defaultable: a new call site must choose, because the two arms
-/// differ in exactly the way `resolveName` does and picking the wrong
-/// one is either a silent wrong answer (Root where Nested was needed) or
-/// a spurious fail-closed (the reverse).
-enum SignatureScope<'a> {
-    /// The indexed function's OWN signature: body-local declarations are
-    /// NOT in scope here, so the owner-scope answer is the right one.
-    Root,
-    /// A NESTED function value's signature, which sits INSIDE the
-    /// enclosing frame's body and therefore sees that frame's
-    /// body-locals.
-    Nested {
-        /// The ENCLOSING frame's lexical authority.
-        gate: &'a CaptureScope,
-        /// The nested function's OWN type parameters: they bind inside
-        /// its signature and the evaluator's binder environment carries
-        /// them, so they are the answer's binders, not references into
-        /// the enclosing frame.
-        binders: &'a [Arc<str>],
-    },
-}
-
 /// The member-literal policy an enclosing TYPE CARRIER imposes on an
 /// object literal it wraps.
 ///
@@ -659,7 +633,6 @@ fn lower_type_param_clause(
     source: &str,
     scope: &SignatureScope<'_>,
 ) -> Vec<SliceTypeParam> {
-    let binders = scope.param_binders();
     declaration
         .map(|declaration| {
             declaration
@@ -670,11 +643,11 @@ fn lower_type_param_clause(
                     constraint: param
                         .constraint
                         .as_ref()
-                        .map(|constraint| scope.gate(lower_ts_type(constraint, source), binders)),
+                        .map(|constraint| scope.gate(lower_ts_type(constraint, source))),
                     default: param
                         .default
                         .as_ref()
-                        .map(|default| scope.gate(lower_ts_type(default, source), binders)),
+                        .map(|default| scope.gate(lower_ts_type(default, source))),
                 })
                 .collect()
         })
@@ -688,73 +661,6 @@ fn lower_slice_type_params(
     scope: &SignatureScope<'_>,
 ) -> Vec<SliceTypeParam> {
     lower_type_param_clause(node.type_parameters(), source, scope)
-}
-
-impl SignatureScope<'_> {
-    /// Gate one signature-position answer for this scope.
-    fn gate(&self, ty: TypeExpr, binders: &[Arc<str>]) -> GatedType {
-        match self {
-            SignatureScope::Root => GatedType::root_signature(ty),
-            SignatureScope::Nested { gate, .. } => gate.gate(ty, binders),
-        }
-    }
-
-    /// The binders a PARAMETER annotation of this signature lowers
-    /// under: the signature's own type-parameter clause.
-    fn param_binders(&self) -> &[Arc<str>] {
-        match self {
-            SignatureScope::Root => &[],
-            SignatureScope::Nested { binders, .. } => binders,
-        }
-    }
-
-    /// Gate one parameter DEFAULT-INITIALIZER answer.
-    ///
-    /// A default initializer is an EXPRESSION evaluated in the scope the
-    /// signature sits in, and the shared shallow pass resolves its names
-    /// in owner scope. The answer's own names are gated as usual, but
-    /// the initializer's REFERENCE-CHAIN ROOT must be checked too: a
-    /// widened or primitive answer (`p = C` ⇒ `string`) carries no name
-    /// at all while still having read THROUGH a binding the answer never
-    /// names, so the answer-name half alone cannot see it.
-    ///
-    /// Two inventories answer that question and BOTH arms consult both.
-    /// The enclosing FRAME's bindings apply only to a nested signature
-    /// (a root signature does not see its own body-locals). This
-    /// signature's PRECEDING PARAMETERS apply to either arm — they are
-    /// not `locals`, and TS2373 makes "preceding" exact.
-    fn gate_param_default(
-        &self,
-        ty: TypeExpr,
-        initializer: &Expression<'_>,
-        binders: &[Arc<str>],
-        parameters: &rustc_hash::FxHashMap<Arc<str>, u32>,
-    ) -> GatedType {
-        let mut gated = match self {
-            SignatureScope::Root => GatedType::root_signature(ty),
-            SignatureScope::Nested { gate, .. } => {
-                let mut gated = gate.gate(ty, binders);
-                if let Some(root) = chain_root_identifier(initializer) {
-                    if !matches!(gate.lookup(root.name.as_str()), NameBinding::Free) {
-                        gated.add_shadowed([FrameShadowedName::Value(Arc::from(
-                            root.name.as_str(),
-                        ))]);
-                    }
-                }
-                gated
-            }
-        };
-        if let Some(root) = chain_root_identifier(initializer) {
-            let limit = initializer.span().start;
-            if parameters
-                .get(root.name.as_str())
-                .is_some_and(|end| *end <= limit)
-            {
-                gated.add_shadowed([FrameShadowedName::Value(Arc::from(root.name.as_str()))]);
-            }
-        }
-        gated
-    }
 }
 
 /// Lower ONE indexed function's own type-parameter clause against the
@@ -1038,7 +944,7 @@ pub(crate) fn build_flow_slice_content(
     let type_param_names = slice_type_param_names(&node);
     let root_captures = CaptureScope::default();
     let captures = context
-        .map(|context| &context.captures)
+        .map(|context| context.captures())
         .unwrap_or(&root_captures);
     let signature_scope = match context {
         Some(_) => SignatureScope::Nested {
@@ -1051,12 +957,9 @@ pub(crate) fn build_flow_slice_content(
         Some(annotation) => {
             let (returned, predicate) =
                 lower_return_annotation(&annotation.type_annotation, source);
-            let gate = |ty: TypeExpr| signature_scope.gate(ty, signature_scope.param_binders());
-            let declared_predicate = predicate.map(|predicate| SlicePredicate {
-                target: predicate.ty.as_deref().cloned().map(gate),
-                predicate,
-            });
-            (Some(gate(returned)), declared_predicate)
+            let declared_predicate =
+                predicate.map(|predicate| signature_scope.predicate(predicate));
+            (Some(signature_scope.gate(returned)), declared_predicate)
         }
         None => (None, None),
     };
@@ -1117,8 +1020,8 @@ pub(crate) fn build_flow_slice_content(
     // marking it frame-bound would fail closed on. The class clause
     // therefore reaches the answer through the EVALUATOR's binder
     // environment only.
-    let frame_gate =
-        Arc::new(DefiningFrameGate {
+    let frame_gate = DefiningFrameGate::seal(
+        DefiningFrameDiscovery {
             skeleton: Arc::clone(skeleton),
             bindings: Arc::clone(&bindings),
             type_parameters: Arc::from(type_param_names.clone()),
@@ -1126,33 +1029,7 @@ pub(crate) fn build_flow_slice_content(
                 .iter()
                 .map(|param| Arc::clone(&param.name))
                 .collect(),
-            parameters: params
-                .iter()
-                .enumerate()
-                .flat_map(|(ordinal, param)| {
-                    param
-                        .binding
-                        .map(|binding| CaptureParameterLocator {
-                            binding,
-                            ordinal,
-                            key: None,
-                            has_default: false,
-                        })
-                        .into_iter()
-                        .chain(param.destructured.iter().map(move |element| {
-                            CaptureParameterLocator {
-                                binding: element.binding,
-                                ordinal,
-                                key: Some(Arc::clone(&element.key)),
-                                has_default: element.has_default,
-                            }
-                        }))
-                })
-                .map(|parameter| (parameter.binding, parameter))
-                .collect::<rustc_hash::FxHashMap<_, _>>()
-                .into(),
-            parameter_names: Arc::new(signature_parameter_bindings(skeleton, anchor)),
-            modelled_patterns: Arc::new(modelled_pattern_bindings(
+            modelled_patterns: modelled_pattern_bindings(
                 program.source_text,
                 &nested_function_bodies(index, entry),
                 anchor,
@@ -1161,12 +1038,15 @@ pub(crate) fn build_flow_slice_content(
                 body,
                 &bindings,
                 anchor,
-            )),
-            body_hash: entry.flow_body_exact_hash()?,
+            ),
             snapshot: snapshot.clone(),
             outer: captures.clone(),
             anchor,
-        });
+        },
+        entry,
+        &params,
+    )
+    .ok()?;
     // A direct class-declaration member reads its receiver; a nested
     // function reads the `this` its creating frame handed it; a module-level
     // function declaration with no `this` parameter has no receiver the
@@ -1182,7 +1062,7 @@ pub(crate) fn build_flow_slice_content(
                 if function.is_declaration() && function.this_param.is_none()
         );
     let this = match context {
-        Some(context) => context.this.clone(),
+        Some(context) => context.this().cloned(),
         None if untyped_declaration_this => Some(SliceThis::Untyped),
         None => resolved.enclosing_this.and_then(|this| {
             let class = Arc::clone(&entry.key().declaration.name);
@@ -2847,8 +2727,7 @@ fn pure_optional_member_root_identifier<'a>(
 /// top without comparing the value it would produce (a comparison would
 /// walk a nested value through every level it nests).
 fn widens_mutable_slot_literals(value: &SliceExpr) -> bool {
-    let is_literal_leaf =
-        |value: &SliceExpr| matches!(value, SliceExpr::Type(GatedLeaf(TypeExpr::Literal(_), _)));
+    let is_literal_leaf = |value: &SliceExpr| matches!(value, SliceExpr::Type(leaf) if matches!(leaf.ty(), TypeExpr::Literal(_)));
     let mut value = value;
     loop {
         return match value {
@@ -2875,11 +2754,8 @@ fn widens_mutable_slot_literals(value: &SliceExpr) -> bool {
 fn widen_mutable_slot_literals(mut value: SliceExpr) -> SliceExpr {
     match &mut value {
         SliceExpr::Type(leaf) => {
-            let taken = std::mem::replace(
-                leaf,
-                GatedLeaf(TypeExpr::Primitive(PrimitiveName::Any), None),
-            );
-            *leaf = taken.map_ty(verter_semantic::analysis::type_eval_build::widen_shallow_literal);
+            let taken = std::mem::replace(leaf, GatedLeaf::primitive(PrimitiveName::Any));
+            *leaf = taken.widen_literal();
         }
         SliceExpr::Not { widen, .. }
         | SliceExpr::Logical { widen, .. }
@@ -2892,9 +2768,7 @@ fn widen_mutable_slot_literals(mut value: SliceExpr) -> SliceExpr {
             *arms = Arc::from(
                 arms.iter()
                     .map(|arm| match arm {
-                        SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().map_ty(
-                            verter_semantic::analysis::type_eval_build::widen_shallow_literal,
-                        )),
+                        SliceExpr::Type(leaf) => SliceExpr::Type(leaf.clone().widen_literal()),
                         SliceExpr::Not { .. } | SliceExpr::Logical { .. } => {
                             widen_mutable_slot_literals(arm.clone())
                         }
@@ -3477,25 +3351,6 @@ pub(crate) mod lowering_probe {
     }
 }
 
-fn signature_parameter_bindings(
-    skeleton: &FunctionBodySkeleton,
-    anchor: u32,
-) -> rustc_hash::FxHashMap<Arc<str>, u32> {
-    let mut parameters = rustc_hash::FxHashMap::default();
-    for binding in skeleton.bindings.iter() {
-        #[cfg(test)]
-        capture_lookup_probe::inspect();
-        if binding.kind == SkeletonBindingKind::Param {
-            let end = binding.span.to_absolute(anchor).end;
-            parameters
-                .entry(Arc::from(skeleton.name(binding.name)))
-                .and_modify(|earliest: &mut u32| *earliest = (*earliest).min(end))
-                .or_insert(end);
-        }
-    }
-    parameters
-}
-
 /// Rebase a LIVE source span onto a function's own anchor.
 fn rebase_span(anchor: u32, span: oxc_span::Span) -> FrameSpan {
     FrameSpan::rebase(anchor, verter_span::Span::new(span.start, span.end))
@@ -3536,39 +3391,6 @@ fn this_member_path(member: &oxc_ast::ast::StaticMemberExpression<'_>) -> Option
     }
     path.reverse();
     Some(path)
-}
-
-/// The parameter names one signature answer references — the
-/// PARAMETER-LIST half of the frame gate.
-///
-/// `visible_before` is the byte offset a DEFAULT INITIALIZER starts at,
-/// or `None` for an ANNOTATION. An annotation sees the WHOLE parameter
-/// list (`f(a: number, p: X, b: typeof p)` binds the parameter `p`
-/// regardless of order); a default initializer sees only the PRECEDING
-/// parameters, because TS2373 rejects a forward reference outright and a
-/// later same-named parameter must not mask the outer declaration the
-/// initializer genuinely reads.
-fn parameter_list_shadowed(
-    ty: &TypeExpr,
-    parameters: &rustc_hash::FxHashMap<Arc<str>, u32>,
-    visible_before: Option<u32>,
-) -> Vec<FrameShadowedName> {
-    let names = verter_type_expr::referenced_names(ty);
-    let mut out: Vec<FrameShadowedName> = Vec::new();
-    for root in &names.value_roots {
-        #[cfg(test)]
-        capture_lookup_probe::inspect();
-        let bound = parameters
-            .get(root.as_str())
-            .is_some_and(|end| visible_before.is_none_or(|limit| *end <= limit));
-        if bound {
-            let entry = FrameShadowedName::Value(Arc::from(root.as_str()));
-            if !out.contains(&entry) {
-                out.push(entry);
-            }
-        }
-    }
-    out
 }
 
 /// Lower the formal parameters: binding name, optional/rest flags, and the
@@ -3650,8 +3472,7 @@ fn lower_params(
     anchor: u32,
     nullability: verter_session_query::flow::policy::NullabilityPolicy,
 ) -> Result<Vec<SliceParam>, verter_type_expr::facts::InferenceUnavailableReason> {
-    let binders = scope.param_binders();
-    let parameter_bindings = signature_parameter_bindings(skeleton, anchor);
+    let parameter_bindings = SignatureParameters::of(skeleton, anchor);
     let mut out = Vec::with_capacity(param_items.len() + usize::from(param_rest.is_some()));
     for param in param_items {
         let name = match &param.pattern {
@@ -3709,45 +3530,32 @@ fn lower_params(
                 .collect(),
             _ => Arc::from(Vec::new().into_boxed_slice()),
         };
-        let (mut ty, visible_before) =
-            match (param.type_annotation.as_ref(), param.initializer.as_ref()) {
-                (Some(annotation), _) => (
-                    scope.gate(lower_ts_type(&annotation.type_annotation, source), binders),
-                    None,
-                ),
-                (None, Some(initializer)) => (
-                    scope.gate_param_default(
-                        widen_arrow_fresh_literal_return(
-                            initializer,
-                            infer_declaration_expression_type(
-                                initializer,
-                                source,
-                                TopLevelLiteralPolicy::Widen,
-                            )?,
-                        ),
+        let declaration = match (param.type_annotation.as_ref(), param.initializer.as_ref()) {
+            (Some(annotation), _) => {
+                ParameterDeclaration::Annotated(lower_ts_type(&annotation.type_annotation, source))
+            }
+            (None, Some(initializer)) => ParameterDeclaration::Defaulted {
+                ty: widen_arrow_fresh_literal_return(
+                    initializer,
+                    infer_declaration_expression_type(
                         initializer,
-                        binders,
-                        &parameter_bindings,
-                    ),
-                    Some(initializer.span().start),
+                        source,
+                        TopLevelLiteralPolicy::Widen,
+                    )?,
                 ),
-                (None, None) => (
-                    GatedType::root_signature(TypeExpr::Primitive(PrimitiveName::Any)),
-                    None,
-                ),
-            };
-        let extra = parameter_list_shadowed(ty.ty(), &parameter_bindings, visible_before);
-        ty.add_shadowed(extra);
+                root: chain_root_identifier(initializer).map(|root| root.name.as_str()),
+                start: initializer.span().start,
+            },
+            (None, None) => ParameterDeclaration::Untyped,
+        };
+        let ty = scope.parameter(declaration, &parameter_bindings);
         // An optional (`?`) parameter is `T | undefined` inside the body
         // under `strictNullChecks`; with it off `undefined` is already a
         // member of every type and the checker adds nothing. A defaulted
         // parameter always has a value. The union rides the SAME gate
         // verdict: adding `undefined` names nothing new.
         let ty = if param.optional && param.initializer.is_none() && nullability.is_strict() {
-            GatedType {
-                ty: TypeExpr::union(vec![ty.ty, TypeExpr::Primitive(PrimitiveName::Undefined)]),
-                shadowed: ty.shadowed,
-            }
+            ty.or_undefined()
         } else {
             ty
         };
@@ -3773,14 +3581,16 @@ fn lower_params(
             BindingPattern::BindingIdentifier(id) => Some(Arc::from(id.name.as_str())),
             _ => None,
         };
-        let mut ty = match rest.type_annotation.as_ref() {
-            Some(annotation) => {
-                scope.gate(lower_ts_type(&annotation.type_annotation, source), binders)
-            }
-            None => GatedType::root_signature(TypeExpr::Primitive(PrimitiveName::Any)),
-        };
-        let extra = parameter_list_shadowed(ty.ty(), &parameter_bindings, None);
-        ty.add_shadowed(extra);
+        let ty = scope.parameter(
+            match rest.type_annotation.as_ref() {
+                Some(annotation) => ParameterDeclaration::Annotated(lower_ts_type(
+                    &annotation.type_annotation,
+                    source,
+                )),
+                None => ParameterDeclaration::Untyped,
+            },
+            &parameter_bindings,
+        );
         out.push(SliceParam {
             binding: match &rest.rest.argument {
                 BindingPattern::BindingIdentifier(id) => bindings.declaration_at_span(
@@ -4018,20 +3828,13 @@ impl SelectedAnnotationFinder<'_> {
         annotation: Option<&oxc_ast::ast::TSTypeAnnotation<'_>>,
         initializer: Option<&Expression<'_>>,
     ) {
-        let gate = &self.locator.gate;
+        let gate = self.locator.gate();
         let scope = SignatureScope::Nested {
-            gate: &gate.outer,
-            binders: &gate.type_parameters,
+            gate: gate.outer(),
+            binders: gate.type_parameters(),
         };
-        let parameter_bindings = &gate.parameter_names;
-        let (mut gated, visible_before) = if let Some(annotation) = annotation {
-            (
-                scope.gate(
-                    lower_ts_type(&annotation.type_annotation, self.source),
-                    &gate.type_parameters,
-                ),
-                None,
-            )
+        let declaration = if let Some(annotation) = annotation {
+            ParameterDeclaration::Annotated(lower_ts_type(&annotation.type_annotation, self.source))
         } else if let Some(initializer) = initializer {
             let Ok(ty) = infer_declaration_expression_type(
                 initializer,
@@ -4040,27 +3843,15 @@ impl SelectedAnnotationFinder<'_> {
             ) else {
                 return;
             };
-            (
-                scope.gate_param_default(
-                    ty,
-                    initializer,
-                    &gate.type_parameters,
-                    parameter_bindings,
-                ),
-                Some(initializer.span().start),
-            )
+            ParameterDeclaration::Defaulted {
+                ty,
+                root: chain_root_identifier(initializer).map(|root| root.name.as_str()),
+                start: initializer.span().start,
+            }
         } else {
-            (
-                GatedType::root_signature(TypeExpr::Primitive(PrimitiveName::Any)),
-                None,
-            )
+            ParameterDeclaration::Untyped
         };
-        gated.add_shadowed(parameter_list_shadowed(
-            gated.ty(),
-            parameter_bindings,
-            visible_before,
-        ));
-        self.found = Some(Some(gated));
+        self.found = Some(Some(scope.parameter(declaration, gate.parameter_names())));
     }
 }
 
@@ -4124,23 +3915,17 @@ impl<'a> Visit<'a> for SelectedAnnotationFinder<'_> {
     }
 
     fn visit_variable_declarator(&mut self, declarator: &oxc_ast::ast::VariableDeclarator<'a>) {
-        if self.locator.parameter_ordinal.is_none()
+        if self.locator.parameter_ordinal().is_none()
             && matches!(&declarator.id, BindingPattern::BindingIdentifier(id) if id.span == self.target)
         {
             self.found = Some(declarator.type_annotation.as_ref().map(|annotation| {
                 let ty = lower_ts_type(&annotation.type_annotation, self.source);
+                let gate = self.locator.gate();
                 let span = FrameSpan::rebase(
-                    self.locator.gate.anchor,
+                    gate.anchor(),
                     verter_span::Span::new(self.target.start, self.target.end),
                 );
-                GatedType {
-                    shadowed: self
-                        .locator
-                        .gate
-                        .answer_names_frame_bound(&ty, span, &[])
-                        .into(),
-                    ty,
-                }
+                gate.gate(ty, span, &[])
             }));
         } else if self.contains(declarator.span) {
             walk::walk_variable_declarator(self, declarator);
@@ -4148,7 +3933,7 @@ impl<'a> Visit<'a> for SelectedAnnotationFinder<'_> {
     }
 
     fn visit_formal_parameter(&mut self, parameter: &oxc_ast::ast::FormalParameter<'a>) {
-        if self.locator.parameter_ordinal.is_some()
+        if self.locator.parameter_ordinal().is_some()
             && pattern_has_identifier(&parameter.pattern, self.target)
         {
             self.parameter(
@@ -4161,7 +3946,7 @@ impl<'a> Visit<'a> for SelectedAnnotationFinder<'_> {
     }
 
     fn visit_formal_parameter_rest(&mut self, parameter: &oxc_ast::ast::FormalParameterRest<'a>) {
-        if self.locator.parameter_ordinal.is_some()
+        if self.locator.parameter_ordinal().is_some()
             && pattern_has_identifier(&parameter.rest.argument, self.target)
         {
             self.parameter(parameter.type_annotation.as_deref(), None);
@@ -4179,17 +3964,17 @@ pub(crate) fn build_flow_capture_authority(
     entry: &FunctionProgramEntry,
     locator: &SliceCaptureAuthorityLocator,
 ) -> Option<Option<SliceCaptureAuthority>> {
-    if *entry.key() != locator.declaration.defining_function
-        || entry.flow_body_exact_hash() != Some(locator.gate.body_hash)
+    if *entry.key() != locator.declaration().defining_function
+        || entry.flow_body_exact_hash() != Some(locator.gate().body_hash())
     {
         return None;
     }
-    let binding = locator.gate.bindings.local(&locator.declaration)?;
-    let fact = locator.gate.skeleton.binding(binding);
+    let binding = locator.gate().bindings().local(&locator.declaration())?;
+    let fact = locator.gate().skeleton().binding(binding);
     let authored = entry
         .bindings()
-        .get(locator.declaration.binding_slot as usize)?;
-    let absolute = fact.span.to_absolute(locator.gate.anchor);
+        .get(locator.declaration().binding_slot as usize)?;
+    let absolute = fact.span.to_absolute(locator.gate().anchor());
     if authored.span != absolute {
         return None;
     }
@@ -4203,10 +3988,10 @@ pub(crate) fn build_flow_capture_authority(
         finder.visit_program(program)
     });
     Some(finder.found?.map(|declared| SliceCaptureAuthority {
-        binding: locator.binding.clone(),
-        name: locator.declaration.name.clone(),
+        binding: locator.binding().clone(),
+        name: locator.declaration().name.clone(),
         declared,
-        source: locator.source.clone(),
+        source: locator.source().clone(),
     }))
 }
 
@@ -5297,7 +5082,7 @@ impl<'a> Lowerer<'a> {
     /// does a `class T` in a nested frame (`function f<T>() { return ()
     /// => { class T {}; … } }`), while a nearer `<T>` shadows an outer
     /// frame's `class T`. All three directions are checker-verified.
-    /// [`Lowerer::capture_scope_for`] keeps the captured inventories
+    /// [`DefiningFrameGate::nested_context`] keeps the captured inventories
     /// disjoint per name, so step 4 needs no nesting order of its own.
     fn name_is_frame_bound(
         &self,
@@ -5310,18 +5095,10 @@ impl<'a> Lowerer<'a> {
             .name_is_bound(name, self.rebase(span), meaning, binders)
     }
 
-    /// THE gated constructor: lower-then-gate one answer produced at
-    /// `span` inside this frame, under `binders`.
-    ///
-    /// Together with [`GatedType::root_signature`] this is the whole
-    /// mint surface for a slice-content type, so an entrance that
-    /// forgets the frame does not compile.
+    /// Gate one answer produced at `span` inside this frame, under
+    /// `binders` — through the frame's own gate operation.
     fn gate(&self, ty: TypeExpr, span: oxc_span::Span, binders: &[Arc<str>]) -> GatedType {
-        let shadowed = self.answer_names_frame_bound(&ty, span, binders);
-        GatedType {
-            ty,
-            shadowed: Arc::from(shadowed.into_boxed_slice()),
-        }
+        self.frame_gate.gate(ty, self.rebase(span), binders)
     }
 
     /// Runtime aliases retain one canonical slot and constant-size source
@@ -5336,21 +5113,19 @@ impl<'a> Lowerer<'a> {
         }
         let fact = self.skeleton.binding(binding);
         match fact.kind {
-            SkeletonBindingKind::Param => match self.frame_gate.parameters.get(&binding) {
+            SkeletonBindingKind::Param => match self.frame_gate.parameter(&binding) {
                 Some(_) if fact.destructured => NameBinding::Local(None),
-                None if fact.destructured
-                    && self.frame_gate.modelled_patterns.contains(&binding) =>
-                {
+                None if fact.destructured && self.frame_gate.is_modelled_pattern(&binding) => {
                     NameBinding::Local(None)
                 }
                 Some(parameter) if shape.has_var => {
-                    NameBinding::Local(Some(parameter.ordinal as u32))
+                    NameBinding::Local(Some(parameter.ordinal() as u32))
                 }
-                Some(parameter) => NameBinding::Param(parameter.ordinal as u32),
+                Some(parameter) => NameBinding::Param(parameter.ordinal() as u32),
                 None => NameBinding::Unmodeled,
             },
             SkeletonBindingKind::Const | SkeletonBindingKind::Let | SkeletonBindingKind::Var
-                if !fact.destructured || self.frame_gate.modelled_patterns.contains(&binding) =>
+                if !fact.destructured || self.frame_gate.is_modelled_pattern(&binding) =>
             {
                 NameBinding::Local(None)
             }
@@ -5358,19 +5133,6 @@ impl<'a> Lowerer<'a> {
             SkeletonBindingKind::CatchParam if !fact.destructured => NameBinding::Local(None),
             SkeletonBindingKind::NestedFunction => NameBinding::NestedFunction,
             _ => NameBinding::Unmodeled,
-        }
-    }
-
-    /// Retain the shared defining frame and the exact lexical region only.
-    /// Captured values and annotation locators are selected by the child graph.
-    fn capture_scope_for(&self, function_span: oxc_span::Span) -> CaptureScope {
-        CaptureScope {
-            enclosing: Some(Arc::new(CapturedFrame {
-                gate: Arc::clone(&self.frame_gate),
-                region: self
-                    .skeleton
-                    .innermost_region_containing(self.rebase(function_span)),
-            })),
         }
     }
 
@@ -5570,10 +5332,7 @@ impl<'a> Lowerer<'a> {
                     let mut predicate_test = None;
                     let argument = ret.argument.as_ref().map(|arg| {
                         if bare_self_call {
-                            SliceExpr::Type(GatedLeaf(
-                                TypeExpr::Primitive(PrimitiveName::Never),
-                                None,
-                            ))
+                            SliceExpr::Type(GatedLeaf::primitive(PrimitiveName::Never))
                         } else if self.value_span_selected(arg.span()) {
                             let lowered = self.lower_expr(arg, ExprMode::Return);
                             predicate_test = self.return_predicate_test(arg);
@@ -6549,8 +6308,7 @@ impl<'a> Lowerer<'a> {
         let pattern = self.lower_pattern(&declarator.id)?;
         let bindings = pattern.bindings();
         if !bindings.iter().any(|(binding, _)| {
-            self.frame_gate.modelled_patterns.contains(binding)
-                && self.binding_is_selected(*binding)
+            self.frame_gate.is_modelled_pattern(binding) && self.binding_is_selected(*binding)
         }) {
             return None;
         }
@@ -9415,13 +9173,13 @@ impl<'a> Lowerer<'a> {
             | FlowBindingOccurrence::UnmodeledLocal
             | FlowBindingOccurrence::Missing => return None,
         };
-        let declarations = gate.bindings.runtime_declarations(local);
+        let declarations = gate.bindings().runtime_declarations(local);
         if declarations.is_empty() {
             return None;
         }
         let mut annotated: Vec<FrameSpan> = Vec::new();
         for declaration in declarations {
-            let fact = gate.skeleton.binding(*declaration);
+            let fact = gate.skeleton().binding(*declaration);
             match fact.kind {
                 SkeletonBindingKind::Const
                 | SkeletonBindingKind::Let
@@ -9442,10 +9200,10 @@ impl<'a> Lowerer<'a> {
         if annotated.is_empty() {
             return Some(StatementCallEffect::Inert);
         }
-        let entry = self.index.get(gate.bindings.function())?;
+        let entry = self.index.get(gate.bindings().function())?;
         let mut finder = DeclaredCallEffects {
             within: entry.entry().span(),
-            anchor: gate.anchor,
+            anchor: gate.anchor(),
             names: annotated,
             effects: Vec::new(),
         };
@@ -11649,20 +11407,26 @@ impl<'a> Lowerer<'a> {
             // verdict the classifier gives every other one —
             // publishing the `any` was a fabricated value at a
             // call position, warm and clean.
-            LeafLowering::Free(ty) if is_any(&ty) => SliceExpr::UnreducedCallValue,
-            LeafLowering::Free(ty) => SliceExpr::Call(
-                SliceCall::Symbolic(ty.clone(), self.frame_root_for_type(&ty, expr)),
-                call_site(call),
-                SliceCallArguments::none(),
-            ),
-            LeafLowering::FrameShadowed { ty, shadowed } => SliceExpr::FrameShadowed {
-                inner: Box::new(SliceExpr::Call(
-                    SliceCall::Symbolic(ty.clone(), self.frame_root_for_type(&ty, expr)),
+            LeafLowering::Answer(answer) if is_any(answer.ty()) => SliceExpr::UnreducedCallValue,
+            LeafLowering::Answer(answer) => {
+                let frame_root = self
+                    .frame_gate
+                    .value_root(answer.ty(), self.leaf_root(expr));
+                let (ty, shadowed) = answer.into_parts();
+                let symbolic = SliceExpr::Call(
+                    SliceCall::Symbolic(ty, frame_root),
                     call_site(call),
                     SliceCallArguments::none(),
-                )),
-                shadowed,
-            },
+                );
+                if shadowed.is_empty() {
+                    symbolic
+                } else {
+                    SliceExpr::FrameShadowed {
+                        inner: Box::new(symbolic),
+                        shadowed,
+                    }
+                }
+            }
         }
     }
 
@@ -12377,9 +12141,7 @@ impl<'a> Lowerer<'a> {
             EvolvingLowering::Unselected => {
                 return match expr {
                     Expression::AssignmentExpression(_) => SliceExpr::Elided,
-                    _ => {
-                        SliceExpr::Type(GatedLeaf(TypeExpr::Primitive(PrimitiveName::Number), None))
-                    }
+                    _ => SliceExpr::Type(GatedLeaf::primitive(PrimitiveName::Number)),
                 }
             }
             EvolvingLowering::NotEvolving => {}
@@ -12732,10 +12494,10 @@ impl<'a> Lowerer<'a> {
                 if let Some(write) = self.modeled_void_write(unwrapped) {
                     return SliceExpr::Void {
                         operand: Box::new(write),
-                        value: Box::new(SliceExpr::Type(GatedLeaf(
-                            widening_nullish_type(unwrapped),
-                            None,
-                        ))),
+                        value: Box::new(SliceExpr::Type(
+                            GatedLeaf::nameless(widening_nullish_type(unwrapped))
+                                .expect("a nullish widening is built from primitives"),
+                        )),
                     };
                 }
                 if let Some(operation) = self.lower_operator_form(unwrapped, mode) {
@@ -13069,15 +12831,11 @@ impl<'a> Lowerer<'a> {
             path: full,
             type_args: Vec::new(),
         });
-        let shadowed = self.answer_names_frame_bound(&ty, expr.span(), &[]);
-        if shadowed.is_empty() {
+        let answer = self.frame_gate.answer(ty, self.rebase(expr.span()));
+        if answer.is_free() {
             return None;
         }
-        let frame_root = self.frame_root_for_type(&ty, expr);
-        Some(SliceExpr::FrameShadowed {
-            inner: Box::new(SliceExpr::Type(GatedLeaf(ty, frame_root))),
-            shadowed: Arc::from(shadowed.into_boxed_slice()),
-        })
+        Some(self.frame_gate.leaf(answer, self.leaf_root(expr)))
     }
 
     /// An operator form whose value the checker computes from its
@@ -13228,10 +12986,9 @@ impl<'a> Lowerer<'a> {
             // A free `undefined` is not a declaration the owner scope can
             // answer: its value IS the `undefined` type (the shared shallow
             // pass reads it the same way).
-            NameBinding::Free if name == "undefined" => SliceExpr::Type(GatedLeaf(
-                TypeExpr::Primitive(PrimitiveName::Undefined),
-                None,
-            )),
+            NameBinding::Free if name == "undefined" => {
+                SliceExpr::Type(GatedLeaf::primitive(PrimitiveName::Undefined))
+            }
             // A static member reading its own class, or an object literal's
             // method reading the variable that holds the literal, reads the
             // value its receiver is: the deferred type of the value being
@@ -13245,15 +13002,18 @@ impl<'a> Lowerer<'a> {
             {
                 SliceExpr::This(self.this.clone().expect("guarded"))
             }
-            NameBinding::Free => {
-                match self.namespace_scoped_leaf(TypeExpr::TypeOf(verter_type_expr::ValueRef {
-                    path: vec![name.to_owned()],
-                    type_args: Vec::new(),
-                })) {
-                    LeafLowering::Free(ty) => SliceExpr::Type(GatedLeaf(ty, None)),
-                    _ => SliceExpr::UnmodeledBinding,
+            // The occurrence index resolves the read as free, so its
+            // `typeof name` answer names nothing this frame binds.
+            NameBinding::Free => match self
+                .frame_gate
+                .free_read(name, self.rebase(identifier.span))
+                .map(|answer| self.namespace_scoped_leaf(answer))
+            {
+                Some(LeafLowering::Answer(answer)) if answer.is_free() => {
+                    self.frame_gate.leaf(answer, None)
                 }
-            }
+                _ => SliceExpr::UnmodeledBinding,
+            },
         }
     }
 
@@ -13520,22 +13280,21 @@ impl<'a> Lowerer<'a> {
         let super_class = heritage_access.super_class;
         // The heritage expression's gated value type, through the same
         // leaf lowering + frame gate any authored heritage read takes.
-        let (ty, shadowed) = match self.leaf_type(super_class, mode) {
+        let heritage = match self.leaf_type(super_class, mode) {
             // A heritage the shared shallow pass cannot model (a call, a
             // computed composition) has no honest base to walk.
             LeafLowering::Unmodeled => return None,
-            LeafLowering::Free(ty) => {
-                let shadowed = self.answer_names_frame_bound(&ty, super_class.span(), &[]);
-                (ty, Arc::from(shadowed.into_boxed_slice()))
+            // A free answer is gated again as the type it now is (a
+            // namespace member read is re-rooted under its block).
+            LeafLowering::Answer(answer) if answer.is_free() => {
+                self.gate(answer.into_ty(), super_class.span(), &[])
             }
-            LeafLowering::FrameShadowed { ty, shadowed } => (ty, shadowed),
+            LeafLowering::Answer(answer) => answer.into_gated(),
         };
+        let shadowed = heritage.shared_shadowed();
         let call_expr = SliceExpr::Call(
             SliceCall::OnHeritage {
-                heritage: GatedType {
-                    ty,
-                    shadowed: Arc::clone(&shadowed),
-                },
+                heritage,
                 member: Arc::from(member.to_vec().into_boxed_slice()),
                 static_side: heritage_access.static_side,
                 this: self.keyword_this(),
@@ -13900,10 +13659,10 @@ impl<'a> Lowerer<'a> {
                     key,
                     value,
                     assignment_value: None,
-                    unwidened: Some(SliceExpr::Type(GatedLeaf(
-                        widening_nullish_type(value_expression),
-                        None,
-                    ))),
+                    unwidened: Some(SliceExpr::Type(
+                        GatedLeaf::nameless(widening_nullish_type(value_expression))
+                            .expect("a nullish widening is built from primitives"),
+                    )),
                     method_kind,
                     readonly: policy.readonly(),
                     spans,
@@ -14343,21 +14102,21 @@ impl<'a> Lowerer<'a> {
                 (Arc::clone(&self.frame_gate), *binding)
             }
             FlowBindingOccurrence::Resolved(FlowBindingRef::Captured(identity)) => {
-                let mut current = self.captures.enclosing.as_deref();
+                let mut current = self.captures.enclosing();
                 loop {
                     let frame = current?;
-                    if frame.gate.bindings.function() == &identity.defining_function {
+                    if frame.gate().bindings().function() == &identity.defining_function {
                         break (
-                            Arc::clone(&frame.gate),
-                            frame.gate.bindings.local(identity)?,
+                            Arc::clone(frame.gate()),
+                            frame.gate().bindings().local(identity)?,
                         );
                     }
-                    current = frame.gate.outer.enclosing.as_deref();
+                    current = frame.gate().outer().enclosing();
                 }
             }
             _ => return None,
         };
-        if gate.skeleton.binding(local).kind != SkeletonBindingKind::NestedFunction {
+        if gate.skeleton().binding(local).kind != SkeletonBindingKind::NestedFunction {
             return None;
         }
         let own_frame = Arc::ptr_eq(&gate, &self.frame_gate);
@@ -14413,19 +14172,19 @@ impl<'a> Lowerer<'a> {
         // declaration of its runtime variable: a body declaration of a
         // function expression's own name is the value the name reads.
         let candidates = std::iter::once(local).chain(
-            gate.bindings
+            gate.bindings()
                 .runtime_declarations(local)
                 .iter()
                 .rev()
                 .copied(),
         );
         for candidate in candidates {
-            let fact = gate.skeleton.binding(candidate);
+            let fact = gate.skeleton().binding(candidate);
             if fact.kind != SkeletonBindingKind::NestedFunction {
                 continue;
             }
             let mut finder = Finder {
-                name: fact.span.to_absolute(gate.anchor),
+                name: fact.span.to_absolute(gate.anchor()),
                 found: None,
             };
             self.walks
@@ -14438,10 +14197,10 @@ impl<'a> Lowerer<'a> {
                 // this reads. The skeleton recorded each bodiless
                 // declaration of the runtime variable when it discovered it.
                 if gate
-                    .bindings
+                    .bindings()
                     .runtime_declarations(candidate)
                     .iter()
-                    .any(|declaration| gate.skeleton.binding(*declaration).overload_signature)
+                    .any(|declaration| gate.skeleton().binding(*declaration).overload_signature)
                 {
                     return None;
                 }
@@ -14474,7 +14233,7 @@ impl<'a> Lowerer<'a> {
         };
         self.index
             .nested_at(
-                gate.bindings.function(),
+                gate.bindings().function(),
                 verter_span::Span::new(function.span.start, function.span.end),
             )
             .is_some_and(|entry| entry.entry().key() == self.bindings.function())
@@ -14490,21 +14249,19 @@ impl<'a> Lowerer<'a> {
         own_frame: bool,
     ) -> SliceExpr {
         let node = FunctionNode::Function(function);
-        let Some(entry) = self.index.nested_at(gate.bindings.function(), {
+        let Some(entry) = self.index.nested_at(gate.bindings().function(), {
             let span = node_span(&node);
             verter_span::Span::new(span.start, span.end)
         }) else {
             return SliceExpr::UnmodeledBinding;
         };
         let entry = entry.entry();
-        let captures = CaptureScope {
-            enclosing: Some(Arc::new(CapturedFrame {
-                gate: Arc::clone(gate),
-                region: gate.skeleton.innermost_region_containing(FrameSpan::rebase(
-                    gate.anchor,
-                    verter_span::Span::new(function.span.start, function.span.end),
-                )),
-            })),
+        // A function declaration's `this` is its own.
+        let Some(context) = gate.nested_context(
+            verter_span::Span::new(function.span.start, function.span.end),
+            None,
+        ) else {
+            return SliceExpr::UnmodeledBinding;
         };
         // Every capture reads its declared type where the value is read: the
         // evaluator supplies it for a declaring-frame parameter and whole
@@ -14522,11 +14279,11 @@ impl<'a> Lowerer<'a> {
             if !checked.insert(identity) {
                 continue;
             }
-            let Some(binding) = gate.bindings.local(identity) else {
+            let Some(binding) = gate.bindings().local(identity) else {
                 continue;
             };
-            let binding = gate.bindings.canonical_local(binding);
-            let fact = gate.skeleton.binding(binding);
+            let binding = gate.bindings().canonical_local(binding);
+            let fact = gate.skeleton().binding(binding);
             if fact.evolving_array {
                 declared_evolving_captures.push(identity.clone());
                 continue;
@@ -14555,11 +14312,7 @@ impl<'a> Lowerer<'a> {
         }
         SliceExpr::NestedFunctionValue {
             function: entry.key().clone(),
-            context: Arc::new(NestedFlowContext {
-                captures,
-                // A function declaration's `this` is its own.
-                this: None,
-            }),
+            context: Arc::new(context),
             has_declared_return: function.return_type.is_some(),
             gap,
             declared_evolving_captures: Arc::from(declared_evolving_captures.into_boxed_slice()),
@@ -14592,7 +14345,6 @@ impl<'a> Lowerer<'a> {
             return SliceExpr::UnmodeledBinding;
         };
         let entry = entry.entry();
-        let captures = self.capture_scope_for(node_span(node));
         let invoked_arguments =
             invocation.map(|call| oxc_span::Span::new(call.callee.span().end, call.span.end));
         let mut extended_captures: Vec<SkeletonBindingId> = Vec::new();
@@ -14690,22 +14442,31 @@ impl<'a> Lowerer<'a> {
                 break;
             }
         }
+        // The context retains the shared defining frame and the exact
+        // lexical region only; captured values and annotation locators are
+        // selected by the child graph.
+        let Some(context) = self.frame_gate.nested_context(
+            {
+                let span = node_span(node);
+                verter_span::Span::new(span.start, span.end)
+            },
+            // An arrow has no `this` of its own: it reads its creating
+            // frame's (a class expression's instance initializer reads
+            // the class's own receiver). A class expression's member
+            // function reads the receiver the class binds.
+            match member_this {
+                Some(this) => this,
+                None => match node {
+                    FunctionNode::Arrow(_) | FunctionNode::Initializer(_) => self.this.clone(),
+                    FunctionNode::Function(_) => None,
+                },
+            },
+        ) else {
+            return SliceExpr::UnmodeledBinding;
+        };
         SliceExpr::NestedFunctionValue {
             function: entry.key().clone(),
-            context: Arc::new(NestedFlowContext {
-                captures,
-                // An arrow has no `this` of its own: it reads its creating
-                // frame's (a class expression's instance initializer reads
-                // the class's own receiver). A class expression's member
-                // function reads the receiver the class binds.
-                this: match member_this {
-                    Some(this) => this,
-                    None => match node {
-                        FunctionNode::Arrow(_) | FunctionNode::Initializer(_) => self.this.clone(),
-                        FunctionNode::Function(_) => None,
-                    },
-                },
-            }),
+            context: Arc::new(context),
             has_declared_return: node.return_type().is_some(),
             gap,
             declared_evolving_captures: Arc::from(declared_evolving_captures.into_boxed_slice()),
@@ -14776,8 +14537,8 @@ impl<'a> Lowerer<'a> {
             // over a call with no structural arm — conjoined with "the
             // answer embeds `any`", so a form whose answer the pass DOES
             // model (`f() === 1` is `boolean`) is never refused.
-            LeafLowering::Free(ty) | LeafLowering::FrameShadowed { ty, .. }
-                if leaf_answer_is_fabricated_at_a_call_position(&ty, expr) =>
+            LeafLowering::Answer(answer)
+                if leaf_answer_is_fabricated_at_a_call_position(answer.ty(), expr) =>
             {
                 SliceExpr::UnreducedCallValue
             }
@@ -14788,23 +14549,14 @@ impl<'a> Lowerer<'a> {
             // what follows in the checker. The calls take the same
             // per-callee certification the modelled arms apply; an
             // unprovable one flags the enclosing statement's typed gap.
-            LeafLowering::Free(ty) if is_any(&ty) => {
+            LeafLowering::Answer(answer) if is_any(answer.ty()) => {
                 self.record_decided_above_calls(expr);
                 SliceExpr::SemanticAny
             }
-            LeafLowering::Free(ty) => {
+            LeafLowering::Answer(answer) => {
                 self.record_decided_above_calls(expr);
-                SliceExpr::Type(GatedLeaf(ty.clone(), self.frame_root_for_type(&ty, expr)))
-            }
-            LeafLowering::FrameShadowed { ty, shadowed } => {
-                self.record_decided_above_calls(expr);
-                SliceExpr::FrameShadowed {
-                    inner: Box::new(SliceExpr::Type(GatedLeaf(
-                        ty.clone(),
-                        self.frame_root_for_type(&ty, expr),
-                    ))),
-                    shadowed,
-                }
+                let root = self.leaf_root(expr);
+                self.frame_gate.leaf(answer, root)
             }
         }
     }
@@ -15285,29 +15037,14 @@ impl<'a> Lowerer<'a> {
         unprovable
     }
 
-    /// THE root-identifier gate, half one: the names in the leaf
-    /// lowering's ANSWER that this frame owns.
-    ///
-    /// The shared shallow-pass leaf lowering has no frame — it resolves
-    /// every name it meets in FILE-OWNER SCOPE. So whenever its answer
-    /// carries a `typeof x…` value root or a named type reference the
-    /// frame BINDS, the published answer names whatever the OWNER scope
-    /// has under that name (`typeof CBait.s` / `ReturnType<typeof obj.m>`
-    /// bind the module-scope `CBait` / `obj`, not the local class / local
-    /// object). The name set is read off the produced typed IR through
-    /// the shared exhaustive walk, so it is exactly what the leaf
-    /// referenced — never a re-derivation of the leaf's own traversal.
-    ///
-    /// `span` is the leaf expression's own position: the region the
-    /// frame's authority resolves those names in.
-    fn answer_names_frame_bound(
-        &self,
-        ty: &TypeExpr,
-        span: oxc_span::Span,
-        binders: &[Arc<str>],
-    ) -> Vec<FrameShadowedName> {
-        self.frame_gate
-            .answer_names_frame_bound(ty, self.rebase(span), binders)
+    /// The authored identifier a leaf expression's reference chain is
+    /// rooted at, at its exact position in this frame: the occurrence the
+    /// frame resolves a `typeof` answer's root through.
+    fn leaf_root<'e>(&self, expr: &'e Expression<'e>) -> Option<LeafRootOccurrence<'e>> {
+        chain_root_identifier(expr).map(|root| LeafRootOccurrence {
+            name: root.name.as_str(),
+            span: self.rebase(root.span),
+        })
     }
 
     /// The shared shallow-pass per-expression lowering for the position
@@ -15323,23 +15060,6 @@ impl<'a> Lowerer<'a> {
     /// minted here and carries the root-identifier gate's verdict. Dedicated
     /// frame carriers (including bare identifier reads) are lowered by their
     /// own typed arms rather than through this leaf path.
-    /// Resolve a leaf's value root while its exact lexical position is available.
-    fn frame_root_for_type(&self, ty: &TypeExpr, expr: &Expression<'_>) -> Option<FlowBindingRef> {
-        let value = match ty {
-            TypeExpr::TypeOf(value) => value,
-            TypeExpr::Ref { type_arguments, .. } if type_arguments.len() == 1 => {
-                let TypeExpr::TypeOf(value) = &type_arguments[0] else {
-                    return None;
-                };
-                value
-            }
-            _ => return None,
-        };
-        let root = chain_root_identifier(expr)?;
-        (value.path.first()?.as_str() == root.name.as_str())
-            .then(|| self.binding_at(root.span))
-            .flatten()
-    }
 
     fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> LeafLowering {
         // A JSX element / fragment's value is the configured `JSX`
@@ -15355,14 +15075,7 @@ impl<'a> Lowerer<'a> {
                 name: Arc::from("JSX.Element"),
                 type_arguments: Arc::from(Vec::new().into_boxed_slice()),
             };
-            let shadowed = self.answer_names_frame_bound(&ty, expr.span(), &[]);
-            if shadowed.is_empty() {
-                return LeafLowering::Free(ty);
-            }
-            return LeafLowering::FrameShadowed {
-                ty,
-                shadowed: Arc::from(shadowed.into_boxed_slice()),
-            };
+            return LeafLowering::Answer(self.frame_gate.answer(ty, self.rebase(expr.span())));
         }
         // A return argument PRESERVES its top-level literal: the aggregate
         // widening decision belongs to the return join, which is the only
@@ -15402,20 +15115,17 @@ impl<'a> Lowerer<'a> {
             return LeafLowering::Unmodeled;
         }
         if is_any(&ty) {
-            return LeafLowering::Free(ty);
+            return LeafLowering::Answer(FrameAnswer::primitive(PrimitiveName::Any));
         }
         // A leaf expression is a BODY position: it sits IN this frame's
         // region chain, so no clause is NEARER than the frame's own
         // lexical authority. This frame's clause answers at its own step,
         // behind the skeleton.
-        let shadowed = self.answer_names_frame_bound(&ty, expr.span(), &[]);
-        if shadowed.is_empty() {
-            self.namespace_scoped_leaf(ty)
+        let answer = self.frame_gate.answer(ty, self.rebase(expr.span()));
+        if answer.is_free() {
+            self.namespace_scoped_leaf(answer)
         } else {
-            LeafLowering::FrameShadowed {
-                ty,
-                shadowed: Arc::from(shadowed.into_boxed_slice()),
-            }
+            LeafLowering::Answer(answer)
         }
     }
 
@@ -15426,11 +15136,11 @@ impl<'a> Lowerer<'a> {
     /// block does not export has no declaration of its own the lane can
     /// address, and an answer that embeds a block member in a composite
     /// is not rewritten, so both fail closed.
-    fn namespace_scoped_leaf(&self, ty: TypeExpr) -> LeafLowering {
+    fn namespace_scoped_leaf(&self, answer: FrameAnswer) -> LeafLowering {
         if self.namespace_scopes.is_empty() {
-            return LeafLowering::Free(ty);
+            return LeafLowering::Answer(answer);
         }
-        let names = verter_type_expr::referenced_names(&ty);
+        let names = verter_type_expr::referenced_names(answer.ty());
         let block_member = |root: &str| {
             self.namespace_scopes
                 .iter()
@@ -15442,23 +15152,17 @@ impl<'a> Lowerer<'a> {
             .iter()
             .any(|root| block_member(root).is_some())
         {
-            return LeafLowering::Free(ty);
+            return LeafLowering::Answer(answer);
         }
-        let TypeExpr::TypeOf(value) = &ty else {
+        let TypeExpr::TypeOf(value) = answer.ty() else {
             return LeafLowering::Unmodeled;
         };
         let Some((scope, true)) = value.path.first().and_then(|root| block_member(root)) else {
             return LeafLowering::Unmodeled;
         };
-        if !value.type_args.is_empty() {
-            return LeafLowering::Unmodeled;
-        }
-        let mut path: Vec<String> = scope.qualified.split('.').map(str::to_string).collect();
-        path.extend(value.path.iter().cloned());
-        LeafLowering::Free(TypeExpr::TypeOf(verter_type_expr::ValueRef {
-            path,
-            type_args: Vec::new(),
-        }))
+        answer
+            .qualify_namespace_member(&scope.qualified)
+            .map_or(LeafLowering::Unmodeled, LeafLowering::Answer)
     }
 }
 
@@ -16760,16 +16464,12 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
 /// The root-identifier gate's verdict on one leaf lowering.
 enum LeafLowering {
     Unmodeled,
-    /// Every name the answer depends on is genuinely FREE in this frame:
-    /// the owner-scope answer is the right one.
-    Free(TypeExpr),
-    /// The leaf modelled an answer that NAMES frame-owned bindings: the
-    /// evaluator decides, against the live owner scope, whether those
+    /// The modelled answer with its frame verdict. A free answer's names
+    /// are genuinely FREE in this frame, so the owner-scope answer is the
+    /// right one; an answer that NAMES frame-owned bindings leaves the
+    /// evaluator to decide, against the live owner scope, whether those
     /// names would bind (fail closed) or genuinely answer nothing.
-    FrameShadowed {
-        ty: TypeExpr,
-        shadowed: Arc<[FrameShadowedName]>,
-    },
+    Answer(FrameAnswer),
 }
 
 fn is_any(ty: &TypeExpr) -> bool {

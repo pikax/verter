@@ -1350,39 +1350,95 @@ pub enum ReturnPredicateTest {
     Unexpressible,
 }
 
-/// A leaf `TypeExpr` that has PASSED the frame gate.
+/// A leaf `TypeExpr` that has PASSED the frame gate, with the frame binding
+/// its value path is rooted at.
 ///
-/// The field and the constructor are MODULE-private, so a
-/// [`SliceExpr::Type`] cannot be minted anywhere else: every leaf
-/// answer reaches this carrier through [`Lowerer::lower_leaf`], which
-/// routes it through [`Lowerer::leaf_type`]'s gate verdict first. The
-/// only other channel is [`GatedLeaf::map_ty`], which rewrites the
-/// lowered type while PRESERVING the verdict that was already reached.
+/// Both fields are private. A leaf is built only by
+/// [`DefiningFrameGate::leaf`], which derives the frame root from the
+/// lowered type and the frame's own indexed occurrence of the root
+/// identifier and returns the leaf together with the shadow carrier its
+/// [`FrameAnswer`] verdict calls for, or by [`GatedLeaf::nameless`] /
+/// [`GatedLeaf::primitive`] for an answer that names nothing a frame could
+/// bind. The one transformation, [`GatedLeaf::widen_literal`], only
+/// replaces a literal with its primitive, which introduces no name.
 ///
-/// This is the same confinement [`GatedType`] applies to signature
-/// positions, at the body-leaf position: "produce a `TypeExpr` in slice
-/// content without deciding what the frame does to it" is inexpressible
-/// rather than merely discouraged.
+/// This is structural sealing of the leaf against its frame, not proof
+/// that the lowered type or the root occurrence came from a parser: the
+/// source lowering supplies those inputs.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GatedLeaf(pub TypeExpr, pub Option<FlowBindingRef>);
+pub struct GatedLeaf {
+    ty: TypeExpr,
+    frame_root: Option<FlowBindingRef>,
+}
 
 impl GatedLeaf {
+    /// The frame binding the leaf's `typeof` path is rooted at, when the
+    /// frame resolves the root occurrence.
     pub fn frame_root(&self) -> Option<&FlowBindingRef> {
-        self.1.as_ref()
+        self.frame_root.as_ref()
     }
+
     /// The lowered leaf type.
     #[must_use]
     pub fn ty(&self) -> &TypeExpr {
-        &self.0
+        &self.ty
     }
 
-    /// Rewrite the lowered type PRESERVING the gate verdict.
-    ///
-    /// The one caller widens a non-`as const` object-literal member's
-    /// value, which cannot introduce a name the gate has not already
-    /// seen — widening only ever replaces a literal with its primitive.
-    pub fn map_ty(self, f: impl FnOnce(TypeExpr) -> TypeExpr) -> Self {
-        Self(f(self.0), self.1)
+    /// A leaf whose answer is built only from primitives and literals
+    /// (unions of them included): it names nothing, so no frame can bind
+    /// any part of it and it has no frame root. `None` for any other type.
+    #[must_use]
+    pub fn nameless(ty: TypeExpr) -> Option<Self> {
+        names_nothing(&ty).then_some(Self {
+            ty,
+            frame_root: None,
+        })
+    }
+
+    /// A primitive leaf: it names nothing and has no frame root.
+    #[must_use]
+    pub fn primitive(name: verter_type_expr::PrimitiveName) -> Self {
+        Self {
+            ty: TypeExpr::Primitive(name),
+            frame_root: None,
+        }
+    }
+
+    /// Widen a fresh literal leaf to its primitive (literal widening at a
+    /// mutable location), keeping the frame root; any other leaf is
+    /// returned unchanged. Widening only replaces a literal with its
+    /// primitive, so it cannot introduce a name the gate has not seen.
+    #[must_use]
+    pub fn widen_literal(self) -> Self {
+        use verter_type_expr::{LiteralValue, PrimitiveName};
+        let ty = match self.ty {
+            TypeExpr::Literal(LiteralValue::String(_)) => {
+                TypeExpr::Primitive(PrimitiveName::String)
+            }
+            TypeExpr::Literal(LiteralValue::Number(_)) => {
+                TypeExpr::Primitive(PrimitiveName::Number)
+            }
+            TypeExpr::Literal(LiteralValue::Boolean(_)) => {
+                TypeExpr::Primitive(PrimitiveName::Boolean)
+            }
+            TypeExpr::Literal(LiteralValue::BigInt(_)) => {
+                TypeExpr::Primitive(PrimitiveName::BigInt)
+            }
+            other => other,
+        };
+        Self {
+            ty,
+            frame_root: self.frame_root,
+        }
+    }
+}
+
+/// Whether a type is built only from primitives and literals.
+fn names_nothing(ty: &TypeExpr) -> bool {
+    match ty {
+        TypeExpr::Primitive(_) | TypeExpr::Literal(_) => true,
+        TypeExpr::Union(arms) => arms.iter().all(names_nothing),
+        _ => false,
     }
 }
 
@@ -2413,13 +2469,14 @@ pub enum FrameShadowedName {
 /// A function's authored type predicate: its subject and assertion flag,
 /// with the target gated exactly like the return it stands beside.
 ///
-/// Both fields are currently public, so nothing in the type ties the gated
-/// `target` to the authored `predicate`'s own target: that correspondence
-/// is upheld by the producers, not by the compiler.
+/// Both fields are private. The one constructor,
+/// [`SignatureScope::predicate`], takes the authored predicate and gates
+/// that predicate's OWN target, so the gated target always corresponds to
+/// the authored one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlicePredicate {
-    pub predicate: Arc<verter_type_expr::TypePredicate>,
-    pub target: Option<GatedType>,
+    predicate: Arc<verter_type_expr::TypePredicate>,
+    target: Option<GatedType>,
 }
 
 impl SlicePredicate {
@@ -2442,15 +2499,22 @@ impl SlicePredicate {
 /// The shared shallow-pass lowering has no frame — it resolves every
 /// name it meets in FILE-OWNER SCOPE — so any answer produced inside a
 /// function body position is wrong whenever the frame binds one of the
-/// names it references. Producers mint a value through the frame gate
-/// (`Lowerer::gate`) or the explicitly-named [`GatedType::root_signature`].
-/// Both fields are currently public, so that discipline is upheld by the
-/// producers rather than enforced by the compiler: any crate can build a
-/// value or replace its type or shadow list without consulting a frame.
+/// names it references.
+///
+/// Both fields are private. A value is built only by an operation that
+/// computes its verdict: [`DefiningFrameGate::gate`] at a body position,
+/// [`CaptureScope::gate`] against an enclosing chain, the
+/// [`SignatureScope`] operations for a signature (which add the
+/// parameter-list and default-initializer shadows themselves), a body
+/// [`FrameAnswer`] through [`FrameAnswer::into_gated`], or the
+/// explicitly-named ungated scope choice [`GatedType::root_signature`].
+/// [`GatedType::or_undefined`] is the one transformation and names
+/// nothing new. These are structural guarantees over the supplied type and
+/// scope, not proof that a caller chose the correct scope.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GatedType {
-    pub ty: TypeExpr,
-    pub shadowed: Arc<[FrameShadowedName]>,
+    ty: TypeExpr,
+    shadowed: Arc<[FrameShadowedName]>,
 }
 
 impl GatedType {
@@ -2458,9 +2522,7 @@ impl GatedType {
     /// type-parameter clause, and its parameter defaults.
     ///
     /// Deliberately UNGATED, and the only ungated constructor this type
-    /// names. The fields are public, so a struct literal can also build an
-    /// ungated value; that is a producer discipline, not a compiler-enforced
-    /// boundary.
+    /// names: choosing it is choosing the owner scope.
     /// `checker.ts::resolveName` discards a Type-meaning hit in a
     /// function's own `locals` whenever `lastLocation !== location.body`
     /// (mirrored on the value side by `useOuterVariableScopeInParameter`),
@@ -2491,16 +2553,29 @@ impl GatedType {
         &self.shadowed
     }
 
-    /// WIDEN an existing answer's frame verdict with more shadow
-    /// entries.
-    ///
-    /// NOT a mint and not a third constructor: the answer was already
-    /// produced by one of the two above, and this only records
-    /// additional frame-owned names it references — the signature's own
-    /// PARAMETER LIST inventory, and a default initializer's
-    /// reference-chain root. It only adds entries, so it cannot erase a
-    /// verdict; it is public, like the fields.
-    pub fn add_shadowed(&mut self, extra: impl IntoIterator<Item = FrameShadowedName>) {
+    /// A shared handle on the verdict, for a carrier that repeats it.
+    #[must_use]
+    pub fn shared_shadowed(&self) -> Arc<[FrameShadowedName]> {
+        Arc::clone(&self.shadowed)
+    }
+
+    /// The answer joined with `undefined` (an optional parameter under
+    /// `strictNullChecks`), under the SAME verdict: `undefined` names
+    /// nothing a frame could bind.
+    #[must_use]
+    pub fn or_undefined(self) -> Self {
+        Self {
+            ty: TypeExpr::union(vec![
+                self.ty,
+                TypeExpr::Primitive(verter_type_expr::PrimitiveName::Undefined),
+            ]),
+            shadowed: self.shadowed,
+        }
+    }
+
+    /// Record frame-owned names a signature operation found the answer
+    /// reading through. Only adds entries, so it never erases a verdict.
+    fn add_shadowed(&mut self, extra: impl IntoIterator<Item = FrameShadowedName>) {
         let mut shadowed = self.shadowed.to_vec();
         let before = shadowed.len();
         for entry in extra {
@@ -2514,7 +2589,197 @@ impl GatedType {
     }
 }
 
-/// One type parameter of a function value.
+/// Which signature a parameter list, type-parameter clause, or return
+/// annotation is lowering, and therefore which frame — if any — its
+/// answers are gated against.
+///
+/// NOT defaultable: a call site must choose, because the two arms differ
+/// in exactly the way `resolveName` does and picking the wrong one is
+/// either a silent wrong answer (Root where Nested was needed) or a
+/// spurious fail-closed (the reverse).
+#[derive(Clone, Copy)]
+pub enum SignatureScope<'a> {
+    /// The indexed function's OWN signature: body-local declarations are
+    /// NOT in scope here, so the owner-scope answer is the right one.
+    Root,
+    /// A NESTED function value's signature, which sits INSIDE the
+    /// enclosing frame's body and therefore sees that frame's
+    /// body-locals.
+    Nested {
+        /// The ENCLOSING frame's lexical authority.
+        gate: &'a CaptureScope,
+        /// The nested function's OWN type parameters: they bind inside
+        /// its signature and the evaluator's binder environment carries
+        /// them, so they are the answer's binders, not references into
+        /// the enclosing frame.
+        binders: &'a [Arc<str>],
+    },
+}
+
+/// How one formal parameter declares its type, as the source lowering
+/// read it.
+pub enum ParameterDeclaration<'a> {
+    /// An authored annotation, lowered.
+    Annotated(TypeExpr),
+    /// No annotation but a default initializer: the initializer's inferred
+    /// type, the root identifier of its reference chain (when it has one),
+    /// and its absolute start offset.
+    Defaulted {
+        ty: TypeExpr,
+        root: Option<&'a str>,
+        start: u32,
+    },
+    /// Neither: `any`.
+    Untyped,
+}
+
+impl SignatureScope<'_> {
+    /// Gate one signature-position answer for this scope, under the
+    /// signature's own binders.
+    #[must_use]
+    pub fn gate(&self, ty: TypeExpr) -> GatedType {
+        match self {
+            SignatureScope::Root => GatedType::root_signature(ty),
+            SignatureScope::Nested { gate, binders } => gate.gate(ty, binders),
+        }
+    }
+
+    /// The binders a PARAMETER annotation of this signature lowers
+    /// under: the signature's own type-parameter clause.
+    #[must_use]
+    pub fn param_binders(&self) -> &[Arc<str>] {
+        match self {
+            SignatureScope::Root => &[],
+            SignatureScope::Nested { binders, .. } => binders,
+        }
+    }
+
+    /// The authored type predicate with its own target gated for this
+    /// scope.
+    #[must_use]
+    pub fn predicate(&self, predicate: Arc<verter_type_expr::TypePredicate>) -> SlicePredicate {
+        SlicePredicate {
+            target: predicate.ty.as_deref().cloned().map(|ty| self.gate(ty)),
+            predicate,
+        }
+    }
+
+    /// Gate one formal parameter's declared type for this scope against
+    /// the signature's own parameter list.
+    ///
+    /// A signature's OWN parameter list is a shadowing inventory of THAT
+    /// signature in either arm: a formal parameter is not in the
+    /// function's `locals`, so `typeof p` in a sibling annotation and a
+    /// preceding parameter named in a default initializer both bind the
+    /// PARAMETER, never an outer declaration of the same name. Recording
+    /// them makes the answer fail closed instead of publishing an
+    /// unrelated module-scope symbol's type.
+    ///
+    /// A default initializer is an EXPRESSION evaluated in the scope the
+    /// signature sits in, and the shared shallow pass resolves its names
+    /// in owner scope. Its reference-chain ROOT is checked too: a widened
+    /// or primitive answer (`p = C` ⇒ `string`) carries no name at all
+    /// while still having read THROUGH a binding. The enclosing FRAME's
+    /// bindings apply only to a nested signature; this signature's
+    /// PRECEDING parameters apply to either arm (TS2373 makes "preceding"
+    /// exact).
+    #[must_use]
+    pub fn parameter(
+        &self,
+        declaration: ParameterDeclaration<'_>,
+        parameters: &SignatureParameters,
+    ) -> GatedType {
+        let (mut gated, visible_before) = match declaration {
+            ParameterDeclaration::Annotated(ty) => (self.gate(ty), None),
+            ParameterDeclaration::Defaulted { ty, root, start } => {
+                let mut gated = match self {
+                    SignatureScope::Root => GatedType::root_signature(ty),
+                    SignatureScope::Nested { gate, binders } => {
+                        let mut gated = gate.gate(ty, binders);
+                        if let Some(root) = root {
+                            if !matches!(gate.lookup(root), NameBinding::Free) {
+                                gated.add_shadowed([FrameShadowedName::Value(Arc::from(root))]);
+                            }
+                        }
+                        gated
+                    }
+                };
+                if let Some(root) = root {
+                    if parameters.0.get(root).is_some_and(|end| *end <= start) {
+                        gated.add_shadowed([FrameShadowedName::Value(Arc::from(root))]);
+                    }
+                }
+                (gated, Some(start))
+            }
+            ParameterDeclaration::Untyped => (
+                GatedType::root_signature(TypeExpr::Primitive(
+                    verter_type_expr::PrimitiveName::Any,
+                )),
+                None,
+            ),
+        };
+        let extra = parameters.shadowed_by(gated.ty(), visible_before);
+        gated.add_shadowed(extra);
+        gated
+    }
+}
+
+/// The names one signature's parameter list binds, each with the end
+/// offset of its earliest binding identifier, read from the frame's own
+/// [`FunctionBodySkeleton`] — the SAME single lexical authority every
+/// other classification in this module routes through. A DESTRUCTURED
+/// element is inventoried exactly like a plain binding identifier: the
+/// checker resolves `typeof a` in `f({ a }: { a: number }, b: typeof a)`
+/// to the destructured element.
+///
+/// Derived only from a skeleton ([`SignatureParameters::of`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SignatureParameters(FxHashMap<Arc<str>, u32>);
+
+impl SignatureParameters {
+    /// The parameter-list inventory of the function whose skeleton is
+    /// `skeleton`, anchored at `anchor`.
+    #[must_use]
+    pub fn of(skeleton: &FunctionBodySkeleton, anchor: u32) -> Self {
+        let mut parameters = FxHashMap::default();
+        for binding in skeleton.bindings.iter() {
+            #[cfg(any(test, feature = "test-support"))]
+            capture_lookup_probe::inspect();
+            if binding.kind == SkeletonBindingKind::Param {
+                let end = binding.span.to_absolute(anchor).end;
+                parameters
+                    .entry(Arc::from(skeleton.name(binding.name)))
+                    .and_modify(|earliest: &mut u32| *earliest = (*earliest).min(end))
+                    .or_insert(end);
+            }
+        }
+        Self(parameters)
+    }
+
+    /// The parameter names `ty` reads as value roots that are visible at
+    /// `visible_before` (every one when `None`).
+    fn shadowed_by(&self, ty: &TypeExpr, visible_before: Option<u32>) -> Vec<FrameShadowedName> {
+        let names = verter_type_expr::referenced_names(ty);
+        let mut out: Vec<FrameShadowedName> = Vec::new();
+        for root in &names.value_roots {
+            #[cfg(any(test, feature = "test-support"))]
+            capture_lookup_probe::inspect();
+            let bound = self
+                .0
+                .get(root.as_str())
+                .is_some_and(|end| visible_before.is_none_or(|limit| *end <= limit));
+            if bound {
+                let entry = FrameShadowedName::Value(Arc::from(root.as_str()));
+                if !out.contains(&entry) {
+                    out.push(entry);
+                }
+            }
+        }
+        out
+    }
+}
+
+// One type parameter of a function value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceTypeParam {
     /// The parameter name.
@@ -2836,13 +3101,8 @@ impl SliceFreshness {
     }
 }
 
-/// The names THIS signature's parameter list binds, paired with their
-/// binding-identifier spans, read from the frame's own
-/// [`FunctionBodySkeleton`] — the SAME single lexical authority every
-/// other classification in this module routes through. A DESTRUCTURED
-/// element is inventoried exactly like a plain binding identifier: the
-/// checker resolves `typeof a` in `f({ a }: { a: number }, b: typeof a)`
-/// to the destructured element.
+/// Test observability: counts the lexical inventory probes capture
+/// classification performs while a scope is entered.
 #[cfg(any(test, feature = "test-support"))]
 pub mod capture_lookup_probe {
     use std::cell::RefCell;
@@ -2893,39 +3153,131 @@ pub enum NameBinding {
     Unmodeled,
 }
 
-/// A shared structural lexical frame. It contains no lowered annotation or
-/// semantic value and is queried only for names the selected content uses.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DefiningFrameGate {
+/// The source-assembled inputs of one [`DefiningFrameGate`], before the
+/// boundary seals them against the indexed function they describe.
+///
+/// Public and mutable because source assembly fills it from the retained
+/// parse; nothing reads a discovery as a frame. [`DefiningFrameGate::seal`]
+/// is the only way to turn one into a frame.
+pub struct DefiningFrameDiscovery {
+    /// The function's body skeleton.
     pub skeleton: Arc<FunctionBodySkeleton>,
+    /// The indexed binding correspondence built for the same function.
     pub bindings: Arc<crate::flow::binding::FlowBindingMap>,
+    /// The function's OWN type-parameter names.
     pub type_parameters: Arc<[Arc<str>]>,
     /// The ENCLOSING declaration's clause, by name: a class member's
     /// class clause (`class C<T> { m() { … } }`), empty otherwise.
     pub enclosing_type_parameters: Arc<[Arc<str>]>,
-    pub parameters: Arc<rustc_hash::FxHashMap<SkeletonBindingId, CaptureParameterLocator>>,
-    pub parameter_names: Arc<rustc_hash::FxHashMap<Arc<str>, u32>>,
     /// The bindings a destructuring declarator binds whose whole pattern
-    /// this half models ([`SlicePattern`]).
-    pub modelled_patterns: Arc<FxHashSet<SkeletonBindingId>>,
-    pub body_hash: [u8; 16],
+    /// the content lowering models ([`SlicePattern`]).
+    pub modelled_patterns: FxHashSet<SkeletonBindingId>,
+    /// The retained source snapshot the frame was lowered from.
     pub snapshot: crate::source::snapshot::SnapshotKey,
+    /// The enclosing lexical chain at the function's position.
     pub outer: CaptureScope,
+    /// The function's own start offset: the anchor every frame span is
+    /// relative to.
     pub anchor: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CaptureParameterLocator {
-    pub binding: SkeletonBindingId,
-    pub ordinal: usize,
-    pub key: Option<Arc<str>>,
-    pub has_default: bool,
+/// Why a [`DefiningFrameDiscovery`] does not describe the function it was
+/// sealed against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefiningFrameError {
+    /// The binding map was built for a different function.
+    ForeignBindings,
+    /// The binding map was built over a different skeleton.
+    ForeignSkeleton,
+    /// The indexed function addresses no exact body bytes.
+    NoExactBody,
+    /// A formal parameter names a binding the skeleton does not have.
+    ParameterOutsideFrame,
 }
 
+/// A shared structural lexical frame. It contains no lowered annotation or
+/// semantic value and is queried only for names the selected content uses.
+///
+/// Every field is private and the record is immutable once sealed:
+/// [`DefiningFrameGate::seal`] checks that the binding map was built for the
+/// indexed function and over the supplied skeleton, takes the exact body
+/// hash from the indexed function, and derives the parameter locators and
+/// the signature parameter inventory itself. These are checked structural
+/// relationships, not proof that the discovery inputs came from a parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefiningFrameGate {
+    skeleton: Arc<FunctionBodySkeleton>,
+    bindings: Arc<crate::flow::binding::FlowBindingMap>,
+    type_parameters: Arc<[Arc<str>]>,
+    enclosing_type_parameters: Arc<[Arc<str>]>,
+    parameters: Arc<FxHashMap<SkeletonBindingId, CaptureParameterLocator>>,
+    parameter_names: Arc<SignatureParameters>,
+    modelled_patterns: Arc<FxHashSet<SkeletonBindingId>>,
+    body_hash: [u8; 16],
+    snapshot: crate::source::snapshot::SnapshotKey,
+    outer: CaptureScope,
+    anchor: u32,
+}
+
+/// One formal-parameter binding of a frame: a plain parameter, or a
+/// modelled element of a destructured object-pattern parameter. Derived by
+/// [`DefiningFrameGate::seal`] from the function's lowered parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureParameterLocator {
+    binding: SkeletonBindingId,
+    ordinal: usize,
+    key: Option<Arc<str>>,
+    has_default: bool,
+}
+
+impl CaptureParameterLocator {
+    /// The parameter's binding.
+    #[must_use]
+    pub fn binding(&self) -> SkeletonBindingId {
+        self.binding
+    }
+
+    /// The parameter's ordinal in the signature.
+    #[must_use]
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+
+    /// The annotation member a destructured element binds; `None` for a
+    /// plain parameter.
+    #[must_use]
+    pub fn key(&self) -> Option<&Arc<str>> {
+        self.key.as_ref()
+    }
+
+    /// Whether a destructured element authored a default initializer.
+    #[must_use]
+    pub fn has_default(&self) -> bool {
+        self.has_default
+    }
+}
+
+/// One enclosing frame of a capture chain, at the lexical region its child
+/// sits in. Built only by [`DefiningFrameGate::nested_context`], which
+/// derives the region from the child's own position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedFrame {
-    pub gate: Arc<DefiningFrameGate>,
-    pub region: crate::flow::skeleton::SkeletonRegionId,
+    gate: Arc<DefiningFrameGate>,
+    region: crate::flow::skeleton::SkeletonRegionId,
+}
+
+impl CapturedFrame {
+    /// The enclosing frame.
+    #[must_use]
+    pub fn gate(&self) -> &Arc<DefiningFrameGate> {
+        &self.gate
+    }
+
+    /// The enclosing frame's innermost region containing the child.
+    #[must_use]
+    pub fn region(&self) -> crate::flow::skeleton::SkeletonRegionId {
+        self.region
+    }
 }
 
 /// What `this` reads inside a class declaration's member: the checker's
@@ -2968,38 +3320,82 @@ pub enum SliceThis {
 
 /// The exact lexical chain at a nested function's authored position.
 /// Shared frame handles avoid enumerating or copying visible declarations.
+///
+/// The default is the empty chain of a root function. A non-empty chain is
+/// built only by [`DefiningFrameGate::nested_context`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaptureScope {
-    pub enclosing: Option<Arc<CapturedFrame>>,
+    enclosing: Option<Arc<CapturedFrame>>,
 }
 
 /// Owned content-free lexical context at the exact nested function position.
+/// Built only by [`DefiningFrameGate::nested_context`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedFlowContext {
-    pub captures: CaptureScope,
-    /// The lexical `this` an ARROW created in a class member reads; `None`
-    /// for every other nested function, whose `this` is its own.
-    pub this: Option<SliceThis>,
+    captures: CaptureScope,
+    this: Option<SliceThis>,
 }
 
 impl NestedFlowContext {
-    /// What `this` reads inside the nested function.
+    /// The lexical chain at the nested function's position.
+    #[must_use]
+    pub fn captures(&self) -> &CaptureScope {
+        &self.captures
+    }
+
+    /// What `this` reads inside the nested function: the lexical `this` an
+    /// ARROW created in a class member reads; `None` for every other nested
+    /// function, whose `this` is its own.
     pub fn this(&self) -> Option<&SliceThis> {
         self.this.as_ref()
     }
 }
 
 /// An exact source declaration eligible to provide a selected capture's type.
+///
+/// Every field is private: the one producer is
+/// [`NestedFlowContext::mutable_authorities`], which derives each locator
+/// from the enclosing frame that declares the binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SliceCaptureAuthorityLocator {
-    pub binding: crate::function_program::FlowBindingIdentity,
-    pub declaration: crate::function_program::FlowBindingIdentity,
-    pub source: SliceCaptureAuthoritySource,
-    pub parameter_ordinal: Option<usize>,
-    pub gate: Arc<DefiningFrameGate>,
+    binding: crate::function_program::FlowBindingIdentity,
+    declaration: crate::function_program::FlowBindingIdentity,
+    source: SliceCaptureAuthoritySource,
+    parameter_ordinal: Option<usize>,
+    gate: Arc<DefiningFrameGate>,
 }
 
 impl SliceCaptureAuthorityLocator {
+    /// The captured binding the child reads.
+    #[must_use]
+    pub fn binding(&self) -> &crate::function_program::FlowBindingIdentity {
+        &self.binding
+    }
+
+    /// The declaration that provides the binding's declared type.
+    #[must_use]
+    pub fn declaration(&self) -> &crate::function_program::FlowBindingIdentity {
+        &self.declaration
+    }
+
+    /// How the declaration provides it.
+    #[must_use]
+    pub fn source(&self) -> &SliceCaptureAuthoritySource {
+        &self.source
+    }
+
+    /// The parameter ordinal, when the declaration is a formal parameter.
+    #[must_use]
+    pub fn parameter_ordinal(&self) -> Option<usize> {
+        self.parameter_ordinal
+    }
+
+    /// The frame that declares it.
+    #[must_use]
+    pub fn gate(&self) -> &Arc<DefiningFrameGate> {
+        &self.gate
+    }
+
     pub fn local_declaration(&self) -> Option<SkeletonBindingId> {
         self.gate.bindings.local(&self.declaration)
     }
@@ -3101,6 +3497,12 @@ impl Drop for CaptureScope {
 }
 
 impl CaptureScope {
+    /// The innermost enclosing frame; `None` for a root function.
+    #[must_use]
+    pub fn enclosing(&self) -> Option<&CapturedFrame> {
+        self.enclosing.as_deref()
+    }
+
     pub fn gate(&self, ty: TypeExpr, binders: &[Arc<str>]) -> GatedType {
         let names = verter_type_expr::referenced_names(&ty);
         let mut shadowed = Vec::new();
@@ -3275,7 +3677,370 @@ impl CaptureScope {
     }
 }
 
+/// The authored identifier a leaf's `typeof` path is rooted at, as the
+/// source lowering read it: its name and its exact position in the frame.
+#[derive(Debug, Clone, Copy)]
+pub struct LeafRootOccurrence<'a> {
+    pub name: &'a str,
+    pub span: FrameSpan,
+}
+
+/// One BODY-position answer of a frame together with its gate verdict: the
+/// frame-owned names the answer references at the position it was produced.
+///
+/// Both fields are private. An answer is built by
+/// [`DefiningFrameGate::answer`] (which computes the verdict at the exact
+/// lexical position), by [`DefiningFrameGate::free_read`] (an identifier
+/// the frame's own occurrence index resolves as free), or by
+/// [`FrameAnswer::primitive`] (which names nothing).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameAnswer {
+    ty: TypeExpr,
+    shadowed: Arc<[FrameShadowedName]>,
+}
+
+impl FrameAnswer {
+    /// A primitive answer: it names nothing, so its verdict is free.
+    #[must_use]
+    pub fn primitive(name: verter_type_expr::PrimitiveName) -> Self {
+        Self {
+            ty: TypeExpr::Primitive(name),
+            shadowed: Arc::from(Vec::new().into_boxed_slice()),
+        }
+    }
+
+    /// The answer type.
+    #[must_use]
+    pub fn ty(&self) -> &TypeExpr {
+        &self.ty
+    }
+
+    /// The frame-owned names the answer references.
+    #[must_use]
+    pub fn shadowed(&self) -> &[FrameShadowedName] {
+        &self.shadowed
+    }
+
+    /// Whether every name the answer references is free in the frame.
+    #[must_use]
+    pub fn is_free(&self) -> bool {
+        self.shadowed.is_empty()
+    }
+
+    /// The answer type, dropping the verdict.
+    #[must_use]
+    pub fn into_ty(self) -> TypeExpr {
+        self.ty
+    }
+
+    /// The answer type and its verdict, taken apart.
+    #[must_use]
+    pub fn into_parts(self) -> (TypeExpr, Arc<[FrameShadowedName]>) {
+        (self.ty, self.shadowed)
+    }
+
+    /// The answer as a gated type carrying the same verdict.
+    #[must_use]
+    pub fn into_gated(self) -> GatedType {
+        GatedType {
+            ty: self.ty,
+            shadowed: self.shadowed,
+        }
+    }
+
+    /// Re-root a FREE `typeof root.…` answer under the enclosing namespace
+    /// block that declares and exports `root`: the read is that block's
+    /// member, `typeof N.root.…`. The verdict stays free — the block
+    /// encloses the whole function, so re-rooting introduces no frame
+    /// binding. `None` for an answer that is not free, not a `typeof`
+    /// path, or carries type arguments.
+    #[must_use]
+    pub fn qualify_namespace_member(self, qualified: &str) -> Option<Self> {
+        if !self.is_free() {
+            return None;
+        }
+        let TypeExpr::TypeOf(value) = &self.ty else {
+            return None;
+        };
+        if !value.type_args.is_empty() {
+            return None;
+        }
+        let mut path: Vec<String> = qualified.split('.').map(str::to_string).collect();
+        path.extend(value.path.iter().cloned());
+        Some(Self {
+            ty: TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path,
+                type_args: Vec::new(),
+            }),
+            shadowed: self.shadowed,
+        })
+    }
+}
+
 impl DefiningFrameGate {
+    /// Seal one frame from its source-assembled discovery against the
+    /// indexed function it describes and that function's lowered formal
+    /// parameters.
+    ///
+    /// The binding map must have been built for `entry`'s function and over
+    /// the discovery's skeleton. The exact body hash comes from `entry`; the
+    /// parameter locators come from `params`; the signature parameter
+    /// inventory comes from the skeleton.
+    pub fn seal(
+        discovery: DefiningFrameDiscovery,
+        entry: &crate::function_program::FunctionProgramEntry,
+        params: &[SliceParam],
+    ) -> Result<Arc<Self>, DefiningFrameError> {
+        let DefiningFrameDiscovery {
+            skeleton,
+            bindings,
+            type_parameters,
+            enclosing_type_parameters,
+            modelled_patterns,
+            snapshot,
+            outer,
+            anchor,
+        } = discovery;
+        if bindings.function() != entry.key() {
+            return Err(DefiningFrameError::ForeignBindings);
+        }
+        if !bindings.describes(&skeleton) {
+            return Err(DefiningFrameError::ForeignSkeleton);
+        }
+        let body_hash = entry
+            .flow_body_exact_hash()
+            .ok_or(DefiningFrameError::NoExactBody)?;
+        let parameters =
+            params
+                .iter()
+                .enumerate()
+                .flat_map(|(ordinal, param)| {
+                    param
+                        .binding
+                        .map(|binding| CaptureParameterLocator {
+                            binding,
+                            ordinal,
+                            key: None,
+                            has_default: false,
+                        })
+                        .into_iter()
+                        .chain(param.destructured.iter().map(move |element| {
+                            CaptureParameterLocator {
+                                binding: element.binding,
+                                ordinal,
+                                key: Some(Arc::clone(&element.key)),
+                                has_default: element.has_default,
+                            }
+                        }))
+                })
+                .map(|parameter| (parameter.binding, parameter))
+                .collect::<FxHashMap<_, _>>();
+        if parameters
+            .keys()
+            .any(|binding| binding.index() >= skeleton.bindings.len())
+        {
+            return Err(DefiningFrameError::ParameterOutsideFrame);
+        }
+        let parameter_names = Arc::new(SignatureParameters::of(&skeleton, anchor));
+        Ok(Arc::new(Self {
+            skeleton,
+            bindings,
+            type_parameters,
+            enclosing_type_parameters,
+            parameters: Arc::new(parameters),
+            parameter_names,
+            modelled_patterns: Arc::new(modelled_patterns),
+            body_hash,
+            snapshot,
+            outer,
+            anchor,
+        }))
+    }
+
+    /// The function's body skeleton.
+    #[must_use]
+    pub fn skeleton(&self) -> &Arc<FunctionBodySkeleton> {
+        &self.skeleton
+    }
+
+    /// The function's indexed binding correspondence.
+    #[must_use]
+    pub fn bindings(&self) -> &Arc<crate::flow::binding::FlowBindingMap> {
+        &self.bindings
+    }
+
+    /// The function's OWN type-parameter names.
+    #[must_use]
+    pub fn type_parameters(&self) -> &Arc<[Arc<str>]> {
+        &self.type_parameters
+    }
+
+    /// The enclosing declaration's type-parameter names.
+    #[must_use]
+    pub fn enclosing_type_parameters(&self) -> &Arc<[Arc<str>]> {
+        &self.enclosing_type_parameters
+    }
+
+    /// The formal-parameter locator of `binding`, when it is one.
+    #[must_use]
+    pub fn parameter(&self, binding: &SkeletonBindingId) -> Option<&CaptureParameterLocator> {
+        self.parameters.get(binding)
+    }
+
+    /// The function's signature parameter inventory.
+    #[must_use]
+    pub fn parameter_names(&self) -> &SignatureParameters {
+        &self.parameter_names
+    }
+
+    /// Whether `binding` belongs to a destructuring pattern the content
+    /// lowering models.
+    #[must_use]
+    pub fn is_modelled_pattern(&self, binding: &SkeletonBindingId) -> bool {
+        self.modelled_patterns.contains(binding)
+    }
+
+    /// The exact byte hash of the function's body.
+    #[must_use]
+    pub fn body_hash(&self) -> [u8; 16] {
+        self.body_hash
+    }
+
+    /// The retained source snapshot the frame was lowered from.
+    #[must_use]
+    pub fn snapshot(&self) -> &crate::source::snapshot::SnapshotKey {
+        &self.snapshot
+    }
+
+    /// The enclosing lexical chain at the function's position.
+    #[must_use]
+    pub fn outer(&self) -> &CaptureScope {
+        &self.outer
+    }
+
+    /// The function's own start offset.
+    #[must_use]
+    pub fn anchor(&self) -> u32 {
+        self.anchor
+    }
+
+    /// The lexical context of a nested function authored at `child` (an
+    /// absolute span) inside this frame: the chain with this frame at the
+    /// innermost region containing the child, and the `this` the child
+    /// reads. `None` when `child` does not start inside this frame.
+    pub fn nested_context(
+        self: &Arc<Self>,
+        child: verter_span::Span,
+        this: Option<SliceThis>,
+    ) -> Option<NestedFlowContext> {
+        if child.start < self.anchor {
+            return None;
+        }
+        Some(NestedFlowContext {
+            captures: CaptureScope {
+                enclosing: Some(Arc::new(CapturedFrame {
+                    gate: Arc::clone(self),
+                    region: self
+                        .skeleton
+                        .innermost_region_containing(FrameSpan::rebase(self.anchor, child)),
+                })),
+            },
+            this,
+        })
+    }
+
+    /// Gate one answer produced at `position` inside this frame under
+    /// `binders`.
+    #[must_use]
+    pub fn gate(&self, ty: TypeExpr, position: FrameSpan, binders: &[Arc<str>]) -> GatedType {
+        let shadowed = self.answer_names_frame_bound(&ty, position, binders);
+        GatedType {
+            ty,
+            shadowed: Arc::from(shadowed.into_boxed_slice()),
+        }
+    }
+
+    /// Gate one BODY-position answer at `position`: a body position sits in
+    /// this frame's region chain, so no clause binder is nearer than the
+    /// frame's own lexical authority.
+    #[must_use]
+    pub fn answer(&self, ty: TypeExpr, position: FrameSpan) -> FrameAnswer {
+        let shadowed = self.answer_names_frame_bound(&ty, position, &[]);
+        FrameAnswer {
+            ty,
+            shadowed: Arc::from(shadowed.into_boxed_slice()),
+        }
+    }
+
+    /// The answer of a bare identifier read the frame's own occurrence
+    /// index resolves as FREE: `typeof name`, naming nothing the frame
+    /// binds. `None` when the indexed occurrence at `occurrence` is not
+    /// free.
+    #[must_use]
+    pub fn free_read(&self, name: &str, occurrence: FrameSpan) -> Option<FrameAnswer> {
+        matches!(
+            self.bindings.occurrence(occurrence),
+            crate::flow::binding::FlowBindingOccurrence::Free
+        )
+        .then(|| FrameAnswer {
+            ty: TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: vec![name.to_owned()],
+                type_args: Vec::new(),
+            }),
+            shadowed: Arc::from(Vec::new().into_boxed_slice()),
+        })
+    }
+
+    /// The frame binding a `typeof root.…` answer (or a one-argument
+    /// reference over one) reads, when `root` is the path's root and the
+    /// frame's occurrence index resolves it.
+    #[must_use]
+    pub fn value_root(
+        &self,
+        ty: &TypeExpr,
+        root: Option<LeafRootOccurrence<'_>>,
+    ) -> Option<FlowBindingRef> {
+        let value = match ty {
+            TypeExpr::TypeOf(value) => value,
+            TypeExpr::Ref { type_arguments, .. } if type_arguments.len() == 1 => {
+                let TypeExpr::TypeOf(value) = &type_arguments[0] else {
+                    return None;
+                };
+                value
+            }
+            _ => return None,
+        };
+        let root = root?;
+        if value.path.first()?.as_str() != root.name {
+            return None;
+        }
+        match self.bindings.occurrence(root.span) {
+            crate::flow::binding::FlowBindingOccurrence::Resolved(binding) => Some(binding.clone()),
+            _ => None,
+        }
+    }
+
+    /// The leaf expression of one body answer: the [`GatedLeaf`] with its
+    /// frame root derived from the answer type and `root`, wrapped in
+    /// [`SliceExpr::FrameShadowed`] exactly when the answer's verdict names
+    /// frame-owned bindings.
+    #[must_use]
+    pub fn leaf(&self, answer: FrameAnswer, root: Option<LeafRootOccurrence<'_>>) -> SliceExpr {
+        let frame_root = self.value_root(&answer.ty, root);
+        let leaf = SliceExpr::Type(GatedLeaf {
+            ty: answer.ty,
+            frame_root,
+        });
+        if answer.shadowed.is_empty() {
+            leaf
+        } else {
+            SliceExpr::FrameShadowed {
+                inner: Box::new(leaf),
+                shadowed: answer.shadowed,
+            }
+        }
+    }
+
     /// Whether every destructuring declaration of `binding`'s runtime
     /// variable is a modelled pattern (vacuously, when it has none).
     pub fn destructured_var_is_modelled(&self, binding: SkeletonBindingId) -> bool {
@@ -3328,7 +4093,22 @@ impl DefiningFrameGate {
         self.outer.name_is_bound(name, meaning)
     }
 
-    pub fn answer_names_frame_bound(
+    /// THE root-identifier gate, half one: the names in the leaf
+    /// lowering's ANSWER that this frame owns.
+    ///
+    /// The shared shallow-pass leaf lowering has no frame — it resolves
+    /// every name it meets in FILE-OWNER SCOPE. So whenever its answer
+    /// carries a `typeof x…` value root or a named type reference the
+    /// frame BINDS, the published answer names whatever the OWNER scope
+    /// has under that name (`typeof CBait.s` / `ReturnType<typeof obj.m>`
+    /// bind the module-scope `CBait` / `obj`, not the local class / local
+    /// object). The name set is read off the produced typed IR through
+    /// the shared exhaustive walk, so it is exactly what the leaf
+    /// referenced — never a re-derivation of the leaf's own traversal.
+    ///
+    /// `span` is the leaf expression's own position: the region the
+    /// frame's authority resolves those names in.
+    fn answer_names_frame_bound(
         &self,
         ty: &TypeExpr,
         span: FrameSpan,

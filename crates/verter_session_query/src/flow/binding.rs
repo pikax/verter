@@ -353,6 +353,12 @@ impl FlowBindingMap {
         (stored.name == identity.name && stored.kind == identity.kind).then_some(local)
     }
 
+    /// Whether this map was built over a skeleton with `skeleton`'s binding
+    /// universe: one correspondence row per skeleton binding.
+    pub fn describes(&self, skeleton: &FunctionBodySkeleton) -> bool {
+        self.identities.len() == skeleton.bindings.len()
+    }
+
     pub fn function(&self) -> &FunctionProgramKey {
         &self.function
     }

@@ -860,15 +860,15 @@ impl<'s> Lowerer<'s> {
         &self,
     ) -> Arc<[verter_session_query::flow::policy::ClassExpressionClause]> {
         let mut frames: Vec<&DefiningFrameGate> = vec![&self.frame_gate];
-        let mut current = self.frame_gate.outer.enclosing.as_deref();
+        let mut current = self.frame_gate.outer().enclosing();
         while let Some(frame) = current {
-            frames.push(&frame.gate);
-            current = frame.gate.outer.enclosing.as_deref();
+            frames.push(frame.gate());
+            current = frame.gate().outer().enclosing();
         }
         frames.reverse();
         let mut clauses = Vec::new();
         for gate in frames {
-            if gate.type_parameters.is_empty() && gate.enclosing_type_parameters.is_empty() {
+            if gate.type_parameters().is_empty() && gate.enclosing_type_parameters().is_empty() {
                 continue;
             }
             let (container, class) = self
@@ -876,19 +876,19 @@ impl<'s> Lowerer<'s> {
                 .body
                 .get(self.contributor as usize)
                 .and_then(|statement| {
-                    ClauseContainerFinder::find(&self.walks, statement, gate.anchor)
+                    ClauseContainerFinder::find(&self.walks, statement, gate.anchor())
                 })
                 .unwrap_or_else(|| (Arc::from(ANONYMOUS_FUNCTION), None));
-            if !gate.enclosing_type_parameters.is_empty() {
+            if !gate.enclosing_type_parameters().is_empty() {
                 clauses.push(verter_session_query::flow::policy::ClassExpressionClause {
                     container: class.unwrap_or_else(|| Arc::from(ANONYMOUS_CLASS)),
-                    parameters: Arc::clone(&gate.enclosing_type_parameters),
+                    parameters: Arc::clone(&gate.enclosing_type_parameters()),
                 });
             }
-            if !gate.type_parameters.is_empty() {
+            if !gate.type_parameters().is_empty() {
                 clauses.push(verter_session_query::flow::policy::ClassExpressionClause {
                     container,
-                    parameters: Arc::clone(&gate.type_parameters),
+                    parameters: Arc::clone(&gate.type_parameters()),
                 });
             }
         }

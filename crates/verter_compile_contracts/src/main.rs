@@ -67,6 +67,12 @@ fn selected_owner() -> (&'static str, &'static str, &'static str) {
             "tests/cases/compile-fail",
         ),
         (
+            cfg!(feature = "session-query"),
+            "session-query",
+            "crates/verter_session_query",
+            "tests/compile-fail",
+        ),
+        (
             cfg!(feature = "type-runtime"),
             "type-runtime",
             "crates/verter_type_runtime",
