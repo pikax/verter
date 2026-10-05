@@ -6810,7 +6810,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         // ONCE into a `OnceLock` via a one-shot OXC parse. It is not a per-file
         // materialise flight, so the scheduler is not its authority — the parse
         // is the static prelude build, run at most once per process.
-        ("crates/verter_session/src/host_resolve/rune_ambient.rs", 1),
+        ("crates/verter_session/src/rune_ambient.rs", 1),
         // The framework two-pass script-fact seam's syntax-capture half
         // (`capture_candidates_for`): a PARSE-DOMAIN-only re-parse that runs a
         // provider's syntax-only candidate capture over a fresh OXC program. The
