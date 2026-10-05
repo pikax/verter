@@ -434,9 +434,14 @@ fn a_lease_miss_at_every_collapsing_body_accessor_refuses_shared_admission() {
     use verter_session_query::declarations::AugmentationScopeKind;
 
     type Probe = fn(&crate::resolver_core::ShallowFileState) -> bool;
-    let probes: [(&str, Probe); 4] = [
+    let probes: [(&str, Probe); 5] = [
         ("type", |state| state.type_decl("B").is_some()),
         ("value", |state| state.value_decl("v").is_some()),
+        ("owner-qualified value", |state| {
+            state
+                .value_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "v")
+                .is_some()
+        }),
         ("augmentation type", |state| {
             state
                 .augmentation_type_decl(&AugmentationScopeKind::Global, "GT")
@@ -525,4 +530,166 @@ fn a_genuine_absence_stays_cacheable_under_a_broken_lease() {
          lease is broken"
     );
     assert_eq!(read.reason, None);
+}
+
+fn rune_module_language() -> verter_language::FileLanguage {
+    verter_language::FileLanguage::adapter_module(
+        verter_language::ScriptSourceType::Ts,
+        verter_language::FrameworkAdapterId::svelte(),
+        verter_language::LanguageId::new(verter_language::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+    )
+}
+
+fn assert_refused_as_lease_miss<R>(read: &TracedRead<R>, what: &str) {
+    assert!(
+        !read.admitted,
+        "{what}: a compute that consumed a broken-lease miss must be refused shared-cache \
+         admission — admitting it would freeze a recoverable miss"
+    );
+    assert_eq!(
+        read.reason,
+        Some(NonCacheableReadReason::LeaseMiss),
+        "{what}: the refusal must carry the typed transient reason"
+    );
+}
+
+#[test]
+fn a_lease_miss_through_the_effective_type_lookup_stays_refused() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let indexed = indexed_with_broken_lease(
+        &host,
+        "/lease/types.svelte.ts",
+        "export type A = { x: number };\nexport type B = { y: string };\n",
+        rune_module_language(),
+    );
+    let read = traced_read(&host, || {
+        indexed.shallow_state.effective_type_decl("B").is_some()
+    });
+    assert!(
+        !read.value,
+        "the user declaration lease-misses and no rune ambient type answers"
+    );
+    assert_refused_as_lease_miss(&read, "effective type lookup");
+}
+
+/// The lazy body-hash facts (`Export` / `LocalDecl`) read declaration bodies
+/// through the memo. A broken lease there must refuse the observing compute
+/// exactly as a direct body read does, for type and value symbols and for
+/// exports whose backing declaration lives under a component instance-script
+/// owner (the owner-qualified body read).
+#[test]
+fn a_lease_miss_behind_a_lazy_body_fact_refuses_shared_admission() {
+    use verter_session_query::facts::registry::{FactKey, SymbolSpace};
+
+    fn export(symbol: &str, space: SymbolSpace) -> FactKey {
+        FactKey::Export {
+            name: crate::file_artifact_store::InternedName::from(symbol),
+            space,
+        }
+    }
+    fn local(symbol: &str, space: SymbolSpace) -> FactKey {
+        FactKey::LocalDecl {
+            name: crate::file_artifact_store::InternedName::from(symbol),
+            space,
+        }
+    }
+    let cases: [(&str, &str, verter_language::FileLanguage, FactKey, FactKey); 6] = [
+        (
+            "exported type",
+            "/lease/facts.ts",
+            verter_language::FileLanguage::script_ts(),
+            export("A", SymbolSpace::Type),
+            export("B", SymbolSpace::Type),
+        ),
+        (
+            "local type",
+            "/lease/facts.ts",
+            verter_language::FileLanguage::script_ts(),
+            export("A", SymbolSpace::Type),
+            local("L", SymbolSpace::Type),
+        ),
+        (
+            "exported value",
+            "/lease/facts.ts",
+            verter_language::FileLanguage::script_ts(),
+            export("A", SymbolSpace::Type),
+            export("v", SymbolSpace::Value),
+        ),
+        (
+            "local value",
+            "/lease/facts.ts",
+            verter_language::FileLanguage::script_ts(),
+            export("A", SymbolSpace::Type),
+            local("lv", SymbolSpace::Value),
+        ),
+        (
+            "component-script exported type",
+            "/lease/Facts.svelte",
+            verter_language::FileLanguage::svelte(),
+            export("A", SymbolSpace::Type),
+            export("B", SymbolSpace::Type),
+        ),
+        (
+            "component-script exported value",
+            "/lease/Facts.svelte",
+            verter_language::FileLanguage::svelte(),
+            export("A", SymbolSpace::Type),
+            export("v", SymbolSpace::Value),
+        ),
+    ];
+    for (what, path, language, pin, probe) in cases {
+        let source = if path.ends_with(".svelte") {
+            "<script lang=\"ts\">\nexport type A = { x: number };\n\
+             export type B = { y: string };\nexport const v: number = 1;\n</script>\n\
+             <div></div>\n"
+        } else {
+            "export type A = { x: number };\nexport type B = { y: string };\n\
+             type L = { z: boolean };\nexport declare const v: number;\n\
+             declare const lv: string;\n"
+        };
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(path.to_string()),
+                input_id: path.to_string(),
+                source: Arc::from(source),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("upsert {path} failed: {e:?}"));
+        let indexed = host.ensure_indexed_ready(path).expect("indexed");
+        if path.ends_with(".svelte") {
+            for exported in ["B", "v"] {
+                assert!(
+                    matches!(
+                        indexed.shallow_state.exports.get(exported),
+                        Some(verter_session_query::inputs::shallow::ExportTarget::Local { owner, .. })
+                            if *owner != verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    ),
+                    "{what}: `{exported}` must be backed by the instance-script owner, so the \
+                     fact reads its body through the owner-qualified accessor"
+                );
+            }
+        }
+        let artifacts = host
+            .exact_current_artifacts_for_test(path, indexed.whole_hash)
+            .expect("published artifacts must be readable");
+        assert!(
+            artifacts.facts.lookup_or_compute(&pin).is_some(),
+            "{what}: the pin fact lowers under a live lease, pinning the retained snapshot"
+        );
+        indexed
+            .shallow_state
+            .decl_bodies()
+            .release_retained_snapshot_for_test();
+
+        let read = traced_read(&host, || {
+            artifacts.facts.lookup_or_compute(&probe).is_some()
+        });
+        assert!(
+            !read.value,
+            "{what}: a broken-lease body fact reads as absent"
+        );
+        assert_refused_as_lease_miss(&read, what);
+    }
 }

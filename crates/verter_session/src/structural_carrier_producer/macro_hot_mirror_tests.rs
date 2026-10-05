@@ -807,7 +807,7 @@ fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability()
     );
 }
 
-/// LB3 — a broken decl-body lease at the plain type accessor carries its
+/// A broken decl-body lease at the plain type accessor carries its
 /// refusal BY VALUE, and the engine consumer that takes the value marks the
 /// generalized non-cacheability rail. The plain type / value / augmentation
 /// decl-body accessors are the collapse points the carrier & frontier
@@ -825,9 +825,7 @@ fn broken_lease_type_decl_accessor_carries_its_refusal_to_the_consumer() {
     upsert_ts(
         &host,
         "/d.ts",
-        "export type A = { x: number };
-export type B = { y: string };
-",
+        "export type A = { x: number };\nexport type B = { y: string };\n",
     );
     let indexed = host.ensure_indexed_ready("/d.ts").expect("indexed");
     let memo = indexed.shallow_state.decl_bodies();
@@ -861,7 +859,8 @@ export type B = { y: string };
     );
     assert!(
         read_set.non_cacheable_read_observed(),
-        "consuming the broken-lease read MUST mark the generalized non-cacheability rail so          an enclosing traced compute refuses shared-cache admission"
+        "consuming the broken-lease read MUST mark the generalized non-cacheability rail so \
+         an enclosing traced compute refuses shared-cache admission"
     );
 }
 
