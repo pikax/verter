@@ -1713,8 +1713,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output = output.with_observed_self_roots(fresh);
         if unobservable {
             output.cache_suppress = true;
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
         }
         output
@@ -4824,8 +4824,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return InstantiateStart::Done(Box::new(out));
             }
             PreparedTypeDeclResolution::Failed { failure, .. } => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                 );
                 tracing::error!(
                     ?failure,
@@ -4944,8 +4944,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .as_ref()
                 .is_some_and(|debt| debt.finish());
             if unresolved_owner_debt {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                 );
                 self.fold_local_partial_completeness(
                     crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
@@ -5386,8 +5386,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .as_ref()
             .is_some_and(|debt| debt.finish());
         if unresolved_owner_debt {
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
             );
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
@@ -5414,8 +5414,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // facts validate live while a contributor's source-env is
             // unobservable). Same rail as the external augmentation collector
             // (`collect_augmentation_contributions`).
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
         }
         if unresolved_owner_debt {
@@ -6657,8 +6657,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // refusal to the component-meta warm gate WITHOUT false-`Partial`ing it.
         if source_env_unobservable {
             self.fold_into_top_build_local_taint(false, true);
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
         }
         // A tainted-EMPTY collection (augmenters targeted the specifier but were
@@ -7347,8 +7347,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } => Some(prepared),
             PreparedTypeDeclResolution::Missing => None,
             PreparedTypeDeclResolution::Failed { .. } => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                 );
                 None
             }

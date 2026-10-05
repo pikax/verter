@@ -644,8 +644,8 @@ mod tests {
             _base_is_current: bool,
         ) -> Option<Self::Resolution> {
             if self.mark_hazard.get() {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
             }
             Some(42)

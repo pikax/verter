@@ -3914,7 +3914,7 @@ fn staged_flow_proof(
         .1;
     let basis = FlowDemandBasis {
         ancestry: Default::default(),
-        graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+        graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {
@@ -3955,7 +3955,7 @@ fn staged_flow_proof(
 /// rooted exactly as if it had re-evaluated it.
 #[test]
 fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
-    reused_flow_result_replays(crate::resolver_core::reuse::ReuseClass::Shared);
+    reused_flow_result_replays(verter_session_query::facts::reuse::ReuseClass::Shared);
 }
 
 /// A completed result whose persistent admission was refused for a typed,
@@ -3965,9 +3965,9 @@ fn a_reused_flow_member_replays_its_reads_into_the_live_scopes() {
 /// are replayed as for any other completed result.
 #[test]
 fn a_request_only_flow_result_answers_its_transaction_and_replays_its_refusal() {
-    reused_flow_result_replays(crate::resolver_core::reuse::ReuseClass::RequestOnly(
-        crate::resolver_core::reuse::NonCacheableRefusal::new(
-            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+    reused_flow_result_replays(verter_session_query::facts::reuse::ReuseClass::RequestOnly(
+        verter_session_query::facts::reuse::NonCacheableRefusal::new(
+            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
         ),
     ));
 }
@@ -3977,7 +3977,7 @@ fn a_request_only_flow_result_answers_its_transaction_and_replays_its_refusal() 
 /// evaluates it again rather than freezing a degraded answer.
 #[test]
 fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
-    use crate::resolver_core::reuse::{NoReuseCause, ReuseClass};
+    use verter_session_query::facts::reuse::{NoReuseCause, ReuseClass};
     let host = make_scc_host();
     with_dispatch(&host, |dispatch| {
         let key = scc_key(dispatch, "scCleanA");
@@ -3985,7 +3985,7 @@ fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
         for reuse in [
             ReuseClass::NoReuse(NoReuseCause::Incomplete),
             ReuseClass::NoReuse(NoReuseCause::TransientRefusal(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
             )),
             ReuseClass::NoReuse(NoReuseCause::UnattributedRefusal(
                 verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
@@ -4015,7 +4015,7 @@ fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
     });
 }
 
-fn reused_flow_result_replays(reuse: crate::resolver_core::reuse::ReuseClass) {
+fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseClass) {
     let host = make_scc_host();
     with_dispatch(&host, |dispatch| {
         let key = scc_key(dispatch, "scCleanA");

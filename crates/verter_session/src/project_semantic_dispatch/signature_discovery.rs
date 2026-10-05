@@ -542,8 +542,8 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
         };
         if contributions.source_env_unobservable {
             d.fold_into_top_build_local_taint(false, true);
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
         }
         let mut out = Vec::new();

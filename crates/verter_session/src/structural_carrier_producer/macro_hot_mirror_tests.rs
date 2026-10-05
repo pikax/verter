@@ -95,7 +95,7 @@ fn macro_type_arg(host: &VerterHost, canonical: &str, macro_index: usize) -> Arc
         .decl_bodies()
         .transient_macro_type_argument(macro_span)
     {
-        crate::decl_body_memo::DemandOutcome::Ready(Some(expr)) => expr,
+        verter_session_query::source::demand::DemandOutcome::Ready(Some(expr)) => expr,
         _ => panic!("type-based macro must lazily lower a parsed type argument"),
     }
 }

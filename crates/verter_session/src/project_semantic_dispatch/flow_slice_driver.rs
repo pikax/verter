@@ -1,5 +1,7 @@
 //! Request-local flow artifact execution. Shared stores expose claims and
 //! immutable products; this driver alone requests owned source lowering.
+use verter_session_query::flow::bundle::FlowGraphBundle;
+use verter_session_query::flow::bundle::FlowSliceFunctionKey;
 
 use crate::cache_runtime::flow_slice_node::*;
 use crate::cache_runtime::node::{ArtifactNode, ComputeCtx, QueryFlightKey};

@@ -43,10 +43,10 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::resolver_core::request_store_view::BundleMemoWorld;
-use crate::resolver_core::reuse::ReuseClass;
 use crate::resolver_core::{CanonicalCompletionOverlay, SessionResolverContext};
 use crate::session_view::{OverlaidView, SessionView};
 use crate::{HostConfig, VerterHost};
+use verter_session_query::facts::reuse::ReuseClass;
 use verter_session_query::facts::store_view::StoreView;
 
 const OWNER: &str = "/proj/owner.ts";
@@ -540,7 +540,7 @@ fn resolution_retarget_between_snapshots_misses_memo() {
 fn unattributed_refusal_is_not_memoized() {
     let host = host_with_base_files();
     *host.materialize_seam_hook.lock() = Some(Arc::new(|| {
-        crate::resolver_core::resolver_context::note_non_cacheable_propagation(
+        verter_session_query::facts::reuse::note_non_cacheable_propagation(
             verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
         );
     }));
@@ -888,7 +888,7 @@ fn request_only_bundle_computes_once_and_replays_each_touch() {
 fn lease_missed_bundle_is_not_request_memoized() {
     assert_transient_refusal_is_not_memoized(
         "/rc_base_memo_lease",
-        crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+        verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
     );
 }
 
@@ -899,7 +899,7 @@ fn lease_missed_bundle_is_not_request_memoized() {
 fn cancelled_or_partial_bundle_is_not_request_memoized() {
     assert_transient_refusal_is_not_memoized(
         "/rc_base_memo_budget",
-        crate::resolver_core::resolver_context::NonCacheableReadReason::InferenceBudgetExceeded,
+        verter_session_query::facts::reuse::NonCacheableReadReason::InferenceBudgetExceeded,
     );
 }
 
@@ -909,7 +909,7 @@ fn cancelled_or_partial_bundle_is_not_request_memoized() {
 /// memoised without the refusal.
 fn assert_transient_refusal_is_not_memoized(
     root: &str,
-    reason: crate::resolver_core::resolver_context::NonCacheableReadReason,
+    reason: verter_session_query::facts::reuse::NonCacheableReadReason,
 ) {
     let (host, owner) = base_host(root);
     // The seam fires inside the IndexedReady materialise flight, which
@@ -917,7 +917,7 @@ fn assert_transient_refusal_is_not_memoized(
     // the bundle producer's own observation scope, exactly as a real
     // nested producer's would.
     *host.materialize_seam_hook.lock() = Some(Arc::new(move || {
-        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(reason);
+        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(reason);
     }));
 
     let request = CanonicalCompletionOverlay::new();

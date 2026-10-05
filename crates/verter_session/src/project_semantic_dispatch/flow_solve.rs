@@ -62,11 +62,10 @@ use super::dispatch_txn::flow_obligation_state::{
     ObligationState, SealedFlowCompletion,
 };
 use super::dispatch_txn::ObligationRuntime;
-use crate::cache_runtime::flow_slice_node::{
-    BoundFlowGraph, FlowSliceFunctionKey, PlannedFlowSlice,
-};
+use crate::cache_runtime::flow_slice_node::PlannedFlowSlice;
 use crate::semantic_query::demand::Demand;
 use crate::semantic_query::{FlowReturnResult, PathSegment, SemanticQueryKey, SemanticQueryKeyTag};
+use verter_session_query::flow::bundle::{BoundFlowGraph, FlowSliceFunctionKey};
 use verter_session_query::flow::policy::FlowGap;
 
 // Short aliases keep the closed registry table and the planner legible.

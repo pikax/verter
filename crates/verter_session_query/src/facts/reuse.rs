@@ -26,7 +26,7 @@
 //! that a later demand under a live lease would improve.
 //!
 //! So the marking chokepoint
-//! ([`note_non_cacheable_read_fan_out`](super::resolver_context::note_non_cacheable_read_fan_out))
+//! ([`note_non_cacheable_read_fan_out`](note_non_cacheable_read_fan_out))
 //! also records its TYPED reason into every active
 //! [`RefusalObservationScope`] on the thread — the same fan-out shape the
 //! tracer stack uses, so an inner producer's refusal is observed by every
@@ -46,9 +46,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
-
-use super::resolver_context::NonCacheableReadReason;
+use crate::facts::fact_read_set::NonCacheablePropagation;
 
 /// Whether a complete result whose compute consumed a given
 /// non-cacheable read stays DETERMINISTIC under the request's immutable
@@ -74,13 +72,13 @@ pub(crate) enum RequestReuse {
 /// The pair is what a REUSED value returns to its caller. Tracer
 /// finalisation exposes only the boolean; this exposes why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct NonCacheableRefusal {
+pub struct NonCacheableRefusal {
     reason: NonCacheableReadReason,
 }
 
 impl NonCacheableRefusal {
     #[inline]
-    pub(crate) fn new(reason: NonCacheableReadReason) -> Self {
+    pub fn new(reason: NonCacheableReadReason) -> Self {
         Self { reason }
     }
 
@@ -88,9 +86,9 @@ impl NonCacheableRefusal {
     /// DECISION is made by [`classify_reuse`] and applied by
     /// [`ReuseClass::replay_refusal`], so only a discriminating test
     /// needs to read the reason back out.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[inline]
-    pub(crate) fn reason(&self) -> NonCacheableReadReason {
+    pub fn reason(&self) -> NonCacheableReadReason {
         self.reason
     }
 
@@ -98,9 +96,9 @@ impl NonCacheableRefusal {
     /// alongside the reason: a stored copy could drift from the reason's
     /// own policy the moment a reason's propagation changes.
     /// Fixture-facing, for the same reason as [`Self::reason`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[inline]
-    pub(crate) fn propagation(&self) -> NonCacheablePropagation {
+    pub fn propagation(&self) -> NonCacheablePropagation {
         self.reason.propagation()
     }
 
@@ -116,13 +114,13 @@ impl NonCacheableRefusal {
     /// the only thing that keeps the taint attached to the value.
     #[inline]
     pub(crate) fn replay(&self) {
-        super::resolver_context::note_non_cacheable_read_fan_out(self.reason);
+        crate::facts::reuse::note_non_cacheable_read_fan_out(self.reason);
     }
 }
 
 /// Why a completed compute is not safe even for request-scoped reuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NoReuseCause {
+pub enum NoReuseCause {
     /// A TRANSIENT non-cacheable read (see [`RequestReuse::Transient`]).
     TransientRefusal(NonCacheableReadReason),
     /// The compute was refused with NO typed reason: a fact-signature
@@ -144,7 +142,7 @@ pub(crate) enum NoReuseCause {
 
 /// How far a completed compute may be reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReuseClass {
+pub enum ReuseClass {
     Shared,
     RequestOnly(NonCacheableRefusal),
     NoReuse(NoReuseCause),
@@ -154,23 +152,23 @@ impl ReuseClass {
     /// `true` only for [`Self::Shared`] — the sole class a shared /
     /// persistent cache may admit.
     #[inline]
-    pub(crate) fn is_shared(&self) -> bool {
+    pub fn is_shared(&self) -> bool {
         matches!(self, Self::Shared)
     }
 
     /// `true` for [`Self::Shared`] and [`Self::RequestOnly`] — the
     /// classes a request-scoped memo may hold.
     #[inline]
-    pub(crate) fn is_request_reusable(&self) -> bool {
+    pub fn is_request_reusable(&self) -> bool {
         matches!(self, Self::Shared | Self::RequestOnly(_))
     }
 
     /// The stored refusal, for a [`Self::RequestOnly`] value.
     /// Fixture-facing: production replays through
     /// [`Self::replay_refusal`] rather than unwrapping the class.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[inline]
-    pub(crate) fn request_only_refusal(&self) -> Option<&NonCacheableRefusal> {
+    pub fn request_only_refusal(&self) -> Option<&NonCacheableRefusal> {
         match self {
             Self::RequestOnly(refusal) => Some(refusal),
             Self::Shared | Self::NoReuse(_) => None,
@@ -180,14 +178,14 @@ impl ReuseClass {
     /// Replay this class's refusal, if it has one. Called on EVERY
     /// return of a reused value — cold, memo hit, singleflight follower.
     #[inline]
-    pub(crate) fn replay_refusal(&self) {
+    pub fn replay_refusal(&self) {
         match self {
             Self::RequestOnly(refusal) => refusal.replay(),
             Self::NoReuse(NoReuseCause::TransientRefusal(reason)) => {
-                super::resolver_context::note_non_cacheable_read_fan_out(*reason);
+                crate::facts::reuse::note_non_cacheable_read_fan_out(*reason);
             }
             Self::NoReuse(NoReuseCause::UnattributedRefusal(propagation)) => {
-                super::resolver_context::note_non_cacheable_propagation(*propagation);
+                crate::facts::reuse::note_non_cacheable_propagation(*propagation);
             }
             Self::Shared
             | Self::NoReuse(NoReuseCause::Incomplete)
@@ -200,7 +198,7 @@ impl ReuseClass {
     /// tracer records only the propagation — so the result is the
     /// conservative unattributed class that still replays.
     #[inline]
-    pub(crate) fn from_captured_propagation(propagation: Option<NonCacheablePropagation>) -> Self {
+    pub fn from_captured_propagation(propagation: Option<NonCacheablePropagation>) -> Self {
         match propagation {
             None => Self::Shared,
             Some(propagation) => Self::NoReuse(NoReuseCause::UnattributedRefusal(propagation)),
@@ -211,7 +209,7 @@ impl ReuseClass {
 /// What a producer's [`RefusalObservationScope`] saw, folded with any
 /// cacheability-scope verdict the producer also holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ObservedRefusal {
+pub enum ObservedRefusal {
     /// Nothing refused.
     None,
     /// A typed reason reached the scope through the marking chokepoint.
@@ -228,7 +226,7 @@ pub(crate) enum ObservedRefusal {
 /// result is [`NoReuseCause::Incomplete`] regardless of what was
 /// observed, because a partial value must never be frozen for the
 /// request.
-pub(crate) fn classify_reuse(observed: ObservedRefusal, complete: bool) -> ReuseClass {
+pub fn classify_reuse(observed: ObservedRefusal, complete: bool) -> ReuseClass {
     if !complete {
         return ReuseClass::NoReuse(NoReuseCause::Incomplete);
     }
@@ -260,20 +258,20 @@ thread_local! {
 ///
 /// `!Send + !Sync` by construction (`Rc`): like the fact tracer this is
 /// per-compute, per-thread state and must never cross a task boundary.
-pub(crate) struct RefusalObservationScope {
+pub struct RefusalObservationScope {
     cell: Rc<Cell<Option<NonCacheableReadReason>>>,
 }
 
 impl RefusalObservationScope {
     /// Push a fresh scope onto this thread's stack.
-    pub(crate) fn enter() -> Self {
+    pub fn enter() -> Self {
         let cell = Rc::new(Cell::new(None));
         ACTIVE_REFUSAL_SCOPES.with(|scopes| scopes.borrow_mut().push(Rc::clone(&cell)));
         Self { cell }
     }
 
     /// The dominant reason observed so far, if any.
-    pub(crate) fn observed(&self) -> Option<NonCacheableReadReason> {
+    pub fn observed(&self) -> Option<NonCacheableReadReason> {
         self.cell.get()
     }
 }
@@ -425,4 +423,148 @@ mod tests {
              attribute another compute's refusal to this one"
         );
     }
+}
+
+/// A typed reason a read was NON-CACHEABLE — the discriminant a marking
+/// site passes to [`note_non_cacheable_read_fan_out`].
+///
+/// The tracer records only a boolean (any non-cacheable read refuses
+/// shared-cache admission for the enclosing compute); the reason is a
+/// structural, self-documenting signal at the marking site so the
+/// non-cacheability class is closed by TYPED dispatch rather than an
+/// untyped "mark suppress" call. Orthogonal to completeness: marking a
+/// read non-cacheable never makes the result `Partial`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonCacheableReadReason {
+    /// A FENCED (ReturnOnly, `store_published == false`) `IndexedReady`
+    /// serve consumed inside the tracer scope: the payload was computed
+    /// from a served-without-publication (superseded) artifact.
+    FencedServe,
+    /// A broken decl-body lease pin (`DemandOutcome::LeaseMiss` /
+    /// `PreparedDeclOutcome::LeaseMiss` / `LocatorBodyDerefError::LeaseMiss`):
+    /// the demanded body did not lower and produced nothing — a TRANSIENT
+    /// no-warm signal, recoverable on a later demand under a live lease.
+    LeaseMiss,
+    /// An unrootable / unadmitted import route: the served value's basis
+    /// cannot be soundly fact-rooted for warm admission.
+    UnrootableRoute,
+    /// An unobservable contributor source-env identity: the exact artifact
+    /// key the read served from is unavailable, so the result cannot be
+    /// fact-rooted.
+    UnobservableSource,
+    /// A local semantic-inference safety budget stopped before producing an
+    /// authoritative declaration result.
+    InferenceBudgetExceeded,
+    /// Declaration preparation failed with a typed structural failure. The
+    /// failed slot remains vacant and any Option-shaped caller may serve the
+    /// failure only as ReturnOnly; it must never publish it as real absence.
+    PreparationFailure,
+    /// A terminal output-materialization LOST typed degradation: a
+    /// present-but-unraisable fold (`None`) or a non-empty degradation
+    /// sidecar discarded at the capability-gated terminal unwrap. The
+    /// compat tree may still be published for display, but the compute must
+    /// never be warm-admitted as a complete result. Orthogonal to
+    /// completeness: the result is NOT partial, it is non-cacheable.
+    OutputMaterializationLoss,
+}
+
+impl NonCacheableReadReason {
+    /// A non-cacheable READ taints the derivation basis, rather than merely
+    /// declining retention in one cache family, so every current read class
+    /// propagates through all enclosing cold-compute scopes.
+    #[inline]
+    pub(crate) fn propagation(self) -> crate::facts::fact_read_set::NonCacheablePropagation {
+        match self {
+            Self::FencedServe
+            | Self::LeaseMiss
+            | Self::UnrootableRoute
+            | Self::UnobservableSource
+            | Self::InferenceBudgetExceeded
+            | Self::PreparationFailure
+            | Self::OutputMaterializationLoss => {
+                crate::facts::fact_read_set::NonCacheablePropagation::Transitive
+            }
+        }
+    }
+
+    /// Whether a COMPLETE result whose compute consumed this read stays
+    /// deterministic under the request's immutable view — the axis the
+    /// [`ReuseClass`](super::reuse::ReuseClass) splits on.
+    ///
+    /// Exhaustive by design: a new reason cannot be added without
+    /// deciding whether a value built on it may be reused inside the
+    /// request. Defaulting a new arm either way is exactly the silent
+    /// mistake this match exists to prevent — the permissive default
+    /// freezes a recoverable miss, the conservative one re-runs a
+    /// deterministic compute on every touch.
+    #[inline]
+    pub(crate) fn request_reuse(self) -> super::reuse::RequestReuse {
+        match self {
+            // The payload is a definite answer for this view: a
+            // superseded artifact's content, a route whose basis cannot
+            // be fact-rooted, a contributor whose source-env identity is
+            // unobservable. Re-running inside the same request world
+            // reproduces it, so only PUBLICATION is refused.
+            Self::FencedServe | Self::UnrootableRoute | Self::UnobservableSource => {
+                super::reuse::RequestReuse::Deterministic
+            }
+            // The payload is DEGRADED and a later demand may improve it:
+            // a broken decl-body lease recovers under a live lease, a
+            // safety-budget stop and a structural preparation failure
+            // both leave a slot vacant rather than answering it.
+            Self::LeaseMiss | Self::InferenceBudgetExceeded | Self::PreparationFailure => {
+                super::reuse::RequestReuse::Transient
+            }
+            // A materialization loss is a definite answer under the
+            // request's immutable view: the same fold loses the same
+            // degradation sidecar on every re-run, so only warm
+            // PUBLICATION is refused, never intra-request reuse.
+            Self::OutputMaterializationLoss => super::reuse::RequestReuse::Deterministic,
+        }
+    }
+}
+
+/// Mark every active tracer on the current thread's stack as having
+/// consumed a NON-CACHEABLE read — the by-value rail enclosing traced cold
+/// computes consult to refuse shared-cache admission. `reason` is the typed
+/// marking-site discriminant; the tracer records only the boolean, so the
+/// reason documents intent and keeps the marking surface typed (not an
+/// untyped suppress). No-op when the stack is empty (no traced compute is
+/// in scope).
+#[inline]
+pub fn note_non_cacheable_read_fan_out(reason: NonCacheableReadReason) {
+    // The typed half: every active `RefusalObservationScope` records the
+    // REASON, so a producer can classify its result's reuse rail instead
+    // of inferring it from a boolean that a fenced serve and a broken
+    // lease set identically.
+    super::reuse::record_refusal(reason);
+    note_non_cacheable_propagation(reason.propagation());
+}
+
+/// Apply an already-classified refusal to the active tracer stack. Cache
+/// owners use this after a typed `ReturnOnly` result escapes its own tracing
+/// scope; ordinary read sites should use [`note_non_cacheable_read_fan_out`]
+/// so their closed reason enum selects the propagation policy.
+#[inline]
+pub fn note_non_cacheable_propagation(
+    propagation: crate::facts::fact_read_set::NonCacheablePropagation,
+) {
+    if let Some(sink) = NON_CACHEABLE_READ_SINK.get() {
+        sink(propagation);
+    }
+}
+
+/// The engine's tracer-stack receiver of non-cacheable read marks. The engine
+/// installs it before it first pushes a tracer or recorder, so a mark noted
+/// while no receiver is installed has no active tracer to reach.
+static NON_CACHEABLE_READ_SINK: std::sync::OnceLock<
+    fn(crate::facts::fact_read_set::NonCacheablePropagation),
+> = std::sync::OnceLock::new();
+
+/// Install the receiver of non-cacheable read marks. The first installed
+/// receiver stays for the process; later installs are no-ops.
+pub fn install_non_cacheable_read_sink(
+    sink: fn(crate::facts::fact_read_set::NonCacheablePropagation),
+) {
+    let _ = NON_CACHEABLE_READ_SINK.set(sink);
 }

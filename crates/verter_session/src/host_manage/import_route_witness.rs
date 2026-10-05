@@ -162,8 +162,8 @@ impl VerterHost {
             if let Some(hit) = hit {
                 replay_resolution_witness(&hit.observed);
                 if hit.refused {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                     );
                 }
                 return hit;
@@ -407,8 +407,8 @@ impl VerterHost {
     /// Mark the enclosing compute non-cacheable and report an
     /// unrootable import-route witness.
     fn decline_import_route_witness(&self) -> Option<Vec<FactVersionRef>> {
-        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-            crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
         );
         None
     }

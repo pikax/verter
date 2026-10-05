@@ -850,8 +850,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .force_carrier_direct_serve_fence_for_tests
                         .load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                     );
                 }
                 serve.is_some()

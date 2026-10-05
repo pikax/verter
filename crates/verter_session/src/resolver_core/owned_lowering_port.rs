@@ -3,8 +3,8 @@
 
 use super::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use super::request_ports::OwnedLowering;
-use crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey;
 use std::sync::Arc;
+use verter_session_query::flow::bundle::FlowSliceFunctionKey;
 use verter_session_query::flow::{
     binding::FlowBindingMapError, skeleton::PreparedFunctionBodySkeleton,
 };
@@ -313,8 +313,8 @@ fn observed_fact_hash(
     )
 }
 fn missing_source() {
-    super::resolver_context::note_non_cacheable_read_fan_out(
-        super::resolver_context::NonCacheableReadReason::LeaseMiss,
+    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+        verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
     );
 }
 impl<
@@ -710,10 +710,12 @@ impl<
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientTypeParts> {
+    ) -> verter_session_query::source::demand::DemandOutcome<
+        crate::decl_body_memo::TransientTypeParts,
+    > {
         let Some(source) = self.source(source) else {
             missing_source();
-            return crate::decl_body_memo::DemandOutcome::LeaseMiss;
+            return verter_session_query::source::demand::DemandOutcome::LeaseMiss;
         };
         source.decl_bodies().transient_type_parts_in(owner, name)
     }
@@ -722,10 +724,12 @@ impl<
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientValueParts> {
+    ) -> verter_session_query::source::demand::DemandOutcome<
+        crate::decl_body_memo::TransientValueParts,
+    > {
         let Some(source) = self.source(source) else {
             missing_source();
-            return crate::decl_body_memo::DemandOutcome::LeaseMiss;
+            return verter_session_query::source::demand::DemandOutcome::LeaseMiss;
         };
         source.decl_bodies().transient_value_parts_in(owner, name)
     }

@@ -180,6 +180,7 @@ impl Drop for RecorderScope {
 /// SAFETY: the caller keeps `recorder` alive for as long as the scope,
 /// and drops the scope first.
 pub(super) fn install_recorder(recorder: &FactReadRecorder) -> RecorderScope {
+    verter_session_query::facts::reuse::install_non_cacheable_read_sink(note_non_cacheable_read);
     ACTIVE_RECORDERS.with(|slot| {
         slot.borrow_mut().push(recorder as *const FactReadRecorder);
     });
@@ -200,6 +201,7 @@ fn active_recorders() -> SmallVec<[*const FactReadRecorder; 4]> {
 /// entire scope duration. `clear` is called on the RAII guard's drop —
 /// even on panic — so the pointer is removed before the cell is freed.
 pub(super) fn install(cell: &FactReadSetCell) {
+    verter_session_query::facts::reuse::install_non_cacheable_read_sink(note_non_cacheable_read);
     ACTIVE_TRACERS.with(|slot| {
         slot.borrow_mut().push(cell as *const FactReadSetCell);
     });

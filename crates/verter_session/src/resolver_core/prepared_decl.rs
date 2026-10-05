@@ -10,10 +10,11 @@ use verter_session_query::type_solver::{
 use verter_type_expr::TopLevelOwnerId;
 
 use super::ShallowFileState;
-use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
+use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use crate::identity_interner::IdentityInterner;
 use verter_session_query::inputs::shallow::ClassifiedTypeDeps;
 use verter_session_query::inputs::shallow::ExportTarget;
+use verter_session_query::source::demand::DemandOutcome;
 
 #[path = "prepared_decl_type_prep.rs"]
 mod type_prep;
@@ -121,8 +122,8 @@ impl<T> PreparedDeclOutcome<T> {
         match self {
             PreparedDeclOutcome::Ready(value) => Ok(value),
             PreparedDeclOutcome::LeaseMiss => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)
             }
@@ -1039,8 +1040,8 @@ impl PreparedTypeDeclCache {
                 // (retry on the next live-lease demand) AND mark the
                 // generalized non-cacheability rail so an enclosing traced
                 // compute refuses admission.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)
             }
@@ -1296,8 +1297,8 @@ impl PreparedValueDeclCache {
                 // (retry on the next live-lease demand) AND mark the
                 // generalized non-cacheability rail so an enclosing traced
                 // compute refuses admission.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)
             }

@@ -9,12 +9,11 @@ use verter_session_query::declarations::DeclarationId;
 use verter_session_query::resolution::{AmbientSymbolHit, ProjectStableKey};
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
-use super::resolver_context::{
-    note_non_cacheable_read_fan_out, MaterializeScopeObservation, NonCacheableReadReason,
-};
+use super::resolver_context::MaterializeScopeObservation;
 use crate::resolver_core::ValueDeclIdentity;
 use crate::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::reuse::{note_non_cacheable_read_fan_out, NonCacheableReadReason};
 
 pub struct OperandEnvEpoch {
     root: Option<Arc<verter_workspace::published_state::PublishedRoot>>,
@@ -655,13 +654,17 @@ pub trait OwnedLowering {
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientTypeParts>;
+    ) -> verter_session_query::source::demand::DemandOutcome<
+        crate::decl_body_memo::TransientTypeParts,
+    >;
     fn transient_value_parts(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientValueParts>;
+    ) -> verter_session_query::source::demand::DemandOutcome<
+        crate::decl_body_memo::TransientValueParts,
+    >;
 
     /// The owner's `TypeDecl` with its body already lowered — the port's
     /// eager type-body demand. Its value-decl twin `lowered_value_decl` is the
@@ -728,7 +731,7 @@ pub trait OwnedLowering {
 
     fn prepare_function_structure(
         &self,
-        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+        key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Result<
         Option<verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton>,
         verter_session_query::flow::binding::FlowBindingMapError,

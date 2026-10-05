@@ -567,7 +567,7 @@ pub(super) struct FlowSliceDemandSite {
     /// The function's own file roots.
     self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     /// The content-pinned function identity.
-    slice_key_function: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+    slice_key_function: verter_session_query::flow::bundle::FlowSliceFunctionKey,
     /// The hash-node key (function + demand identity).
     slice_key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
     /// The demanded member for a member-projection demand.
@@ -2611,8 +2611,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .force_flow_member_fenced_serve_for_tests
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
             }
             let idx = self.flow_frame_open(&key);
@@ -2646,7 +2646,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let queued_before = self.dispatch_txn.borrow().flow.completed_members.len();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
+        let refusals = verter_session_query::facts::reuse::RefusalObservationScope::enter();
         let started = crate::resolver_core::resolver_context::mark_evidence();
         let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(run);
         let ended = crate::resolver_core::resolver_context::mark_evidence();
@@ -2669,13 +2669,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             && !observed.result_is_partial
             && !folded_partial;
         let refusal = match refused {
-            Some(reason) => crate::resolver_core::reuse::ObservedRefusal::Typed(reason),
+            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
             None if reads.non_cacheable || observed.cache_suppress => {
-                crate::resolver_core::reuse::ObservedRefusal::Unattributed
+                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
             }
-            None => crate::resolver_core::reuse::ObservedRefusal::None,
+            None => verter_session_query::facts::reuse::ObservedRefusal::None,
         };
-        let reuse = crate::resolver_core::reuse::classify_reuse(refusal, complete);
+        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
         if reuse.is_request_reusable() && self.closed_as_own_root(&key, queued_before) {
             if let FlowReturnStep::Complete(value) = &step {
                 // Hierarchical evidence: the completed result's reads —
@@ -5350,7 +5350,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 refusal: FlowPlanRefusal::TornView,
             });
         };
-        let slice_key_function = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+        let slice_key_function = verter_session_query::flow::bundle::FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
             function: entry.key.clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash,
@@ -8794,7 +8794,7 @@ use verter_type_expr::TypeExpr;
 pub(super) trait FlowDemandDriver {
     fn flow_slice_skeleton(
         &self,
-        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+        key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Option<Arc<FunctionBodySkeleton>>;
     fn flow_slice_lowered(
         &self,
@@ -8806,8 +8806,8 @@ pub(super) trait FlowDemandDriver {
     ) -> Option<crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome>;
     fn flow_bound_graph_for(
         &self,
-        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
-    ) -> Option<crate::cache_runtime::flow_slice_node::BoundFlowGraph>;
+        key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
+    ) -> Option<verter_session_query::flow::bundle::BoundFlowGraph>;
     fn first_signature_param_occurrence(
         &self,
         params: &[crate::semantic_query::FunctionParam],
@@ -9118,7 +9118,7 @@ pub(super) trait FlowDemandDriver {
 impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn flow_slice_skeleton(
         &self,
-        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+        key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Option<Arc<FunctionBodySkeleton>> {
         self.flow_slice_driver().skeleton_for(key)
     }
@@ -9136,8 +9136,8 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     }
     fn flow_bound_graph_for(
         &self,
-        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
-    ) -> Option<crate::cache_runtime::flow_slice_node::BoundFlowGraph> {
+        key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
+    ) -> Option<verter_session_query::flow::bundle::BoundFlowGraph> {
         self.binding.flow_slice.bound_graph_for(key)
     }
     fn first_signature_param_occurrence(
@@ -9729,7 +9729,7 @@ impl<D: FlowDemandDriver> FlowCx<'_, D> {
 impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn flow_slice_skeleton(
         &self,
-        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
+        key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Option<Arc<FunctionBodySkeleton>> {
         self.driver.flow_slice_skeleton(key)
     }
@@ -9747,8 +9747,8 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn flow_bound_graph_for(
         &self,
-        key: &crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey,
-    ) -> Option<crate::cache_runtime::flow_slice_node::BoundFlowGraph> {
+        key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
+    ) -> Option<verter_session_query::flow::bundle::BoundFlowGraph> {
         self.driver.flow_bound_graph_for(key)
     }
     fn first_signature_param_occurrence(
@@ -11105,7 +11105,7 @@ fn seed_selected_parameters(
     parameters: &[verter_session_query::flow::slice::SliceParam],
     values: &[SemanticNodeId],
     bindings: &FlowBindingMap,
-    bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+    bound: &verter_session_query::flow::bundle::BoundFlowGraph,
     execution_selection: &super::flow_solve::FlowExecutionSelection,
 ) {
     let input_by_binding: rustc_hash::FxHashMap<_, _> = parameters
@@ -23705,7 +23705,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         declared_predicate: Option<&verter_session_query::flow::slice::SlicePredicate>,
         bindings: &Arc<FlowBindingMap>,
         skeleton: Arc<FunctionBodySkeleton>,
-        bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        bound: verter_session_query::flow::bundle::BoundFlowGraph,
         planned: Option<&crate::cache_runtime::flow_slice_node::PlannedFlowSlice>,
         anchor: u32,
         key: &FlowReturnKey,

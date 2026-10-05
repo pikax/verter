@@ -192,7 +192,7 @@ mod tests {
                     owner,
                     "Old"
                 ),
-                crate::decl_body_memo::DemandOutcome::Ready(Some(_))
+                verter_session_query::source::demand::DemandOutcome::Ready(Some(_))
             ));
             assert!(matches!(
                 OwnedLowering::transient_type_parts(
@@ -201,7 +201,7 @@ mod tests {
                     owner,
                     "Fresh"
                 ),
-                crate::decl_body_memo::DemandOutcome::Ready(None)
+                verter_session_query::source::demand::DemandOutcome::Ready(None)
             ));
             assert!(matches!(
                 OwnedLowering::transient_type_parts(
@@ -210,7 +210,7 @@ mod tests {
                     owner,
                     "Fresh"
                 ),
-                crate::decl_body_memo::DemandOutcome::Ready(Some(_))
+                verter_session_query::source::demand::DemandOutcome::Ready(Some(_))
             ));
             assert!(
                 !first.store_published,

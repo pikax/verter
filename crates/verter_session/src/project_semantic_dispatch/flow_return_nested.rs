@@ -241,7 +241,7 @@ pub(super) struct NestedChildParts {
         rustc_hash::FxHashSet<verter_session_query::function_program::FlowBindingIdentity>,
     pub(super) execution_selection: Arc<super::super::flow_solve::FlowExecutionSelection>,
     pub(super) plan: Option<Arc<super::super::flow_solve::FlowDemandPlan>>,
-    pub(super) bound: crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+    pub(super) bound: verter_session_query::flow::bundle::BoundFlowGraph,
     pub(super) skeleton: Arc<FunctionBodySkeleton>,
 }
 

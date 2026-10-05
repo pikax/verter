@@ -583,8 +583,8 @@ impl VerterHost {
                 // non-admission only, never request partiality. The fenced
                 // consumption ALSO flows by value (the TLS chokepoint flag)
                 // so enclosing traced cold computes refuse admission.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
                 return Some(crate::host_manage::prepared_decl::IndexedReadyServe {
                     indexed: outcome.indexed,
@@ -598,8 +598,8 @@ impl VerterHost {
             // Complete, NOT partial — mark cache non-admission only, never
             // request partiality (the by-value `store_published == false`
             // and the fan-out both refuse shared-cache admission).
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }
         last_fenced.map(

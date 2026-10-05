@@ -28,7 +28,7 @@
 //! The acceptance distinction the tests below pin:
 //!
 //! * the RETURNED refusal carries the exact
-//!   [`NonCacheableReadReason`](crate::resolver_core::resolver_context::NonCacheableReadReason)
+//!   [`NonCacheableReadReason`](verter_session_query::facts::reuse::NonCacheableReadReason)
 //!   and [`NonCacheablePropagation`](verter_session_query::facts::fact_read_set::NonCacheablePropagation);
 //! * tracer finalisation exposes only the BOOLEAN — it never records the
 //!   reason.
@@ -36,8 +36,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::resolver_core::resolver_context::NonCacheableReadReason;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::reuse::NonCacheableReadReason;
 use verter_session_query::facts::store_view::StoreView;
 
 fn upsert(host: &VerterHost, path: &str, source: &str) {

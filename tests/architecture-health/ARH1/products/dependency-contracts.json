@@ -869,7 +869,6 @@
           "component_meta_audit",
           "fact_signature_helpers",
           "file_artifact_store",
-          "global_contributors",
           "graph_walk",
           "intrinsic_registry",
           "loop5_instrumentation",

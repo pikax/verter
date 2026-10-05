@@ -48,7 +48,7 @@ mod tests {
         nested: bool,
     ) -> (
         FlowFrameProducts,
-        crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        verter_session_query::flow::bundle::BoundFlowGraph,
         super::super::flow_solve::FlowDemandPlan,
     ) {
         fixture_with_resources(source, nested, FlowResourcePolicy::default())
@@ -60,7 +60,7 @@ mod tests {
         resources: FlowResourcePolicy,
     ) -> (
         FlowFrameProducts,
-        crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        verter_session_query::flow::bundle::BoundFlowGraph,
         super::super::flow_solve::FlowDemandPlan,
     ) {
         let (state, _) =
@@ -657,7 +657,7 @@ impl FlowFrameProducts {
 
     pub fn new(
         execution: FlowProductExecution,
-        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
     ) -> Result<Self, FlowProductFailure> {
         let content = execution.attach_content(bound)?;
         let state = execution.empty_state();

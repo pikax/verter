@@ -1175,8 +1175,8 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                         // caller's query-scoped load boundary. Without its live
                         // hash the result remains usable for this request, but it
                         // cannot be rooted for shared warm admission.
-                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                            crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+                        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                            verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
                         );
                     }
                 }

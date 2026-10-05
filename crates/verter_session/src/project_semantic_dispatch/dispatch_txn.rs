@@ -3010,7 +3010,7 @@ pub(crate) struct CompletedFlowReturnMember {
 /// them — the transaction-local counterpart of a warm hit bubbling its
 /// stored signature. Only a COMPLETE evaluation is kept (no partial taint,
 /// a complete cold-compute scope); its refusal, if any, is carried by the
-/// result's [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) and
+/// result's [`ReuseClass`](verter_session_query::facts::reuse::ReuseClass) and
 /// replayed beside these rails.
 #[derive(Debug, Clone)]
 pub(crate) struct FlowMemberReuse {
@@ -3029,12 +3029,12 @@ pub(crate) struct FlowMemberReuse {
 #[derive(Debug, Clone)]
 pub(crate) struct TransactionFlowResult {
     pub(crate) value: crate::semantic_query::FlowReturnResult,
-    /// [`ReuseClass::Shared`](crate::resolver_core::reuse::ReuseClass::Shared)
+    /// [`ReuseClass::Shared`](verter_session_query::facts::reuse::ReuseClass::Shared)
     /// for a result eligible for cross-request reuse,
-    /// [`ReuseClass::RequestOnly`](crate::resolver_core::reuse::ReuseClass::RequestOnly)
+    /// [`ReuseClass::RequestOnly`](verter_session_query::facts::reuse::ReuseClass::RequestOnly)
     /// for one whose persistent admission is refused. An incomplete result
     /// never enters the table.
-    pub(crate) reuse: crate::resolver_core::reuse::ReuseClass,
+    pub(crate) reuse: verter_session_query::facts::reuse::ReuseClass,
     pub(crate) replay: FlowMemberReuse,
 }
 

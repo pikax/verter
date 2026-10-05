@@ -1,5 +1,7 @@
 //! The session's request-bound resolver contexts: the direct-host test seam and the
 //! request-bound adapter that serves the engine's resolver ports from a lifecycle.
+use verter_session_query::facts::reuse::note_non_cacheable_read_fan_out;
+use verter_session_query::facts::reuse::NonCacheableReadReason;
 
 use std::sync::Arc;
 

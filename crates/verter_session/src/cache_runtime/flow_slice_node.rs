@@ -49,82 +49,28 @@
 //! [`FlowSliceBudget`] cell. The `FlowReturn` executor consumes the hash
 //! node on its cold path (the budget outcome gates memo admission); the
 //! lowered node serves slice-IR demand through the same store.
+use verter_session_query::flow::bundle::{BoundFlowGraph, FlowGraphBundle, FlowSliceFunctionKey};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use verter_language::{FileLanguage, ParseKey};
-use verter_session_query::flow::flow_graph::{build_function_flow_graph, FunctionFlowGraph};
+use verter_session_query::flow::flow_graph::build_function_flow_graph;
 use verter_session_query::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
 use verter_session_query::flow::hashing::FlowSliceHash;
 use verter_session_query::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
-use verter_session_query::flow::{
-    binding::FlowBindingMap,
-    skeleton::{FunctionBodySkeleton, PreparedFunctionBodySkeleton},
-};
-use verter_session_query::function_program::FunctionProgramKey;
+use verter_session_query::flow::skeleton::{FunctionBodySkeleton, PreparedFunctionBodySkeleton};
 
 use super::admission::CacheEntry;
 use super::node::QueryFlightKey;
 use super::singleflight::InflightTable;
-use verter_session_query::analysis::types::Hash16;
 
 #[cfg(test)]
 #[path = "flow_slice_node_tests.rs"]
 pub(crate) mod tests;
 
 // ── Keys ──────────────────────────────────────────────────────────────
-
-/// The content-pinned function identity every flow-slice artifact keys
-/// on: the canonical, the five-axis served-function identity, the
-/// body-sensitive `flow_body_stable_hash` (NOT `parse_stable_hash` —
-/// `return {{ b: 1 }}` vs `return {{ b: 2 }}` key distinct slices), the
-/// EXACT per-function byte hash, the parse-env hash, the exact parse
-/// identity ([`ParseKey`]) and runtime-authoritative language row
-/// ([`FileLanguage`]) of the serving file — the same source axes
-/// [`verter_session_query::source::artifact_key::FileArtifactKey`] carries — and the
-/// parser version.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FlowSliceFunctionKey {
-    /// Canonical id of the file serving the function.
-    pub(crate) canonical_id: Arc<str>,
-    /// The five-axis function program identity.
-    pub(crate) function: FunctionProgramKey,
-    /// The whole-function body-sensitive / cosmetic-insensitive hash.
-    pub(crate) flow_body_stable_hash: Hash16,
-    /// The EXACT byte hash of the function's own source text.
-    ///
-    /// The artifacts this key addresses carry SOURCE POSITIONS, and the
-    /// stable hash above cannot address those: it alpha-normalizes
-    /// binding / reference identifiers and folds the AST rather than the
-    /// text, so `const aa = 1` and `const aaaa = 1` share it while
-    /// placing every position inside the body differently. Reuse across
-    /// that boundary hands a plan positions that no longer address the
-    /// code they were computed from.
-    ///
-    /// This is NOT a file-offset axis, and deliberately so: it covers
-    /// the function's OWN bytes only, so an edit anywhere else in the
-    /// file — a leading blank line, a sibling function's body — leaves
-    /// it (and every anchor-relative position in the artifacts) intact.
-    /// Reuse also requires the serving ParseKey below: that key pins the
-    /// lexical source context of exact captured binding identities.
-    pub(crate) flow_body_exact_hash: Hash16,
-    /// Parse-domain env hash.
-    pub(crate) parse_env_hash: Hash16,
-    /// The exact parse identity (source bytes, language, compatibility
-    /// domain/epoch, syntax profile) of the serving file — taken from the
-    /// request-bound artifact identity, never reclassified from the path.
-    pub(crate) parse_key: ParseKey,
-    /// The runtime-authoritative [`FileLanguage`] row the serving file was
-    /// parsed under — taken from the request-bound `IndexedReady`, never
-    /// reclassified from the path.
-    pub(crate) file_language: FileLanguage,
-    /// Parser version.
-    pub(crate) build_toolchain_fingerprint:
-        verter_session_query::source::toolchain::BuildToolchainFingerprint,
-}
 
 /// The demand identity of one slice: the demanded return-projection
 /// path (empty = whole return). Further demand axes (the
@@ -162,18 +108,6 @@ pub(crate) struct FlowSliceLoweredKey {
 
 // ── Graph storage (once per function content version) ────────────────
 
-/// One memoized per-function flow bundle: the skeleton, exact indexed
-/// binding correspondence, and graph, shared by every demand against
-/// the same content version.
-pub(crate) struct FlowGraphBundle {
-    /// The arena-free body skeleton.
-    pub skeleton: Arc<FunctionBodySkeleton>,
-    /// The authoritative indexed declaration map built once with the skeleton.
-    pub bindings: Arc<FlowBindingMap>,
-    /// The typed-edge dependence graph built once from the skeleton.
-    pub graph: Arc<FunctionFlowGraph>,
-}
-
 /// The one bundle construction. Bindings come from the pinned indexed
 /// entry, and the graph consumes its sealed prepared structure. No demand or
 /// caller-authored inventory can initialize the cached binding authority.
@@ -184,30 +118,6 @@ pub(crate) fn build_prepared_bundle(prepared: PreparedFunctionBodySkeleton) -> F
         skeleton: Arc::new(skeleton),
         bindings: Arc::new(bindings),
         graph: Arc::new(graph),
-    }
-}
-
-/// A flow graph bundle SEALED to the store key it was built for. Fields
-/// are private and the sole constructors are [`FunctionFlowGraphStore`]
-/// methods, so a consumer can never plan over one graph while naming
-/// another's body identity. This is the completeness-proof layer's graph
-/// handle: the production demand preparation mints it from the memoized
-/// bundle ([`FunctionFlowGraphStore::bound_graph`]); the gated test mint
-/// below serves the hermetic fixtures.
-pub(crate) struct BoundFlowGraph {
-    key: FlowSliceFunctionKey,
-    bundle: Arc<FlowGraphBundle>,
-}
-
-impl BoundFlowGraph {
-    /// The content-pinned function identity the bundle was built for.
-    pub(crate) fn key(&self) -> &FlowSliceFunctionKey {
-        &self.key
-    }
-
-    /// The memoized bundle the key names.
-    pub(crate) fn bundle(&self) -> &FlowGraphBundle {
-        &self.bundle
     }
 }
 

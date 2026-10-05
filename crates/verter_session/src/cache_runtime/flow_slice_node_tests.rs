@@ -7,6 +7,7 @@
 use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use verter_language::FileLanguage;
 
 use verter_semantic::analysis::flow::{build_indexed_function_body_skeleton, FunctionBodySource};
 use verter_semantic::analysis::function_program::build_function_program_index;

@@ -22,11 +22,12 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
-use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
+use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use verter_session_query::analysis::route_inventory::{
     RouteCapability, RouteImportForm, RouteImportedName, ScriptRouteInventory,
 };
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::source::demand::DemandOutcome;
 use verter_type_expr::facts::TypeDependencyPathFact;
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TypeExpr};
 
@@ -826,7 +827,9 @@ impl ShallowFileState {
         // re-borrow (broken lease / seeded state) is a conservative `None`.
         self.type_decl(name)?;
         match self.decl_bodies.transient_type_parts(name) {
-            crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => Some(parts.bodies.clone()),
+            verter_session_query::source::demand::DemandOutcome::Ready(Some(parts)) => {
+                Some(parts.bodies.clone())
+            }
             _ => None,
         }
     }
@@ -920,8 +923,8 @@ impl ShallowFileState {
                 // shared-cache admission (this accessor collapses the
                 // `DemandOutcome` directly, bypassing `into_option`), and fail
                 // closed — never cache the transient empty classification.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 None
             }
@@ -1374,7 +1377,7 @@ impl SfsRouteFactProvider<'_> {
             .decl_bodies()
             .transient_type_parts_in(self.owner, name)
         {
-            crate::decl_body_memo::DemandOutcome::Ready(Some(parts))
+            verter_session_query::source::demand::DemandOutcome::Ready(Some(parts))
                 if !parts.bodies.is_empty() =>
             {
                 Some(verter_session_query::facts::produce_key_source_fact(
@@ -1386,9 +1389,9 @@ impl SfsRouteFactProvider<'_> {
             // collapse bypasses `into_option`, so mark the generalized
             // non-cacheability rail on `LeaseMiss` (a genuine `Ready(None)` /
             // body-less re-borrow stays an unmarked, cacheable undecided miss).
-            crate::decl_body_memo::DemandOutcome::LeaseMiss => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+            verter_session_query::source::demand::DemandOutcome::LeaseMiss => {
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 None
             }

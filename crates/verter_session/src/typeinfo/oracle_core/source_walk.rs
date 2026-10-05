@@ -159,7 +159,7 @@ fn walk<C: ResolverContext>(
                 .lowered_type_decl(&shallow, owner, &def_name)
                 .and_then(
                     |_| match ctx.transient_type_parts(&shallow, owner, &def_name) {
-                        crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => {
+                        verter_session_query::source::demand::DemandOutcome::Ready(Some(parts)) => {
                             Some(parts.bodies.clone())
                         }
                         _ => None,

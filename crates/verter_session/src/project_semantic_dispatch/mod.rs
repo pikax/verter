@@ -2399,9 +2399,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .carrier_normalization_force_fence_for_tests
                         .load(std::sync::atomic::Ordering::Relaxed)
                     {
-                        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
-                    );
+                        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
+                        );
                     }
                     (normalized, partial_reasons)
                 },
@@ -2526,8 +2526,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .force_fenced_serve_for_tests
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }
         // Test-only per-host forced-result-partial knob. When set,

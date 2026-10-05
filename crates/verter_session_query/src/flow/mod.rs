@@ -2,6 +2,7 @@
 //! it, the demand planner, the slice hash and the slice IR.
 
 pub mod binding;
+pub mod bundle;
 pub mod completion;
 pub mod flow_graph;
 pub mod flow_ir;

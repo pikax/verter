@@ -25,7 +25,8 @@ use verter_type_expr::locators::{
 };
 use verter_type_expr::{FunctionExpr, ObjectMember, TupleElement, TypeExpr, TypeParam};
 
-use super::{DeclBodyMemo, DemandOutcome, TransientTypeParts, TransientValueParts};
+use super::{DeclBodyMemo, TransientTypeParts, TransientValueParts};
+use verter_session_query::source::demand::DemandOutcome;
 
 impl DeclBodyMemo {
     /// Locator deref — the WORKER phase of locator-shape lowering: re-borrow

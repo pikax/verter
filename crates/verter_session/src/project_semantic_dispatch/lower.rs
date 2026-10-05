@@ -795,8 +795,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 }),
         };
         let Some(param) = transient_param else {
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnobservableSource,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
             return self.opaque(QueryError::Miss);
         };

@@ -1478,8 +1478,8 @@ fn macro_hot_product(
             // Transient broken lease: leave the slot VACANT (the build lock is
             // released on scope exit, so the next demand re-enters the cold path
             // and retries), and mark the generalized non-cacheability rail.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
             );
             None
         }
@@ -1538,15 +1538,17 @@ fn build_macro_hot_ref(
         return MacroHotRefOutcome::LeaseMiss;
     };
     let parsed_arg = match source_demand.transient_macro_type_argument(mac.span) {
-        crate::decl_body_memo::DemandOutcome::Ready(Some(expr)) => expr,
+        verter_session_query::source::demand::DemandOutcome::Ready(Some(expr)) => expr,
         // A genuine, cacheable absence: the position lowered to no argument.
-        crate::decl_body_memo::DemandOutcome::Ready(None) => {
+        verter_session_query::source::demand::DemandOutcome::Ready(None) => {
             return MacroHotRefOutcome::Ready(None)
         }
         // A TRANSIENT broken decl-body lease: DO NOT commit a permanent
         // negative — surface the distinct outcome so the caller leaves the
         // mirror slot vacant, marks non-cacheability, and retries later.
-        crate::decl_body_memo::DemandOutcome::LeaseMiss => return MacroHotRefOutcome::LeaseMiss,
+        verter_session_query::source::demand::DemandOutcome::LeaseMiss => {
+            return MacroHotRefOutcome::LeaseMiss
+        }
     };
     let parsed_arg = parsed_arg.as_ref();
     let prop_reference_heads = mac

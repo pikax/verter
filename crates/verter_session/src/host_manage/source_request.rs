@@ -212,8 +212,8 @@ impl<'a> ImportedRootRequestDriver<'a> {
                 // reason refused it and whichever producer supplied it. This is a
                 // VALID (Complete) root, NOT a partial result — cache non-admission
                 // only, never request partiality.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return Some(run_result);
             }
@@ -228,8 +228,8 @@ impl<'a> ImportedRootRequestDriver<'a> {
             // cannot root. This is a VALID (Complete) adopted root, NOT a
             // partial result — cache non-admission only, never request
             // partiality.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
             );
         }
         last_unadmitted
@@ -525,8 +525,8 @@ impl<'a> RouteRequestDriver<'a> {
                 // floor that does not depend on a producer remembering it. This is a
                 // VALID (Complete) route, NOT a partial result — cache non-admission
                 // only, never request partiality.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return Some(run_result);
             }
@@ -541,8 +541,8 @@ impl<'a> RouteRequestDriver<'a> {
             // folding a route it cannot root. This is a VALID (Complete)
             // adopted route, NOT a partial result — cache non-admission
             // only, never request partiality.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
             );
         }
         last_unadmitted

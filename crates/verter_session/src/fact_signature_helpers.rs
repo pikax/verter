@@ -455,8 +455,8 @@ fn force_tracer_overflow_observations(
 ) {
     let (non_cacheable, sticky) = source.tracer_forcing();
     if non_cacheable {
-        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
         );
     }
     let once = crate::host_test_force::claim_fact_tracer_overflow_once(scope);

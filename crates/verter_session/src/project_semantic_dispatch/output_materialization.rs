@@ -196,8 +196,8 @@ mod projector {
                 // also fires for a genuinely-absent id (a real absence, not
                 // degradation), costing warm hits on that class for this
                 // block (fail-closed direction chosen deliberately).
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::OutputMaterializationLoss,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::OutputMaterializationLoss,
                 );
             }
             raised
@@ -435,8 +435,8 @@ mod carrier {
             /// member-level degradation stays entry-local).
             pub(super) fn into_type_expr<P: OutputProjector + ?Sized>(self, _cap: &P) -> TypeExpr {
                 if !self.degraded_leaves.is_empty() {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::OutputMaterializationLoss,
+                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::OutputMaterializationLoss,
                     );
                 }
                 self.type_expr

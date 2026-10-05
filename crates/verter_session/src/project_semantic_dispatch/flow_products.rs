@@ -11,7 +11,6 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::flow_solve::{FlowDemandBasis, FlowDemandPlan, FlowDomain, FlowExecutionSelection};
-use crate::cache_runtime::flow_slice_node::{BoundFlowGraph, FlowSliceFunctionKey};
 use crate::semantic_query::SemanticNodeId;
 use rustc_hash::FxHashMap;
 use std::cell::{Cell, OnceCell, RefCell};
@@ -19,6 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
 use verter_session_query::flow::binding::{FlowBindingMap, FlowBindingRef};
+use verter_session_query::flow::bundle::{BoundFlowGraph, FlowSliceFunctionKey};
 use verter_session_query::flow::flow_graph::{FlowNodeId, FlowNodeKind, FunctionFlowGraph};
 use verter_session_query::flow::flow_ir::ReturnSlicePlan;
 use verter_session_query::flow::policy::FlowGap;

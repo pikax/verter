@@ -65,8 +65,8 @@ impl<T> RouteShallowStateCache<T> {
             // that opened AFTER the original serve was recorded would
             // otherwise miss the chokepoint flag — re-flag on every
             // memo read so the by-value rail cannot under-report.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }
         Some(cached)

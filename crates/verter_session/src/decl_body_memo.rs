@@ -25,6 +25,7 @@
 //! backfills exactly those siblings' entries (the work was actually
 //! performed — path-independent population of only what the compute
 //! produced).
+use verter_session_query::source::demand::DemandOutcome;
 use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 
 use std::sync::atomic::Ordering;
@@ -170,48 +171,6 @@ type LoweredDeclGroups = (
 enum DemandLower {
     Ready(Option<LoweredStatementBatch>),
     LeaseMiss,
-}
-
-/// Outcome of a per-symbol body DEMAND ([`DeclBodyMemo::demand_and_commit`])
-/// as seen by a caller that needs to DISTINGUISH the two `None`-shaped miss
-/// classes (the locator-deref path, which must not collapse a transient
-/// ReturnOnly into a cacheable resolution result):
-///
-/// - [`Ready`](Self::Ready) — the lease-only run completed. `Some` is the
-///   demanded decl; `None` is a GENUINE, cacheable miss (the symbol is not
-///   inventoried, or the run produced a fatal-parse empty).
-/// - [`LeaseMiss`](Self::LeaseMiss) — the lease pin was broken: the demand
-///   ran NOTHING and committed NOTHING (`ReturnOnly`). A caller must route
-///   this to a no-warm signal, never treat it as a genuine miss.
-pub enum DemandOutcome<D> {
-    Ready(Option<Arc<D>>),
-    LeaseMiss,
-}
-
-impl<D> DemandOutcome<D> {
-    /// Collapse to the plain `Option` API: a lease-miss reads as `None`. Used
-    /// by the broad `Option`-returning demand accessors whose consumers do
-    /// NOT distinguish the transient ReturnOnly from a genuine miss (the
-    /// per-symbol demand cell already fails closed by evicting the poisoned
-    /// cell, so a later demand under a live lease recovers).
-    ///
-    /// The `LeaseMiss` arm marks the generalized non-cacheability rail: this
-    /// is the ONE central collapse point for the plain type / value /
-    /// augmentation decl-body accessors, so a transient broken-lease read
-    /// consumed by an enclosing traced compute refuses that compute's
-    /// shared-cache admission (structural, not per-name). A `Ready(None)`
-    /// genuine absence stays cacheable and marks nothing.
-    fn into_option(self) -> Option<Arc<D>> {
-        match self {
-            DemandOutcome::Ready(value) => value,
-            DemandOutcome::LeaseMiss => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
-                );
-                None
-            }
-        }
-    }
 }
 
 /// TRANSIENT per-name retention between `lower_statement_parts` and
@@ -551,7 +510,7 @@ impl IndexedExpressionDemand {
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
         selection: verter_session_query::flow::slice::FlowSliceSelection,
-        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.flow_slice_content_with_context(entry, Some(selection), bound, None, policy)
@@ -561,7 +520,7 @@ impl IndexedExpressionDemand {
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
         selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
-        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
@@ -1565,13 +1524,13 @@ impl DeclBodyMemo {
     pub(crate) fn flow_bound_graph_for_tests(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-    ) -> crate::cache_runtime::flow_slice_node::BoundFlowGraph {
+    ) -> verter_session_query::flow::bundle::BoundFlowGraph {
         let file_language =
             verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
         let (_, parse_key) =
             verter_language::default_parse_identity_for(&self.eval_source, &file_language)
                 .expect("fixture parse identity");
-        let key = crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+        let key = verter_session_query::flow::bundle::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&self.key.canonical),
             function: entry.key.clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash,
@@ -1600,7 +1559,7 @@ impl DeclBodyMemo {
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
         selection: verter_session_query::flow::slice::FlowSliceSelection,
-        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.indexed_expression_demand()
@@ -1612,7 +1571,7 @@ impl DeclBodyMemo {
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
         selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
-        bound: &crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {

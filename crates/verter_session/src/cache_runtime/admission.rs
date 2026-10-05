@@ -87,7 +87,7 @@ pub(crate) fn propagate_non_admission(reason: NonAdmissionReason) {
     if propagation
         == verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive
     {
-        crate::resolver_core::resolver_context::note_non_cacheable_propagation(propagation);
+        verter_session_query::facts::reuse::note_non_cacheable_propagation(propagation);
     }
 }
 

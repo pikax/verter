@@ -45,7 +45,6 @@ pub(crate) mod request_bound;
 pub(crate) mod request_ports;
 pub(crate) mod request_store_view;
 pub(crate) mod resolver_context;
-pub(crate) mod reuse;
 pub mod route_db;
 pub(crate) mod scope_shadowing;
 pub(crate) mod session_resolver_context;
@@ -372,7 +371,7 @@ pub(crate) struct StableExecutionValue<V> {
     /// Orthogonal to `completeness`: this field is the REFUSAL axis and
     /// `completeness` is the COMPLETENESS axis; admission requires both
     /// to be clean.
-    pub reuse: reuse::ReuseClass,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
 }
 
 /// Sealed evidence that the stable-request driver observed a current,
@@ -575,7 +574,7 @@ where
                     executor.store_stable(&value, StableAdmission { _private: () });
                 }
                 if let Some(propagation) = cache_refusal {
-                    resolver_context::note_non_cacheable_propagation(propagation);
+                    verter_session_query::facts::reuse::note_non_cacheable_propagation(propagation);
                 }
                 return Ok(RequestRunResult {
                     value,
@@ -594,7 +593,7 @@ where
             // result now.
             if executor.snapshot_is_immutable() {
                 if let Some(propagation) = executor.capture_cache_refusal() {
-                    resolver_context::note_non_cacheable_propagation(propagation);
+                    verter_session_query::facts::reuse::note_non_cacheable_propagation(propagation);
                 }
                 return Ok(RequestRunResult {
                     value,
@@ -667,7 +666,7 @@ where
                         completeness: ResultCompleteness::Complete,
                         // A warm hit came out of a shared cache: it was
                         // admitted, so nothing refused it.
-                        reuse: reuse::ReuseClass::Shared,
+                        reuse: verter_session_query::facts::reuse::ReuseClass::Shared,
                     });
                 }
 
@@ -688,7 +687,10 @@ where
                     stable,
                     computed: true,
                     completeness,
-                    reuse: reuse::ReuseClass::from_captured_propagation(cache_refusal),
+                    reuse:
+                        verter_session_query::facts::reuse::ReuseClass::from_captured_propagation(
+                            cache_refusal,
+                        ),
                 })
             },
             // Retain ONLY stable results as a joinable rendezvous. An
@@ -764,7 +766,7 @@ where
     let value = executor.compute(&store_view)?;
     let completeness = executor.capture_completeness();
     if let Some(propagation) = executor.capture_cache_refusal() {
-        resolver_context::note_non_cacheable_propagation(propagation);
+        verter_session_query::facts::reuse::note_non_cacheable_propagation(propagation);
     }
     Ok(RequestRunResult {
         value,
@@ -2892,7 +2894,7 @@ mod tests {
                         stable: true,
                         computed: true,
                         completeness: crate::semantic_query::ResultCompleteness::Complete,
-                        reuse: reuse::ReuseClass::Shared,
+                        reuse: verter_session_query::facts::reuse::ReuseClass::Shared,
                     })
                 },
                 |sev| sev.stable,

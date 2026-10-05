@@ -135,7 +135,7 @@ fn flow_demand_basis_for_member(
         .1;
     FlowDemandBasis {
         ancestry: Default::default(),
-        graph_body: crate::cache_runtime::flow_slice_node::FlowSliceFunctionKey {
+        graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {

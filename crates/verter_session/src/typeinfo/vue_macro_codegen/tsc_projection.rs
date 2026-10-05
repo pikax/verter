@@ -575,7 +575,7 @@ fn inferred_class_members(
             .lowering
             .transient_type_parts(inventory.shallow_state, owner, name)
         {
-            crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => parts,
+            verter_session_query::source::demand::DemandOutcome::Ready(Some(parts)) => parts,
             _ => {
                 return Err(ClassInferenceFailure::Unresolved(
                     UnresolvedReason::MissingDependency,
@@ -713,7 +713,7 @@ fn inferred_class_members(
             .lowering
             .transient_value_parts(inventory.shallow_state, owner, name)
         {
-            crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => Some(parts),
+            verter_session_query::source::demand::DemandOutcome::Ready(Some(parts)) => Some(parts),
             _ => {
                 return Err(ClassInferenceFailure::Unresolved(
                     UnresolvedReason::MissingDependency,

@@ -21,6 +21,7 @@ pub mod reactivity;
 pub mod receipt;
 pub mod registry;
 pub mod resolution;
+pub mod reuse;
 pub mod route;
 pub mod route_closure;
 pub mod route_facts;

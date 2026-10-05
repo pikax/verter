@@ -171,7 +171,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// still fans out to each enclosing tracer, so a producer bracketing this
     /// read still refuses its own shared-cache admission.
     ///
-    /// [`NonCacheableReadReason::LeaseMiss`]: crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss
+    /// [`NonCacheableReadReason::LeaseMiss`]: verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss
     pub(crate) fn prepared_type_decl(
         &mut self,
         canonical_id: &str,
@@ -202,8 +202,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .flatten()
                 }
                 Err(failure) => {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                     );
                     tracing::error!(
                         canonical_id,

@@ -80,7 +80,7 @@ fn selection_for(
     path: &[Arc<str>],
 ) -> (
     FlowSliceSelection,
-    crate::cache_runtime::flow_slice_node::BoundFlowGraph,
+    verter_session_query::flow::bundle::BoundFlowGraph,
 ) {
     let bound = memo.flow_bound_graph_for_tests(entry);
     let skeleton = &bound.bundle().skeleton;

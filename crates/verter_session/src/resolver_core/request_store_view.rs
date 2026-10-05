@@ -85,12 +85,12 @@ use verter_session_query::facts::fact_cache::{CompletionOverlayState, OverlayId}
 use crate::file_artifact_store::FileFacts;
 use crate::resolver_core::bracketed_generation::BracketedGeneration;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
-use crate::resolver_core::reuse::ReuseClass;
 use crate::resolver_store::HostStoreView;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
 };
+use verter_session_query::facts::reuse::ReuseClass;
 use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
 /// Per-request shadowing side maps recording additive loads that the

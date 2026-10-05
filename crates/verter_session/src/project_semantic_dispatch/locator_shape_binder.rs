@@ -393,8 +393,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                                 failure,
                                 ..
                             } => {
-                                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                                    crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+                                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                                    verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                                 );
                                 tracing::error!(
                                     ?failure,

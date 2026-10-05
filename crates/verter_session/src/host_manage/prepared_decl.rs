@@ -78,14 +78,14 @@ enum BundleMaterialization {
 }
 
 /// A prepared-decl bundle read together with the
-/// [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) of the value
+/// [`ReuseClass`](verter_session_query::facts::reuse::ReuseClass) of the value
 /// that produced it.
 ///
 /// The two halves answer different questions and must not be collapsed:
 /// `bundle` is the ANSWER (a refused bundle is still served — the
 /// refusal is about admission, never about the answer), while `reuse` is
 /// how far that answer may travel. A `RequestOnly` outcome carries the
-/// exact [`NonCacheableRefusal`](crate::resolver_core::reuse::NonCacheableRefusal)
+/// exact [`NonCacheableRefusal`](verter_session_query::facts::reuse::NonCacheableRefusal)
 /// its compute observed, which is strictly more than tracer finalisation
 /// exposes: the tracer records only that the enclosing compute is
 /// non-cacheable, never why.
@@ -93,7 +93,7 @@ enum BundleMaterialization {
 pub(crate) struct BundleReuseOutcome {
     pub(crate) bundle:
         Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>>,
-    pub(crate) reuse: crate::resolver_core::reuse::ReuseClass,
+    pub(crate) reuse: verter_session_query::facts::reuse::ReuseClass,
 }
 
 /// One generation-fenced source snapshot admitted by the upsert transaction
@@ -324,7 +324,7 @@ impl VerterHost {
 
     /// Fixture-facing mirror of [`Self::prepared_decl_bundle_classified`]
     /// so a discriminating test can assert the exact
-    /// [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) — and, for
+    /// [`ReuseClass`](verter_session_query::facts::reuse::ReuseClass) — and, for
     /// a `RequestOnly` value, the exact refusal reason and propagation —
     /// that the shared implementation earned. Production reads take the
     /// projection above; the class governs admission INSIDE the
@@ -346,7 +346,7 @@ impl VerterHost {
     /// singleflight cold lane.
     ///
     /// Returns the bundle together with the
-    /// [`ReuseClass`](crate::resolver_core::reuse::ReuseClass) its
+    /// [`ReuseClass`](verter_session_query::facts::reuse::ReuseClass) its
     /// producing path earned. The class is what decides admission on the
     /// way out — the request memo takes only a request-reusable value,
     /// and a `RequestOnly` value replays its refusal into the caller's
@@ -359,10 +359,10 @@ impl VerterHost {
         canonical_id: &str,
     ) -> (
         Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>>,
-        crate::resolver_core::reuse::ReuseClass,
+        verter_session_query::facts::reuse::ReuseClass,
     ) {
         use crate::resolver_core::request_store_view::BundleMemoWorld;
-        use crate::resolver_core::reuse::{
+        use verter_session_query::facts::reuse::{
             classify_reuse, NoReuseCause, ObservedRefusal, ReuseClass,
         };
         let normalized_canonical_id = self.normalized_analysis_canonical(canonical_id);
@@ -487,7 +487,7 @@ impl VerterHost {
             // active scope — so the classification below reads what was
             // actually refused instead of inferring it from a boolean a
             // fenced serve and a broken lease set identically.
-            let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
+            let refusals = verter_session_query::facts::reuse::RefusalObservationScope::enter();
             let built = match self
                 .materialize_prepared_decl_bundle_from_routed_shallow(view, canonical_id)
             {
@@ -681,7 +681,7 @@ impl VerterHost {
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
         use crate::resolver_core::request_store_view::BundleMemoWorld;
-        use crate::resolver_core::reuse::{classify_reuse, ObservedRefusal};
+        use verter_session_query::facts::reuse::{classify_reuse, ObservedRefusal};
         // Two-identity split. `canonical_id` is the RAW requested
         // canonical; the overlay-detection gate + tombstone check below
         // MUST run on it because the `SessionView` overlay maps +
@@ -766,7 +766,7 @@ impl VerterHost {
                 // overflow or a mutation-instability verdict names no
                 // reason, and the conservative class is the only sound
                 // answer for it.
-                let refusals = crate::resolver_core::reuse::RefusalObservationScope::enter();
+                let refusals = verter_session_query::facts::reuse::RefusalObservationScope::enter();
                 let (bundle, non_cacheable) =
                     crate::fact_signature_helpers::with_cacheability_scope(
                         &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
@@ -2080,8 +2080,8 @@ impl VerterHost {
         {
             if let Some(serve) = serve {
                 if serve.store_published {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                     );
                     return Some(IndexedReadyServe {
                         indexed: serve.indexed,
@@ -2710,8 +2710,8 @@ impl VerterHost {
                 // (semantic-memo builds, the owner-import-surface and
                 // component-meta proof producers) so their admission
                 // gates refuse the fenced-derived result by value.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
                 return Some(IndexedReadyServe {
                     indexed: outcome.indexed,
@@ -2740,8 +2740,8 @@ impl VerterHost {
             //
             // Chokepoint: flag every enclosing traced cold compute —
             // same rail as the fenced-leader arm above.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }
         last_fenced.map(|indexed| IndexedReadyServe {
@@ -3451,8 +3451,8 @@ impl VerterHost {
                     // the route-walk shape of the same hole. This is a VALID
                     // (Complete) unrootable surface, NOT a partial result —
                     // cache non-admission only, never request partiality.
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                     );
                     let surface = crate::owner_import_surface::build_owner_import_surface(
                         Arc::from(owner_canonical),
