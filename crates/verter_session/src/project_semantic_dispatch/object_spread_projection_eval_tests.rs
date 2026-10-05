@@ -1966,8 +1966,20 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
 
     // A correlated closed union joins branch-local keys as optional and
     // stays explicitly incomplete.
-    let left = object(graph, [surface_member("a", number, false)]);
-    let right = object(graph, [surface_member("b", string, false)]);
+    let left = object(
+        graph,
+        [
+            surface_member("a", number, false),
+            surface_member("c", number, false),
+        ],
+    );
+    let right = object(
+        graph,
+        [
+            surface_member("b", string, false),
+            surface_member("c", string, false),
+        ],
+    );
     let union = graph.intern_node(SemanticNodeData::Union(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
     ));
@@ -1979,6 +1991,22 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
     };
     assert!(member_named(&surface, "a").optional);
     assert!(member_named(&surface, "b").optional);
+    // A key present in EVERY branch stays required and joins its values.
+    let c = member_named(&surface, "c");
+    assert!(!c.optional);
+    assert!(
+        matches!(
+            graph.node_data(c.value).as_deref(),
+            Some(SemanticNodeData::Union(_))
+        ),
+        "the shared key joins its per-branch values into one union"
+    );
+    // The joined stream carries exactly one row per joined key and nothing
+    // else (no signatures, no index facts).
+    assert_eq!(surface.members.len(), 3);
+    assert_eq!(surface.entries.len(), 3);
+    assert!(surface.call_signatures.is_empty() && surface.index_signatures.is_empty());
+    assert!(!surface.has_index_signature);
 }
 
 #[test]

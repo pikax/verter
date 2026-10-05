@@ -36,19 +36,45 @@ use crate::semantic_query_memo::SemanticGraphStore;
 
 /// A graph-only one-level surface: the resolver-owned ordered declaration
 /// stream plus the keyspace / index-signature facts of the surface it was
-/// read from. `Clone` is cheap (the stream is `Arc`-shared).
+/// read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OneLevelSurface {
-    entries: Arc<[SurfaceEntry]>,
+    entries: SurfaceEntries,
     keyspace: Option<SemanticNodeId>,
     has_index_signature: bool,
 }
+
+/// Backing of a [`OneLevelSurface`]'s entry stream: a graph view's stream is
+/// SHARED (no copy); a surface synthesized here (a presence join, a spread
+/// join) OWNS the one vector it was built into.
+#[derive(Debug, Clone)]
+enum SurfaceEntries {
+    Shared(Arc<[SurfaceEntry]>),
+    Owned(Vec<SurfaceEntry>),
+}
+
+impl SurfaceEntries {
+    fn as_slice(&self) -> &[SurfaceEntry] {
+        match self {
+            Self::Shared(entries) => entries,
+            Self::Owned(entries) => entries,
+        }
+    }
+}
+
+impl PartialEq for SurfaceEntries {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for SurfaceEntries {}
 
 impl OneLevelSurface {
     /// The surface that declares nothing.
     pub(crate) fn empty() -> Self {
         Self {
-            entries: Arc::from([]),
+            entries: SurfaceEntries::Owned(Vec::new()),
             keyspace: None,
             has_index_signature: false,
         }
@@ -57,7 +83,7 @@ impl OneLevelSurface {
     /// The one-level surface a graph [`SurfaceView`] carries, verbatim.
     pub(crate) fn from_view(view: &SurfaceView) -> Self {
         Self {
-            entries: Arc::clone(&view.entries),
+            entries: SurfaceEntries::Shared(Arc::clone(&view.entries)),
             keyspace: view.keyspace,
             has_index_signature: view.has_known_index_signature(),
         }
@@ -68,7 +94,7 @@ impl OneLevelSurface {
     /// carriers.
     pub(crate) fn from_presence_members(members: Vec<SurfaceMember>) -> Self {
         Self {
-            entries: members.into_iter().map(SurfaceEntry::Member).collect(),
+            entries: SurfaceEntries::Owned(members.into_iter().map(SurfaceEntry::Member).collect()),
             keyspace: None,
             has_index_signature: false,
         }
@@ -76,12 +102,12 @@ impl OneLevelSurface {
 
     /// The ordered declaration stream.
     pub(crate) fn entries(&self) -> &[SurfaceEntry] {
-        &self.entries
+        self.entries.as_slice()
     }
 
     /// Named members in declaration order.
     pub(crate) fn members(&self) -> impl Iterator<Item = &SurfaceMember> {
-        self.entries.iter().filter_map(|entry| match entry {
+        self.entries().iter().filter_map(|entry| match entry {
             SurfaceEntry::Member(member) => Some(member),
             _ => None,
         })
@@ -89,7 +115,7 @@ impl OneLevelSurface {
 
     /// Call-signature nodes in declaration order.
     pub(crate) fn call_signatures(&self) -> impl Iterator<Item = SemanticNodeId> + '_ {
-        self.entries.iter().filter_map(|entry| match entry {
+        self.entries().iter().filter_map(|entry| match entry {
             SurfaceEntry::CallSignature(node) => Some(*node),
             _ => None,
         })
@@ -97,7 +123,7 @@ impl OneLevelSurface {
 
     /// Index signatures in declaration order.
     pub(crate) fn index_signatures(&self) -> impl Iterator<Item = &IndexSignature> {
-        self.entries.iter().filter_map(|entry| match entry {
+        self.entries().iter().filter_map(|entry| match entry {
             SurfaceEntry::IndexSignature(signature) => Some(signature),
             _ => None,
         })
@@ -247,67 +273,66 @@ impl OneLevelSurface {
             }
         }
 
-        let members: Vec<SurfaceMember> = joins
-            .into_iter()
-            .map(|join| {
-                // A definitely-present key whose value is Indeterminate in
-                // EVERY alternative (an open residual may overwrite it)
-                // still publishes its row — with the honest open value,
-                // matching the walker's `Opaque(OpenSurface)` convention —
-                // never a dropped row.
-                let value = if join.values.is_empty() {
-                    graph.intern_node(SemanticNodeData::Opaque(
-                        crate::semantic_query::QueryError::OpenSurface,
-                    ))
-                } else {
-                    union_value(graph, join.values, evidence)
-                };
-                SurfaceMember {
-                    key: AuthoredPropertyKey::from_known(join.key),
-                    value,
-                    optional: join.optional_somewhere || join.present_in < alternative_count,
-                    readonly: join.readonly_all,
-                    method_kind: join.method_kind,
-                    has_implementation_body: join.has_implementation_body,
-                    visibility: verter_type_expr::MemberVisibility::Public,
-                    spans: verter_type_expr::MemberSpans::default(),
-                    declaration_origin: None,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                }
-            })
-            .collect();
-        let index_signatures: Vec<IndexSignature> = index_joins
-            .into_iter()
+        // ONE entry stream, built in declaration-kind order: members, call
+        // signatures, construct signatures, index signatures. The member
+        // value unions intern before the index value unions, as before.
+        let index_count = index_joins
+            .iter()
             .filter(|(.., values, _)| !values.is_empty())
-            .map(|(_, key_type, values, readonly)| IndexSignature {
+            .count();
+        let mut entries: Vec<SurfaceEntry> = Vec::with_capacity(
+            joins.len() + call_nodes.len() + construct_nodes.len() + index_count,
+        );
+        for join in joins {
+            // A definitely-present key whose value is Indeterminate in
+            // EVERY alternative (an open residual may overwrite it)
+            // still publishes its row — with the honest open value,
+            // matching the walker's `Opaque(OpenSurface)` convention —
+            // never a dropped row.
+            let value = if join.values.is_empty() {
+                graph.intern_node(SemanticNodeData::Opaque(
+                    crate::semantic_query::QueryError::OpenSurface,
+                ))
+            } else {
+                union_value(graph, join.values, evidence)
+            };
+            entries.push(SurfaceEntry::Member(SurfaceMember {
+                key: AuthoredPropertyKey::from_known(join.key),
+                value,
+                optional: join.optional_somewhere || join.present_in < alternative_count,
+                readonly: join.readonly_all,
+                method_kind: join.method_kind,
+                has_implementation_body: join.has_implementation_body,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            }));
+        }
+        entries.extend(call_nodes.into_iter().map(SurfaceEntry::CallSignature));
+        entries.extend(
+            construct_nodes
+                .into_iter()
+                .map(SurfaceEntry::ConstructSignature),
+        );
+        for (_, key_type, values, readonly) in index_joins {
+            if values.is_empty() {
+                continue;
+            }
+            entries.push(SurfaceEntry::IndexSignature(IndexSignature {
                 key_type,
                 value_type: union_value(graph, values, evidence),
                 readonly,
                 spans: verter_type_expr::IndexSignatureSpans::default(),
                 declaration_origin: None,
-            })
-            .collect();
-        let has_index_signature = !index_signatures.is_empty();
+            }));
+        }
         SurfaceResolution::open_presence(Self {
-            entries: members
-                .into_iter()
-                .map(SurfaceEntry::Member)
-                .chain(call_nodes.into_iter().map(SurfaceEntry::CallSignature))
-                .chain(
-                    construct_nodes
-                        .into_iter()
-                        .map(SurfaceEntry::ConstructSignature),
-                )
-                .chain(
-                    index_signatures
-                        .into_iter()
-                        .map(SurfaceEntry::IndexSignature),
-                )
-                .collect(),
+            entries: SurfaceEntries::Owned(entries),
             keyspace: None,
-            has_index_signature,
+            has_index_signature: index_count > 0,
         })
     }
 }

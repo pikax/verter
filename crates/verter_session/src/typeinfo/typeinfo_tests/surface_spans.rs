@@ -725,6 +725,15 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     };
 
     let surface = TypeInfoSurface::build(graph, &view);
+    // The graph-only one-level surface converts to the identical span-rich
+    // member surface.
+    assert_eq!(
+        TypeInfoSurface::from_one_level(
+            graph,
+            &crate::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view(&view),
+        ),
+        surface,
+    );
     let present = member(&surface, "present");
     assert_eq!(
         present.origin.canonical_file.as_deref(),
@@ -975,3 +984,134 @@ export class C {
 // `prepared_member_index_carries_spans_and_declaration_origin`. The
 // scope-less-value projection consumed by `build_member` is covered by
 // `member_build_uses_declaration_origin_for_scopeless_value` above.
+
+// ---------------------------------------------------------------------------
+// The graph-only one-level surface converts to the same span-rich surface the
+// direct view build produces for EVERY entry kind (member, call signature,
+// construct signature, index signature) in declaration order, and an unbound
+// generic ROOT projects its constraint's members as open presence.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
+    use crate::project_semantic_dispatch::one_level_surface::OneLevelSurface;
+    use crate::semantic_query::surface_resolution::SurfaceResolution;
+    use crate::semantic_query::{
+        IndexSignature, NodeScopeId, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
+        SemanticNodeData, SignatureKind, SignatureReturnCarrier, SurfaceMember,
+    };
+    use std::sync::Arc;
+    use verter_span::Span;
+
+    const FILE: &str = "/src/one_level.ts";
+
+    let host = make_host_with_footprint();
+    let graph = { host.project_type_store().semantic_graph() };
+    let scope = NodeScopeId::File {
+        canonical_id: Arc::from(FILE),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: Default::default(),
+        local_scope: None,
+    };
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let signature = |kind: SignatureKind, span: Span| {
+        graph.intern_node_with_scope(
+            SemanticNodeData::Signature {
+                kind,
+                params: Arc::from(Vec::new().into_boxed_slice()),
+                return_type: number,
+                type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                occurrence: None,
+                return_carrier: SignatureReturnCarrier::Declared(number),
+                signature_span: Some(span),
+                return_type_span: None,
+                predicate: None,
+                is_abstract: false,
+            },
+            scope.clone(),
+        )
+    };
+    let call = signature(SignatureKind::Call, Span::new(30, 40));
+    let construct = signature(SignatureKind::Construct, Span::new(41, 55));
+    let member = SurfaceMember {
+        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+        visibility: verter_type_expr::MemberVisibility::Public,
+        key: crate::semantic_query::AuthoredPropertyKey::string("m"),
+        value: string,
+        optional: true,
+        readonly: true,
+        method_kind: None,
+        has_implementation_body: false,
+        spans: verter_type_expr::MemberSpans {
+            declaration: Some(Span::new(0, 12)),
+            name: Some(Span::new(0, 1)),
+            type_annotation: Some(Span::new(4, 10)),
+        },
+        declaration_origin: Some(Arc::from(FILE)),
+        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+    };
+    let index = IndexSignature {
+        key_type: string,
+        value_type: number,
+        readonly: false,
+        spans: verter_type_expr::IndexSignatureSpans {
+            declaration: Some(Span::new(13, 29)),
+            key: Some(Span::new(14, 20)),
+            value: Some(Span::new(23, 29)),
+        },
+        declaration_origin: Some(Arc::from(FILE)),
+    };
+    let view = crate::test_surface_view! {
+        members: Arc::from(vec![member].into_boxed_slice()),
+        call_signatures: Arc::from(vec![call].into_boxed_slice()),
+        construct_signatures: Arc::from(vec![construct].into_boxed_slice()),
+        index_signatures: Arc::from(vec![index].into_boxed_slice()),
+        keyspace: None,
+        has_index_signature: true,
+    };
+
+    let built = TypeInfoSurface::build(graph, &view);
+    let one_level = OneLevelSurface::from_view(&view);
+    assert_eq!(one_level.entries(), &view.entries[..]);
+    assert_eq!(TypeInfoSurface::from_one_level(graph, &one_level), built);
+    assert_eq!(built.members.len(), 1);
+    assert_eq!(built.call_signatures.len(), 1);
+    assert_eq!(built.call_signatures[0].node, call);
+    assert_eq!(built.construct_signatures.len(), 1);
+    assert_eq!(built.construct_signatures[0].node, construct);
+    assert_eq!(built.index_signatures.len(), 1);
+    assert!(built.has_index_signature);
+
+    // An unbound generic root whose constraint is that object projects the
+    // constraint's members as OPEN presence — never a closed claim.
+    let constraint = graph.intern_node_with_scope(SemanticNodeData::Object(view), scope);
+    let generic = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: Some(constraint),
+        default: None,
+        display_name: Arc::from("T"),
+    });
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let SurfaceResolution::OpenPresence(surface) =
+        crate::typeinfo::shallow_surface::project_shallow_surface_graph_only(
+            host.as_ref(),
+            &dispatch,
+            generic,
+            Arc::from([]),
+            ProjectionReductionContext::published(ProjectionMode::Shallow),
+            None,
+        )
+    else {
+        panic!("an unbound generic root projects its constraint as OPEN presence");
+    };
+    assert!(
+        surface
+            .members
+            .iter()
+            .any(|member| member.string_name() == Some("m")),
+        "the constraint's member is present on the open surface"
+    );
+}

@@ -236,6 +236,11 @@ pub(crate) fn with_member_jsdoc_spans_from_ctx<C: crate::resolver_core::Resolver
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     surface: TypeInfoSurface,
 ) -> TypeInfoSurface {
+    // Nothing to hydrate: an empty surface (the `defineModel` macro surface)
+    // is returned as is, never rebuilt.
+    if surface.entries.is_empty() {
+        return surface;
+    }
     surface.with_member_jsdoc_spans(|canonical| {
         ctx.ensure_indexed_ready_serve(canonical)
             .map(|serve| Arc::clone(&serve.indexed.raw_source))
