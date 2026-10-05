@@ -27,7 +27,7 @@ pub trait FactValidation {
         crate::fact_signature_helpers::StructuralCarrierReadSet,
         crate::cache_runtime::NonAdmissionReason,
     >;
-    fn aggregate_clock_reader(&self) -> crate::resolver_store::AggregateClockReader;
+    fn aggregate_clock_reader(&self) -> verter_session_query::facts::clocks::AggregateClockReader;
     fn record_signature_overflow(&self);
     #[cfg(test)]
     fn tracer_forcing(&self) -> (bool, usize);
@@ -132,7 +132,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         &self,
         key: &verter_session_query::source::artifact_key::FileArtifactKey,
     ) -> crate::resolver_store::SourceEnvIdentity {
-        crate::resolver_store::SourceEnvIdentity::live_for_artifact_key(self.0.host(), key)
+        crate::resolver_store::live_source_env_identity(self.0.host(), key)
     }
     fn current_project_generation(&self) -> u64 {
         self.0
@@ -157,7 +157,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
             facts,
         )
     }
-    fn aggregate_clock_reader(&self) -> crate::resolver_store::AggregateClockReader {
+    fn aggregate_clock_reader(&self) -> verter_session_query::facts::clocks::AggregateClockReader {
         self.0.host().aggregate_clock_reader()
     }
     fn record_signature_overflow(&self) {

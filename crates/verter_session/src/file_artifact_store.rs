@@ -3141,7 +3141,7 @@ impl FileArtifactStore {
     #[must_use]
     pub(crate) fn route_generation_reader(
         &self,
-    ) -> crate::resolver_core::bracketed_generation::BracketedGenerationRead {
+    ) -> verter_session_query::facts::clocks::BracketedGenerationRead {
         self.route_surface_generation.reader()
     }
 

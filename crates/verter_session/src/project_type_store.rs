@@ -1286,8 +1286,12 @@ impl ProjectTypeStore {
 
     /// Current monotonic project generation. Owned by the host / workspace
     /// layer — queries read it but never mutate it.
-    pub(crate) fn project_generation_reader(&self) -> crate::resolver_store::ProjectGenerationRead {
-        crate::resolver_store::ProjectGenerationRead::new(Arc::clone(&self.project_generation))
+    pub(crate) fn project_generation_reader(
+        &self,
+    ) -> verter_session_query::facts::clocks::ProjectGenerationRead {
+        verter_session_query::facts::clocks::ProjectGenerationRead::new(Arc::clone(
+            &self.project_generation,
+        ))
     }
 
     pub fn project_generation(&self) -> u64 {

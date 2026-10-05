@@ -1404,7 +1404,7 @@ fn macro_hot_product(
     macro_index: usize,
 ) -> Option<Arc<MacroHotProduct>> {
     let (serve, source_demand) = ctx.indexed_flow_source(owner_canonical)?;
-    let indexed = serve.indexed;
+    let indexed = Arc::clone(&serve.indexed);
 
     // Lazily allocate the dense cell table once, sized to the owner's macro
     // count (race-safe via the outer `OnceLock::get_or_init`). An
@@ -1460,6 +1460,8 @@ fn macro_hot_product(
         }
     }
     match build_macro_hot_ref(
+        ctx,
+        &serve,
         source_demand.as_deref(),
         graph,
         owner_canonical,
@@ -1506,6 +1508,8 @@ enum MacroHotRefOutcome {
 /// [`build_script_setup_seed_frames`] DIRECTLY — both are module-private, so
 /// only this module's own producer paths can reach them.
 fn build_macro_hot_ref(
+    ctx: &dyn crate::resolver_core::request_ports::OwnedLowering,
+    serve: &crate::resolver_core::request_inputs::IndexedInputServe,
     source_demand: Option<&dyn verter_session_query::source::demand::ExpressionSourceDemand>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     owner_canonical: &str,
@@ -1588,10 +1592,7 @@ fn build_macro_hot_ref(
     // data (`raw_source` + `framework_parse`) — NO host route lookup, so the
     // mirror stays a pure producer.
     let seed_frames = build_script_setup_seed_frames_from_params(
-        &crate::host_resolve::sfc_script_setup_type_params(
-            &indexed.raw_source,
-            indexed.framework_parse.as_deref(),
-        ),
+        &ctx.script_setup_type_params(serve),
         graph,
         &scope,
     );

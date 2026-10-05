@@ -448,7 +448,7 @@ impl ResolvedImportFactsDb {
     #[must_use]
     pub(crate) fn generation_reader(
         &self,
-    ) -> crate::resolver_core::bracketed_generation::BracketedGenerationRead {
+    ) -> verter_session_query::facts::clocks::BracketedGenerationRead {
         self.generation.reader()
     }
 

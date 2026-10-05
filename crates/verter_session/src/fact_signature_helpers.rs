@@ -203,7 +203,7 @@ impl<'h> StepwiseFactTracer<'h> {
 enum BasisAuthority<'h> {
     Bound {
         port: &'h dyn crate::resolver_core::fact_validation_port::FactValidation,
-        clocks: crate::resolver_store::AggregateClockReader,
+        clocks: verter_session_query::facts::clocks::AggregateClockReader,
     },
     Unbound {
         overflow: &'h std::sync::atomic::AtomicU64,
@@ -761,7 +761,7 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
 /// the canonical's LIVE per-canonical parse env — the SAME dimension
 /// the contributor `LowerLocator` body-source key folds — sourced
 /// through the shared
-/// [`crate::resolver_store::SourceEnvIdentity::live_for_artifact_key`]
+/// [`crate::resolver_store::live_source_env_identity`]
 /// construction the validate-side snapshot seeding also uses, so
 /// record and validate compare the same dimension by construction. The
 /// key's own `parse_env_hash` slot must NOT be copied into the fact: a

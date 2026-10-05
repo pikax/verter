@@ -596,6 +596,9 @@ impl VerterHost {
             },
             block_content: crate::block_content::BlockContentHostLane::default(),
             language_classifier,
+            workspace_clocks: Arc::new(crate::resolver_store::WorkspaceSlotClocks(Arc::clone(
+                &workspace_lock,
+            ))),
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
@@ -1785,7 +1788,7 @@ mod fact_validation_authority {
             &self,
             key: &verter_session_query::source::artifact_key::FileArtifactKey,
         ) -> crate::resolver_store::SourceEnvIdentity {
-            crate::resolver_store::SourceEnvIdentity::live_for_artifact_key(self, key)
+            crate::resolver_store::live_source_env_identity(self, key)
         }
         fn current_project_generation(&self) -> u64 {
             self.project_type_store().current_project_generation()
@@ -1807,7 +1810,9 @@ mod fact_validation_authority {
             };
             crate::semantic_query_memo::semantic_graph_read_set_signature(&view, roots, facts)
         }
-        fn aggregate_clock_reader(&self) -> crate::resolver_store::AggregateClockReader {
+        fn aggregate_clock_reader(
+            &self,
+        ) -> verter_session_query::facts::clocks::AggregateClockReader {
             crate::VerterHost::aggregate_clock_reader(self)
         }
         fn record_signature_overflow(&self) {

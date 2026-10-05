@@ -1128,39 +1128,37 @@ pub struct SourceEnvIdentity {
     pub(crate) file_language_id: verter_language::FileLanguage,
 }
 
-impl SourceEnvIdentity {
-    /// The LIVE source-env identity for `key`'s canonical — the SINGLE
-    /// construction point shared by the fact producer
-    /// ([`crate::fact_signature_helpers::observe_file_source_env_from_artifact_key`])
-    /// and the validate-side root-relative read
-    /// ([`crate::store_view_roots::StoreViewRoots::resolve_canonical`]),
-    /// so record and validate compare the same dimensions by
-    /// construction.
-    ///
-    /// `parse_key` / `file_language_id` come from the artifact KEY
-    /// itself (the exact identity of the artifact the read served
-    /// from). The `parse_env_hash` dimension is the canonical's LIVE
-    /// per-canonical parse env
-    /// ([`VerterHost::host_view_env_hashes_for`]) — the SAME dimension
-    /// the contributor `LowerLocator` body-source key folds — NEVER the
-    /// key's `parse_env_hash` slot: a base key carries the zero
-    /// sentinel there and an overlay-scoped key a session
-    /// discriminator, neither an env identity. Copying the key slot
-    /// would make a live parse-env move (content unchanged) invisible
-    /// to the rail on BOTH sides, warm-serving a fold whose folded
-    /// contributor body-source identity has moved.
-    pub(crate) fn live_for_artifact_key(
-        host: &VerterHost,
-        key: &verter_session_query::source::artifact_key::FileArtifactKey,
-    ) -> Self {
-        Self {
-            parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
-                host.host_view_env_hashes_for(key.canonical.as_ref())
-                    .parse_env_hash,
-            ),
-            parse_key: key.parse_key.clone(),
-            file_language_id: key.file_language_id.clone(),
-        }
+/// The LIVE source-env identity for `key`'s canonical — the SINGLE
+/// construction point shared by the fact producer
+/// ([`crate::fact_signature_helpers::observe_file_source_env_from_artifact_key`])
+/// and the validate-side root-relative read
+/// ([`crate::store_view_roots::StoreViewRoots::resolve_canonical`]),
+/// so record and validate compare the same dimensions by
+/// construction.
+///
+/// `parse_key` / `file_language_id` come from the artifact KEY
+/// itself (the exact identity of the artifact the read served
+/// from). The `parse_env_hash` dimension is the canonical's LIVE
+/// per-canonical parse env
+/// ([`VerterHost::host_view_env_hashes_for`]) — the SAME dimension
+/// the contributor `LowerLocator` body-source key folds — NEVER the
+/// key's `parse_env_hash` slot: a base key carries the zero
+/// sentinel there and an overlay-scoped key a session
+/// discriminator, neither an env identity. Copying the key slot
+/// would make a live parse-env move (content unchanged) invisible
+/// to the rail on BOTH sides, warm-serving a fold whose folded
+/// contributor body-source identity has moved.
+pub(crate) fn live_source_env_identity(
+    host: &VerterHost,
+    key: &verter_session_query::source::artifact_key::FileArtifactKey,
+) -> SourceEnvIdentity {
+    SourceEnvIdentity {
+        parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
+            host.host_view_env_hashes_for(key.canonical.as_ref())
+                .parse_env_hash,
+        ),
+        parse_key: key.parse_key.clone(),
+        file_language_id: key.file_language_id.clone(),
     }
 }
 
@@ -5169,57 +5167,34 @@ mod store_view_resolution_root_tests;
 #[path = "resolve_env_asymmetry_tests.rs"]
 mod resolve_env_asymmetry_tests;
 
-/// A read-only project clock selected from its lifetime owner.
-#[derive(Clone)]
-pub(crate) struct ProjectGenerationRead(std::sync::Arc<std::sync::atomic::AtomicU64>);
-impl ProjectGenerationRead {
-    pub(crate) fn new(clock: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
-        Self(clock)
-    }
-    fn current(&self) -> u64 {
-        self.0.load(std::sync::atomic::Ordering::Acquire)
-    }
-}
+/// The host's live workspace slot as a clock source: each read selects the
+/// slot's current workspace, so a replacement is visible to the next read.
+pub(crate) struct WorkspaceSlotClocks(pub(crate) WorkspaceSlot);
 
-/// Fixed live-clock sampling authority. The workspace slot remains live so a
-/// workspace replacement has the same visibility as the host's original read.
-/// No workspace, store, mutation, or callback capability can escape this record.
-#[derive(Clone)]
-pub struct AggregateClockReader {
-    workspace:
-        std::sync::Arc<parking_lot::RwLock<std::sync::Arc<dyn verter_workspace::WorkspaceAccess>>>,
-    project: ProjectGenerationRead,
-    imports: crate::resolver_core::bracketed_generation::BracketedGenerationRead,
-    routes: crate::resolver_core::bracketed_generation::BracketedGenerationRead,
-}
-impl AggregateClockReader {
-    pub(crate) fn live(&self) -> verter_session_query::facts::fact_cache::LiveAggregateCounters {
-        // Keep the original two workspace selections and read order. A workspace
-        // can be replaced between them; each read observes the live slot.
-        let content = { std::sync::Arc::clone(&self.workspace.read()) }.content_generation();
-        let source_env = { std::sync::Arc::clone(&self.workspace.read()) }.source_env_generation();
-        verter_session_query::facts::fact_cache::LiveAggregateCounters {
-            content,
-            source_env,
-            workspace_shape: self.project.current(),
-            semantic_imports: self.imports.stable(),
-            route_surface: self.routes.stable(),
-        }
+/// The host's replaceable workspace slot.
+pub(crate) type WorkspaceSlot =
+    std::sync::Arc<parking_lot::RwLock<std::sync::Arc<dyn verter_workspace::WorkspaceAccess>>>;
+impl verter_session_query::facts::clocks::WorkspaceClocks for WorkspaceSlotClocks {
+    fn content_generation(&self) -> u64 {
+        { std::sync::Arc::clone(&self.0.read()) }.content_generation()
+    }
+    fn source_env_generation(&self) -> Option<u64> {
+        { std::sync::Arc::clone(&self.0.read()) }.source_env_generation()
     }
 }
 impl crate::VerterHost {
-    pub(crate) fn aggregate_clock_reader(&self) -> AggregateClockReader {
-        AggregateClockReader {
-            workspace: std::sync::Arc::clone(&self.workspace),
-            project: self.project_type_store().project_generation_reader(),
-            imports: self
-                .project_type_store()
+    pub(crate) fn aggregate_clock_reader(
+        &self,
+    ) -> verter_session_query::facts::clocks::AggregateClockReader {
+        verter_session_query::facts::clocks::AggregateClockReader::new(
+            std::sync::Arc::clone(&self.workspace_clocks),
+            self.project_type_store().project_generation_reader(),
+            self.project_type_store()
                 .resolved_import_facts()
                 .generation_reader(),
-            routes: self
-                .project_type_store()
+            self.project_type_store()
                 .indexed()
                 .route_generation_reader(),
-        }
+        )
     }
 }

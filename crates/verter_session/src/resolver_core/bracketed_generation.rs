@@ -60,19 +60,11 @@ pub(crate) struct BracketedGeneration {
     writer: Mutex<()>,
 }
 
-/// Read-only authority over the existing clock; it cannot bracket or mutate.
-#[derive(Clone)]
-pub(crate) struct BracketedGenerationRead(std::sync::Arc<AtomicU64>);
-impl BracketedGenerationRead {
-    pub(crate) fn stable(&self) -> Option<u64> {
-        let seq = self.0.load(Ordering::Acquire);
-        seq.is_multiple_of(2).then_some(seq)
-    }
-}
-
 impl BracketedGeneration {
-    pub(crate) fn reader(&self) -> BracketedGenerationRead {
-        BracketedGenerationRead(std::sync::Arc::clone(&self.seq))
+    pub(crate) fn reader(&self) -> verter_session_query::facts::clocks::BracketedGenerationRead {
+        verter_session_query::facts::clocks::BracketedGenerationRead::new(std::sync::Arc::clone(
+            &self.seq,
+        ))
     }
     /// The current stable generation, or `None` while a mutation is in
     /// flight.
