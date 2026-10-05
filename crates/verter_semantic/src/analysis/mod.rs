@@ -126,7 +126,7 @@ pub use style::{
     parse_style_ir_for_analysis, AnalyzedSelector, AttributeOperator, AttributeSelector,
     BlockContentAvailability, CompoundSelector, SelectorCombinator, SelectorPseudoClass,
     SpecialPseudoInput, SpecialPseudoKind, StructuredSelector, StyleAnalysisFlags,
-    StyleAnalysisLang, StyleBlockAnalysis, VBindInput, VueStyleInput,
+    StyleAnalysisLang, StyleBlockAnalysis, StyleLangDialect, VBindInput, VueStyleInput,
 };
 pub use template::{
     extract_dynamic_class_names, extract_dynamic_class_names_rich, AnalyzedEmitDefinition,

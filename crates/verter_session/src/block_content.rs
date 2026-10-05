@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use verter_semantic::analysis::StyleLangDialect;
 
 use sha2::{Digest, Sha256};
 use verter_compiler::style_planner::{

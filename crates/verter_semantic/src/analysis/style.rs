@@ -722,7 +722,23 @@ pub enum StyleAnalysisLang {
     Unknown,
 }
 
-impl StyleAnalysisLang {
+/// Dialect classification of a style language through the shared CSS syntax
+/// authority. The language enum is plain data; this owner maps it to and from
+/// the grammar that parses it.
+pub trait StyleLangDialect: Sized {
+    /// Classify an authored `<style lang="…">` spelling.
+    fn from_lang(lang: &str) -> Self;
+    /// The native grammar behind this language, or `None` when there is none.
+    fn native_dialect(self) -> Option<verter_css_syntax::CssDialect>;
+    /// Whether the shared syntax authority can parse this language's bytes as
+    /// authored.
+    fn is_natively_parsed(self) -> bool;
+    /// Whether bytes in this language need an external preprocessor before a
+    /// plain-CSS-only stage can run over them.
+    fn requires_external_preprocessing(self) -> bool;
+}
+
+impl StyleLangDialect for StyleAnalysisLang {
     /// Classify an authored `<style lang="…">` spelling.
     ///
     /// Delegates to the one spelling owner rather than keeping a table here.
@@ -731,8 +747,7 @@ impl StyleAnalysisLang {
     /// framework compiler does after its processor lookup misses; Vue's
     /// reference compiler falls through to plain CSS in that case. An
     /// unrecognised spelling is [`Self::Unknown`], never an implicit dialect.
-    #[must_use]
-    pub fn from_lang(lang: &str) -> Self {
+    fn from_lang(lang: &str) -> Self {
         match verter_css_syntax::CssDialect::from_lang(lang) {
             Some(verter_css_syntax::CssDialect::Css) => Self::Css,
             Some(verter_css_syntax::CssDialect::Scss) => Self::Scss,
@@ -744,8 +759,7 @@ impl StyleAnalysisLang {
     }
 
     /// The native grammar behind this language, or `None` when there is none.
-    #[must_use]
-    pub const fn native_dialect(self) -> Option<verter_css_syntax::CssDialect> {
+    fn native_dialect(self) -> Option<verter_css_syntax::CssDialect> {
         match self {
             Self::Css => Some(verter_css_syntax::CssDialect::Css),
             Self::Scss => Some(verter_css_syntax::CssDialect::Scss),
@@ -758,16 +772,14 @@ impl StyleAnalysisLang {
 
     /// Whether the shared syntax authority can parse this language's bytes as
     /// authored. `false` means the block's facts depend on an external tool.
-    #[must_use]
-    pub const fn is_natively_parsed(self) -> bool {
+    fn is_natively_parsed(self) -> bool {
         self.native_dialect().is_some()
     }
 
     /// Whether bytes in this language need an external preprocessor before a
     /// plain-CSS-only stage can run over them. `Unknown` answers `false`:
     /// nothing here can claim to know what an unrecognised language needs.
-    #[must_use]
-    pub fn requires_external_preprocessing(self) -> bool {
+    fn requires_external_preprocessing(self) -> bool {
         self.native_dialect()
             .is_some_and(verter_css_syntax::CssDialect::requires_external_preprocessing)
     }

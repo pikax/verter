@@ -1927,7 +1927,7 @@ fn build_style_analyses_from_inventory(
         dialect: &StyleDialect,
         authored: Option<&str>,
     ) -> verter_semantic::analysis::StyleAnalysisLang {
-        use verter_semantic::analysis::StyleAnalysisLang;
+        use verter_semantic::analysis::{StyleAnalysisLang, StyleLangDialect};
         match authored {
             None => match dialect {
                 StyleDialect::Css => StyleAnalysisLang::Css,
