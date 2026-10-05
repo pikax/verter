@@ -318,10 +318,10 @@ fn prepared_graph_does_not_resolve_free_parameter_inputs_as_body_bindings() {
         );
         let entry = index.matches_named("f").next().unwrap().entry();
         let reference = entry
-            .references
+            .references()
             .iter()
             .find(|read| read.name.as_ref() == "seed")
-            .unwrap_or_else(|| panic!("default read is indexed: {:?}", entry.references));
+            .unwrap_or_else(|| panic!("default read is indexed: {:?}", entry.references()));
         assert!(
             reference.binding
                 == verter_session_query::function_program::FunctionReferenceBinding::Free,
@@ -858,7 +858,7 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
     let entries: Vec<_> = index.matches_named("root").collect();
     for matched in entries {
         let entry = matched.entry();
-        let node = resolve_function_node(&parsed.program, &entry.locator)
+        let node = resolve_function_node(&parsed.program, entry.locator())
             .unwrap()
             .node;
         let body = match node {
@@ -873,13 +873,16 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
         let prepared = build_indexed_function_body_skeleton(&body, source, entry).unwrap();
         let bindings = prepared.bindings();
         let frame_span = |start: u32, len: u32| {
-            FrameSpan::rebase(entry.span.start, verter_span::Span::new(start, start + len))
+            FrameSpan::rebase(
+                entry.span().start,
+                verter_span::Span::new(start, start + len),
+            )
         };
         assert_eq!(
-            bindings.occurrence(frame_span(entry.span.start, 1)),
+            bindings.occurrence(frame_span(entry.span().start, 1)),
             FlowBindingOccurrence::Missing
         );
-        if entry.lexical_parent.is_none() {
+        if entry.lexical_parent().is_none() {
             let default = source.find("arg=seed").unwrap() as u32 + 4;
             assert_eq!(
                 bindings.occurrence(frame_span(default, 4)),
@@ -908,7 +911,7 @@ fn prepared_occurrences_distinguish_free_shadowed_and_captured_targets() {
                 panic!("write-only LHS is an indexed captured occurrence");
             };
             assert_eq!(identity.name.as_ref(), "value");
-            assert_ne!(identity.defining_function, entry.key);
+            assert_ne!(&identity.defining_function, entry.key());
             let read = source.rfind("return value").unwrap() as u32 + 7;
             assert_eq!(
                 bindings.occurrence(frame_span(read, 5)),
@@ -943,7 +946,7 @@ fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings()
     let occurrence = |needle: &str, name: &str| {
         let start = source.find(needle).unwrap() as u32;
         prepared.bindings().occurrence(FrameSpan::rebase(
-            entry.span.start,
+            entry.span().start,
             verter_span::Span::new(start, start + name.len() as u32),
         ))
     };
@@ -991,7 +994,7 @@ fn prepared_class_occurrences_distinguish_outer_free_and_static_local_bindings()
         );
     }
     assert!(entry
-        .bindings
+        .bindings()
         .iter()
         .all(|binding| !["touch", "caught", "item", "own"].contains(&binding.name.as_ref())));
 }

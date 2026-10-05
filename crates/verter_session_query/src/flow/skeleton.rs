@@ -914,10 +914,10 @@ pub fn prepare_function_body_skeleton(
     entry: &FunctionProgramEntry,
 ) -> Result<PreparedFunctionBodySkeleton, FlowBindingMapError> {
     let mut bindings =
-        FlowBindingMap::build(&skeleton, &entry.bindings, &entry.key, entry.span.start)?;
+        FlowBindingMap::build(&skeleton, entry.bindings(), entry.key(), entry.span().start)?;
     bindings.prepare_occurrences(entry)?;
     skeleton.closure_assignments = entry
-        .descendant_assignments
+        .descendant_assignments()
         .iter()
         .filter_map(|identity| bindings.local(identity))
         .collect::<Vec<_>>()
@@ -992,7 +992,7 @@ fn attach_declaration_closures(
     bindings: &FlowBindingMap,
     entry: &FunctionProgramEntry,
 ) -> Result<(), FlowBindingMapError> {
-    let anchor = entry.span.start;
+    let anchor = entry.span().start;
     let declaration_of = |binding: &FlowBindingRef| -> Option<SkeletonBindingId> {
         let FlowBindingRef::Local(local) = binding else {
             return None;
@@ -1022,7 +1022,7 @@ fn attach_declaration_closures(
         // span holds the declared name.
         let name = skeleton.bindings[local.index()].span.to_absolute(anchor);
         let Some(captures) = entry
-            .nested_captures
+            .nested_captures()
             .iter()
             .find(|child| child.span.start <= name.start && child.span.end >= name.end)
         else {

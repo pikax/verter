@@ -54,8 +54,8 @@ fn prepare_structure(
         return Ok(None);
     };
     let entry = matched.entry();
-    if entry.flow_body_stable_hash != key.flow_body_stable_hash
-        || entry.flow_body_exact_hash != Some(key.flow_body_exact_hash)
+    if entry.flow_body_stable_hash() != key.flow_body_stable_hash
+        || entry.flow_body_exact_hash() != Some(key.flow_body_exact_hash)
         || indexed.source_parse_key().as_ref() != Some(&key.parse_key)
         || indexed.file_language != key.file_language
     {

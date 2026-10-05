@@ -426,7 +426,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let prepared = (|| {
             let site = self.dispatch.flow_slice_demand_site(&key).ok()?;
             let index = site.source_demand.function_program_index();
-            let entry = index.get(function)?.entry();
+            let matched = index.get(function)?;
+            let entry = matched.entry();
             let skeleton = self
                 .dispatch
                 .flow_slice_skeleton(&site.slice_key_function)?;
@@ -453,7 +454,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ))
             };
             let content = site.source_demand.flow_slice_content_with_context(
-                entry,
+                matched,
                 planned_and_selection
                     .as_ref()
                     .map(|(_, selection)| selection.clone()),
@@ -466,7 +467,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 skeleton,
                 bound,
                 planned_and_selection.map(|(planned, _)| planned),
-                entry.span.start,
+                entry.span().start,
             ))
         })();
         let Some((content, skeleton, bound, planned, anchor)) = prepared else {

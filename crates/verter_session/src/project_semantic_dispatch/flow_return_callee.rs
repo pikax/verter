@@ -41,7 +41,7 @@
 //!   The two entrances both demand the callee's own authority as an
 //!   argument: [`CalleeClause::read_from_program_entry`] /
 //!   [`UtilityClause::read_from_program_entry`] take a
-//!   `FunctionProgramEntry` (obtainable only by looking the callee up and
+//!   `FunctionProgramMatch` (obtainable only by looking the callee up and
 //!   finding it), and [`CallValue::of_signature_node`] reads the clause
 //!   off a resolved `Signature` node. A serve or index miss has nothing
 //!   to hand over, returns [`CalleeClauseLookup::Unavailable`], and
@@ -278,7 +278,7 @@ impl CalleeClause {
     /// rail, and the reason that rail cannot fabricate a clause.
     ///
     /// The [`FunctionProgramMatch`] IS the witness, and it is a witness
-    /// because its own field is private and only a KEYED lookup on a
+    /// because its fields are private and only a KEYED lookup on a
     /// `FunctionProgramIndex` mints one. A serve miss or an index miss
     /// has nothing to pass here and returns
     /// [`CalleeClauseLookup::Unavailable`] by calling nothing at all.
@@ -288,10 +288,11 @@ impl CalleeClause {
     /// literal assembled out of nothing, and — the realistic one — a
     /// miss falling back to `index.entries.first()`, which hands over a
     /// genuine entry for the WRONG callee and reads that callee's clause
-    /// as this one's. The first is now impossible because
-    /// `FunctionProgramEntry` is `#[non_exhaustive]`; the second because
-    /// the index exposes no positional accessor and this signature
-    /// accepts nothing an iteration could produce.
+    /// as this one's. The first is now impossible because a served
+    /// `FunctionProgramEntry` has private fields and is sealed only by
+    /// `FunctionProgramIndex::from_discovery`; the second because the
+    /// index exposes no positional accessor and this signature accepts
+    /// nothing an iteration could produce.
     ///
     /// `default_of` lowers ONE declared default, by ordinal, and is
     /// called only for a parameter whose default the call-site rule
@@ -302,11 +303,11 @@ impl CalleeClause {
         mut default_of: impl FnMut(usize, &FunctionProgramTypeParam) -> Option<SemanticNodeId>,
     ) -> CalleeClauseLookup {
         let entry = matched.entry();
-        if entry.type_parameters.is_empty() {
+        if entry.type_parameters().is_empty() {
             return CalleeClauseLookup::Clause(Self::non_generic());
         }
-        let mut params = Vec::with_capacity(entry.type_parameters.len());
-        for (ordinal, param) in entry.type_parameters.iter().enumerate() {
+        let mut params = Vec::with_capacity(entry.type_parameters().len());
+        for (ordinal, param) in entry.type_parameters().iter().enumerate() {
             if !param.has_default {
                 params.push(CalleeClauseParam::bare(Arc::clone(&param.name)));
                 continue;
@@ -429,7 +430,7 @@ impl UtilityClause {
     ) -> Option<Self> {
         let params = matched
             .entry()
-            .type_parameters
+            .type_parameters()
             .iter()
             .enumerate()
             .map(|(ordinal, param)| {

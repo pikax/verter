@@ -216,7 +216,7 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
     let root = index.matches_named("root").next().unwrap().entry();
     let child = index
         .nested_at(
-            &root.key,
+            root.key(),
             verter_span::Span::new(
                 source.find("() =>").unwrap() as u32,
                 (source.rfind("; }").unwrap()) as u32,
@@ -224,7 +224,7 @@ fn indexed_returned_arrow(source: &str) -> FunctionBodySkeleton {
         )
         .unwrap()
         .entry();
-    let FunctionNode::Arrow(arrow) = resolve_function_node(&parsed.program, &child.locator)
+    let FunctionNode::Arrow(arrow) = resolve_function_node(&parsed.program, child.locator())
         .unwrap()
         .node
     else {

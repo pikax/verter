@@ -2200,7 +2200,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// callee declares none" — a failed read must not return the callee's
     /// return UNTOUCHED, its own binders intact and warm-admissible, while
     /// the CALL-site route degrades on the identical miss. Both readers
-    /// take a `FunctionProgramEntry` witness and both states are distinct,
+    /// take a `FunctionProgramMatch` witness and both states are distinct,
     /// so that asymmetry has no spelling.
     fn instantiate_callee_clause_at_base_constraints(
         &self,
@@ -2238,14 +2238,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let index = source_demand.function_program_index();
         let matched = index.get(&key)?;
-        let entry = matched.entry();
         // The lowered clause is demanded at most once, and only for a
         // generic callee.
         let mut lowered: Option<Option<Vec<verter_session_query::flow::slice::SliceTypeParam>>> =
             None;
         UtilityClause::read_from_program_entry(matched, |ordinal, param| {
             let clause =
-                lowered.get_or_insert_with(|| source_demand.function_type_param_clause(entry));
+                lowered.get_or_insert_with(|| source_demand.function_type_param_clause(matched));
             // Matched by ORDINAL with the name as a cross-check, exactly as
             // the call-site route matches a declared default: a
             // disagreement means the two views are not the same clause,
@@ -5330,7 +5329,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // axis, so no content-addressed key can be built for it: fail
         // closed rather than key on a constant every unreadable body
         // shares.
-        let Some(flow_body_exact_hash) = entry.flow_body_exact_hash else {
+        let Some(flow_body_exact_hash) = entry.flow_body_exact_hash() else {
             return Err(FlowSliceDemandSiteError {
                 failure: FlowReturnFailure::Unresolved,
                 self_roots,
@@ -5352,8 +5351,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let slice_key_function = verter_session_query::flow::bundle::FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
-            function: entry.key.clone(),
-            flow_body_stable_hash: entry.flow_body_stable_hash,
+            function: entry.key().clone(),
+            flow_body_stable_hash: entry.flow_body_stable_hash(),
             flow_body_exact_hash,
             parse_env_hash: key.context.parse_env_hash,
             parse_key,
@@ -5499,23 +5498,21 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // enough" is exactly the shape that hands over the wrong callee.
         // The demand site already proved this entry over this pinned
         // serve; the re-lookup is deterministic.
-        let Some(entry) = index
-            .value_function(
-                owner,
-                name,
-                &key.function.function_part,
-                key.function.overload_ordinal,
-            )
-            .map(|matched| matched.entry())
-        else {
+        let Some(matched) = index.value_function(
+            owner,
+            name,
+            &key.function.function_part,
+            key.function.overload_ordinal,
+        ) else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
+        let entry = matched.entry();
         // The whole-body fact rail: the candidate roots on the indexed
         // whole-body hash (never re-lowered at validation).
         crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::ProgramAnalysis(
             ProgramAnalysisFactRef::FlowBody {
                 function: key.function.program_analysis_ref(),
-                flow_body_stable_hash: entry.flow_body_stable_hash,
+                flow_body_stable_hash: entry.flow_body_stable_hash(),
             },
         ));
         // The demand-slice substrate: plan the demanded slice as graph
@@ -5624,7 +5621,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
         let Some(ir) =
-            source_demand.flow_slice_content(entry, selection, &bound, key.context.policy)
+            source_demand.flow_slice_content(matched, selection, &bound, key.context.policy)
         else {
             return degraded(FlowReturnFailure::Missing, self_roots);
         };
@@ -5632,7 +5629,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // (the function node's own start) — the witness pairs the
         // evaluator's absolute call spans with the skeleton's
         // frame-relative twins through it.
-        let frame_anchor = entry.span.start;
+        let frame_anchor = entry.span().start;
         // A budget edge in one SELECTED leaf's expression lowering stops
         // the whole evaluation with the typed reason.
         if let Some(reason) = ir.budget_failure {
@@ -24294,7 +24291,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let Some(matched) = index.get(target) else {
             return CalleeClauseLookup::Unavailable;
         };
-        let entry = matched.entry();
         // The lowered clause is demanded lazily and at most once, and
         // only when some parameter's default is actually needed.
         let mut lowered: Option<Option<Vec<verter_session_query::flow::slice::SliceTypeParam>>> =
@@ -24305,7 +24301,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // the constructors that would let it are private there.
         CalleeClause::read_from_program_entry(matched, site, |ordinal, param| {
             let clause =
-                lowered.get_or_insert_with(|| source_demand.function_type_param_clause(entry));
+                lowered.get_or_insert_with(|| source_demand.function_type_param_clause(matched));
             // Matched by ORDINAL, with the name as a cross-check: the
             // shallow index and the lowered clause both walk the SAME
             // authored clause in declaration order, so the ordinal is the

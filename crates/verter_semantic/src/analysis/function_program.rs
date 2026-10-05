@@ -25,7 +25,7 @@ use verter_session_query::function_program::{
     FunctionCapturedRead, FunctionControlKind, FunctionControlRegion, FunctionDeclarationRef,
     FunctionDescent, FunctionDescentStep, FunctionDirectCall, FunctionEffectCallee,
     FunctionEffectRecord, FunctionNestedCaptures, FunctionParamRecord,
-    FunctionParameterCallableCaptures, FunctionProgramEntry, FunctionProgramIndex,
+    FunctionParameterCallableCaptures, FunctionProgramDiscovery, FunctionProgramIndex,
     FunctionProgramKey, FunctionProgramTypeParam, FunctionReadRole, FunctionReferenceBinding,
     FunctionReferenceRecord, FunctionReturnSite, FunctionSourceTypeQuery, FunctionTypeQuery,
     FunctionTypeQueryPosition, FunctionWriteKind, FunctionWriteRecord, FunctionWriteTarget,
@@ -119,7 +119,7 @@ struct DiscoveryCtx<'source, 'ast> {
     enclosing_type_parameters: Option<&'ast oxc_ast::ast::TSTypeParameterDeclaration<'ast>>,
     enclosing_heritage: Option<EnclosingHeritage<'ast>>,
     enclosing_this: Option<EnclosingThis>,
-    entries: Vec<FunctionProgramEntry>,
+    entries: Vec<FunctionProgramDiscovery>,
     /// Each entry's function node, by entry ordinal, whose hashes
     /// [`hash_entries`] folds once discovery is done.
     hashed_nodes: Vec<(usize, FunctionNode<'ast>)>,
@@ -140,7 +140,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         })
     }
 
-    fn push(&mut self, entry: FunctionProgramEntry, node: FunctionNode<'ast>) {
+    fn push(&mut self, entry: FunctionProgramDiscovery, node: FunctionNode<'ast>) {
         if let Some(nodes) = &mut self.nodes {
             let self_name = match entry.locator.descent.last() {
                 Some(FunctionDescentStep::VariableInitializer { .. }) => Some(Arc::from(
@@ -376,7 +376,7 @@ fn hash_entries(ctx: &mut DiscoveryCtx<'_, '_>) {
 /// entry for that name — the trailing implementation of its overload
 /// group. Computed callees, member calls, and unresolved names are never
 /// direct calls.
-fn resolve_direct_calls(entries: &mut [FunctionProgramEntry]) {
+fn resolve_direct_calls(entries: &mut [FunctionProgramDiscovery]) {
     let candidates: Vec<(Arc<str>, FunctionPartIdentity, u32, FunctionProgramKey)> = entries
         .iter()
         .map(|entry| {
@@ -446,7 +446,7 @@ fn scope_contains(scope: verter_span::Span, site: verter_span::Span) -> bool {
 /// order; identity is the `(defining frame, binding slot)` pair, so two
 /// same-name binders never collapse. A name binding in NO enclosing frame
 /// is not a capture (a free/global reference).
-fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
+fn resolve_captures(entries: &mut [FunctionProgramDiscovery]) {
     // Snapshot the frame bindings + parents up front (no borrow conflicts).
     // The binding inventories are shared, not copied, and one key -> position
     // index resolves the whole parent chain by lookup. Duplicate keys keep
@@ -613,7 +613,7 @@ fn resolve_captures(entries: &mut [FunctionProgramEntry]) {
 
 /// Carry closure-cell dependencies through intervening callable values without
 /// rewalking their ASTs or constructing any child flow skeleton.
-fn resolve_nested_capture_reads(entries: &mut [FunctionProgramEntry]) {
+fn resolve_nested_capture_reads(entries: &mut [FunctionProgramDiscovery]) {
     let positions: rustc_hash::FxHashMap<_, _> = entries
         .iter()
         .enumerate()
@@ -765,7 +765,7 @@ struct LexicalScopeIndex {
 }
 
 impl LexicalScopeIndex {
-    fn build(entry: &FunctionProgramEntry) -> Self {
+    fn build(entry: &FunctionProgramDiscovery) -> Self {
         let mut tables =
             rustc_hash::FxHashMap::<_, rustc_hash::FxHashMap<Arc<str>, LexicalBinding>>::default();
         tables.entry(entry.span).or_default();
@@ -1281,7 +1281,7 @@ fn for_each_call_expression_root<'a>(
 /// highest-ordinal entry for that name — the trailing implementation of
 /// its overload group. Computed callees, member calls, and unresolved
 /// names carry no target.
-fn resolve_call_site_targets(entries: &mut [FunctionProgramEntry]) {
+fn resolve_call_site_targets(entries: &mut [FunctionProgramDiscovery]) {
     let candidates: Vec<(Arc<str>, FunctionPartIdentity, u32, FunctionProgramKey)> = entries
         .iter()
         .map(|entry| {
@@ -1351,7 +1351,7 @@ fn resolve_call_site_targets(entries: &mut [FunctionProgramEntry]) {
 
 fn link_callback_return_sources(
     canonical_id: &Arc<str>,
-    entries: &mut [FunctionProgramEntry],
+    entries: &mut [FunctionProgramDiscovery],
     expressions: &mut Vec<ProgramExpressionRecord>,
 ) {
     let callbacks: Vec<(
@@ -2925,7 +2925,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
         body: FunctionBodyRef<'ast>,
         function_start: u32,
         node: FunctionNode<'ast>,
-    ) -> FunctionProgramEntry {
+    ) -> FunctionProgramDiscovery {
         let function_end = node.span().end;
         let frame_span = verter_span::Span::new(function_start, function_end);
         let mut inventory = InventoryVisitor {
@@ -3034,7 +3034,7 @@ impl<'source, 'ast> DiscoveryCtx<'source, 'ast> {
 
         // The stable and exact hashes fold each nested function's once
         // discovery is done (`hash_entries`).
-        FunctionProgramEntry {
+        FunctionProgramDiscovery {
             key,
             span: frame_span,
             body_span: {

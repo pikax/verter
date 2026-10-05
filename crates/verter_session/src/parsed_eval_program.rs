@@ -206,15 +206,15 @@ impl ParsedEvalProgram {
     ) -> Option<R> {
         let cell = self.functions.get()?;
         let retained = cell.borrow_dependent();
-        let indexed = retained.index.get(&entry.key)?.entry();
-        if indexed.locator != entry.locator
-            || indexed.span != entry.span
-            || indexed.body_span != entry.body_span
-            || indexed.flow_body_exact_hash != entry.flow_body_exact_hash
+        let indexed = retained.index.get(entry.key())?.entry();
+        if indexed.locator() != entry.locator()
+            || indexed.span() != entry.span()
+            || indexed.body_span() != entry.body_span()
+            || indexed.flow_body_exact_hash() != entry.flow_body_exact_hash()
         {
             return None;
         }
-        let node = retained.nodes.get(&entry.key)?;
+        let node = retained.nodes.get(entry.key())?;
         self.leased(|| lower(node, indexed))
     }
 

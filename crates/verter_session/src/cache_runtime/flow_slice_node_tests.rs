@@ -110,14 +110,26 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
             &owners,
             Arc::clone(&key.canonical_id),
         );
-        let mut entry = index
+        let indexed = index
             .get(&key.function)
             .expect("fixture function is indexed")
-            .entry()
-            .clone();
-        if self.invalid_bindings.load(Ordering::SeqCst) {
-            entry.bindings = entry.bindings[..entry.bindings.len() - 1].into();
-        }
+            .entry();
+        let resealed;
+        let entry = if self.invalid_bindings.load(Ordering::SeqCst) {
+            let mut discovery = indexed.unsealed_for_test();
+            discovery.bindings = discovery.bindings[..discovery.bindings.len() - 1].into();
+            resealed = verter_session_query::function_program::FunctionProgramIndex::from_discovery(
+                vec![discovery],
+                Vec::new(),
+                Vec::new(),
+            );
+            resealed
+                .get(&key.function)
+                .expect("resealed fixture function is indexed")
+                .entry()
+        } else {
+            indexed
+        };
         let function = parsed
             .program
             .body
@@ -134,7 +146,7 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
         let prepared = build_indexed_function_body_skeleton(
             &FunctionBodySource::from_function(function).unwrap(),
             source,
-            &entry,
+            entry,
         )?;
         Ok(Some(build_prepared_bundle(prepared)))
     }
@@ -244,7 +256,7 @@ fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
         let root = index.matches_named("root").next().unwrap().entry();
         let child = index
             .nested_at(
-                &root.key,
+                root.key(),
                 verter_span::Span::new(
                     source.find("() =>").unwrap() as u32,
                     source.rfind("; }").unwrap() as u32,
@@ -253,12 +265,12 @@ fn enclosing_binding_changes_split_unchanged_child_body_bundles() {
             .unwrap()
             .entry();
         let key = FlowSliceFunctionKey {
-            function: child.key.clone(),
-            flow_body_stable_hash: child.flow_body_stable_hash,
-            flow_body_exact_hash: child.flow_body_exact_hash.unwrap(),
+            function: child.key().clone(),
+            flow_body_stable_hash: child.flow_body_stable_hash(),
+            flow_body_exact_hash: child.flow_body_exact_hash().unwrap(),
             ..function_key("/capture.ts", "root", 0, source)
         };
-        (key, child.captures.0[0].clone())
+        (key, child.captures().0[0].clone())
     }
     let (before, old_capture) = child_key("function root() { let x = 0; return () => x; }");
     let (after, new_capture) =
@@ -324,10 +336,10 @@ fn skeleton_source_verifies_parse_key_and_language() {
     let env = host.host_view_env_hashes_for(canonical);
     let key = FlowSliceFunctionKey {
         canonical_id: Arc::from(canonical),
-        function: entry.key.clone(),
-        flow_body_stable_hash: entry.flow_body_stable_hash,
+        function: entry.key().clone(),
+        flow_body_stable_hash: entry.flow_body_stable_hash(),
         flow_body_exact_hash: entry
-            .flow_body_exact_hash
+            .flow_body_exact_hash()
             .expect("a served function position addresses its own bytes"),
         parse_env_hash: env.parse_env_hash,
         parse_key: source_key.parse_key.clone(),
@@ -346,12 +358,12 @@ fn skeleton_source_verifies_parse_key_and_language() {
     );
     let first = stores.bound_graph_for(&key).expect("built graph is bound");
     let bindings = &first.bundle().bindings;
-    assert_eq!(bindings.function(), &entry.key);
-    assert_eq!(bindings.value_count(), entry.bindings.len());
-    for (slot, record) in entry.bindings.iter().enumerate() {
+    assert_eq!(bindings.function(), entry.key());
+    assert_eq!(bindings.value_count(), entry.bindings().len());
+    for (slot, record) in entry.bindings().iter().enumerate() {
         let local = bindings
             .declaration_at_span(verter_session_query::flow::frame_span::FrameSpan::rebase(
-                entry.span.start,
+                entry.span().start,
                 record.span,
             ))
             .expect("every indexed declaration has its exact skeleton binding");
@@ -1000,10 +1012,10 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
     let key = FlowSliceHashKey {
         function: FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
-            function: entry.key.clone(),
-            flow_body_stable_hash: entry.flow_body_stable_hash,
+            function: entry.key().clone(),
+            flow_body_stable_hash: entry.flow_body_stable_hash(),
             flow_body_exact_hash: entry
-                .flow_body_exact_hash
+                .flow_body_exact_hash()
                 .expect("a served function position addresses its own bytes"),
             parse_env_hash: env.parse_env_hash,
             parse_key: source_key.parse_key,
@@ -1572,7 +1584,7 @@ fn the_two_shift_edits_are_invisible_to_flow_body_stable_hash() {
         let hash = index
             .matches_named("shiftedSecond")
             .next()
-            .map(|matched| matched.entry().flow_body_stable_hash)
+            .map(|matched| matched.entry().flow_body_stable_hash())
             .expect("shiftedSecond is a served function position");
         hash
     };

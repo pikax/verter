@@ -72,7 +72,7 @@ mod tests {
         let index = memo.function_program_index();
         let entry = index
             .matches_named("products")
-            .find(|candidate| candidate.entry().lexical_parent.is_some() == nested)
+            .find(|candidate| candidate.entry().lexical_parent().is_some() == nested)
             .unwrap()
             .entry();
 
@@ -84,14 +84,14 @@ mod tests {
                 function: FlowFunctionSlotIdentity {
                     declaration_slot: ResolvedDeclSlotIdentity::value_slot(
                         Arc::clone(&bound.key().canonical_id),
-                        entry.key.declaration.owner,
-                        Arc::clone(&entry.key.declaration.name),
+                        entry.key().declaration.owner,
+                        Arc::clone(&entry.key().declaration.name),
                         0,
                         [0; 16],
                         [0; 16],
                     ),
-                    function_part: entry.key.part.clone(),
-                    overload_ordinal: entry.key.overload_ordinal,
+                    function_part: entry.key().part.clone(),
+                    overload_ordinal: entry.key().overload_ordinal,
                 },
                 normalized_type_args: Arc::from([]),
                 context: FlowReturnContext {

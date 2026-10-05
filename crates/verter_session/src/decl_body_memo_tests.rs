@@ -8,6 +8,7 @@ use verter_session_query::source::deref::DerefedBodyShape;
 use verter_session_query::source::deref::LocatorBodyDerefError;
 
 use std::sync::Arc;
+use verter_session_query::function_program::{FunctionProgramDiscovery, FunctionProgramIndex};
 
 use super::*;
 use verter_type_expr::locators::{
@@ -2366,10 +2367,10 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
         )
         .expect("alpha is indexed")
         .entry();
-    assert_eq!(alpha.return_sites.len(), 2);
-    assert_eq!(alpha.direct_calls.len(), 1, "the self-call is exact");
+    assert_eq!(alpha.return_sites().len(), 2);
+    assert_eq!(alpha.direct_calls().len(), 1, "the self-call is exact");
     assert_eq!(
-        alpha.direct_calls[0].target.declaration.name.as_ref(),
+        alpha.direct_calls()[0].target.declaration.name.as_ref(),
         "alpha"
     );
 
@@ -2414,7 +2415,7 @@ fn function_program_index_hash_folds_parse_env_identity() {
             )
             .expect("alpha is indexed")
             .entry()
-            .flow_body_stable_hash
+            .flow_body_stable_hash()
     };
     let memo_folded = alpha_of(&index);
 
@@ -2454,7 +2455,7 @@ fn function_program_index_hash_tracks_body_content_across_files() {
             )
             .expect("alpha is indexed")
             .entry()
-            .flow_body_stable_hash
+            .flow_body_stable_hash()
     };
     assert_eq!(
         hash_of(&memo_a),
@@ -2482,7 +2483,7 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
     let index = memo.function_program_index();
     let children: Vec<_> = index
         .matches_named("root")
-        .filter(|matched| matched.entry().lexical_parent.is_some())
+        .filter(|matched| matched.entry().lexical_parent().is_some())
         .map(|matched| matched.entry().clone())
         .collect();
     assert_eq!(children.len(), 65);
@@ -2493,7 +2494,7 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
     let parse_count = parses(&provenance);
     for child in &children {
         assert!(memo.function_flow_structure(child).unwrap().is_some());
-        for call in child.call_sites.iter() {
+        for call in child.call_sites().iter() {
             assert!(memo.indexed_call_expression_at(call.span).is_some());
         }
     }
@@ -2512,25 +2513,33 @@ fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
     let (memo, _) = memo_for("function f(x) { let value = x; return value; }");
     let index = memo.function_program_index();
     let entry = index.matches_named("f").next().unwrap().entry();
-    let mut stale_span = entry.clone();
-    stale_span.span.start += 1;
-    let mut stale_body = entry.clone();
-    stale_body.body_span.end -= 1;
-    let mut stale_hash = entry.clone();
-    let mut hash = stale_hash.flow_body_exact_hash.unwrap();
-    hash[0] ^= 1;
-    stale_hash.flow_body_exact_hash = Some(hash);
+    // Each altered record is resealed into an index of its own: a served
+    // entry cannot be edited in place.
+    let reseal = |alter: &dyn Fn(&mut FunctionProgramDiscovery)| {
+        let mut discovery = entry.unsealed_for_test();
+        alter(&mut discovery);
+        FunctionProgramIndex::from_discovery(vec![discovery], Vec::new(), Vec::new())
+    };
+    let stale_span = reseal(&|discovery| discovery.span.start += 1);
+    let stale_body = reseal(&|discovery| discovery.body_span.end -= 1);
+    let stale_hash = reseal(&|discovery| {
+        let mut hash = discovery.flow_body_exact_hash.unwrap();
+        hash[0] ^= 1;
+        discovery.flow_body_exact_hash = Some(hash);
+    });
     for stale in [&stale_span, &stale_body, &stale_hash] {
+        let stale = stale.get(entry.key()).unwrap().entry();
         assert!(
             memo.function_flow_structure(stale).unwrap().is_none(),
             "stale address-bearing metadata must not reach the retained AST"
         );
     }
-    let mut modified_inventory = entry.clone();
-    modified_inventory.bindings = Arc::from([]);
-    modified_inventory.references = Arc::from([]);
+    let modified_inventory = reseal(&|discovery| {
+        discovery.bindings = Arc::from([]);
+        discovery.references = Arc::from([]);
+    });
     let prepared = memo
-        .function_flow_structure(&modified_inventory)
+        .function_flow_structure(modified_inventory.get(entry.key()).unwrap().entry())
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -2559,7 +2568,7 @@ fn retained_call_arguments_carry_exact_identifier_occurrences() {
     let entry = index.matches_named("f").next().unwrap().entry();
     let parse_count = parses(&provenance);
     let call = memo
-        .indexed_call_expression_at(entry.call_sites[0].span)
+        .indexed_call_expression_at(entry.call_sites()[0].span)
         .unwrap();
     let span = |text: &str, prefix: usize, length: usize| {
         let start = source.find(text).unwrap() + prefix;
@@ -2595,9 +2604,9 @@ fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
     let (memo, _) = memo_for(source);
     let index = memo.function_program_index();
     let entry = index.matches_named("f").next().unwrap().entry();
-    assert_eq!(entry.call_sites.len(), 2);
+    assert_eq!(entry.call_sites().len(), 2);
     let transparent = memo
-        .indexed_call_expression_at(entry.call_sites[0].span)
+        .indexed_call_expression_at(entry.call_sites()[0].span)
         .unwrap();
     let start = source.find("((receiver").unwrap() + 2;
     assert_eq!(
@@ -2609,7 +2618,7 @@ fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
         "a receiver lowered as a binding read retains that exact occurrence"
     );
     let authoritative = memo
-        .indexed_call_expression_at(entry.call_sites[1].span)
+        .indexed_call_expression_at(entry.call_sites()[1].span)
         .unwrap();
     assert_eq!(
         authoritative.receiver_root,
@@ -2630,7 +2639,7 @@ fn retained_call_type_query_keeps_its_distinct_source_origin() {
     let entry = index.matches_named("f").next().unwrap().entry();
     let parse_count = parses(&provenance);
     let call = memo
-        .indexed_call_expression_at(entry.call_sites[0].span)
+        .indexed_call_expression_at(entry.call_sites()[0].span)
         .unwrap();
     let value_start = source.find("id(x").unwrap() as u32 + 3;
     let query_start = source.find("typeof x").unwrap() as u32 + 7;
@@ -2657,7 +2666,7 @@ fn a_frame_lowered_call_argument_keeps_no_indexed_record() {
     let index = memo.function_program_index();
     let entry = index.matches_named("g").next().unwrap().entry();
     let outer = entry
-        .call_sites
+        .call_sites()
         .iter()
         .max_by_key(|site| site.span.end - site.span.start)
         .unwrap()
@@ -2698,7 +2707,7 @@ fn indexed_expression_endpoint_shares_lazy_snapshot_and_index() {
     let entry = index.matches_named("f").next().expect("indexed f").entry();
     let parse_count = parses(&provenance);
     assert!(demand
-        .indexed_call_expression_over_frame_at(entry.call_sites[0].span, Arc::from([]))
+        .indexed_call_expression_over_frame_at(entry.call_sites()[0].span, Arc::from([]))
         .is_some());
     assert_eq!(
         parses(&provenance),
@@ -2717,7 +2726,7 @@ fn indexed_expression_endpoint_broken_pin_is_a_miss_without_reparse() {
     let parses_before = parses(&provenance);
     memo.release_retained_snapshot_for_test();
     assert!(demand
-        .indexed_call_expression_over_frame_at(entry.call_sites[0].span, Arc::from([]))
+        .indexed_call_expression_over_frame_at(entry.call_sites()[0].span, Arc::from([]))
         .is_none());
     assert_eq!(
         parses(&provenance),

@@ -611,7 +611,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut out = CalleeKeys::default();
         // A nested position's bare names can bind in the frames around it,
         // which its own index entry does not record as free.
-        if entry.lexical_parent.is_some() {
+        if entry.lexical_parent().is_some() {
             return Vec::new();
         }
         let calls = self.frame_calls(frame, entry, lowered);
@@ -622,9 +622,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // A function value the slice selects is composed where it sits: its
         // body's return is evaluated inside this frame, calls and all.
         let canonical = frame.function.declaration_slot.defining_canonical.as_ref();
-        let anchor = entry.span.start;
+        let anchor = entry.span().start;
         let mut composed: Vec<(&FunctionProgramEntry, Vec<NamedCall>)> = Vec::new();
-        for nested in entry.nested_captures.iter() {
+        for nested in entry.nested_captures().iter() {
             let relative = FrameSpan::rebase(anchor, nested.span);
             let selected = lowered.exprs.iter().any(|expression| {
                 expression.role == FlowExprRole::Value && expression.span.contains(relative)
@@ -662,7 +662,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Vec<NamedCall> {
         let slot = &frame.function.declaration_slot;
         let canonical = slot.defining_canonical.as_ref();
-        let anchor = entry.span.start;
+        let anchor = entry.span().start;
         let every_call: Vec<verter_span::Span> = lowered
             .effects
             .iter()
@@ -700,9 +700,13 @@ impl<'a> ProjectSemanticDispatch<'a> {
             {
                 continue;
             }
-            let identity = match entry.direct_calls.iter().find(|direct| direct.span == span) {
+            let identity = match entry
+                .direct_calls()
+                .iter()
+                .find(|direct| direct.span == span)
+            {
                 // A call to the function itself is its own recursion hold.
-                Some(direct) if direct.target == entry.key => continue,
+                Some(direct) if direct.target == *entry.key() => continue,
                 Some(direct) => self.direct_callee_identity(canonical, &direct.target),
                 None => {
                     let payload = self.scope_payload(canonical, slot.owner, &mut scope_payload);
@@ -737,9 +741,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) {
         let slot = &frame.function.declaration_slot;
         let canonical = slot.defining_canonical.as_ref();
-        let anchor = entry.span.start;
+        let anchor = entry.span().start;
         let mut scope_payload = None;
-        for query in entry.type_queries.iter() {
+        for query in entry.type_queries().iter() {
             if !matches!(query.binding, FunctionReferenceBinding::Free) {
                 continue;
             }
@@ -957,7 +961,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         else {
             return false;
         };
-        if entry.type_parameters.len() != frame.normalized_type_args.len() {
+        if entry.type_parameters().len() != frame.normalized_type_args.len() {
             return true;
         }
         let slot = &frame.function.declaration_slot;
@@ -968,7 +972,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     if decl.canonical_id == slot.defining_canonical && decl.owner == slot.owner =>
                 {
                     let ordinal = entry
-                        .type_parameters
+                        .type_parameters()
                         .iter()
                         .position(|param| param.name == decl.decl_name)?;
                     frame.normalized_type_args.get(ordinal).copied()
@@ -1075,8 +1079,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return true;
             };
             skeleton.name_id(name).is_some_and(|name| {
-                let region = skeleton
-                    .innermost_region_containing(FrameSpan::rebase(entry.span.start, value.span));
+                let region = skeleton.innermost_region_containing(FrameSpan::rebase(
+                    entry.span().start,
+                    value.span(),
+                ));
                 skeleton.declares_meaning_in_scope(name, region, NameMeaning::Type)
             })
         };
@@ -1102,30 +1108,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 else {
                     return None;
                 };
-                let binding =
-                    reader
-                        .references
-                        .iter()
-                        .find_map(|reference| match &reference.binding {
-                            FunctionReferenceBinding::Resolved(binding)
-                                if reference.span == *root
-                                    && reference.name.as_ref() == name
-                                    && reference.path.is_empty() =>
-                            {
-                                Some(binding)
-                            }
-                            _ => None,
-                        })?;
+                let binding = reader
+                    .references()
+                    .iter()
+                    .find_map(|reference| match &reference.binding {
+                        FunctionReferenceBinding::Resolved(binding)
+                            if reference.span == *root
+                                && reference.name.as_ref() == name
+                                && reference.path.is_empty() =>
+                        {
+                            Some(binding)
+                        }
+                        _ => None,
+                    })?;
                 if binding.kind != FunctionBindingKind::Param
-                    || entry.descendant_writes.contains(binding)
+                    || entry.descendant_writes().contains(binding)
                 {
                     return None;
                 }
-                let binder = if binding.defining_function == entry.key {
+                let binder = if binding.defining_function == *entry.key() {
                     if parameter_written(entry, binding) {
                         return None;
                     }
-                    let ordinal = entry.params.iter().position(|param| {
+                    let ordinal = entry.params().iter().position(|param| {
                         param.name.as_deref() == Some(name.as_str()) && !param.rest
                     })?;
                     let declared = own_signature.params.get(ordinal)?;
@@ -1133,20 +1138,20 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .type_parameters
                         .iter()
                         .position(|param| param.param == declared.ty)?
-                } else if binding.defining_function == reader.key {
+                } else if binding.defining_function == *reader.key() {
                     if parameter_written(reader, binding)
-                        || reader.descendant_writes.contains(binding)
+                        || reader.descendant_writes().contains(binding)
                     {
                         return None;
                     }
                     let annotated = reader
-                        .params
+                        .params()
                         .iter()
                         .find(|param| param.name.as_deref() == Some(name.as_str()) && !param.rest)?
                         .annotation_reference
                         .as_deref()?;
                     if reader
-                        .type_parameters
+                        .type_parameters()
                         .iter()
                         .any(|param| param.name.as_ref() == annotated)
                         || frame_declares_type(annotated, reader)
@@ -1154,7 +1159,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         return None;
                     }
                     entry
-                        .type_parameters
+                        .type_parameters()
                         .iter()
                         .position(|param| param.name.as_ref() == annotated)?
                 } else {
@@ -1294,7 +1299,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let entry = frame_entry(&index, key)?;
         Some(
             entry
-                .type_parameters
+                .type_parameters()
                 .iter()
                 .map(|param| Arc::clone(&param.name))
                 .collect(),
@@ -1320,17 +1325,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Vec<NamedCall> {
         let mut out = Vec::new();
         let every_call: Vec<verter_span::Span> =
-            value.effects.iter().map(|effect| effect.span).collect();
+            value.effects().iter().map(|effect| effect.span).collect();
         let nest = CallNest::of(&every_call, value);
-        for effect in value.effects.iter() {
+        for effect in value.effects().iter() {
             let FunctionEffectCallee::Identifier(name) = &effect.callee else {
                 continue;
             };
             // An expression-bodied arrow records no return site: its body IS
             // the returned expression.
-            let returned = value.body_span == effect.span
+            let returned = value.body_span() == effect.span
                 || value
-                    .return_sites
+                    .return_sites()
                     .iter()
                     .any(|site| contains(site.span, effect.span));
             if !returned || nest.enclosing.contains_key(&effect.span) {
@@ -1338,17 +1343,17 @@ impl<'a> ProjectSemanticDispatch<'a> {
             }
             // A name the frame around the value binds is a captured binding
             // there, never the file's function.
-            if frame.bindings.iter().any(|binding| &binding.name == name) {
+            if frame.bindings().iter().any(|binding| &binding.name == name) {
                 continue;
             }
             let Some(direct) = value
-                .direct_calls
+                .direct_calls()
                 .iter()
                 .find(|direct| direct.span == effect.span)
             else {
                 continue;
             };
-            if direct.target == value.key || !callee_is_free(value, name, effect.span) {
+            if direct.target == *value.key() || !callee_is_free(value, name, effect.span) {
                 continue;
             }
             if let Some(identity) = self.direct_callee_identity(canonical, &direct.target) {
@@ -1502,14 +1507,16 @@ fn annotated(prepared: &verter_session_query::type_solver::prepared::PreparedVal
 /// Whether the body can demand a callee return: it makes a call, in its
 /// own frame or a composed one, or reads a `typeof` in a type position.
 fn demands_callees(entry: &FunctionProgramEntry) -> bool {
-    !(entry.effects.is_empty() && entry.nested_captures.is_empty() && entry.type_queries.is_empty())
+    !(entry.effects().is_empty()
+        && entry.nested_captures().is_empty()
+        && entry.type_queries().is_empty())
 }
 
 /// Whether the callee identifier of the call at `span` is FREE in `entry`:
 /// a parameter, local or nested declaration of that name shadows the
 /// file's binding, and the content lowering calls the binding instead.
 fn callee_is_free(entry: &FunctionProgramEntry, name: &str, span: verter_span::Span) -> bool {
-    entry.references.iter().any(|reference| {
+    entry.references().iter().any(|reference| {
         reference.name.as_ref() == name
             && reference.span.start == span.start
             && matches!(reference.binding, FunctionReferenceBinding::Free)
@@ -1522,7 +1529,7 @@ fn parameter_written(
     entry: &FunctionProgramEntry,
     binding: &verter_session_query::function_program::FlowBindingIdentity,
 ) -> bool {
-    entry.writes.iter().any(|write| {
+    entry.writes().iter().any(|write| {
         write.targets.iter().any(|target| match target {
             verter_session_query::function_program::FunctionWriteTarget::Binding {
                 reference,
@@ -1615,7 +1622,7 @@ impl<'e> CallNest<'e> {
             open.push(span);
         }
         let mut sites = rustc_hash::FxHashMap::default();
-        for site in entry.call_sites.iter() {
+        for site in entry.call_sites().iter() {
             sites.entry(site.span).or_insert(site);
         }
         Self {

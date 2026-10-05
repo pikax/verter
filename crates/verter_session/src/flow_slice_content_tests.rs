@@ -15,7 +15,7 @@ use std::sync::Arc;
 use verter_session_query::flow::lower::lower_slice_plan;
 use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
 use verter_session_query::function_program::{
-    FunctionDescentStep, FunctionProgramEntry, FunctionProgramIndex,
+    FunctionDescentStep, FunctionProgramIndex, FunctionProgramMatch,
 };
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
@@ -49,11 +49,10 @@ fn memo_for(source: &str) -> Arc<DeclBodyMemo> {
     Arc::clone(state.decl_bodies())
 }
 
-fn entry_of<'a>(index: &'a FunctionProgramIndex, name: &'a str) -> &'a FunctionProgramEntry {
+fn entry_of<'a>(index: &'a FunctionProgramIndex, name: &'a str) -> FunctionProgramMatch<'a> {
     index
         .matches_named(name)
         .next()
-        .map(|matched| matched.entry())
         .unwrap_or_else(|| panic!("{name} must be indexed"))
 }
 
@@ -61,13 +60,12 @@ fn member_entry_of<'a>(
     index: &'a FunctionProgramIndex,
     class_name: &'a str,
     ordinal: u32,
-) -> &'a FunctionProgramEntry {
+) -> FunctionProgramMatch<'a> {
     index
         .matches_named(class_name)
         .find(|matched| {
             matches!(&matched.key().part, FunctionPartIdentity::Member { member_path } if member_path.contains(&ordinal))
         })
-        .map(|matched| matched.entry())
         .unwrap_or_else(|| panic!("{class_name} member {ordinal} must be indexed"))
 }
 
@@ -76,13 +74,13 @@ fn member_entry_of<'a>(
 /// slice → selection — the exact pipeline the flow evaluator runs.
 fn selection_for(
     memo: &DeclBodyMemo,
-    entry: &FunctionProgramEntry,
+    matched: FunctionProgramMatch<'_>,
     path: &[Arc<str>],
 ) -> (
     FlowSliceSelection,
     verter_session_query::flow::bundle::BoundFlowGraph,
 ) {
-    let bound = memo.flow_bound_graph_for_tests(entry);
+    let bound = memo.flow_bound_graph_for_tests(matched.entry());
     let skeleton = &bound.bundle().skeleton;
     let graph = &bound.bundle().graph;
     let demand = SliceDemand::for_return_projection(skeleton, path);
@@ -166,7 +164,7 @@ fn nested_signature_typeof_uses_lexical_siblings_without_runtime_captures() {
             .get(function)
             .expect("indexed child")
             .entry()
-            .captures
+            .captures()
             .0
             .is_empty(),
         "type syntax is absent from runtime captures"
@@ -203,7 +201,7 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
         .get(function)
         .expect("indexed child")
         .entry()
-        .captures
+        .captures()
         .0[0];
     let locator = context
         .mutable_authorities(capture)
@@ -217,10 +215,7 @@ fn selected_capture_authority_rejects_a_different_outer_source_snapshot() {
     assert!(changed.flow_capture_authority(&locator).is_none(),
         "unchanged function bytes cannot attach a lexical gate from a different outer source snapshot");
     let changed_index = changed.function_program_index();
-    let changed_entry = changed_index
-        .get(function)
-        .expect("same indexed child")
-        .entry();
+    let changed_entry = changed_index.get(function).expect("same indexed child");
     let (_, changed_bound) = selection_for(&changed, changed_entry, &[]);
     assert!(
         changed
@@ -264,7 +259,7 @@ fn selected_capture_locators_skip_known_unannotated_local_declarations() {
         .get(function)
         .expect("indexed child")
         .entry()
-        .captures
+        .captures()
         .0;
     let plain = captures
         .iter()
@@ -562,7 +557,7 @@ fn selected_captured_parameters_retrieve_without_repeated_frame_inventory_scans(
             &memo.capture_lookup_work,
         ));
         child
-            .captures
+            .captures()
             .0
             .iter()
             .flat_map(|capture| context.mutable_authorities(capture))
@@ -1649,7 +1644,7 @@ fn nested_content(memo: &DeclBodyMemo, nested: &SliceExpr) -> Arc<SliceContent> 
         panic!("nested descriptor");
     };
     let index = memo.function_program_index();
-    let entry = index.get(function).expect("indexed child").entry();
+    let entry = index.get(function).expect("indexed child");
     let (selection, skeleton) = selection_for(memo, entry, &[]);
     memo.flow_slice_content_with_context(
         entry,
@@ -4878,11 +4873,19 @@ fn locator_miss_is_typed_none() {
     let entry = entry_of(&index, "id");
     let (selection, skeleton) = selection_for(&memo, entry, &[]);
 
-    let mut missing_contributor = entry.clone();
-    missing_contributor.locator.contributor.contributor_index = 9999;
+    // An altered record reseals into an index of its own; the memo refuses
+    // that witness exactly as it refuses a stale locator.
+    let reseal =
+        |alter: &dyn Fn(&mut verter_session_query::function_program::FunctionProgramDiscovery)| {
+            let mut discovery = entry.entry().unsealed_for_test();
+            alter(&mut discovery);
+            FunctionProgramIndex::from_discovery(vec![discovery], Vec::new(), Vec::new())
+        };
+    let missing_contributor =
+        reseal(&|discovery| discovery.locator.contributor.contributor_index = 9999);
     assert!(
         memo.flow_slice_content(
-            &missing_contributor,
+            missing_contributor.get(entry.key()).unwrap(),
             selection.clone(),
             &skeleton,
             verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
@@ -4893,14 +4896,15 @@ fn locator_miss_is_typed_none() {
         "an out-of-range contributor is a typed miss"
     );
 
-    let mut bad_descent = entry.clone();
-    bad_descent.locator.descent = verter_session_query::function_program::FunctionDescent::new()
-        .then(FunctionDescentStep::VariableInitializer {
-            declarator_ordinal: 99,
-        });
+    let bad_descent = reseal(&|discovery| {
+        discovery.locator.descent = verter_session_query::function_program::FunctionDescent::new()
+            .then(FunctionDescentStep::VariableInitializer {
+                declarator_ordinal: 99,
+            });
+    });
     assert!(
         memo.flow_slice_content(
-            &bad_descent,
+            bad_descent.get(entry.key()).unwrap(),
             selection,
             &skeleton,
             verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
@@ -4910,6 +4914,69 @@ fn locator_miss_is_typed_none() {
         .is_none(),
         "a mismatched descent is a typed miss"
     );
+    // The retained parse re-checks the locator itself, independently of
+    // which index answered.
+    for stale in [&missing_contributor, &bad_descent] {
+        assert!(
+            memo.function_flow_structure(stale.get(entry.key()).unwrap().entry())
+                .unwrap()
+                .is_none(),
+            "a stale locator never reaches the retained AST"
+        );
+    }
+}
+
+/// A source serves content only for a witness its OWN inventory answered.
+/// A separately built index for the same source text answers the same
+/// position with a structurally identical entry — same key, locator, spans
+/// and exact body hash, so the retained-parse re-check alone would accept
+/// it — and its witness is refused as a typed miss.
+#[test]
+fn source_refuses_a_witness_from_another_index_for_the_same_position() {
+    use verter_session_query::source::demand::ExpressionSourceDemand;
+    let source = "function pick<T extends string>(x: T) { return x; }\n";
+    let memo = memo_for(source);
+    let index = memo.function_program_index();
+    let own = entry_of(&index, "pick");
+    let other = memo_for(source);
+    let other_index = other.function_program_index();
+    let foreign = entry_of(&other_index, "pick");
+    assert_eq!(
+        own.entry(),
+        foreign.entry(),
+        "the two indexes agree structurally"
+    );
+    assert!(own.is_served_by(&index) && !foreign.is_served_by(&index));
+    assert!(
+        own.is_served_by(&index.as_ref().clone()),
+        "a clone of the served index shares its inventory"
+    );
+
+    let demand = memo.indexed_expression_demand();
+    assert!(
+        demand.function_type_param_clause(own).is_some(),
+        "the source's own witness is served"
+    );
+    assert!(
+        demand.function_type_param_clause(foreign).is_none(),
+        "a foreign witness is a typed miss"
+    );
+
+    let (selection, bound) = selection_for(&memo, own, &[]);
+    let policy = || {
+        verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+            &Default::default(),
+        )
+    };
+    assert!(memo
+        .flow_slice_content(own, selection.clone(), &bound, policy())
+        .is_some());
+    assert!(memo
+        .flow_slice_content(foreign, selection.clone(), &bound, policy())
+        .is_none());
+    assert!(memo
+        .flow_slice_content_with_context(foreign, Some(selection), &bound, None, policy())
+        .is_none());
 }
 
 /// The expression-statement fallthrough — every shape that is neither a
@@ -6033,7 +6100,7 @@ fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
                 .skeleton
                 .expr_site(definitions[0])
                 .span
-                .to_absolute(entry.span.start),
+                .to_absolute(entry.entry().span().start),
             verter_span::Span::new(rhs_start as u32, (rhs_start + 1) as u32)
         );
         let inspected = work.load(Ordering::Relaxed);
@@ -6052,7 +6119,7 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     let memo = memo_for(source);
     let index = memo.function_program_index();
     let entry = entry_of(&index, "f");
-    let bound = memo.flow_bound_graph_for_tests(entry);
+    let bound = memo.flow_bound_graph_for_tests(entry.entry());
     let skeleton = &bound.bundle().skeleton;
     let graph = &bound.bundle().graph;
     let demand = SliceDemand::for_return_projection(skeleton, &[]);
@@ -6062,7 +6129,7 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     let mut ir = lower_slice_plan(&plan, graph, skeleton);
     let rhs_start = source.find("x=1").unwrap() + 2;
     let rhs_span = verter_session_query::flow::frame_span::FrameSpan::rebase(
-        entry.span.start,
+        entry.entry().span().start,
         verter_span::Span::new(rhs_start as u32, (rhs_start + 1) as u32),
     );
     let original = ir

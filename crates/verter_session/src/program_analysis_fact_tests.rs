@@ -75,7 +75,7 @@ fn live_alpha_hash(
         )
         .expect("alpha is indexed")
         .entry()
-        .flow_body_stable_hash
+        .flow_body_stable_hash()
 }
 
 #[test]
@@ -176,10 +176,10 @@ fn flow_body_fact_identity_discriminates_overload_ordinals() {
     assert!(view.validates(&alpha_fact_at(
         &host,
         "/ws/flow.ts",
-        entry.flow_body_stable_hash,
+        entry.flow_body_stable_hash(),
         1,
     )));
-    let mut wrong_ordinal = alpha_fact_at(&host, "/ws/flow.ts", entry.flow_body_stable_hash, 1);
+    let mut wrong_ordinal = alpha_fact_at(&host, "/ws/flow.ts", entry.flow_body_stable_hash(), 1);
     let FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody { function, .. }) =
         &mut wrong_ordinal
     else {

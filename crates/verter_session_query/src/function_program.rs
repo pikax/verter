@@ -762,19 +762,22 @@ pub struct FunctionProgramTypeParam {
     pub first_parameter_occurrence: Option<u32>,
 }
 
-/// One served function position: identity, body locator, structural
-/// inventory, and the whole-function stable hash.
+/// The references each parameter-list callable makes to names it does not
+/// declare, keyed by the callable's span.
+pub type ParameterCallableReferences = Arc<[(verter_span::Span, Arc<[FunctionReferenceRecord]>)]>;
+
+/// One DISCOVERED function position, as the parser front-end's discovery
+/// walk records it: identity, body locator, structural inventory, and the
+/// whole-function stable hash.
 ///
-/// An entry is a STATEMENT about an authored function the parser
-/// front-end's discovery walk found, and the flow substrate's callee rail
-/// reads a clause off exactly this record. The discovery walk lives in the
-/// front-end crate, so this record cannot be `#[non_exhaustive]`; a
-/// consumer reaches an entry only through a keyed lookup on
-/// [`FunctionProgramIndex`], which hands out the [`FunctionProgramMatch`]
-/// witness for the position it named. Fields are public: the value is a
-/// shallow structural fact.
+/// A discovery record is mutable working state: the walk fills it in over
+/// several passes (captures, call targets, nested reads, hashes), so its
+/// fields are public. It is never served.
+/// [`FunctionProgramIndex::from_discovery`] seals each record into a
+/// read-only [`FunctionProgramEntry`] and derives the index's keyed
+/// lookups from the sealed inventory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionProgramEntry {
+pub struct FunctionProgramDiscovery {
     /// The program identity.
     pub key: FunctionProgramKey,
     /// The authored function node's span.
@@ -819,7 +822,7 @@ pub struct FunctionProgramEntry {
     /// The references each parameter-list callable makes to names it does
     /// not declare, by the callable's span: resolved with the frame's own
     /// references into [`Self::parameter_callable_captures`].
-    pub parameter_callable_references: Arc<[(verter_span::Span, Arc<[FunctionReferenceRecord]>)]>,
+    pub parameter_callable_references: ParameterCallableReferences,
     /// The exact captures of each parameter-list callable whose every
     /// reference resolved (the others keep their typed gap).
     pub parameter_callable_captures: Arc<[FunctionParameterCallableCaptures]>,
@@ -905,41 +908,420 @@ pub struct FunctionProgramEntry {
     pub flow_body_exact_hash: Option<Hash16>,
 }
 
-/// A LOOKUP-PROVEN entry: what THIS index answered when asked for one
+/// One SERVED function position: a sealed [`FunctionProgramDiscovery`].
+///
+/// The fields are private and there are no setters, so an entry is
+/// constructed in exactly one place —
+/// [`FunctionProgramIndex::from_discovery`] — and never changes after it
+/// is sealed: no code outside this module can assemble one with a struct
+/// literal or rewrite a field of a served one. Each accessor documents
+/// the matching [`FunctionProgramDiscovery`] field.
+///
+/// Sealing guarantees STRUCTURE, not provenance: `from_discovery` is
+/// public, so any caller can seal discovery data of its own. What binds an
+/// entry to an actual served source is the [`FunctionProgramMatch`]
+/// witness, which records the index that answered the lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionProgramEntry {
+    key: FunctionProgramKey,
+    span: verter_span::Span,
+    body_span: verter_span::Span,
+    locator: FunctionBodyLocator,
+    params: Arc<[FunctionParamRecord]>,
+    bindings: Arc<[FunctionBindingRecord]>,
+    unmodeled_bindings: Arc<[FunctionBindingRecord]>,
+    references: Arc<[FunctionReferenceRecord]>,
+    source_type_queries: Arc<[FunctionSourceTypeQuery]>,
+    type_queries: Arc<[FunctionTypeQuery]>,
+    return_sites: Arc<[FunctionReturnSite]>,
+    writes: Arc<[FunctionWriteRecord]>,
+    descendant_writes: Arc<[FlowBindingIdentity]>,
+    descendant_assignments: Arc<[FlowBindingIdentity]>,
+    unserved_assignments: Arc<[FunctionReferenceRecord]>,
+    captured_reads: Arc<[FunctionCapturedRead]>,
+    nested_captures: Arc<[FunctionNestedCaptures]>,
+    parameter_callable_references: ParameterCallableReferences,
+    parameter_callable_captures: Arc<[FunctionParameterCallableCaptures]>,
+    effects: Arc<[FunctionEffectRecord]>,
+    call_sites: Arc<[FunctionCallSiteRecord]>,
+    control: Arc<[FunctionControlRegion]>,
+    direct_calls: Arc<[FunctionDirectCall]>,
+    type_parameters: Arc<[FunctionProgramTypeParam]>,
+    lexical_parent: Option<Box<FunctionProgramKey>>,
+    class_member: bool,
+    nested_declaration_name: Option<Arc<str>>,
+    captures: CanonicalCaptureIdentity,
+    captures_exhaustive: bool,
+    flow_body_stable_hash: Hash16,
+    flow_body_exact_hash: Option<Hash16>,
+}
+
+impl FunctionProgramEntry {
+    /// Test-support copy of this entry as a discovery record, for tests
+    /// that reseal a deliberately altered entry into an index of its own.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn unsealed_for_test(&self) -> FunctionProgramDiscovery {
+        let entry = self.clone();
+        FunctionProgramDiscovery {
+            key: entry.key,
+            span: entry.span,
+            body_span: entry.body_span,
+            locator: entry.locator,
+            params: entry.params,
+            bindings: entry.bindings,
+            unmodeled_bindings: entry.unmodeled_bindings,
+            references: entry.references,
+            source_type_queries: entry.source_type_queries,
+            type_queries: entry.type_queries,
+            return_sites: entry.return_sites,
+            writes: entry.writes,
+            descendant_writes: entry.descendant_writes,
+            descendant_assignments: entry.descendant_assignments,
+            unserved_assignments: entry.unserved_assignments,
+            captured_reads: entry.captured_reads,
+            nested_captures: entry.nested_captures,
+            parameter_callable_references: entry.parameter_callable_references,
+            parameter_callable_captures: entry.parameter_callable_captures,
+            effects: entry.effects,
+            call_sites: entry.call_sites,
+            control: entry.control,
+            direct_calls: entry.direct_calls,
+            type_parameters: entry.type_parameters,
+            lexical_parent: entry.lexical_parent,
+            class_member: entry.class_member,
+            nested_declaration_name: entry.nested_declaration_name,
+            captures: entry.captures,
+            captures_exhaustive: entry.captures_exhaustive,
+            flow_body_stable_hash: entry.flow_body_stable_hash,
+            flow_body_exact_hash: entry.flow_body_exact_hash,
+        }
+    }
+
+    /// Seal one discovery record. Every field MOVES: no payload is cloned.
+    fn seal(discovery: FunctionProgramDiscovery) -> Self {
+        let FunctionProgramDiscovery {
+            key,
+            span,
+            body_span,
+            locator,
+            params,
+            bindings,
+            unmodeled_bindings,
+            references,
+            source_type_queries,
+            type_queries,
+            return_sites,
+            writes,
+            descendant_writes,
+            descendant_assignments,
+            unserved_assignments,
+            captured_reads,
+            nested_captures,
+            parameter_callable_references,
+            parameter_callable_captures,
+            effects,
+            call_sites,
+            control,
+            direct_calls,
+            type_parameters,
+            lexical_parent,
+            class_member,
+            nested_declaration_name,
+            captures,
+            captures_exhaustive,
+            flow_body_stable_hash,
+            flow_body_exact_hash,
+        } = discovery;
+        Self {
+            key,
+            span,
+            body_span,
+            locator,
+            params,
+            bindings,
+            unmodeled_bindings,
+            references,
+            source_type_queries,
+            type_queries,
+            return_sites,
+            writes,
+            descendant_writes,
+            descendant_assignments,
+            unserved_assignments,
+            captured_reads,
+            nested_captures,
+            parameter_callable_references,
+            parameter_callable_captures,
+            effects,
+            call_sites,
+            control,
+            direct_calls,
+            type_parameters,
+            lexical_parent,
+            class_member,
+            nested_declaration_name,
+            captures,
+            captures_exhaustive,
+            flow_body_stable_hash,
+            flow_body_exact_hash,
+        }
+    }
+
+    /// See [`FunctionProgramDiscovery::key`].
+    #[must_use]
+    pub fn key(&self) -> &FunctionProgramKey {
+        &self.key
+    }
+
+    /// See [`FunctionProgramDiscovery::span`].
+    #[must_use]
+    pub fn span(&self) -> verter_span::Span {
+        self.span
+    }
+
+    /// See [`FunctionProgramDiscovery::body_span`].
+    #[must_use]
+    pub fn body_span(&self) -> verter_span::Span {
+        self.body_span
+    }
+
+    /// See [`FunctionProgramDiscovery::locator`].
+    #[must_use]
+    pub fn locator(&self) -> &FunctionBodyLocator {
+        &self.locator
+    }
+
+    /// See [`FunctionProgramDiscovery::params`].
+    #[must_use]
+    pub fn params(&self) -> &Arc<[FunctionParamRecord]> {
+        &self.params
+    }
+
+    /// See [`FunctionProgramDiscovery::bindings`].
+    #[must_use]
+    pub fn bindings(&self) -> &Arc<[FunctionBindingRecord]> {
+        &self.bindings
+    }
+
+    /// See [`FunctionProgramDiscovery::unmodeled_bindings`].
+    #[must_use]
+    pub fn unmodeled_bindings(&self) -> &Arc<[FunctionBindingRecord]> {
+        &self.unmodeled_bindings
+    }
+
+    /// See [`FunctionProgramDiscovery::references`].
+    #[must_use]
+    pub fn references(&self) -> &Arc<[FunctionReferenceRecord]> {
+        &self.references
+    }
+
+    /// See [`FunctionProgramDiscovery::source_type_queries`].
+    #[must_use]
+    pub fn source_type_queries(&self) -> &Arc<[FunctionSourceTypeQuery]> {
+        &self.source_type_queries
+    }
+
+    /// See [`FunctionProgramDiscovery::type_queries`].
+    #[must_use]
+    pub fn type_queries(&self) -> &Arc<[FunctionTypeQuery]> {
+        &self.type_queries
+    }
+
+    /// See [`FunctionProgramDiscovery::return_sites`].
+    #[must_use]
+    pub fn return_sites(&self) -> &Arc<[FunctionReturnSite]> {
+        &self.return_sites
+    }
+
+    /// See [`FunctionProgramDiscovery::writes`].
+    #[must_use]
+    pub fn writes(&self) -> &Arc<[FunctionWriteRecord]> {
+        &self.writes
+    }
+
+    /// See [`FunctionProgramDiscovery::descendant_writes`].
+    #[must_use]
+    pub fn descendant_writes(&self) -> &Arc<[FlowBindingIdentity]> {
+        &self.descendant_writes
+    }
+
+    /// See [`FunctionProgramDiscovery::descendant_assignments`].
+    #[must_use]
+    pub fn descendant_assignments(&self) -> &Arc<[FlowBindingIdentity]> {
+        &self.descendant_assignments
+    }
+
+    /// See [`FunctionProgramDiscovery::unserved_assignments`].
+    #[must_use]
+    pub fn unserved_assignments(&self) -> &Arc<[FunctionReferenceRecord]> {
+        &self.unserved_assignments
+    }
+
+    /// See [`FunctionProgramDiscovery::captured_reads`].
+    #[must_use]
+    pub fn captured_reads(&self) -> &Arc<[FunctionCapturedRead]> {
+        &self.captured_reads
+    }
+
+    /// See [`FunctionProgramDiscovery::nested_captures`].
+    #[must_use]
+    pub fn nested_captures(&self) -> &Arc<[FunctionNestedCaptures]> {
+        &self.nested_captures
+    }
+
+    /// See [`FunctionProgramDiscovery::parameter_callable_references`].
+    #[must_use]
+    pub fn parameter_callable_references(&self) -> &ParameterCallableReferences {
+        &self.parameter_callable_references
+    }
+
+    /// See [`FunctionProgramDiscovery::parameter_callable_captures`].
+    #[must_use]
+    pub fn parameter_callable_captures(&self) -> &Arc<[FunctionParameterCallableCaptures]> {
+        &self.parameter_callable_captures
+    }
+
+    /// See [`FunctionProgramDiscovery::effects`].
+    #[must_use]
+    pub fn effects(&self) -> &Arc<[FunctionEffectRecord]> {
+        &self.effects
+    }
+
+    /// See [`FunctionProgramDiscovery::call_sites`].
+    #[must_use]
+    pub fn call_sites(&self) -> &Arc<[FunctionCallSiteRecord]> {
+        &self.call_sites
+    }
+
+    /// See [`FunctionProgramDiscovery::control`].
+    #[must_use]
+    pub fn control(&self) -> &Arc<[FunctionControlRegion]> {
+        &self.control
+    }
+
+    /// See [`FunctionProgramDiscovery::direct_calls`].
+    #[must_use]
+    pub fn direct_calls(&self) -> &Arc<[FunctionDirectCall]> {
+        &self.direct_calls
+    }
+
+    /// See [`FunctionProgramDiscovery::type_parameters`].
+    #[must_use]
+    pub fn type_parameters(&self) -> &Arc<[FunctionProgramTypeParam]> {
+        &self.type_parameters
+    }
+
+    /// See [`FunctionProgramDiscovery::lexical_parent`].
+    #[must_use]
+    pub fn lexical_parent(&self) -> Option<&FunctionProgramKey> {
+        self.lexical_parent.as_deref()
+    }
+
+    /// See [`FunctionProgramDiscovery::class_member`].
+    #[must_use]
+    pub fn class_member(&self) -> bool {
+        self.class_member
+    }
+
+    /// See [`FunctionProgramDiscovery::nested_declaration_name`].
+    #[must_use]
+    pub fn nested_declaration_name(&self) -> Option<&Arc<str>> {
+        self.nested_declaration_name.as_ref()
+    }
+
+    /// See [`FunctionProgramDiscovery::captures`].
+    #[must_use]
+    pub fn captures(&self) -> &CanonicalCaptureIdentity {
+        &self.captures
+    }
+
+    /// See [`FunctionProgramDiscovery::captures_exhaustive`].
+    #[must_use]
+    pub fn captures_exhaustive(&self) -> bool {
+        self.captures_exhaustive
+    }
+
+    /// See [`FunctionProgramDiscovery::flow_body_stable_hash`].
+    #[must_use]
+    pub fn flow_body_stable_hash(&self) -> Hash16 {
+        self.flow_body_stable_hash
+    }
+
+    /// See [`FunctionProgramDiscovery::flow_body_exact_hash`].
+    #[must_use]
+    pub fn flow_body_exact_hash(&self) -> Option<Hash16> {
+        self.flow_body_exact_hash
+    }
+}
+
+/// A LOOKUP-PROVEN entry: what ONE index answered when asked for one
 /// specific function position.
 ///
-/// The field is private and there is no public constructor, so the type
-/// IS the witness: it cannot be forged, and it cannot be manufactured
-/// from an entry obtained any other way — including a legitimately
-/// obtained entry belonging to a DIFFERENT callee.
+/// The fields are private and there is no public constructor, so the type
+/// IS the witness: it is obtained only through a keyed lookup on a
+/// [`FunctionProgramIndex`] ([`FunctionProgramIndex::get`],
+/// [`FunctionProgramIndex::value_function`],
+/// [`FunctionProgramIndex::nested_at`],
+/// [`FunctionProgramIndex::matches_named`]), and it names both the
+/// position and the index that answered.
 ///
-/// That second case is the one that mattered. While the flow rail's
-/// clause reader took a bare `&FunctionProgramEntry`, two defeats
-/// compiled. The first was a struct literal assembled out of nothing
-/// (now separately impossible: [`FunctionProgramEntry`] is
-/// `#[non_exhaustive]`). The second, and the realistic one, was an index
-/// MISS falling back to `index.entries.first()` — a real entry, for the
-/// wrong function, handed to a reader whose doc claimed the reference
-/// itself was proof of a successful lookup. Both are closed by
-/// construction now: this index hands out no entry except through a
-/// KEYED lookup, and what it hands out is this witness.
-#[derive(Debug, Clone, Copy)]
+/// What it guarantees, exactly:
+///
+/// - **Keyed lookup.** No entry leaves an index except through a lookup
+///   that names its position. The defeat this closes was an index MISS
+///   falling back to `index.entries.first()` — a real entry, for the
+///   wrong function, handed to a reader that trusted the reference as
+///   proof of a successful lookup.
+/// - **Structural sealing.** The entry is a sealed
+///   [`FunctionProgramEntry`]: no struct literal, no field write, and
+///   every lookup table of the answering index is derived from the same
+///   sealed inventory by [`FunctionProgramIndex::from_discovery`].
+/// - **Inventory binding.** [`Self::is_served_by`] tells a consumer, in
+///   constant time, whether the witness came from a given index's
+///   inventory (or a clone sharing it). `from_discovery` is public, so
+///   any caller can build an index of its own and obtain witnesses from
+///   it; a source that serves content for a witness checks it against
+///   the inventory it actually serves and refuses a foreign one.
+///
+/// It does NOT guarantee parser provenance (sealing accepts any discovery
+/// data) or snapshot freshness (a source still re-checks the retained
+/// parse it lowers from against the entry it is handed).
+#[derive(Clone, Copy)]
 pub struct FunctionProgramMatch<'a> {
-    entry: &'a FunctionProgramEntry,
+    index: &'a FunctionProgramIndex,
+    ordinal: usize,
+}
+
+impl std::fmt::Debug for FunctionProgramMatch<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FunctionProgramMatch")
+            .field("ordinal", &self.ordinal)
+            .field("key", self.key())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> FunctionProgramMatch<'a> {
     /// The matched entry's structural record.
     #[must_use]
     pub fn entry(self) -> &'a FunctionProgramEntry {
-        self.entry
+        &self.index.entries[self.ordinal]
     }
 
     /// The position this lookup matched — the entry's own identity, so a
     /// caller can cross-check what it asked for against what it got.
     #[must_use]
     pub fn key(self) -> &'a FunctionProgramKey {
-        &self.entry.key
+        &self.entry().key
+    }
+
+    /// Whether this witness was answered by `index`'s inventory: the
+    /// same sealed entry allocation, which every clone of an index shares
+    /// and no separately built index does. Constant time.
+    #[must_use]
+    pub fn is_served_by(self, index: &FunctionProgramIndex) -> bool {
+        Arc::ptr_eq(&self.index.entries, &index.entries)
     }
 }
 
@@ -980,14 +1362,25 @@ impl FunctionProgramIndex {
     /// the indexed expressions (sorted by start) and the authored classes.
     /// The keyed lookups are derived here from the entries, so every way out
     /// of the index stays consistent with what discovery recorded.
+    ///
+    /// This is the ONLY constructor of a [`FunctionProgramEntry`]: each
+    /// discovery record is sealed by moving its fields, in source order.
+    /// Where two records share a lookup key the FIRST in source order wins.
+    /// Sealing proves structure and lookup consistency, not parser
+    /// provenance — any caller may seal discovery data of its own, which is
+    /// why a serving source checks [`FunctionProgramMatch::is_served_by`].
     pub fn from_discovery(
-        entries: Vec<FunctionProgramEntry>,
+        entries: Vec<FunctionProgramDiscovery>,
         expressions: Vec<ProgramExpressionRecord>,
         classes: Vec<ClassSyntaxRecord>,
     ) -> Self {
         let mut by_key = rustc_hash::FxHashMap::default();
         let mut value_functions = ValueFunctionLookup::default();
         let mut nested = rustc_hash::FxHashMap::default();
+        let entries: Vec<FunctionProgramEntry> = entries
+            .into_iter()
+            .map(FunctionProgramEntry::seal)
+            .collect();
         for (ordinal, entry) in entries.iter().enumerate() {
             by_key.entry(entry.key.clone()).or_insert(ordinal);
             if entry.key.declaration.space == SymbolSpace::Value {
@@ -1056,7 +1449,8 @@ impl FunctionProgramIndex {
     ) -> Option<FunctionProgramMatch<'_>> {
         let ordinal = *self.nested.get(&(parent.clone(), span))?;
         Some(FunctionProgramMatch {
-            entry: &self.entries[ordinal],
+            index: self,
+            ordinal,
         })
     }
     /// The entry for `key`, when the position is served by this file.
@@ -1066,7 +1460,8 @@ impl FunctionProgramIndex {
         FUNCTION_KEY_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
         let ordinal = *self.by_key.get(key)?;
         Some(FunctionProgramMatch {
-            entry: &self.entries[ordinal],
+            index: self,
+            ordinal,
         })
     }
 
@@ -1085,7 +1480,8 @@ impl FunctionProgramIndex {
         FUNCTION_VALUE_LOOKUP_VISITS.with(|visits| visits.set(visits.get() + 1));
         let ordinal = *by_name.get(&(owner, part.clone(), overload_ordinal))?;
         Some(FunctionProgramMatch {
-            entry: &self.entries[ordinal],
+            index: self,
+            ordinal,
         })
     }
 
@@ -1099,8 +1495,12 @@ impl FunctionProgramIndex {
     ) -> impl Iterator<Item = FunctionProgramMatch<'a>> + 'a {
         self.entries
             .iter()
-            .filter(move |entry| entry.key.declaration.name.as_ref() == name)
-            .map(|entry| FunctionProgramMatch { entry })
+            .enumerate()
+            .filter(move |(_, entry)| entry.key.declaration.name.as_ref() == name)
+            .map(|(ordinal, _)| FunctionProgramMatch {
+                index: self,
+                ordinal,
+            })
     }
 
     /// How many function positions this file serves.

@@ -1114,7 +1114,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let (index, nodes) = build_function_program_index_with_nodes(&parsed.program, source, &owners, canonical_id.clone(), &Default::default());
     let entry = if let Some(nested_name) = nested {
         let mut matching = index.matches_named(name).filter(|candidate| {
-            candidate.entry().lexical_parent.is_some() && nodes.get(&candidate.entry().key).is_some_and(|resolved| {
+            candidate.entry().lexical_parent().is_some() && nodes.get(candidate.entry().key()).is_some_and(|resolved| {
                 matches!(resolved.node, FunctionNode::Function(func) if func.id.as_ref().is_some_and(|id| id.name.as_str() == nested_name))
             })
         });
@@ -1124,7 +1124,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     } else {
         index.value_function(verter_type_expr::TopLevelOwnerId::ordinary_file(), name, &verter_type_expr::facts::FunctionPartIdentity::DeclarationBody, 0).expect("the fixture function is indexed").entry()
     };
-    let resolved = nodes.get(&entry.key).expect("exact indexed fixture function address");
+    let resolved = nodes.get(entry.key()).expect("exact indexed fixture function address");
     let body = match resolved.node {
         FunctionNode::Function(func) if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression => FunctionBodySource::from_function_expression(func).expect("bodied expression"),
         FunctionNode::Function(func) => FunctionBodySource::from_function(func).expect("bodied declaration"),
@@ -1132,7 +1132,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
         FunctionNode::Initializer(expression) => FunctionBodySource::from_initializer(expression),
     };
     let prepared = build_indexed_function_body_skeleton(&body, source, entry).expect("indexed fixture structure");
-    let function = entry.key.clone();
+    let function = entry.key().clone();
     let key = verter_session_query::flow::bundle::FlowSliceFunctionKey {
         canonical_id, function, parse_env_hash: [0u8; 16],
         flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],

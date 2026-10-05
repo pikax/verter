@@ -794,10 +794,10 @@ fn empty_completion_of(node: &FunctionNode<'_>, entry: &FunctionProgramEntry) ->
     let FunctionNode::Function(function) = node else {
         return EmptyCompletion::Never;
     };
-    if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration || entry.class_member {
+    if function.r#type == oxc_ast::ast::FunctionType::FunctionDeclaration || entry.class_member() {
         return EmptyCompletion::Void;
     }
-    match entry.locator.descent.last() {
+    match entry.locator().descent.last() {
         Some(FunctionDescentStep::ClassMember { .. }) => EmptyCompletion::Void,
         _ => EmptyCompletion::Never,
     }
@@ -1004,18 +1004,18 @@ pub(crate) fn build_flow_slice_content(
     // The receiver rules below read a descent of one or two steps; a longer
     // one is not copied (copying every nested function's whole descent cost
     // the square of the nesting).
-    let namespace_owned = entry.locator.descent.has_namespace_member();
+    let namespace_owned = entry.locator().descent.has_namespace_member();
     let namespace_scopes = if namespace_owned {
         enclosing_namespace_scopes(
             program,
-            entry.locator.contributor.contributor_index as usize,
-            &entry.locator.descent.to_vec(),
+            entry.locator().contributor.contributor_index as usize,
+            &entry.locator().descent.to_vec(),
         )
     } else {
         Vec::new()
     };
-    let descent = if entry.locator.descent.len() <= 2 {
-        entry.locator.descent.to_vec()
+    let descent = if entry.locator().descent.len() <= 2 {
+        entry.locator().descent.to_vec()
     } else {
         Vec::new()
     };
@@ -1162,7 +1162,7 @@ pub(crate) fn build_flow_slice_content(
                 &bindings,
                 anchor,
             )),
-            body_hash: entry.flow_body_exact_hash?,
+            body_hash: entry.flow_body_exact_hash()?,
             snapshot: snapshot.clone(),
             outer: captures.clone(),
             anchor,
@@ -1185,7 +1185,7 @@ pub(crate) fn build_flow_slice_content(
         Some(context) => context.this.clone(),
         None if untyped_declaration_this => Some(SliceThis::Untyped),
         None => resolved.enclosing_this.and_then(|this| {
-            let class = Arc::clone(&entry.key.declaration.name);
+            let class = Arc::clone(&entry.key().declaration.name);
             Some(match this {
                 verter_semantic::analysis::function_program::EnclosingThis::Instance => {
                     SliceThis::Instance {
@@ -1203,7 +1203,7 @@ pub(crate) fn build_flow_slice_content(
                             descent.as_slice(),
                             [FunctionDescentStep::ClassMember { .. }]
                         )
-                        .then_some(entry.locator.contributor.contributor_index),
+                        .then_some(entry.locator().contributor.contributor_index),
                     }
                 }
                 verter_semantic::analysis::function_program::EnclosingThis::ObjectLiteral => {
@@ -1211,7 +1211,7 @@ pub(crate) fn build_flow_slice_content(
                         [FunctionDescentStep::VariableInitializer { declarator_ordinal }, FunctionDescentStep::ObjectMember { .. }] => {
                             SliceThis::Value {
                                 value: class,
-                                contributor: entry.locator.contributor.contributor_index,
+                                contributor: entry.locator().contributor.contributor_index,
                                 declarator: *declarator_ordinal,
                             }
                         }
@@ -1236,14 +1236,14 @@ pub(crate) fn build_flow_slice_content(
         member_this: None,
         skeleton,
         captures,
-        control: Arc::clone(&entry.control),
-        direct_calls: &entry.direct_calls,
+        control: Arc::clone(entry.control()),
+        direct_calls: entry.direct_calls(),
         program,
         walks,
         module_scope,
         namespace_owned,
         namespace_scopes: &namespace_scopes,
-        contributor: entry.locator.contributor.contributor_index,
+        contributor: entry.locator().contributor.contributor_index,
         budget_failure: None,
         inert_write_spans: FxHashSet::default(),
         logical_value_sites: Vec::new(),
@@ -1506,7 +1506,7 @@ fn binding_is_assigned(
                 if bindings.canonical_local(local) == runtime)
     }) || entry.is_some_and(|entry| {
         entry
-            .descendant_assignments
+            .descendant_assignments()
             .iter()
             .filter_map(|identity| bindings.local(identity))
             .any(|local| bindings.canonical_local(local) == runtime)
@@ -1946,10 +1946,10 @@ pub(crate) fn nested_function_bodies(
     entry: &verter_session_query::function_program::FunctionProgramEntry,
 ) -> Vec<verter_span::Span> {
     entry
-        .nested_captures
+        .nested_captures()
         .iter()
         .filter_map(|child| index.get(&child.function))
-        .map(|child| child.entry().body_span)
+        .map(|child| child.entry().body_span())
         .collect()
 }
 
@@ -4179,15 +4179,15 @@ pub(crate) fn build_flow_capture_authority(
     entry: &FunctionProgramEntry,
     locator: &SliceCaptureAuthorityLocator,
 ) -> Option<Option<SliceCaptureAuthority>> {
-    if entry.key != locator.declaration.defining_function
-        || entry.flow_body_exact_hash != Some(locator.gate.body_hash)
+    if *entry.key() != locator.declaration.defining_function
+        || entry.flow_body_exact_hash() != Some(locator.gate.body_hash)
     {
         return None;
     }
     let binding = locator.gate.bindings.local(&locator.declaration)?;
     let fact = locator.gate.skeleton.binding(binding);
     let authored = entry
-        .bindings
+        .bindings()
         .get(locator.declaration.binding_slot as usize)?;
     let absolute = fact.span.to_absolute(locator.gate.anchor);
     if authored.span != absolute {
@@ -4830,7 +4830,7 @@ impl<'a> Lowerer<'a> {
         self.index
             .get(self.bindings.function())
             .into_iter()
-            .flat_map(|entry| entry.entry().descendant_writes.iter())
+            .flat_map(|entry| entry.entry().descendant_writes().iter())
             .filter_map(|identity| self.bindings.local(identity))
             .filter(|binding| {
                 matches!(
@@ -5069,7 +5069,7 @@ impl<'a> Lowerer<'a> {
                     .is_some_and(|binding| self.binding_is_read_after_loop(binding, loop_span))
             };
         nested
-            .writes
+            .writes()
             .iter()
             .flat_map(|write| write.targets.iter())
             .any(|target| {
@@ -5081,7 +5081,7 @@ impl<'a> Lowerer<'a> {
                     .resolved()
                     .is_some_and(&targets_downstream)
             })
-            || nested.references.iter().any(|reference| {
+            || nested.references().iter().any(|reference| {
                 reference
                     .read_role
                     .is_some_and(|role| role.is_effect_input())
@@ -9444,7 +9444,7 @@ impl<'a> Lowerer<'a> {
         }
         let entry = self.index.get(gate.bindings.function())?;
         let mut finder = DeclaredCallEffects {
-            within: entry.entry().span,
+            within: entry.entry().span(),
             anchor: gate.anchor,
             names: annotated,
             effects: Vec::new(),
@@ -14477,7 +14477,7 @@ impl<'a> Lowerer<'a> {
                 gate.bindings.function(),
                 verter_span::Span::new(function.span.start, function.span.end),
             )
-            .is_some_and(|entry| &entry.entry().key == self.bindings.function())
+            .is_some_and(|entry| entry.entry().key() == self.bindings.function())
     }
 
     /// The function value of the local function DECLARATION `function`,
@@ -14517,7 +14517,7 @@ impl<'a> Lowerer<'a> {
         let mut gap = None;
         let mut declared_evolving_captures = Vec::new();
         let mut checked = rustc_hash::FxHashSet::default();
-        for read in entry.captured_reads.iter() {
+        for read in entry.captured_reads().iter() {
             let identity = &read.binding;
             if !checked.insert(identity) {
                 continue;
@@ -14554,7 +14554,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         SliceExpr::NestedFunctionValue {
-            function: entry.key.clone(),
+            function: entry.key().clone(),
             context: Arc::new(NestedFlowContext {
                 captures,
                 // A function declaration's `this` is its own.
@@ -14597,7 +14597,7 @@ impl<'a> Lowerer<'a> {
             invocation.map(|call| oxc_span::Span::new(call.callee.span().end, call.span.end));
         let mut extended_captures: Vec<SkeletonBindingId> = Vec::new();
         if self.class_property_initializers == 0 {
-            for read in entry.captured_reads.iter() {
+            for read in entry.captured_reads().iter() {
                 let Some(binding) = self.bindings.local(&read.binding) else {
                     continue;
                 };
@@ -14641,7 +14641,7 @@ impl<'a> Lowerer<'a> {
         let mut gap = None;
         let mut declared_evolving_captures = Vec::new();
         let mut checked = rustc_hash::FxHashSet::default();
-        for read in entry.captured_reads.iter() {
+        for read in entry.captured_reads().iter() {
             let identity = &read.binding;
             if !checked.insert(identity) {
                 continue;
@@ -14691,7 +14691,7 @@ impl<'a> Lowerer<'a> {
             }
         }
         SliceExpr::NestedFunctionValue {
-            function: entry.key.clone(),
+            function: entry.key().clone(),
             context: Arc::new(NestedFlowContext {
                 captures,
                 // An arrow has no `this` of its own: it reads its creating

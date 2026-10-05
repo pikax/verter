@@ -3523,7 +3523,7 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                     overload_ordinal: function.overload_ordinal,
                 };
                 index.get(&key).is_some_and(|matched| {
-                    &matched.entry().flow_body_stable_hash == flow_body_stable_hash
+                    &matched.entry().flow_body_stable_hash() == flow_body_stable_hash
                 })
             }
         }

@@ -1276,9 +1276,9 @@ impl DeclBodyMemo {
                 .expect("fixture parse identity");
         let key = verter_session_query::flow::bundle::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&self.key.canonical),
-            function: entry.key.clone(),
-            flow_body_stable_hash: entry.flow_body_stable_hash,
-            flow_body_exact_hash: entry.flow_body_exact_hash.expect("fixture exact body"),
+            function: entry.key().clone(),
+            flow_body_stable_hash: entry.flow_body_stable_hash(),
+            flow_body_exact_hash: entry.flow_body_exact_hash().expect("fixture exact body"),
             parse_env_hash: self.key.parse_env_hash,
             parse_key,
             file_language,
@@ -1301,26 +1301,26 @@ impl DeclBodyMemo {
     #[cfg(test)]
     pub(crate) fn flow_slice_content(
         &self,
-        entry: &verter_session_query::function_program::FunctionProgramEntry,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: verter_session_query::flow::slice::FlowSliceSelection,
         bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.indexed_expression_demand()
-            .flow_slice_content(entry, selection, bound, policy)
+            .flow_slice_content(matched, selection, bound, policy)
     }
 
     #[cfg(test)]
     pub(crate) fn flow_slice_content_with_context(
         &self,
-        entry: &verter_session_query::function_program::FunctionProgramEntry,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
         bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
         self.indexed_expression_demand()
-            .flow_slice_content_with_context(entry, selection, bound, context, policy)
+            .flow_slice_content_with_context(matched, selection, bound, context, policy)
     }
 
     /// Lower selected missing annotations in one retained-source lease. Slots
@@ -3422,14 +3422,18 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
 
     fn function_type_param_clause(
         &self,
-        entry: &verter_session_query::function_program::FunctionProgramEntry,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
     ) -> Option<Vec<verter_session_query::flow::slice::SliceTypeParam>> {
         let service = self.snapshot.service.as_ref()?;
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.snapshot.ensure_lease();
-        let _index = self.function_program_index();
-        let entry = entry.clone();
+        // A witness another index answered names no position THIS source
+        // serves: the same typed miss as an unknown entry.
+        if !matched.is_served_by(&self.function_program_index()) {
+            return None;
+        }
+        let entry = matched.entry().clone();
         let Some(clause) = service.run_leased(&self.snapshot.key, move |program| {
             program.and_then(|p| {
                 p.with_indexed_function(&entry, |resolved, _entry| {
@@ -3454,24 +3458,25 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
 
     fn flow_slice_content(
         &self,
-        entry: &verter_session_query::function_program::FunctionProgramEntry,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: verter_session_query::flow::slice::FlowSliceSelection,
         bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
-        self.flow_slice_content_with_context(entry, Some(selection), bound, None, policy)
+        self.flow_slice_content_with_context(matched, Some(selection), bound, None, policy)
     }
 
     fn flow_slice_content_with_context(
         &self,
-        entry: &verter_session_query::function_program::FunctionProgramEntry,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
         bound: &verter_session_query::flow::bundle::BoundFlowGraph,
         context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
         policy: verter_session_query::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
-        if bound.key().function != entry.key
-            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
+        let entry = matched.entry();
+        if bound.key().function != *entry.key()
+            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash()?
             || context
                 .as_ref()
                 .is_some_and(|context| !context.matches_snapshot(&self.snapshot.key))
@@ -3484,8 +3489,13 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.
         self.snapshot.ensure_lease();
-        let entry = entry.clone();
         let index = self.function_program_index();
+        // A witness another index answered names no position THIS source
+        // serves: the same typed miss as an unknown entry.
+        if !matched.is_served_by(&index) {
+            return None;
+        }
+        let entry = entry.clone();
         // A carrier's script block (`.vue` / `.svelte`) compiles to a
         // module by construction; a plain script file proves module scope
         // only through its own top-level syntax.

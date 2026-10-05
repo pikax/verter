@@ -423,7 +423,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             nested_captures: entry
                 .map(|entry| {
                     entry
-                        .nested_captures
+                        .nested_captures()
                         .iter()
                         .map(|child| (child.span, child))
                         .collect()
@@ -432,7 +432,7 @@ impl<'entry> SkeletonBuilder<'entry> {
             parameter_callable_captures: entry
                 .map(|entry| {
                     entry
-                        .parameter_callable_captures
+                        .parameter_callable_captures()
                         .iter()
                         .map(|callable| (callable.span, callable))
                         .collect()
@@ -441,11 +441,12 @@ impl<'entry> SkeletonBuilder<'entry> {
             captured_evolving_references: entry
                 .map(|entry| {
                     entry
-                        .references
+                        .references()
                         .iter()
                         .filter(|reference| {
                             reference.binding.resolved().is_some_and(|identity| {
-                                identity.evolving_array && identity.defining_function != entry.key
+                                identity.evolving_array
+                                    && identity.defining_function != *entry.key()
                             })
                         })
                         .map(|reference| reference.span)

@@ -126,22 +126,29 @@ pub trait ExpressionSourceDemand: Send + Sync {
         frame_lowered: Arc<[bool]>,
     ) -> Option<Arc<IndexedFlowCallExpression>>;
 
+    /// `matched` must have been answered by THIS source's served inventory
+    /// ([`Self::function_program_index`] or a clone of it); a witness from
+    /// any other index is a typed miss (`None`), exactly like an unknown
+    /// position. The source still re-checks its retained parse against the
+    /// matched entry, which a witness does not prove fresh.
     fn function_type_param_clause(
         &self,
-        entry: &crate::function_program::FunctionProgramEntry,
+        matched: crate::function_program::FunctionProgramMatch<'_>,
     ) -> Option<Vec<crate::flow::slice::SliceTypeParam>>;
 
+    /// See [`Self::function_type_param_clause`] for the `matched` contract.
     fn flow_slice_content(
         &self,
-        entry: &crate::function_program::FunctionProgramEntry,
+        matched: crate::function_program::FunctionProgramMatch<'_>,
         selection: crate::flow::slice::FlowSliceSelection,
         bound: &crate::flow::bundle::BoundFlowGraph,
         policy: crate::flow::policy::FlowReturnPolicy,
     ) -> Option<Arc<crate::flow::slice::SliceContent>>;
 
+    /// See [`Self::function_type_param_clause`] for the `matched` contract.
     fn flow_slice_content_with_context(
         &self,
-        entry: &crate::function_program::FunctionProgramEntry,
+        matched: crate::function_program::FunctionProgramMatch<'_>,
         selection: Option<crate::flow::slice::FlowSliceSelection>,
         bound: &crate::flow::bundle::BoundFlowGraph,
         context: Option<Arc<crate::flow::slice::NestedFlowContext>>,

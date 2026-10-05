@@ -241,11 +241,13 @@ impl FlowBindingMap {
         let mut insert = |span: verter_span::Span,
                           binding: IndexedOccurrence|
          -> Result<(), FlowBindingMapError> {
-            if span.start < entry.span.start || span.end > entry.span.end || span.start >= span.end
+            if span.start < entry.span().start
+                || span.end > entry.span().end
+                || span.start >= span.end
             {
                 return Err(FlowBindingMapError::InvalidSpan);
             }
-            let span = FrameSpan::rebase(entry.span.start, span);
+            let span = FrameSpan::rebase(entry.span().start, span);
             if let Some(previous) = occurrences.insert(span, binding.clone()) {
                 if previous != binding {
                     return Err(FlowBindingMapError::ConflictingOccurrence);
@@ -253,7 +255,7 @@ impl FlowBindingMap {
             }
             Ok(())
         };
-        for (slot, declaration) in entry.bindings.iter().enumerate() {
+        for (slot, declaration) in entry.bindings().iter().enumerate() {
             insert(
                 declaration.span,
                 IndexedOccurrence::Resolved(FlowBindingRef::Local(
@@ -261,7 +263,7 @@ impl FlowBindingMap {
                 )),
             )?;
         }
-        for declaration in entry.unmodeled_bindings.iter() {
+        for declaration in entry.unmodeled_bindings().iter() {
             insert(declaration.span, IndexedOccurrence::UnmodeledLocal)?;
         }
         let reference_binding = |binding: &crate::function_program::FunctionReferenceBinding| -> Result<IndexedOccurrence, FlowBindingMapError> {
@@ -272,23 +274,23 @@ impl FlowBindingMap {
                 FunctionReferenceBinding::UnmodeledLocal => IndexedOccurrence::UnmodeledLocal,
             })
         };
-        for reference in entry.references.iter() {
+        for reference in entry.references().iter() {
             insert(reference.span, reference_binding(&reference.binding)?)?;
         }
-        for target in entry.writes.iter().flat_map(|write| write.targets.iter()) {
+        for target in entry.writes().iter().flat_map(|write| write.targets.iter()) {
             if let FunctionWriteTarget::Binding { reference, .. } = target {
                 insert(reference.span, reference_binding(&reference.binding)?)?;
             }
         }
         let mut queries = FxHashMap::default();
-        for query in entry.source_type_queries.iter() {
-            if query.span.start < entry.span.start
-                || query.span.end > entry.span.end
+        for query in entry.source_type_queries().iter() {
+            if query.span.start < entry.span().start
+                || query.span.end > entry.span().end
                 || query.span.start >= query.span.end
             {
                 return Err(FlowBindingMapError::InvalidSpan);
             }
-            let span = FrameSpan::rebase(entry.span.start, query.span);
+            let span = FrameSpan::rebase(entry.span().start, query.span);
             let binding = reference_binding(&query.binding)?;
             if queries
                 .insert(span, binding.clone())
