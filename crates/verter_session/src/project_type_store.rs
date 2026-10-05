@@ -1079,6 +1079,9 @@ pub struct ProjectTypeStore {
     /// Bounded by retained payload bytes; see
     /// [`crate::identity_interner::IdentityInterner`].
     identity_interner: Arc<crate::identity_interner::IdentityInterner>,
+    /// The private hold on the output authority minted with this store's
+    /// engine stores. Never handed out except as an inert lease.
+    output_lease: crate::output_sinks::OutputLease,
     /// The aggregate retained-byte account every store in this graph
     /// charges.
     ///
@@ -1180,20 +1183,26 @@ impl ProjectTypeStore {
             Arc::clone(&counters.component_meta_stale_sweeps),
             store_account.clone(),
         );
-        let semantic_graph = Arc::new(match provenance {
-            Some(prov) => SemanticGraphStore::with_provenance(prov, store_account),
-            None => SemanticGraphStore::with_account(store_account),
-        });
-        let imported_registry_db =
-            ImportedRegistryDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let declaration_lookup_db =
-            DeclarationLookupDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let resolvability_db =
-            ResolvabilityDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let owner_collection_db =
-            OwnerCollectionDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
-        let shape_cache_db =
-            ShapeCacheDb::with_counter(Arc::clone(&counters.component_meta_cache_live));
+        // The engine's own stores and the one output authority minted for
+        // them. The store keeps the authority privately behind its lease.
+        let (engine, output_authority) =
+            crate::project_semantic_dispatch::engine_resources::EngineStores::create(
+                provenance,
+                store_account,
+                &counters.component_meta_cache_live,
+            );
+        let crate::project_semantic_dispatch::engine_resources::EngineStores {
+            graph: semantic_graph,
+            flow_slice,
+            intrinsics: intrinsic_registry,
+            imported_registry: imported_registry_db,
+            declarations: declaration_lookup_db,
+            resolvability: resolvability_db,
+            owner_collections: owner_collection_db,
+            shapes: shape_cache_db,
+            identities: identity_interner,
+            mapper_binders: mapper_binder_registry,
+        } = engine;
         let app_config_no_override_proof =
             crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
@@ -1207,17 +1216,17 @@ impl ProjectTypeStore {
             semantic_graph,
             owner_import_surfaces,
             component_meta_results: Arc::new(component_meta_results),
-            intrinsic_registry: Arc::new(IntrinsicRegistry::with_defaults()),
-            imported_registry_db: Arc::new(imported_registry_db),
-            declaration_lookup_db: Arc::new(declaration_lookup_db),
-            resolvability_db: Arc::new(resolvability_db),
-            owner_collection_db: Arc::new(owner_collection_db),
-            shape_cache_db: Arc::new(shape_cache_db),
+            intrinsic_registry,
+            imported_registry_db,
+            declaration_lookup_db,
+            resolvability_db,
+            owner_collection_db,
+            shape_cache_db,
             app_config_no_override_proof: Arc::new(app_config_no_override_proof),
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content:
                 crate::compile_output_node::CompileOutputNodePureContent::new(),
-            flow_slice: Arc::new(crate::cache_runtime::flow_slice_node::FlowSliceStores::new()),
+            flow_slice,
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
             semantic_db: parking_lot::Mutex::new(verter_semantic::db::SemanticDb::new()),
@@ -1230,12 +1239,9 @@ impl ProjectTypeStore {
             binder_identity_facts: Arc::new(
                 crate::binder_identity_facts::BinderIdentityFactsStore::new(),
             ),
-            mapper_binder_registry: Arc::new(
-                crate::mapper_binder_registry::MapperBinderRegistry::new(),
-            ),
-            identity_interner: Arc::new(crate::identity_interner::IdentityInterner::new(
-                Arc::clone(&retention_account),
-            )),
+            mapper_binder_registry,
+            identity_interner,
+            output_lease: crate::output_sinks::OutputLease::new(output_authority),
             retention_account,
             counters,
             activity_gate: semantic_activity::SemanticActivityGate::default(),
@@ -1264,6 +1270,12 @@ impl ProjectTypeStore {
             Arc::clone(&self.identity_interner),
             Arc::clone(&self.mapper_binder_registry),
         )
+    }
+
+    /// The host's private hold on this store's engine output authority. The
+    /// lease is inert; only a sealed sink capability opens it.
+    pub(crate) fn output_lease(&self) -> &crate::output_sinks::OutputLease {
+        &self.output_lease
     }
 
     pub(crate) fn identity_interner(&self) -> &Arc<crate::identity_interner::IdentityInterner> {

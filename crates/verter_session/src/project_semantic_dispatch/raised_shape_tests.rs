@@ -3283,9 +3283,8 @@ fn carrier_arg_fallback_is_typed_surface_member_and_marks_partial() {
 /// never admitted complete); a GENUINE absence stays exact + non-partial.
 #[test]
 fn terminal_marks_unraisable_composite_partial_and_genuine_absence_exact() {
-    use crate::project_semantic_dispatch::output_materialization::{
-        wrap_output_type_expr, TestOutputCap,
-    };
+    use crate::output_sinks::{OutputProjector, TestOutputCap};
+    use crate::project_semantic_dispatch::output_materialization::wrap_output_type_expr;
     use crate::project_semantic_dispatch::raise::{MaterializedTypeExpr, OutputTypeExpr};
     use crate::semantic_query::{DepSignature, ProjectionMode, ProjectionReductionContext};
 
@@ -3314,7 +3313,7 @@ fn terminal_marks_unraisable_composite_partial_and_genuine_absence_exact() {
     // exact `missing_output` — NON-partial.
     let cap2 = TestOutputCap::new(&dispatch);
     let sealed = wrap_output_type_expr(
-        &cap2,
+        cap2.authority(),
         TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
     );
     let genuine = crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr::from_parts(

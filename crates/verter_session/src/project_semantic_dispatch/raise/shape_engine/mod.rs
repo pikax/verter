@@ -13,7 +13,7 @@
 //!
 //! Three algebras:
 //! - [`MaterializeTypeExprAlg`] (`Out = TypeExpr`) — the EXACT historical
-//!   materialization, reached ONLY through the sealed `OutputProjector` output
+//!   materialization, reached ONLY through the authority-gated output
 //!   seam ([`super::ProjectSemanticDispatch::raise_node_to_type_expr`]) and the
 //!   `#[cfg(test)]` oracle.
 //! - [`RaisedShapeAlg`] (`Out = RaisedShapeResult`) — the TRUE bottom-up

@@ -88,6 +88,7 @@ use verter_type_expr::PrimitiveName;
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
 mod arena_ops;
 mod engine_binding;
+pub(crate) mod engine_resources;
 pub(crate) mod flow_slice_driver;
 pub(crate) use engine_binding::{EngineBinding, EngineObservers, EnginePolicy};
 pub(crate) mod absorb;

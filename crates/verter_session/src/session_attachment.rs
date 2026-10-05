@@ -2,10 +2,11 @@
 //! the engine through the request port, never through the engine binding.
 //!
 //! The engine's binding carries only the engine's own resources. Host-owned
-//! result stores — the per-framework surface DTO stores — are reached by
-//! session code through this attachment, which the host builds once at
-//! construction from the SAME shared instances its framework registry owns.
-//! The engine names the attachment only as the opaque
+//! result stores — the per-framework surface DTO stores — and the host's
+//! inert output lease are reached by session code through this attachment,
+//! which the host builds once at construction from the SAME shared instances
+//! its framework registry and project store own. The engine names the
+//! attachment only as the opaque
 //! [`ResolverCapabilities::HostAttachment`](crate::resolver_core::ResolverCapabilities)
 //! of its capability family; it has no operation on it.
 
@@ -28,12 +29,18 @@ pub(crate) type SvelteSurfaceStore = FrameworkSurfaceStore<SvelteSurfaceKey, Mac
 pub struct SessionAttachment {
     vue_surfaces: Option<Arc<VueSurfaceStore>>,
     svelte_surfaces: Option<Arc<SvelteSurfaceStore>>,
+    output: crate::output_sinks::OutputLease,
 }
 
 impl SessionAttachment {
-    /// Select the typed surface stores from the registry rows that own them.
-    pub(crate) fn from_registry(registry: &crate::framework::FrameworkAdapterRegistry) -> Self {
+    /// Select the typed surface stores from the registry rows that own them,
+    /// beside a share of the project store's output lease.
+    pub(crate) fn new(
+        registry: &crate::framework::FrameworkAdapterRegistry,
+        output: crate::output_sinks::OutputLease,
+    ) -> Self {
         Self {
+            output,
             vue_surfaces: typed_surface_store(
                 registry,
                 &verter_language::FrameworkAdapterId::vue(),
@@ -65,6 +72,11 @@ impl SessionAttachment {
         self.svelte_surfaces
             .as_deref()
             .expect("the Svelte adapter is registered")
+    }
+
+    /// The host's inert output lease; only a sealed sink capability opens it.
+    pub(crate) fn output_lease(&self) -> &crate::output_sinks::OutputLease {
+        &self.output
     }
 }
 

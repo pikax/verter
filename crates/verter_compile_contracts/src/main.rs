@@ -148,6 +148,10 @@ fn main() {
                     | Some("engine_ports_fact_validation_no_workspace.rs")
                     | Some("engine_ports_cancellation_no_host.rs")
                     | Some("engine_ports_execution_no_graph.rs")
+                    | Some("output_authority_not_forgeable.rs")
+                    | Some("output_authority_not_duplicable.rs")
+                    | Some("output_authority_not_recoverable_from_query_access.rs")
+                    | Some("output_authority_not_reminted_from_live_stores.rs")
             )
         });
     }

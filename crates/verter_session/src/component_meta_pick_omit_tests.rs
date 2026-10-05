@@ -1599,8 +1599,9 @@ const m12 = defineModel<Cell<T, 'm12'>>('m12')
 /// complete, never classified.
 #[test]
 fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
+    use crate::output_sinks::{OutputProjector, TestOutputCap};
     use crate::project_semantic_dispatch::output_materialization::{
-        wrap_degraded_output, wrap_output_type_expr, TestOutputCap,
+        wrap_degraded_output, wrap_output_type_expr,
     };
     use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
@@ -1617,7 +1618,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
     // PARTIAL at the `from_parts` choke point ⇒ refused warm admission; the
     // terminal tree keeps the production spelling.
     let typed_sealed = wrap_degraded_output(
-        &cap,
+        cap.authority(),
         QueryError::BudgetExceeded(BudgetExceededFailure {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
@@ -1625,7 +1626,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
             context: "typed-channel-fixture".to_string(),
         }),
     );
-    let tree = typed_sealed.into_type_expr(&cap);
+    let tree = typed_sealed.into_type_expr(cap.authority());
     let TypeExpr::Unknown(value) = &tree else {
         panic!("a budget trip projects an Unknown leaf")
     };
@@ -1635,7 +1636,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
         "the terminal projection keeps the production spelling"
     );
     let typed_sealed = wrap_degraded_output(
-        &cap,
+        cap.authority(),
         QueryError::BudgetExceeded(BudgetExceededFailure {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
@@ -1657,7 +1658,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
     // INERT: an identically-spelled GENUINE `UnknownValue` carries no
     // classification — exact, complete, admitted.
     let inert_sealed = wrap_output_type_expr(
-        &cap,
+        cap.authority(),
         TypeExpr::Unknown(UnknownValue::unsupported_syntax(
             "budgetExceeded(ProjectionOperation)",
         )),

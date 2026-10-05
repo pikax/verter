@@ -91,7 +91,7 @@ use verter_type_expr::{TypeExpr, TypeExprScope};
 
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+use crate::output_sinks::OutputProjector;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
@@ -118,7 +118,7 @@ pub(crate) use normalize_slots::{
     slots_from_typeinfo_surface,
 };
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+crate::output_sinks::define_output_capability! {
     /// The Vue framework-surface executor's output-sink capability: the Vue
     /// resolution leg here (and its normalizer children) hold this to
     /// materialize a graph node into a sealed output carrier and unwrap it.
@@ -853,7 +853,7 @@ pub(super) fn signature_jsdoc_from_spans<C: crate::resolver_core::ResolverCapabi
 /// reverse-materialize a `TypeExpr` here. The forgeable-input boundary is
 /// closed at the normalizer (it requires a [`ResolvedVueSurface`] token).
 pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value<
-    C: crate::resolver_core::ResolverCapabilities,
+    C: crate::session_attachment::SessionCapabilities,
 >(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
@@ -863,7 +863,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value<
 
     let cap = TypeinfoVueSurfaceOutputCap::new(dispatch);
     cap.materialize_output_type_expr(member.value)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
 }
 
 /// Resolve a `.vue` macro's NORMALIZED component-meta DTOs
@@ -1500,7 +1500,7 @@ mod partial_admission_tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+    use crate::output_sinks::OutputProjector;
     use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
     use crate::semantic_query::{
         PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
@@ -1556,7 +1556,7 @@ mod partial_admission_tests {
                 let sealed = cap
                     .materialize_output_type_expr(broken_obj)
                     .expect("the object raises (degraded member)");
-                sealed.into_type_expr(&cap)
+                sealed.into_type_expr(cap.authority())
             },
         );
         assert!(

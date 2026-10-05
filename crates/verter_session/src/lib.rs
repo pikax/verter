@@ -357,6 +357,7 @@ pub mod meta_provenance;
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
+pub(crate) mod output_sinks;
 pub mod owned_artifacts;
 pub mod owner_import_surface;
 #[cfg(test)]

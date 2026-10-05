@@ -1,6 +1,6 @@
 //! Algebra 1 of the shared shape engine: `MaterializeTypeExprAlg` — the EXACT
 //! historical `SemanticNodeId -> TypeExpr` materialization, reached only through
-//! the sealed `OutputProjector` output seam and the `#[cfg(test)]` oracle. Split
+//! the authority-gated output seam and the `#[cfg(test)]` oracle. Split
 //! from the parent for file-size; the algebra trait lives in the parent
 //! `shape_engine` module, the shared fold in the sibling [`fold`](super::fold)
 //! module.
@@ -267,8 +267,8 @@ pub(crate) struct MaterializedObjectMember {
 // ===========================================================================
 // Algebra 1 — `MaterializeTypeExprAlg` (Out = MaterializedTypeExpr).
 //
-// The EXACT historical materialization, reached ONLY through the sealed
-// `OutputProjector` output seam and the `#[cfg(test)]` oracle. Each arm
+// The EXACT historical materialization, reached ONLY through the
+// authority-gated output seam and the `#[cfg(test)]` oracle. Each arm
 // reproduces the former `raise_node_to_type_expr_core_impl` construction
 // byte-for-byte (the byte-identity contract pinned by the raise /
 // materialization suite + the 20 raised-shape parity tests); the sidecar

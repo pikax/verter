@@ -1,387 +1,64 @@
-//! Output-materialization capability fence: the sealed reverse boundary
-//! that turns a graph [`SemanticNodeId`] back into a [`TypeExpr`] for the
-//! true OUTPUT/PUBLICATION sinks ONLY.
+//! Output-materialization fence: the sealed reverse boundary that turns a
+//! graph [`SemanticNodeId`] back into a [`TypeExpr`] for the true
+//! OUTPUT/PUBLICATION sinks ONLY.
 //!
 //! Reverse materialization (`SemanticNodeId -> TypeExpr`) is a laundering
-//! surface: hot/session code that raises a node to a [`TypeExpr`] and then
-//! makes semantic decisions on it bypasses the single graph-native
-//! resolver. This module makes the callable reverse boundary an
-//! UNFORGEABLE CAPABILITY, and — for the carrier-UNWRAP half — puts the
-//! raised [`TypeExpr`] in a structurally-unreachable PAYLOAD VAULT:
+//! surface: code that raises a node to a [`TypeExpr`] and then makes semantic
+//! decisions on it bypasses the single graph-native resolver. Two compiler-held
+//! barriers close it:
 //!
-//! - [`OutputProjector`] is a SEALED capability trait (it can only be
-//!   implemented by the sanctioned output-sink capability types, through
-//!   explicit `impl` pairs in the private `projector` module that names the
-//!   private `projector::sealed::Sealed` marker). Its two boundary methods —
-//!   [`OutputProjector::materialize_output_type_expr`] (plain shell raise)
-//!   and [`OutputProjector::materialize_reduced_output_type_expr`]
-//!   (reduce-then-raise) — hand back SEALED CARRIERS, never a bare
-//!   [`TypeExpr`].
-//! - [`OutputTypeExpr`] / [`MaterializedOutputTypeExpr`] are sealed
-//!   carriers whose inner [`TypeExpr`] lives in a deeply-private nested
-//!   `carrier::payload` vault. The `TypeExpr` is reachable by field access
-//!   ONLY from inside that `payload` module — so in safe Rust OUTSIDE the
-//!   vault there is NO readable `TypeExpr` field to return, and a
-//!   capability-free unwrap is UNREPRESENTABLE by field access, auto-deref,
-//!   an arbitrary trait impl (e.g. `Deref`/`Index` returning `&TypeExpr`),
-//!   or an inherent method. The ONLY production APIs that yield the inner
-//!   [`TypeExpr`] are the capability-gated accessors
-//!   ([`OutputTypeExpr::into_type_expr`] /
-//!   [`MaterializedOutputTypeExpr::into_type_expr`] /
-//!   [`MaterializedOutputTypeExpr::type_expr`]), each of which takes a
-//!   `&impl OutputProjector`.
-//! - Each true output-SINK module (the exact module that projects) owns a tiny
-//!   private-field capability type whose constructor is PRIVATE to that SINK
-//!   (`mint: pub(in <sink-module>)`), NOT to the whole subtree. The sink
-//!   modules are: `meta_resolve::projectors::output_sink` (a DEDICATED terminal
-//!   submodule — extracted exactly so the parent `projectors`' NON-sink helpers
-//!   (`macro_payload_substrate`, `published_reducer`, `define_shapes`, the
-//!   per-kind projector children) cannot mint),
-//!   `meta_resolve::materialize::field_types`,
-//!   `host_manage::component_meta_methods`, `typeinfo::raise`,
-//!   `typeinfo::framework_surface::svelte_exec`,
-//!   `typeinfo::framework_surface::vue_exec` (whose whole reachable scope —
-//!   `vue_exec` + its `normalize` normalizer child — IS output-only, so the
-//!   single cap is correct), and
-//!   `component_meta_query_engine::{registry_decl,surface}`. The capability
-//!   type is `pub(crate)` so the owner `projector` module can name it for the
-//!   sealed-trait impl (the projectors cap is re-exported at
-//!   `meta_resolve::projectors::MetaResolveProjectorsOutputCap` for that
-//!   naming), but it is UNFORGEABLE outside its sink (private constructor +
-//!   private dispatch field). `pub(in P)` grants the mint to `P` AND every
-//!   module at-or-under `P`, so the mint scope is scoped to a TERMINAL output
-//!   sink whose entire reachable production module tree is itself output-only:
-//!   a Kind-B bridge sibling (`dispatch_helpers`, `eval_env`) — or a non-sink
-//!   helper that shares the subtree — is NOT reachable from any sink's mint
-//!   scope, so it cannot name any cap's constructor (a planted mint is
-//!   `E0624`).
+//! - **The authority.** Materializing a node and unwrapping a sealed carrier
+//!   both require a borrowed
+//!   [`OutputAuthority`](super::engine_resources::OutputAuthority). The
+//!   authority is minted ONCE per engine, by
+//!   [`EngineStores::create`](super::engine_resources::EngineStores::create),
+//!   alongside — and separately from — the stores a request binding clones.
+//!   It has a private field, no public constructor, and is neither `Clone`,
+//!   `Copy` nor `Default`; nothing reachable from query access (the engine
+//!   binding, the dispatch, the request ports) produces or recovers it, and
+//!   the constructor accepts no store handle, so recovering a live engine's
+//!   graph cannot remint authority for it. Materializing through a dispatch
+//!   over a different engine panics.
+//! - **The payload vault.** [`OutputTypeExpr`] / [`MaterializedOutputTypeExpr`]
+//!   keep the raised [`TypeExpr`] in a deeply-private nested
+//!   `carrier::payload` module, reachable by field access ONLY from inside
+//!   it. Outside the vault there is no readable `TypeExpr` field, so a
+//!   capability-free unwrap is unrepresentable by field access, auto-deref, an
+//!   arbitrary trait impl or an inherent method. The only production APIs that
+//!   yield the inner `TypeExpr` take `&OutputAuthority`.
 //!
-//! Net effect: in safe production Rust OUTSIDE the audited payload vault,
-//! [`OutputTypeExpr`] and [`MaterializedOutputTypeExpr`] do not expose a
-//! readable [`TypeExpr`] field — capability-free unwrap is unrepresentable
-//! by field access, auto-deref, arbitrary trait impls, or inherent methods,
-//! and the only production APIs returning [`TypeExpr`] / `&TypeExpr` are the
-//! capability-gated `into_type_expr` / `type_expr` accessors. The PRIMARY
-//! barriers are COMPILER-ENFORCED: the payload vault makes a capability-free
-//! unwrap unrepresentable in safe Rust, the private `projector::sealed` marker
-//! makes a non-owner `OutputProjector` impl `E0603`, and the terminal-sink
-//! `mint: pub(in <sink>)` scope makes a non-sink mint `E0624`. The residual
-//! TRUSTED surface — the inline payload vault + the projector registration
-//! source — is the part the COMPILER cannot itself pin (the identity of which
-//! owner-named types are sinks, and edits inside the trusted file). Completeness
-//! for common accidental trait escapes is the
-//! `output_materialization_guards` canary plus the out-of-crate trybuild
-//! fixture `output_projector_not_impl_outside_crate`. The claim does NOT cover
-//! unsafe code (unless the crate forbids unsafe globally).
-//! Hot / session / Kind-B code can neither construct an [`OutputProjector`]
-//! capability (no constructible capability type is reachable from a non-sink
-//! module — a planted hot mint is `E0624`/`E0451`) nor unwrap a sealed
-//! carrier (the accessor requires a capability instance, the trait is sealed
-//! so a hot module cannot implement it for one of its own types, AND the
-//! inner `TypeExpr` is not even a readable field outside the vault). The
-//! carrier `_for_test` accessors are gated
-//! `#[cfg(any(test, feature = "test-support"))]` (the production-unreachable
-//! test-support feature), so they too are COMPILE-ABSENT from every
-//! production build — a planted hot `.type_expr_for_test()` is `E0599`.
+//! The trust boundary is explicit: the host's composition code (the code that
+//! constructs the engine stores and stores the authority) is trusted, together
+//! with the terminal output sinks it lends the authority to. Which modules are
+//! sinks is the host's decision, held there by locally sealed capability
+//! wrappers; the engine names none of them. The claim
+//! does NOT cover unsafe code (unless the crate forbids unsafe globally).
 //!
 //! The raw shell raise primitive `raise_node_to_type_expr` stays
-//! MODULE-PRIVATE to [`super::raise`]. The capability's boundary methods reach
-//! the raise side through the `pub(super)` seams that return SEALED carriers,
-//! never a bare `TypeExpr`: the shell raise via
+//! MODULE-PRIVATE to [`super::raise`]. The authority reaches the raise side
+//! through the `pub(super)` seams that return SEALED carriers, never a bare
+//! `TypeExpr`: the shell raise via
 //! [`ProjectSemanticDispatch::output_shell_raise_sealed`] (returns
 //! `Option<OutputTypeExpr>`), and the reduce path via
 //! [`ProjectSemanticDispatch::raise_and_reduce_with_context`] (returns the
-//! sealed [`MaterializedOutputTypeExpr`]) directly. A `project_semantic_dispatch`
-//! sibling can REACH these `pub(super)` seams but cannot unwrap the returned
-//! carrier without a capability.
+//! sealed [`MaterializedOutputTypeExpr`]). A `project_semantic_dispatch`
+//! sibling can REACH these seams but cannot unwrap the returned carrier
+//! without the authority.
 //!
-//! The former Kind-B raise-then-decide sites (which once raised a node to a
-//! bare `TypeExpr` mid-flight to make a semantic decision) are RETIRED: every
-//! Kind-B caller now decides on the node-domain `RaisedShapeFacts` / interned
-//! `RaisedShapeKey` (no mid-flight raise), and the single publication `TypeExpr`
-//! is materialised ONCE at a registered output sink through this capability —
-//! the demand-bound surface adapters
-//! ([`super::super::resolver_core::component_meta_query_engine::surface`]) and
-//! the sink-owned macro-output expansion demand methods
-//! (`host_manage::component_meta_methods::expand_define_model_output` /
-//! `expand_generic_project_path_output` / `expand_slot_binding_output`), which
-//! resolve a closed semantic demand internally and materialise the produced node
-//! at the module-private sealed sink.
+//! The carrier `_for_test` accessors are gated
+//! `#[cfg(any(test, feature = "test-support"))]` (the production-unreachable
+//! test-support feature), so they are COMPILE-ABSENT from every production
+//! build.
+//!
+//! [`ProjectSemanticDispatch::output_shell_raise_sealed`]: super::ProjectSemanticDispatch
+//! [`ProjectSemanticDispatch::raise_and_reduce_with_context`]: super::ProjectSemanticDispatch
 
 use verter_type_expr::TypeExpr;
 
-use super::ProjectSemanticDispatch;
-use crate::semantic_query::{DepSignature, ProjectionReductionContext, SemanticNodeId};
+use super::engine_resources::OutputAuthority;
+use crate::semantic_query::{DepSignature, SemanticNodeId};
 
-// =====================================================================
-// The carrier names are RE-EXPORTED so every consumer (the Kind-A sinks,
-// the FFI facade, the raise-side seams, the guard module) keeps naming
-// them at the SAME paths — `output_materialization::{OutputProjector,
-// OutputTypeExpr, MaterializedOutputTypeExpr}` — with ZERO churn at call
-// sites. The projector seal lives in the private `projector` module; the
-// carriers and their TypeExpr payload vault live in the sibling private
-// `carrier` module. `carrier`/`carrier::payload` may NAME `OutputProjector`
-// (for the accessor capability bound) but CANNOT name the PRIVATE
-// `projector::sealed::Sealed` marker (private `mod sealed`, not `pub(super)`),
-// so a carrier-side `impl projector::sealed::Sealed for HotCap` is `E0603`
-// (module `sealed` is private) — the carrier modules can never become a
-// replacement owner-descendant scope that launders a sealed impl.
-// =====================================================================
 pub(crate) use carrier::{MaterializedOutputTypeExpr, OutputTypeExpr};
-pub(crate) use projector::OutputProjector;
-
-/// The projector seal: the sealed [`OutputProjector`] capability trait, the
-/// private `sealed::Sealed` marker it is sealed against, and the explicit
-/// `impl` pairs that register the sanctioned output-sink capability types.
-///
-/// Kept in a private module SEPARATE from the carrier payload vault so that
-/// the only scope able to name `sealed::Sealed` — and therefore the only
-/// scope able to implement [`OutputProjector`] — is this `projector` module
-/// itself. Because `mod sealed` is PRIVATE (not `pub(super)`), the sibling
-/// `carrier` module (and its `payload` vault) cannot name `projector::sealed`
-/// at all: a carrier-side `impl projector::sealed::Sealed for HotCap` is a
-/// COMPILE error (`E0603`, module `sealed` is private), so the seal is
-/// compiler-enforced.
-mod projector {
-    use super::{
-        MaterializedOutputTypeExpr, OutputTypeExpr, ProjectSemanticDispatch,
-        ProjectionReductionContext, SemanticNodeId,
-    };
-
-    /// Seals [`OutputProjector`] against external implementations: only the
-    /// capability types this `projector` module names (and impls the marker
-    /// for) can implement the capability trait. A hot module — or a sibling
-    /// `carrier`/`payload` module — cannot add a new capability type and
-    /// implement [`OutputProjector`] for it, because it cannot name (let
-    /// alone implement) this private marker.
-    ///
-    /// The module is PRIVATE (no visibility modifier), so `sealed::Sealed` is
-    /// nameable ONLY from within this `projector` module. A sibling
-    /// `carrier`/`payload` module — or any other module in the crate — that
-    /// writes `projector::sealed::Sealed` gets `E0603` (module `sealed` is
-    /// private): the seal is COMPILER-enforced, not merely guard-backstopped.
-    /// (A `pub(super)` here would have leaked the marker to the parent
-    /// `output_materialization` module and ALL its descendants, including the
-    /// sibling `carrier` module, letting a hand-written carrier-side
-    /// `impl projector::sealed::Sealed for HotCap` launder a sealed impl.)
-    mod sealed {
-        /// Marker trait [`super::OutputProjector`] is sealed against.
-        pub trait Sealed {}
-    }
-
-    /// The sealed reverse-materialization capability.
-    ///
-    /// Implemented ONLY for the true-output-sink capability types registered
-    /// (via the explicit `impl` pairs below) in this module. The two boundary
-    /// methods are the SOLE callable `SemanticNodeId -> TypeExpr` output seam;
-    /// they return sealed carriers, never a bare [`TypeExpr`]. Hold a
-    /// capability local to an output subtree, materialize the node into a
-    /// sealed carrier, then unwrap the carrier through that same capability to
-    /// obtain the [`TypeExpr`] the sink publishes.
-    pub(crate) trait OutputProjector: sealed::Sealed {
-        /// The dispatch this capability projects through.
-        /// The capability family of the dispatch this projector reads.
-        type Caps: crate::resolver_core::ResolverCapabilities;
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, Self::Caps>;
-
-        /// Plain SHELL raise (no operator reduction): materialize `node` into
-        /// a sealed [`OutputTypeExpr`]. `None` is the miss signal (the
-        /// node — or a node required while raising it — is unavailable from
-        /// the live graph store); a `None` result is noted as an
-        /// `OutputMaterializationLoss` NON-CACHEABLE read BEFORE it is
-        /// returned (a torn read is never warm-admitted as a complete raise,
-        /// and never faults the enclosing compute's completeness).
-        fn materialize_output_type_expr(&self, node: SemanticNodeId) -> Option<OutputTypeExpr> {
-            let raised = self.dispatch().output_shell_raise_sealed(node);
-            if raised.is_none() {
-                // DEBT (architect-accepted): the note is UNCONDITIONAL — it
-                // also fires for a genuinely-absent id (a real absence, not
-                // degradation), costing warm hits on that class for this
-                // block (fail-closed direction chosen deliberately).
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
-                    verter_session_query::facts::reuse::NonCacheableReadReason::OutputMaterializationLoss,
-                );
-            }
-            raised
-        }
-
-        /// REDUCE-then-raise: apply the supplied projection reduction context,
-        /// then materialize the reduced node into a sealed
-        /// [`MaterializedOutputTypeExpr`] (the producing reduced `node_id`, the
-        /// sealed `type_expr` payload, the accumulated `dep_signature`, and the
-        /// `result_is_partial` flag).
-        fn materialize_reduced_output_type_expr(
-            &self,
-            node: SemanticNodeId,
-            context: ProjectionReductionContext,
-        ) -> MaterializedOutputTypeExpr {
-            self.dispatch().raise_and_reduce_with_context(node, context)
-        }
-    }
-
-    // =====================================================================
-    // PER-SINK output-sink capability registration — EXPLICIT impl pairs.
-    //
-    // Each capability TYPE is defined (via the sink-side
-    // `define_output_capability!` macro) in the EXACT output-SINK module that
-    // legitimately projects, with a `mint` visibility scoped to that sink —
-    // NOT the whole subtree. (Where a subtree's parent owns non-sink helper
-    // children, the cap lives in a DEDICATED terminal sink submodule — e.g.
-    // `meta_resolve::projectors::output_sink` — so those helpers cannot mint.)
-    // Here, in the owner `projector` module, each cap is sealed
-    // (`impl sealed::Sealed`) and implements [`OutputProjector`] EXPLICITLY (NOT
-    // through a macro): the sanctioned sink set is the actual
-    // `impl OutputProjector for <Cap>` items, not an opaque macro body.
-    //
-    // A hot/session/Kind-B module can NAME a capability type (it is
-    // `pub(crate)`) but can neither call its private `new()` (E0624) nor
-    // struct-literal-construct it (private field, E0451), so it cannot obtain an
-    // [`OutputProjector`]. Because the constructor is scoped to a TERMINAL output
-    // SINK whose entire reachable production module tree is itself output-only,
-    // a Kind-B bridge sibling that shares the SUBTREE
-    // (`meta_resolve::dispatch_helpers`, `host_manage::eval_env`) — or a non-sink
-    // helper sibling — is NOT reachable from any sink's `pub(in P)` mint scope
-    // and ALSO cannot mint, closing the in-subtree convention hole. Combined
-    // with the sealed trait (a hot module cannot implement [`OutputProjector`]
-    // for one of its own types), the COMPILER enforces both mint-locality and
-    // carrier-unwrap-locality in EVERY build profile.
-    //
-    // The cap TYPES are named through their re-export paths where the owning
-    // sink module is private (`field_types`, `registry_decl`, `surface`, and
-    // the projectors `output_sink` submodule): the parent module re-exports
-    // ONLY the `pub(crate)` cap type, NOT the private sink module or its `new()`
-    // constructor. So the owner names the type while the constructor stays
-    // sink-private. Each cap's `mint:` visibility is a TERMINAL sink whose
-    // entire reachable production module tree is output-only.
-    // =====================================================================
-
-    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
-        for crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap<'_, '_, C>
-    {
-    }
-    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
-        for crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap<'_, '_, C>
-    {
-        type Caps = C;
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
-            self.dispatch_for_projector()
-        }
-    }
-
-    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
-        for crate::meta_resolve::materialize::MetaResolveFieldTypesOutputCap<'_, '_, C>
-    {
-    }
-    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
-        for crate::meta_resolve::materialize::MetaResolveFieldTypesOutputCap<'_, '_, C>
-    {
-        type Caps = C;
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
-            self.dispatch_for_projector()
-        }
-    }
-
-    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
-        for crate::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_, C>
-    {
-    }
-    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
-        for crate::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_, C>
-    {
-        type Caps = C;
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
-            self.dispatch_for_projector()
-        }
-    }
-
-    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
-        for crate::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap<
-            '_,
-            '_,
-            C,
-        >
-    {
-    }
-    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
-        for crate::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap<
-            '_,
-            '_,
-            C,
-        >
-    {
-        type Caps = C;
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
-            self.dispatch_for_projector()
-        }
-    }
-
-    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
-        for crate::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap<'_, '_, C>
-    {
-    }
-    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
-        for crate::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap<'_, '_, C>
-    {
-        type Caps = C;
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
-            self.dispatch_for_projector()
-        }
-    }
-
-    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
-        for crate::resolver_core::component_meta_query_engine::MetaQuerySurfaceOutputCap<'_, '_, C>
-    {
-    }
-    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
-        for crate::resolver_core::component_meta_query_engine::MetaQuerySurfaceOutputCap<'_, '_, C>
-    {
-        type Caps = C;
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
-            self.dispatch_for_projector()
-        }
-    }
-
-    // =====================================================================
-    // Test-only output capability.
-    //
-    // The carrier round-trip / reduce / projector-peek test suites drive the
-    // boundary methods directly and assert on the raised `TypeExpr`. They are
-    // not Kind-A subtrees, so they cannot mint a production capability. This
-    // `#[cfg(test)]`-gated capability lets them obtain an `OutputProjector`
-    // without holding a real sink's capability. It exists ONLY in test builds
-    // — the shipped release binary contains no `TestOutputCap`, so it is NOT a
-    // production reverse-materialization path and the structural fence-shape
-    // inventory excludes it (it scans non-`#[cfg(test)]` production source).
-    // =====================================================================
-
-    /// Test-only `OutputProjector` capability. `#[cfg(test)]`-gated. See the
-    /// note above for why it is not a fence hole.
-    #[cfg(test)]
-    pub(crate) struct TestOutputCap<'disp, 'ctx, C: crate::resolver_core::ResolverCapabilities> {
-        dispatch: &'disp ProjectSemanticDispatch<'ctx, C>,
-    }
-
-    #[cfg(test)]
-    impl<'disp, 'ctx, C: crate::resolver_core::ResolverCapabilities> TestOutputCap<'disp, 'ctx, C> {
-        /// Mint the test capability over `dispatch`.
-        pub(crate) fn new(dispatch: &'disp ProjectSemanticDispatch<'ctx, C>) -> Self {
-            Self { dispatch }
-        }
-    }
-
-    #[cfg(test)]
-    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed for TestOutputCap<'_, '_, C> {}
-    #[cfg(test)]
-    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector for TestOutputCap<'_, '_, C> {
-        type Caps = C;
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
-            self.dispatch
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) use projector::TestOutputCap;
 
 /// The carriers and their structurally-unreachable [`TypeExpr`] payload
 /// vault.
@@ -390,14 +67,9 @@ pub(crate) use projector::TestOutputCap;
 /// module ([`payload::OutputPayload`]); it is reachable by field access ONLY
 /// from inside `payload`. The carrier types here ([`OutputTypeExpr`],
 /// [`MaterializedOutputTypeExpr`]) hold the vault and forward the
-/// capability-gated reads to the vault's `pub(super)` accessors. This module
-/// may NAME [`OutputProjector`] (for the accessor capability bound) but
-/// CANNOT name `projector::sealed::Sealed` (it is private to `projector`), so
-/// a carrier-side `impl projector::sealed::Sealed for HotCap` is `E0603` and
-/// this module can never become a scope that launders a sealed
-/// [`OutputProjector`] impl.
+/// authority-gated reads to the vault's `pub(super)` accessors.
 mod carrier {
-    use super::{DepSignature, OutputProjector, SemanticNodeId, TypeExpr};
+    use super::{DepSignature, OutputAuthority, SemanticNodeId, TypeExpr};
     use crate::project_semantic_dispatch::raise::{DegradedLeaf, MaterializedTypeExpr};
 
     /// The PAYLOAD VAULT: the inner [`TypeExpr`] lives here and is reachable
@@ -411,11 +83,10 @@ mod carrier {
     /// (`Deref` / `Index` / `AsRef` returning `&TypeExpr`), or an inherent
     /// method returning the inner `TypeExpr` is therefore UNREPRESENTABLE
     /// outside this vault: there is no field to borrow or move out. The
-    /// capability bound (`P: OutputProjector`) on the read accessors is the
-    /// unwrap-locality proof; the capability instance is not otherwise
-    /// consulted.
+    /// borrowed `&OutputAuthority` on the read accessors is the
+    /// unwrap-locality proof; the authority is not otherwise consulted.
     mod payload {
-        use super::{DegradedLeaf, MaterializedTypeExpr, OutputProjector, TypeExpr};
+        use super::{DegradedLeaf, MaterializedTypeExpr, OutputAuthority, TypeExpr};
 
         /// The sealed inner-`TypeExpr` payload. BOTH fields are private
         /// to this `payload` module — NOT `pub`, NOT `pub(super)`, NOT
@@ -457,7 +128,7 @@ mod carrier {
             }
 
             /// Read the inner [`TypeExpr`] out, consuming the payload. Requires
-            /// an [`OutputProjector`] capability — the unwrap-locality gate.
+            /// an [`OutputAuthority`] — the unwrap-locality gate.
             /// This is the ONLY place the degradation sidecar may be
             /// discarded (the capability-gated TERMINAL unwrap) — and it is
             /// discarded ONLY AFTER being observed into the NON-CACHEABLE
@@ -465,7 +136,7 @@ mod carrier {
             /// never warm-admitted as complete, and the observation never
             /// faults the enclosing compute's completeness (a contained
             /// member-level degradation stays entry-local).
-            pub(super) fn into_type_expr<P: OutputProjector + ?Sized>(self, _cap: &P) -> TypeExpr {
+            pub(super) fn into_type_expr(self, _authority: &OutputAuthority) -> TypeExpr {
                 if !self.degraded_leaves.is_empty() {
                     crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::OutputMaterializationLoss,
@@ -491,10 +162,10 @@ mod carrier {
     /// The inner [`TypeExpr`] is locked in the [`payload::OutputPayload`]
     /// vault: there is NO readable `TypeExpr` field, NO `pub` `Deref` /
     /// `AsRef<TypeExpr>` / `into_inner` / pub field. The only way to read it
-    /// out is [`Self::into_type_expr`], which requires an [`OutputProjector`]
-    /// capability — so a hot module cannot unwrap it (it cannot construct any
-    /// capability, the capability trait is sealed against its own types, and
-    /// the inner `TypeExpr` is not even a reachable field outside the vault).
+    /// out is [`Self::into_type_expr`], which requires the [`OutputAuthority`]
+    /// — so code holding only query access cannot unwrap it (it can neither
+    /// construct nor recover the authority, and the inner `TypeExpr` is not
+    /// even a reachable field outside the vault).
     pub(crate) struct OutputTypeExpr(payload::OutputPayload);
 
     impl OutputTypeExpr {
@@ -502,12 +173,12 @@ mod carrier {
         /// (`crate::project_semantic_dispatch::raise`).
         /// `pub(in crate::project_semantic_dispatch)` — visible to the raise
         /// module (a sibling of `output_materialization` within
-        /// `project_semantic_dispatch`) and to the capability-gated
+        /// `project_semantic_dispatch`) and to the authority-gated
         /// [`super::wrap_output_type_expr`] minting helper, so the
         /// reduce-then-raise orchestrator and the shell-raise delegator
-        /// construct the carrier here; out-of-subsystem code (hot / session /
-        /// Kind-B, outside `project_semantic_dispatch`) cannot reach this
-        /// constructor and must go through a capability or a boundary method.
+        /// construct the carrier here; code outside
+        /// `project_semantic_dispatch` cannot reach this constructor and must
+        /// go through the authority.
         /// This mirrors the pre-vault visibility (the carrier formerly lived
         /// directly in `output_materialization`, where `pub(super)` resolved to
         /// `project_semantic_dispatch`); the vault moved the carrier one level
@@ -519,12 +190,12 @@ mod carrier {
         }
 
         /// Read the inner [`TypeExpr`] out, consuming the carrier. Requires an
-        /// [`OutputProjector`] capability — the compiler-enforced
-        /// unwrap-locality gate. Delegates to the vault's capability-gated
-        /// accessor; the capability argument is the proof the caller is a true
-        /// output sink; it is not otherwise consulted.
-        pub(crate) fn into_type_expr<P: OutputProjector + ?Sized>(self, cap: &P) -> TypeExpr {
-            self.0.into_type_expr(cap)
+        /// [`OutputAuthority`] — the compiler-enforced unwrap-locality gate.
+        /// Delegates to the vault's authority-gated accessor; the borrowed
+        /// authority is the proof the caller holds output power; it is not
+        /// otherwise consulted.
+        pub(crate) fn into_type_expr(self, authority: &OutputAuthority) -> TypeExpr {
+            self.0.into_type_expr(authority)
         }
 
         /// `true` when the sealed tree carries any typed resolver-degradation
@@ -532,7 +203,7 @@ mod carrier {
         /// sentinel (`QueryError::Miss`, `UnmodeledPosition`,
         /// `BudgetExceeded`, …), never a deliberately-materialised
         /// placeholder (`RaiseMiss`, `TypeParamCycle`, …). Reading this flag
-        /// does NOT require an [`OutputProjector`] capability: it exposes a
+        /// does NOT require an [`OutputAuthority`]: it exposes a
         /// bool fact about the sealed payload, never the vaulted
         /// [`TypeExpr`] itself, so a caller can decide whether to unwrap at
         /// all before spending the capability-gated read.
@@ -626,12 +297,12 @@ mod carrier {
             dead_code,
             reason = "part of the sealed output-carrier contract; current sinks use the plain carrier after graph-native reduction"
         )]
-        pub(crate) fn into_type_expr<P: OutputProjector + ?Sized>(self, cap: &P) -> TypeExpr {
-            self.type_expr.into_type_expr(cap)
+        pub(crate) fn into_type_expr(self, authority: &OutputAuthority) -> TypeExpr {
+            self.type_expr.into_type_expr(authority)
         }
 
         /// Borrow the inner [`TypeExpr`] payload. Requires an
-        /// [`OutputProjector`] capability — the compiler-enforced
+        /// [`OutputAuthority`] — the compiler-enforced
         /// unwrap-locality gate for the borrowing read sites. Delegates to the
         /// vault's capability-gated accessor. The carrier's documented borrow
         /// read-surface, paired with the live by-value [`Self::into_type_expr`]:
@@ -706,28 +377,12 @@ mod carrier {
     }
 }
 
-// =====================================================================
-// Capability minting — the sole owner-side entry that a Kind-A subtree's
-// capability constructor delegates to.
-//
-// `wrap_output_type_expr` lets a Kind-A subtree that holds a RAW
-// `TypeExpr` (e.g. the `admit_type_expr_shape_if_possible` /
-// projectors literal-construct sites, which build a `MaterializedOutputTypeExpr`
-// from a freshly-computed `TypeExpr`) seal it into an `OutputTypeExpr`.
-// It requires an `OutputProjector` capability, so only a true output
-// sink can mint a sealed payload from a bare `TypeExpr`. It seals through
-// the carrier's `pub(super)` `from_raise` constructor (the same constructor
-// the raise side uses) — the capability check happens here, at the mint
-// boundary, before sealing.
-// =====================================================================
-
-/// Seal a raw [`TypeExpr`] into an [`OutputTypeExpr`] carrier. Requires an
-/// [`OutputProjector`] capability — a hot module cannot reach this (it
-/// cannot construct a capability). Used by the Kind-A sites that assemble
-/// a [`MaterializedOutputTypeExpr`] from a freshly-computed [`TypeExpr`]
-/// rather than from a boundary-method carrier.
-pub(crate) fn wrap_output_type_expr<P: OutputProjector + ?Sized>(
-    _cap: &P,
+/// Seal a raw [`TypeExpr`] into an [`OutputTypeExpr`] carrier. Requires the
+/// [`OutputAuthority`] — code without it cannot mint a sealed payload. Used
+/// by the sink sites that assemble a [`MaterializedOutputTypeExpr`] from a
+/// freshly-computed [`TypeExpr`] rather than from a boundary-method carrier.
+pub(crate) fn wrap_output_type_expr(
+    _authority: &OutputAuthority,
     type_expr: TypeExpr,
 ) -> OutputTypeExpr {
     // A raw freshly-computed `TypeExpr` carries no degradation — seal it with
@@ -741,98 +396,14 @@ pub(crate) fn wrap_output_type_expr<P: OutputProjector + ?Sized>(
 /// [`OutputTypeExpr`], the terminal counterpart of [`wrap_output_type_expr`]
 /// for a present-but-unraisable node: the sidecar carries the degradation
 /// leaf, so the payload goes PARTIAL at the `from_parts` choke point (never
-/// laundered to a complete empty `Unknown`). Requires an [`OutputProjector`]
-/// capability — only a true output sink can mint it.
-pub(crate) fn wrap_degraded_output<P: OutputProjector + ?Sized>(
-    _cap: &P,
+/// laundered to a complete empty `Unknown`). Requires the [`OutputAuthority`].
+///
+/// [`QueryError`]: crate::semantic_query::QueryError
+pub(crate) fn wrap_degraded_output(
+    _authority: &OutputAuthority,
     reason: crate::semantic_query::QueryError,
 ) -> OutputTypeExpr {
     OutputTypeExpr::from_raise(
         crate::project_semantic_dispatch::raise::MaterializedTypeExpr::degraded(reason),
     )
 }
-
-// =====================================================================
-// The output-sink capability TYPES are defined in their output-SINK modules.
-//
-// Each capability is a private-field marker (it holds a PRIVATE
-// `&ProjectSemanticDispatch`) whose constructor is PRIVATE to its owning
-// output-SINK module — the exact module that projects, NOT the whole
-// subtree (and, where a parent owns non-sink helper children, a DEDICATED
-// terminal sink submodule so those helpers cannot mint). A sink DEFINES its
-// capability with the [`define_output_capability!`] macro, which generates (in
-// the sink): the `pub(crate)` capability struct holding a PRIVATE
-// `&ProjectSemanticDispatch` field, a `new()` constructor PRIVATE to the sink
-// (`mint: pub(in <sink-module>)`), and a `pub(crate)`
-// `dispatch_for_projector()` accessor the owner `projector` module reads
-// through. The owner `projector` module then seals + implements
-// `OutputProjector` for the named capability type via the explicit `impl`
-// pairs above.
-//
-// A hot/session/Kind-B module can NAME a capability type (it is
-// `pub(crate)`) but can neither call its private `new()` (E0624) nor
-// struct-literal-construct it (private field, E0451), so it cannot obtain
-// an `OutputProjector`. Because the constructor is scoped to a TERMINAL output
-// SINK whose entire reachable production module tree is itself output-only, a
-// Kind-B bridge sibling that shares the SUBTREE
-// (`meta_resolve::dispatch_helpers`, `host_manage::eval_env`) — or a non-sink
-// helper sibling — is NOT reachable from any sink's mint scope and ALSO cannot
-// mint, closing the in-subtree convention hole. Combined with the sealed trait
-// (a hot module cannot implement `OutputProjector` for one of its own types),
-// the COMPILER enforces both mint-locality and carrier-unwrap-locality in EVERY
-// build profile.
-// =====================================================================
-
-/// Define an output-sink capability type in an output-SINK module.
-///
-/// Generates a `pub(crate)` private-field capability struct that borrows a
-/// [`ProjectSemanticDispatch`], with:
-/// - a `new()` constructor visible ONLY within the SINK module
-///   (`$mint_vis`, e.g. `pub(in crate::meta_resolve::projectors::output_sink)`)
-///   — so only that sink (and its output-only reachable scope) can obtain the
-///   capability, and NO other module (hot / session / Kind-B, INCLUDING a
-///   Kind-B bridge sibling that shares the subtree, or a non-sink helper
-///   sibling) can mint it;
-/// - a `pub(crate) dispatch_for_projector()` accessor the owner `projector`
-///   module's `OutputProjector` impl reads through;
-/// - a private field — so no module can struct-literal-construct it.
-///
-/// `$mint_vis` is the sink's own visibility path; expanding the macro with a
-/// wider visibility, or in an unrelated module, would still not grant a
-/// cross-sink capability because the [`OutputProjector`] + sealed-marker impls
-/// (in the owner `projector` module) are keyed by the EXACT capability type
-/// registered through the explicit `impl` pairs. Each cap's mint visibility
-/// is a terminal sink whose reachable production module tree is output-only.
-macro_rules! define_output_capability {
-    ($(#[$meta:meta])* $vis:vis struct $name:ident; mint: $mint_vis:vis) => {
-        $(#[$meta])*
-        $vis struct $name<'disp, 'ctx, C: $crate::resolver_core::ResolverCapabilities> {
-            dispatch: &'disp $crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C>,
-        }
-
-        impl<'disp, 'ctx, C: $crate::resolver_core::ResolverCapabilities> $name<'disp, 'ctx, C> {
-            /// Mint the capability. Visible ONLY within this output-SINK module
-            /// (`$mint_vis`) — a hot / session / non-sink module (INCLUDING a
-            /// Kind-B bridge sibling that shares the subtree, or a non-sink
-            /// helper sibling not reachable from the sink's mint scope) cannot
-            /// call it, so it cannot obtain this output capability.
-            $mint_vis fn new(
-                dispatch: &'disp $crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C>,
-            ) -> Self {
-                Self { dispatch }
-            }
-
-            /// The dispatch this capability projects through. Read by the
-            /// owner `projector` module's `OutputProjector` impl. Named
-            /// distinctly from the trait's `dispatch` method so the impl can
-            /// delegate to it without ambiguity (a same-named inherent + trait
-            /// method would recurse).
-            pub(crate) fn dispatch_for_projector(
-                &self,
-            ) -> &$crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C> {
-                self.dispatch
-            }
-        }
-    };
-}
-pub(crate) use define_output_capability;

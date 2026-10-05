@@ -6,7 +6,7 @@
 
 use super::super::dep_signature::emit_dispatch_dep_signature_facts;
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+crate::output_sinks::define_output_capability! {
     /// Capability held only by this graph-native output sink.
     pub(crate) struct MetaResolveFieldTypesOutputCap;
     mint: pub(in crate::meta_resolve::materialize::field_types)
@@ -72,7 +72,7 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
     member_value: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
 ) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
-    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+    use crate::output_sinks::OutputProjector;
 
     let cap = MetaResolveFieldTypesOutputCap::new(dispatch);
     let materialized = cap.materialize_reduced_output_type_expr(member_value, context);

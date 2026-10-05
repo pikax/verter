@@ -336,7 +336,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // [`shape_engine`]). The materialization and the node-domain facts/key
         // share that ONE fold, so they cannot drift — anti-drift is structural.
         // This stays MODULE-PRIVATE; out-of-module callers reach it only through
-        // the sealed `OutputProjector` output seam ([`Self::output_shell_raise_sealed`]).
+        // the authority-gated output seam ([`Self::output_shell_raise_sealed`]).
         shape_engine::fold_to_type_expr(self, node, &mut active)
     }
 
@@ -364,8 +364,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// here so callers can map a miss to whatever their own output contract
     /// requires.
     // Raise-side SHELL seam (no operator reduction). `pub(super)` — the
-    // [`OutputProjector`] capability's `materialize_output_type_expr`
-    // boundary method (in `super::output_materialization`) calls this. The
+    // output authority's `materialize_output_type_expr` boundary method (in
+    // `super::engine_resources`) calls this. The
     // raw `raise_node_to_type_expr` primitive stays MODULE-PRIVATE; this is
     // the only out-of-module shell-raise reach.
     //
@@ -373,10 +373,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     // [`TypeExpr`]. That is the structural fence: a `project_semantic_dispatch`
     // SIBLING module (e.g. `mod.rs`, `evaluate.rs`) can reach this `pub(super)`
     // seam, but the value it gets back is a sealed carrier it CANNOT unwrap
-    // (the inner `TypeExpr` is capability-gated via
-    // [`OutputTypeExpr::into_type_expr`], and a sibling cannot mint an
-    // `OutputProjector`). So no `pub(super)` seam ever yields a raw
-    // `TypeExpr` to a non-capability holder — closing the bare-delegator
+    // (the inner `TypeExpr` is authority-gated via
+    // [`OutputTypeExpr::into_type_expr`], and a sibling can neither mint nor
+    // recover the output authority). So no `pub(super)` seam ever yields a raw
+    // `TypeExpr` to a holder without the authority — closing the bare-delegator
     // laundering hole. `None` is the miss signal.
     pub(super) fn output_shell_raise_sealed(
         &self,
@@ -395,14 +395,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `materialize_type_expr_is_not_production_visible` is retired with
     /// SIMP5.
     ///
-    /// [`OutputProjector`]: super::output_materialization::OutputProjector
+    /// [`OutputProjector`]: crate::output_sinks::OutputProjector
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr {
-        use super::output_materialization::{OutputProjector, TestOutputCap};
+    pub(crate) fn materialize_type_expr(&self, handle: HotTypeRef) -> TypeExpr
+    where
+        C: crate::session_attachment::SessionCapabilities,
+    {
+        use crate::output_sinks::{OutputProjector, TestOutputCap};
         let cap = TestOutputCap::new(self);
         cap.materialize_output_type_expr(handle.node())
-            .map(|carrier| carrier.into_type_expr(&cap))
+            .map(|carrier| carrier.into_type_expr(cap.authority()))
             .unwrap_or(TypeExpr::Unknown(
                 verter_type_expr::UnknownValue::compatibility_projection("<materialize miss>"),
             ))
@@ -419,11 +422,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(crate) fn materialize_output_type_expr_for_test(
         &self,
         node: SemanticNodeId,
-    ) -> Option<TypeExpr> {
-        use super::output_materialization::{OutputProjector, TestOutputCap};
+    ) -> Option<TypeExpr>
+    where
+        C: crate::session_attachment::SessionCapabilities,
+    {
+        use crate::output_sinks::{OutputProjector, TestOutputCap};
         let cap = TestOutputCap::new(self);
         cap.materialize_output_type_expr(node)
-            .map(|carrier| carrier.into_type_expr(&cap))
+            .map(|carrier| carrier.into_type_expr(cap.authority()))
     }
 
     /// Test-only REDUCE-then-raise that returns the unwrapped `TypeExpr`
@@ -436,8 +442,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> TypeExpr {
-        use super::output_materialization::{OutputProjector, TestOutputCap};
+    ) -> TypeExpr
+    where
+        C: crate::session_attachment::SessionCapabilities,
+    {
+        use crate::output_sinks::{OutputProjector, TestOutputCap};
         let cap = TestOutputCap::new(self);
         cap.materialize_reduced_output_type_expr(node, context)
             .type_expr_for_test()

@@ -30,4 +30,10 @@ fn main() {
     tests.compile_fail(fixture_root.join("engine_ports_fact_validation_no_workspace.rs"));
     tests.compile_fail(fixture_root.join("engine_ports_cancellation_no_host.rs"));
     tests.compile_fail(fixture_root.join("engine_ports_execution_no_graph.rs"));
+    // The engine output authority: no forgery or duplication, no recovery from
+    // query access, and no remint from a live engine's recovered stores.
+    tests.compile_fail(fixture_root.join("output_authority_not_forgeable.rs"));
+    tests.compile_fail(fixture_root.join("output_authority_not_duplicable.rs"));
+    tests.compile_fail(fixture_root.join("output_authority_not_recoverable_from_query_access.rs"));
+    tests.compile_fail(fixture_root.join("output_authority_not_reminted_from_live_stores.rs"));
 }

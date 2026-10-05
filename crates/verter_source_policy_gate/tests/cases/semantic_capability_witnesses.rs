@@ -2,7 +2,7 @@
 //!
 //! These modules have no `#[test]` bodies: they fail to compile on
 //! regression. The compile-fail half lives in the session trybuild
-//! fixtures (`no_typeexpr_*`, `output_projector_not_impl_outside_crate`)
+//! fixtures (`no_typeexpr_*`, `output_authority_*`)
 //! run by `scripts/compile-contracts.mjs`.
 
 /// The symbolic IR and its common owner shapes must never implement

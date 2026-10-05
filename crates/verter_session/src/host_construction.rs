@@ -581,6 +581,12 @@ impl VerterHost {
             .clone()
             .map(crate::cooperative_scheduler::CooperativeSchedulerAdapter::with_yield_hook)
             .unwrap_or_default();
+        // The request attachment shares the registry-owned surface stores and
+        // the project store's output lease; it constructs neither.
+        let session_attachment = crate::session_attachment::SessionAttachment::new(
+            framework_services.framework_registry(),
+            project_type_store.output_lease().clone(),
+        );
         let host = Self {
             #[cfg(any(test, feature = "test-support"))]
             source_input_leases: crate::resolver_core::request_inputs::InputArtifactLeases::default(),
@@ -644,9 +650,7 @@ impl VerterHost {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
-            session_attachment: crate::session_attachment::SessionAttachment::from_registry(
-                framework_services.framework_registry(),
-            ),
+            session_attachment,
             framework_services,
             framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]

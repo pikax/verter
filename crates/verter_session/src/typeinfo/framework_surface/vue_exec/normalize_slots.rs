@@ -11,7 +11,7 @@ use verter_type_expr::{LiteralValue, TypeExpr, UnknownValue};
 
 use super::{member_jsdoc_from_spans, raise_member_value, slice_canonical_span};
 use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+use crate::output_sinks::OutputProjector;
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::semantic_query::{
@@ -40,7 +40,7 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 /// otherwise drop the failed arm and publish the resolvable sibling's
 /// callable as a completed concrete slot.
 #[must_use]
-pub(crate) fn slots_from_typeinfo_surface<C: crate::resolver_core::ResolverCapabilities>(
+pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     resolved: &impl ResolvedSurfaceAccess,
@@ -287,7 +287,7 @@ pub(crate) fn slot_return_publications_from_typeinfo_surface<
 /// through the sealed output cap; it makes NO decision on the materialized value
 /// and takes NO `&TypeExpr` param (a node id + the active `ctx`). The mint cap is
 /// constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
-fn materialize_slot_return_node<C: crate::resolver_core::ResolverCapabilities>(
+fn materialize_slot_return_node<C: crate::session_attachment::SessionCapabilities>(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     return_node: SemanticNodeId,
 ) -> TypeExpr {
@@ -298,7 +298,7 @@ fn materialize_slot_return_node<C: crate::resolver_core::ResolverCapabilities>(
     // realized slot's return node always mints, so the fallback is robustness
     // only.
     cap.materialize_output_type_expr(return_node)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
         .unwrap_or(TypeExpr::Unknown(UnknownValue::missing_output()))
 }
 
@@ -329,7 +329,7 @@ fn materialize_slot_return_node<C: crate::resolver_core::ResolverCapabilities>(
 /// surface yields no bindings. Each per-member binding `TypeExpr` is minted ONCE
 /// at the registered terminal [`slot_binding_field`]; this navigator holds NO
 /// mint.
-fn binding_fields_from_param_node<C: crate::resolver_core::ResolverCapabilities>(
+fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     first_param: SemanticNodeId,
@@ -504,7 +504,7 @@ fn pick_source_root_node<C: crate::resolver_core::ResolverCapabilities>(
 /// NODE-DOMAIN `Option` match, never a `TypeExpr` decide; the display renders
 /// through the by-name `.and_then` form. The mint cap is constructed
 /// INTERNALLY from `ctx` (the `raise_member_value` pattern).
-fn slot_binding_field<C: crate::resolver_core::ResolverCapabilities>(
+fn slot_binding_field<C: crate::session_attachment::SessionCapabilities>(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
     member_name: &str,
@@ -536,7 +536,7 @@ fn slot_binding_field<C: crate::resolver_core::ResolverCapabilities>(
     let cap = super::TypeinfoVueSurfaceOutputCap::new(dispatch);
     let named_root = cap
         .materialize_output_type_expr(root_node)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
         .unwrap_or(TypeExpr::Unknown(UnknownValue::missing_output()));
     let symbolic = TypeExpr::IndexedAccess {
         object: Arc::new(named_root),

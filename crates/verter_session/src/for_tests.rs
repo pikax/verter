@@ -1378,11 +1378,14 @@ pub fn dispatch_vue_publication_keyof_partial_reasons_for_tests(
         })
 }
 
+/// Compile-contract access to the engine resource constructor and the output
+/// authority it mints. Neither exposes a field or a store-handle constructor.
+pub use crate::project_semantic_dispatch::engine_resources::{EngineStores, OutputAuthority};
 pub use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
 pub use crate::resolver_core::host_resolver_context::HostResolverContext;
 /// Compile-contract access to the actual request ports and base-host adapter.
 /// Their production owner modules remain private; fields and construction stay sealed.
 pub use crate::resolver_core::request_ports::{
-    Cancellation, ExecutionSubmission, ExpressionSourceSelection, IndexedInputs, OwnedLowering,
-    RouteLookup,
+    Cancellation, ExecutionSubmission, ExpressionSourceSelection, HostAttachmentPort,
+    IndexedInputs, OwnedLowering, RouteLookup,
 };

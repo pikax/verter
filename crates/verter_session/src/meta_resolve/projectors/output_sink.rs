@@ -45,8 +45,9 @@ use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 use verter_type_expr::{TypeExpr, UnknownValue};
 
 use crate::meta_resolve::exactness::classify_node;
+use crate::output_sinks::OutputProjector;
 use crate::project_semantic_dispatch::output_materialization::{
-    wrap_degraded_output, wrap_output_type_expr, MaterializedOutputTypeExpr, OutputProjector,
+    wrap_degraded_output, wrap_output_type_expr, MaterializedOutputTypeExpr,
 };
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
@@ -64,7 +65,7 @@ use super::published_source::{
     structural_member_value_source,
 };
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+crate::output_sinks::define_output_capability! {
     /// The per-member publication PROJECTORS' output-sink capability. The
     /// projector publication functions in `meta_resolve::projectors` reach this
     /// capability ONLY through the high-level publication APIs in this
@@ -107,12 +108,15 @@ fn raise_node_to_sealed_carrier(
             if crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).is_none() {
                 // GENUINE absence (no typed payload minted for this id): the
                 // exact `missing_output` — NON-partial.
-                wrap_output_type_expr(&cap, TypeExpr::Unknown(UnknownValue::missing_output()))
+                wrap_output_type_expr(
+                    cap.authority(),
+                    TypeExpr::Unknown(UnknownValue::missing_output()),
+                )
             } else {
                 // PRESENT-BUT-UNRAISABLE (the node minted but a required child
                 // failed): degrade as the typed unmaterialized `Miss` carrier —
                 // PARTIAL at the choke point, never admitted complete.
-                wrap_degraded_output(&cap, crate::semantic_query::QueryError::Miss)
+                wrap_degraded_output(cap.authority(), crate::semantic_query::QueryError::Miss)
             }
         }
     };
@@ -1283,7 +1287,7 @@ fn materialize_output_source(
             let sealed = cap
                 .materialize_output_type_expr(hot.node())
                 .ok_or(crate::meta_resolve::ComponentMetaOutputFailure::ShellMaterializationMiss)?;
-            Ok(sealed.into_type_expr(cap))
+            Ok(sealed.into_type_expr(cap.authority()))
         }
     }
 }

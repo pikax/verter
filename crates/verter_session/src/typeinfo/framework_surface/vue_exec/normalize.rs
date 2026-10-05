@@ -23,7 +23,7 @@ use verter_type_expr::{
 
 use super::{member_jsdoc_from_spans, raise_member_value, signature_jsdoc_from_spans};
 use crate::meta_resolve::callable_view::CallableNodeView;
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+use crate::output_sinks::OutputProjector;
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::semantic_query::{
@@ -74,7 +74,7 @@ use crate::typeinfo::surface::{TypeInfoSurfaceEntry, TypeInfoSurfaceMember};
 /// named members and the synthesized model prop is appended from the analyzer
 /// facts ([`AnalyzedMacroKind::DefineModel`]'s `prop_fields`).
 #[must_use]
-pub(crate) fn props_from_typeinfo_surface<C: crate::resolver_core::ResolverCapabilities>(
+pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     resolved: &impl ResolvedSurfaceAccess,
@@ -703,7 +703,7 @@ pub(crate) fn model_prop_fields<C: crate::resolver_core::ResolverCapabilities>(
 /// 3. Preserve duplicate names positionally. They are distinct overload rows
 ///    grouped only by the terminal public-contract projector.
 #[must_use]
-pub(crate) fn emits_from_typeinfo_surface<C: crate::resolver_core::ResolverCapabilities>(
+pub(crate) fn emits_from_typeinfo_surface<C: crate::session_attachment::SessionCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     resolved: &impl ResolvedSurfaceAccess,
@@ -968,7 +968,7 @@ pub(crate) fn emits_from_typeinfo_surface<C: crate::resolver_core::ResolverCapab
 /// all materialize — so the fallback is position-safety robustness only, never a
 /// fabricated meaningful element.
 pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tuple<
-    C: crate::resolver_core::ResolverCapabilities,
+    C: crate::session_attachment::SessionCapabilities,
 >(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     params: &[FunctionParam],
@@ -990,7 +990,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tupl
             // only.
             let ty = cap
                 .materialize_output_type_expr(param.ty)
-                .map(|raised| raised.into_type_expr(&cap))
+                .map(|raised| raised.into_type_expr(cap.authority()))
                 .unwrap_or_else(|| TypeExpr::Unknown(UnknownValue::missing_output()));
             verter_type_expr::TupleElement {
                 // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
@@ -1041,7 +1041,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn materialize_payload_tupl
 /// - `None` only when no faithful source exists (the consumer's honest
 ///   degraded fallback applies — never a partial or fabricated fact).
 pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_field<
-    C: crate::resolver_core::ResolverCapabilities,
+    C: crate::session_attachment::SessionCapabilities,
 >(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,

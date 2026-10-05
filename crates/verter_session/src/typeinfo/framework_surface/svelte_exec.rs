@@ -43,7 +43,7 @@ use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 use crate::framework::script_facts::ScriptFactEvidence;
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
 use crate::meta_resolve::callable_view::{CallableNodeView, PositionalParamNode};
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+use crate::output_sinks::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     DisplayNeeds, PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult,
@@ -64,7 +64,7 @@ use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
 use crate::typeinfo::surface::{TypeInfoSurface, TypeInfoSurfaceEntry};
 use crate::typeinfo::types::TypeInfoQueryLevel;
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+crate::output_sinks::define_output_capability! {
     /// The Svelte framework-surface executor's output-sink capability: the
     /// Svelte resolution leg here holds this to materialize a graph node into
     /// a sealed output carrier and unwrap it. Its constructor is visible ONLY
@@ -1157,7 +1157,7 @@ fn materialize_snippet_slot_return(
 ) -> TypeExpr {
     let cap = TypeinfoSvelteSurfaceOutputCap::new(dispatch);
     cap.materialize_output_type_expr(return_node)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
         .unwrap_or(TypeExpr::Unknown(
             verter_type_expr::UnknownValue::missing_output(),
         ))
@@ -1199,7 +1199,7 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_s
             // by-name `.and_then` form (never a direct read-of-mint decide).
             let raised = cap
                 .materialize_output_type_expr(param.ty)
-                .map(|raised| raised.into_type_expr(&cap));
+                .map(|raised| raised.into_type_expr(cap.authority()));
             let type_annotation = raised
                 .as_ref()
                 .and_then(crate::resolver_core::surface_projector::render_type_expr_display);
@@ -1770,7 +1770,7 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_t
             // only.
             let ty = cap
                 .materialize_output_type_expr(param.ty)
-                .map(|raised| raised.into_type_expr(&cap))
+                .map(|raised| raised.into_type_expr(cap.authority()))
                 .unwrap_or_else(|| TypeExpr::Unknown(UnknownValue::missing_output()));
             TupleElement {
                 // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the

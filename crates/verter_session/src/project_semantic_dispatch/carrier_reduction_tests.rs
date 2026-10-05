@@ -818,10 +818,9 @@ fn output_boundaries_discriminate_plain_shell_from_reduce_then_raise() {
     // Mint the `#[cfg(test)]` output capability to drive the reduce-then-
     // raise boundary and read both the recorded node_id and the (sealed)
     // type_expr payload.
-    let cap =
-        crate::project_semantic_dispatch::output_materialization::TestOutputCap::new(&dispatch);
+    let cap = crate::output_sinks::TestOutputCap::new(&dispatch);
     let materialized = {
-        use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+        use crate::output_sinks::OutputProjector;
         cap.materialize_reduced_output_type_expr(
             carrier,
             ProjectionReductionContext::published(ProjectionMode::Expanded),

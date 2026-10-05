@@ -2530,7 +2530,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
 /// completeness stays `Complete`.
 #[test]
 fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
-    use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+    use crate::output_sinks::OutputProjector;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
     use crate::semantic_query::{PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember};
@@ -2579,7 +2579,7 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
             let sealed = cap
                 .materialize_output_type_expr(broken_obj)
                 .expect("the object raises (degraded member)");
-            sealed.into_type_expr(&cap)
+            sealed.into_type_expr(cap.authority())
         },
     );
     assert!(

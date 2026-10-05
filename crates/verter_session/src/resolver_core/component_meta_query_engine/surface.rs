@@ -17,11 +17,11 @@ use verter_type_expr::TypeExpr;
 use super::route_admission::{
     admit_expanded_surface, admit_expanded_surface_changed, AdmittedRouteProjectionNode,
 };
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
+use crate::output_sinks::OutputProjector;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{QueryError, SemanticNodeData, SemanticNodeId, SurfaceView};
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+crate::output_sinks::define_output_capability! {
     /// The component-meta query-engine SURFACE projector's output-sink
     /// capability. The surface projector here holds this to materialize a
     /// graph node into a sealed output carrier and unwrap it. Its constructor
@@ -60,7 +60,7 @@ fn materialize_published_node(
 ) -> Option<TypeExpr> {
     let cap = MetaQuerySurfaceOutputCap::new(dispatch);
     cap.materialize_output_type_expr(node)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
 }
 
 /// Terminal sink: materialise an [`AdmittedRouteProjectionNode`] into a
