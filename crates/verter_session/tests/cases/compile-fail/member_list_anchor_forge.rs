@@ -1,5 +1,5 @@
 //! Constructor half of the member-list anchor seal: minting an anchor demands
-//! the analyzer-only `MemberListAnchorMint` authority, which a crate can obtain
+//! the restricted `MemberListAnchorMint` authority, which a crate can obtain
 //! only by naming `verter_analyzer_mint` — a dependency the session does not
 //! have. A code-action or fixture that minted an anchor from arithmetic would
 //! reintroduce the source-offset guessing the analyzer-minted anchor removed.

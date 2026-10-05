@@ -363,13 +363,19 @@ authorities:
 | **Placement** — where an insertion goes | an analyzer-minted `MacroAnchor`, SFC-absolute | `rfind`, brace-depth counting, `span.end ± N`, any offset not carried by an anchor |
 | **Revision** — may these anchors be applied to this buffer? | the **consumer boundary**, comparing `FileAnalysisSnapshot.anchor_revision` against `AnalysisSourceRevision::of_source(live_buffer)` | trusting `DocumentRegistry::get_analysis` to have matched (its host-fallback branch is gated on `AnalysisScope::BUILD` only, not on document version or content) |
 
-**Anchor vocabulary** (`verter_semantic::analysis::types`, re-exported from
-`analysis::mod`):
+**Anchor vocabulary** (`verter_session_query::analysis::types`):
 
-- `MemberListAnchor` — a private SFC-absolute `insert_offset` (the member list's
-  closing delimiter) plus `is_empty` (drives a consumer's separator choice).
-- `MacroAnchor::{Available(MemberListAnchor), Unsupported(MacroAnchorUnsupported)}`
-  — typed absence, never `Option<u32>`.
+- `MemberListAnchor` — the edit capability: a private SFC-absolute
+  `insert_offset` (the member list's closing delimiter) plus `is_empty` (drives a
+  consumer's separator choice). Serialize-only; `data()` returns its wire form.
+- `MemberListAnchorData { insert_offset, is_empty }` — the plain, public wire
+  record (Serialize + Deserialize). Decoding it yields no edit capability.
+- `MacroAnchor::{Available(MemberListAnchor), Decoded(MemberListAnchorData),
+  Unsupported(MacroAnchorUnsupported)}` — typed absence, never `Option<u32>`.
+  `Available` and `Decoded` encode to the same `available` wire arm, and
+  decoding always yields `Decoded`, so serialized analysis round-trips its bytes
+  but never its capability. `available()` / `is_available()` see only
+  `Available`; `data()` reads the position from either arm.
 - `MacroAnchorUnsupported::{NoTypeArgument, NotTypeBased, NamedTypeArgument,
   IntersectionTypeArgument, NoMemberList}` — one variant per authored shape;
   reasons never collapse. `NoTypeArgument` is the `Default`, so an anchor that
@@ -380,7 +386,7 @@ authorities:
   per-slot `AnalyzedSlotField.props_anchor` — structurally paired with the member
   it anchors, so no parallel-array ordinal can drift.
 
-Minted in `analysis/macros.rs` at the single `AnalyzedMacro` construction site
+Minted in `verter_semantic`'s `analysis/macros.rs` at the single `AnalyzedMacro` construction site
 from the OXC nodes already in scope (`type_argument_member_list_anchor`,
 `runtime_argument_array_anchor`) and inside `extract_slot_bindings_from_params`
 (`object_member_list_anchor`). Publication is a pure `match` — no traversal, no
@@ -399,17 +405,22 @@ landed-scanner bar):
    `action_utils::LiveEditTarget`, whose only capability is
    `anchor_position(&MemberListAnchor) -> Option<Position>`. With no `&str` in
    scope a brace scan is a compile error, not a convention.
-2. `MemberListAnchor`'s offset field is private and its constructor is
-   `pub(crate)` to `verter_semantic`, so no `verter_lsp` path — production or
-   test — can synthesize one via the ctor or a struct literal (`E0624`/`E0451`;
-   witnessed by the `member_list_anchor_*` trybuild fixtures under
-   `verter_session/tests/cases/compile-fail/`). One cross-crate construction
-   path DOES exist by wire mandate: the type derives `Deserialize`, so
-   `serde_json` can materialise an anchor from arbitrary bytes — deliberate
-   (protocol row), and the reason `LiveEditTarget::anchor_position`'s bounds +
-   char-boundary checks stay load-bearing rather than decorative. LSP fixtures
-   obtain anchors by running the real analyzer over fixture source
-   (`features/macro_fixture.rs`).
+2. `MemberListAnchor`'s fields are private, its constructor
+   `MemberListAnchor::new(MemberListAnchorMint, ..)` demands the
+   `verter_analyzer_mint` authority, and it implements no `Default` or
+   `Deserialize`. The mint is reachable only through a direct dependency on
+   `verter_analyzer_mint`, held by `verter_semantic` (the production producer)
+   and `verter_session_query` (the record crate); the dependency set is pinned by
+   `workspace_dependency_layers::analyzer_mint_authority_is_reachable_only_by_its_sanctioned_dependents`.
+   So no `verter_lsp` path — production or test — can synthesize an anchor via
+   the ctor, a struct literal, inference, or wire decoding (witnessed by the
+   `member_list_anchor_*` trybuild fixtures under
+   `verter_session/tests/cases/compile-fail/`: `_forge` E0433, `_struct_literal`
+   E0451, `_mint_by_inference` E0277, `_wire_decode` E0277). This is restricted
+   constructor access, not proof of syntax-tree provenance: a mint holder can
+   pass any offset, which is why `LiveEditTarget::anchor_position`'s bounds +
+   char-boundary checks stay load-bearing. LSP fixtures obtain anchors by running
+   the real analyzer over fixture source (`features/macro_fixture.rs`).
 
 `LiveEditTarget::anchor_position` is the single conversion point and fails closed
 on BOTH an offset past the live source's end and an offset off a UTF-8 character

@@ -2457,7 +2457,10 @@ impl GatedType {
     /// The ROOT function's OWN signature — its parameter list, its
     /// type-parameter clause, and its parameter defaults.
     ///
-    /// Deliberately UNGATED, and the only such constructor.
+    /// Deliberately UNGATED, and the only ungated constructor this type
+    /// names. The fields are public, so a struct literal can also build an
+    /// ungated value; that is a producer discipline, not a compiler-enforced
+    /// boundary.
     /// `checker.ts::resolveName` discards a Type-meaning hit in a
     /// function's own `locals` whenever `lastLocation !== location.body`
     /// (mirrored on the value side by `useOuterVariableScopeInParameter`),

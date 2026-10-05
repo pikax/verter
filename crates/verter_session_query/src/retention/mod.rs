@@ -720,9 +720,9 @@ impl Drop for RetentionCharge {
 /// a [`ChargeClass::Retained`] charge, refused under pressure like any
 /// other warm cache entry (the workspace then serves the answer uncached).
 ///
-/// The bound account is private. Outside test support the only
-/// constructors are [`Self::process_local`] and [`Default`], so this
-/// adapter always charges the one process-local account. That closes only
+/// The bound account is private and the only constructors are
+/// [`Self::process_local`] and [`Default`], so this adapter always charges
+/// the one process-local account. That closes only
 /// THIS adapter's construction: the resolution-account trait it implements
 /// is an open provider interface, and any crate may install its own
 /// implementation of it. The single-account policy for resolution state is
@@ -734,13 +734,6 @@ impl ResolutionRetention {
     #[must_use]
     pub fn process_local() -> Self {
         Self(SemanticRetentionAccount::process_local())
-    }
-
-    /// The adapter over an explicit isolated account. Test-support only.
-    #[cfg(any(test, feature = "test-support"))]
-    #[must_use]
-    pub fn with_account(account: Arc<SemanticRetentionAccount>) -> Self {
-        Self(account)
     }
 }
 
