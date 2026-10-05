@@ -148,7 +148,9 @@ impl FlowBodySkeletonSource for FixtureSkeletonSource {
             source,
             entry,
         )?;
-        Ok(Some(build_prepared_bundle(prepared)))
+        Ok(Some(FlowGraphBundle::build(
+            KeyedFunctionStructure::bind_fixture(key.clone(), prepared),
+        )))
     }
 }
 
@@ -357,7 +359,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
         "the key whose source axes match the served artifact is served"
     );
     let first = stores.bound_graph_for(&key).expect("built graph is bound");
-    let bindings = &first.bundle().bindings;
+    let bindings = &first.bundle().bindings();
     assert_eq!(bindings.function(), entry.key());
     assert_eq!(bindings.value_count(), entry.bindings().len());
     for (slot, record) in entry.bindings().iter().enumerate() {
@@ -376,7 +378,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
     }
     let repeated = stores.bound_graph_for(&key).expect("warm graph is bound");
     assert!(
-        Arc::ptr_eq(bindings, &repeated.bundle().bindings),
+        Arc::ptr_eq(bindings, repeated.bundle().bindings()),
         "all demands share the map built from the pinned retained index"
     );
     assert_eq!(stores.graphs().build_count(), 1);
@@ -412,6 +414,102 @@ fn skeleton_source_verifies_parse_key_and_language() {
     // Neither refusal populated the memoized store under the foreign keys.
     assert!(stores.graphs().peek(&foreign_parse_key).is_none());
     assert!(stores.graphs().peek(&foreign_language).is_none());
+}
+
+/// Every source axis of a function key binds the product it obtains: a key
+/// that differs from the served artifact ONLY in its parse environment, or
+/// ONLY in its toolchain fingerprint, is a typed miss — it never obtains
+/// or publishes the product of the source the matching key names.
+#[test]
+fn skeleton_source_verifies_parse_env_and_toolchain() {
+    use crate::types::UpsertRequest;
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let canonical = "/ws/source-axes.ts";
+    let source = "export function myType(p: number) { const a = p; return { a }; }\n";
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from(source),
+        file_language: crate::LanguageRegistry::global()
+            .classify_static(canonical)
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let serve = ctx
+        .ensure_indexed_ready_serve(canonical)
+        .expect("the fixture file is served");
+    let index = ctx
+        .function_program_index(&serve.indexed.shallow_state)
+        .expect("the retained source index is available");
+    let entry = index
+        .matches_named("myType")
+        .next()
+        .map(|matched| matched.entry())
+        .expect("myType is a served function position");
+    let source_key =
+        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+            Arc::from(canonical),
+            serve.indexed.whole_hash,
+            serve.indexed.raw_source.as_ref(),
+            serve.indexed.file_language.clone(),
+            serve.indexed.framework_parse.as_deref(),
+            serve.indexed.parse_env_hash,
+        )
+        .expect("a served script file has an exact source identity");
+    let key = FlowSliceFunctionKey {
+        canonical_id: Arc::from(canonical),
+        function: entry.key().clone(),
+        flow_body_stable_hash: entry.flow_body_stable_hash(),
+        flow_body_exact_hash: entry
+            .flow_body_exact_hash()
+            .expect("a served function position addresses its own bytes"),
+        parse_env_hash: serve.indexed.parse_env_hash,
+        parse_key: source_key.parse_key.clone(),
+        file_language: source_key.file_language_id.clone(),
+        build_toolchain_fingerprint:
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
+    };
+    let foreign_parse_env = FlowSliceFunctionKey {
+        parse_env_hash: key.parse_env_hash.map(|byte| byte ^ 0xff),
+        ..key.clone()
+    };
+    let foreign_toolchain = FlowSliceFunctionKey {
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            0x9a,
+        ),
+        ..key.clone()
+    };
+    assert_ne!(
+        key.build_toolchain_fingerprint,
+        foreign_toolchain.build_toolchain_fingerprint
+    );
+    let stores = host.project_type_store().flow_slice();
+
+    for (foreign, axis) in [
+        (&foreign_parse_env, "parse environment"),
+        (&foreign_toolchain, "toolchain fingerprint"),
+    ] {
+        assert!(
+            FlowSliceDriver::new(stores, ctx)
+                .skeleton_for(foreign)
+                .is_none(),
+            "a key whose {axis} the serving artifact does not carry is a typed miss"
+        );
+        assert!(
+            stores.graphs().peek(foreign).is_none(),
+            "a refused {axis} variant publishes nothing under its key"
+        );
+    }
+    // The matching key still serves, and the refusals left it unbuilt.
+    assert!(stores.graphs().peek(&key).is_none());
+    assert!(
+        FlowSliceDriver::new(stores, ctx)
+            .skeleton_for(&key)
+            .is_some(),
+        "the key whose every source axis matches the served artifact is served"
+    );
+    assert_eq!(stores.graphs().build_count(), 1);
 }
 
 #[test]
@@ -565,7 +663,7 @@ fn invalid_binding_correspondence_never_publishes_or_caches_absence() {
         .graphs
         .bound_graph(&key)
         .expect("valid retry publishes");
-    assert_eq!(recovered.bundle().bindings.value_count(), 2);
+    assert_eq!(recovered.bundle().bindings().value_count(), 2);
     assert_eq!(rig.stores.graphs.build_count(), 1);
     assert_eq!(rig.source.build_calls(), 4);
 }
@@ -756,8 +854,8 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
         .bound_graph(&function)
         .expect("second demand reuses");
     assert!(Arc::ptr_eq(
-        &first.bundle().bindings,
-        &second.bundle().bindings
+        first.bundle().bindings(),
+        second.bundle().bindings()
     ));
     assert_ne!(
         planned_a, planned_b,

@@ -569,7 +569,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             enclosing_frames,
             bindings: Arc::clone(&owned.content.bindings),
             skeleton: Arc::clone(&skeleton),
-            flow_graph: Arc::clone(&bound.bundle().graph),
+            flow_graph: Arc::clone(bound.bundle().graph()),
             execution_selection,
             plan,
             anchor,

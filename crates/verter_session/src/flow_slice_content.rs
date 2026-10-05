@@ -3969,7 +3969,7 @@ pub(crate) fn build_flow_capture_authority(
     {
         return None;
     }
-    let binding = locator.gate().bindings().local(&locator.declaration())?;
+    let binding = locator.gate().bindings().local(locator.declaration())?;
     let fact = locator.gate().skeleton().binding(binding);
     let authored = entry
         .bindings()
@@ -15060,7 +15060,6 @@ impl<'a> Lowerer<'a> {
     /// minted here and carries the root-identifier gate's verdict. Dedicated
     /// frame carriers (including bare identifier reads) are lowered by their
     /// own typed arms rather than through this leaf path.
-
     fn leaf_type(&mut self, expr: &Expression<'_>, mode: ExprMode) -> LeafLowering {
         // A JSX element / fragment's value is the configured `JSX`
         // namespace's `Element` type — a TYPE-space reference the shared

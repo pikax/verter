@@ -5918,7 +5918,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             enclosing_frames: EnclosingFrames::default(),
             bindings: Arc::clone(&ir.bindings),
             skeleton: Arc::clone(&skeleton),
-            flow_graph: Arc::clone(&bound.bundle().graph),
+            flow_graph: Arc::clone(bound.bundle().graph()),
             execution_selection,
             plan: demand_carrier
                 .as_ref()
@@ -11138,7 +11138,7 @@ fn seed_selected_parameters(
         .copied()
     {
         let verter_session_query::flow::flow_graph::FlowNodeKind::Binding(binding) =
-            bound.bundle().graph.node_kind(node)
+            bound.bundle().graph().node_kind(node)
         else {
             continue;
         };
@@ -11153,7 +11153,7 @@ fn seed_selected_parameters(
             &subject,
             DefiniteAssignmentProduct::assigned(),
             ReachingTypeProduct::of(*value),
-            Some(bound.bundle().graph.binding_node(*input)),
+            Some(bound.bundle().graph().binding_node(*input)),
         );
     }
 }
@@ -24119,7 +24119,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .as_ref()
                     .and_then(|(products, subject)| products.declared_type(subject))
                 {
-                    capture_inputs[index].apply_authority(node, &locator.source());
+                    capture_inputs[index].apply_authority(node, locator.source());
                 } else {
                     missing.push((index, locator, source));
                 }
@@ -24153,7 +24153,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             if let Some((mut products, subject)) = source {
                                 products.set_declared_type(&subject, Some(node));
                             }
-                            capture_inputs[index].apply_authority(node, &locator.source());
+                            capture_inputs[index].apply_authority(node, locator.source());
                         }
                     }
                 }

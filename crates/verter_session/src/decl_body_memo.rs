@@ -3483,8 +3483,8 @@ impl ExpressionSourceDemand for IndexedExpressionDemand {
         {
             return None;
         }
-        let skeleton = Arc::clone(&bound.bundle().skeleton);
-        let bindings = Arc::clone(&bound.bundle().bindings);
+        let skeleton = Arc::clone(bound.bundle().skeleton());
+        let bindings = Arc::clone(bound.bundle().bindings());
         let service = self.snapshot.service.as_ref()?;
         // Pin the retained snapshot for this memo's lifetime; the
         // LEASE-ONLY run below reuses it.

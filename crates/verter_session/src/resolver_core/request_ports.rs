@@ -737,7 +737,7 @@ pub trait OwnedLowering {
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Result<
-        Option<verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton>,
+        Option<verter_session_query::flow::bundle::KeyedFunctionStructure>,
         verter_session_query::flow::binding::FlowBindingMapError,
     >;
 }

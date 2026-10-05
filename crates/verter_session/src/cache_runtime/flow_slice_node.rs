@@ -49,14 +49,15 @@
 //! [`FlowSliceBudget`] cell. The `FlowReturn` executor consumes the hash
 //! node on its cold path (the budget outcome gates memo admission); the
 //! lowered node serves slice-IR demand through the same store.
-use verter_session_query::flow::bundle::{BoundFlowGraph, FlowGraphBundle, FlowSliceFunctionKey};
+use verter_session_query::flow::bundle::{
+    BoundFlowGraph, FlowGraphBundle, FlowSliceFunctionKey, KeyedFunctionStructure,
+};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use verter_session_query::flow::flow_graph::build_function_flow_graph;
 use verter_session_query::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
 use verter_session_query::flow::hashing::FlowSliceHash;
 use verter_session_query::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
@@ -108,19 +109,6 @@ pub(crate) struct FlowSliceLoweredKey {
 
 // ── Graph storage (once per function content version) ────────────────
 
-/// The one bundle construction. Bindings come from the pinned indexed
-/// entry, and the graph consumes its sealed prepared structure. No demand or
-/// caller-authored inventory can initialize the cached binding authority.
-pub(crate) fn build_prepared_bundle(prepared: PreparedFunctionBodySkeleton) -> FlowGraphBundle {
-    let graph = build_function_flow_graph(&prepared);
-    let (skeleton, bindings) = prepared.into_parts();
-    FlowGraphBundle {
-        skeleton: Arc::new(skeleton),
-        bindings: Arc::new(bindings),
-        graph: Arc::new(graph),
-    }
-}
-
 /// The once-per-content-version graph store: `FunctionFlowGraph`, its
 /// skeleton, and binding map are built once per `(canonical, function,
 /// flow_body_stable_hash, flow_body_exact_hash, parse_env_hash,
@@ -148,11 +136,17 @@ pub(crate) struct GraphPublish<'a> {
 }
 
 impl GraphPublish<'_> {
-    pub(crate) fn publish(self, bundle: FlowGraphBundle) -> Arc<FlowGraphBundle> {
+    /// Publish `bundle` under the claimed key. A bundle built for any other
+    /// key is refused — `None`, nothing published, the claim abandoned —
+    /// so a slot only ever holds the product of its own key.
+    pub(crate) fn publish(self, bundle: FlowGraphBundle) -> Option<Arc<FlowGraphBundle>> {
+        if bundle.key() != self.slot.key() {
+            return None;
+        }
         self.builds.fetch_add(1, Ordering::Relaxed);
         let bundle = Arc::new(bundle);
         self.slot.insert(Arc::clone(&bundle));
-        bundle
+        Some(bundle)
     }
 }
 
@@ -190,10 +184,7 @@ impl FunctionFlowGraphStore {
     /// the only builder, so a miss here is a torn view between the hash
     /// node and the graph store, never a reason to build.
     pub(crate) fn bound_graph(&self, key: &FlowSliceFunctionKey) -> Option<BoundFlowGraph> {
-        self.peek(key).map(|bundle| BoundFlowGraph {
-            key: key.clone(),
-            bundle,
-        })
+        self.peek(key).map(BoundFlowGraph::new)
     }
 
     /// Seal a fixture built through the production indexed structural owner,
@@ -204,21 +195,17 @@ impl FunctionFlowGraphStore {
         key: FlowSliceFunctionKey,
         prepared: PreparedFunctionBodySkeleton,
     ) -> BoundFlowGraph {
-        assert_eq!(
-            &key.function,
-            prepared.bindings().function(),
-            "prepared fixture must match its content key"
-        );
-        let bundle = match self.entries.entry(key.clone()) {
+        let structure = KeyedFunctionStructure::bind_fixture(key.clone(), prepared);
+        let bundle = match self.entries.entry(key) {
             dashmap::mapref::entry::Entry::Occupied(occupied) => Arc::clone(occupied.get()),
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let bundle = Arc::new(build_prepared_bundle(prepared));
+                let bundle = Arc::new(FlowGraphBundle::build(structure));
                 self.builds.fetch_add(1, Ordering::Relaxed);
                 vacant.insert(Arc::clone(&bundle));
                 bundle
             }
         };
-        BoundFlowGraph { key, bundle }
+        BoundFlowGraph::new(bundle)
     }
 
     /// Non-blocking peek at the already-memoized bundle for `key` — the
@@ -485,7 +472,7 @@ impl FlowSliceStores {
     ) -> Option<Arc<FunctionBodySkeleton>> {
         self.graphs
             .peek(key)
-            .map(|bundle| Arc::clone(&bundle.skeleton))
+            .map(|bundle| Arc::clone(bundle.skeleton()))
     }
 
     /// The store-minted bound graph of one function content version — the

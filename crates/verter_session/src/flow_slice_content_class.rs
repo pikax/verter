@@ -882,13 +882,13 @@ impl<'s> Lowerer<'s> {
             if !gate.enclosing_type_parameters().is_empty() {
                 clauses.push(verter_session_query::flow::policy::ClassExpressionClause {
                     container: class.unwrap_or_else(|| Arc::from(ANONYMOUS_CLASS)),
-                    parameters: Arc::clone(&gate.enclosing_type_parameters()),
+                    parameters: Arc::clone(gate.enclosing_type_parameters()),
                 });
             }
             if !gate.type_parameters().is_empty() {
                 clauses.push(verter_session_query::flow::policy::ClassExpressionClause {
                     container,
-                    parameters: Arc::clone(&gate.type_parameters()),
+                    parameters: Arc::clone(gate.type_parameters()),
                 });
             }
         }

@@ -1023,11 +1023,11 @@ impl FlowGraphFixtureForTests {
         use verter_session_query::flow::peeker::{ReturnPathPeeker, SliceDemand};
         let subject = crate::project_semantic_dispatch::flow_solve::derive_demand_subject(&request.query)?;
         let bundle = self.bound.bundle();
-        let demand = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
-        let selection = ReturnPathPeeker::new(&bundle.graph)
+        let demand = SliceDemand::for_return_projection(bundle.skeleton(), &subject.projection_path);
+        let selection = ReturnPathPeeker::new(bundle.graph())
             .plan(&demand, &request.resources.slice_budget)
             .map_err(FlowDemandPlanError::SliceBudget)?;
-        let hash = compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton);
+        let hash = compute_flow_slice_hash(&selection, bundle.graph(), bundle.skeleton());
         Ok(PlannedFlowSlice::for_test(hash, selection))
     }
 

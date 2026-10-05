@@ -74,12 +74,12 @@ impl<'a> FlowSliceDriver<'a> {
                 if let Some(fixture) = self.fixture {
                     return Ok(fixture
                         .build_bundle(key)?
-                        .map(|bundle| lease.publish(bundle)));
+                        .and_then(|bundle| lease.publish(bundle)));
                 }
-                let Some(prepared) = self.lowering.prepare_function_structure(key)? else {
+                let Some(structure) = self.lowering.prepare_function_structure(key)? else {
                     return Ok(None);
                 };
-                Ok(Some(lease.publish(build_prepared_bundle(prepared))))
+                Ok(lease.publish(FlowGraphBundle::build(structure)))
             }
         }
     }
@@ -91,7 +91,7 @@ impl<'a> FlowSliceDriver<'a> {
         self.graph_bundle(key)
             .ok()
             .flatten()
-            .map(|bundle| Arc::clone(&bundle.skeleton))
+            .map(|bundle| Arc::clone(bundle.skeleton()))
     }
 
     pub(crate) fn lookup_hash(&self, key: FlowSliceHashKey) -> Option<FlowSliceHashOutcome> {
@@ -133,8 +133,8 @@ impl ArtifactNode for FlowSliceHashNodeDemand<'_> {
             };
         };
         let demand =
-            SliceDemand::for_return_projection(&bundle.skeleton, &key.demand.projection_path);
-        let peeker = ReturnPathPeeker::new(&bundle.graph);
+            SliceDemand::for_return_projection(bundle.skeleton(), &key.demand.projection_path);
+        let peeker = ReturnPathPeeker::new(bundle.graph());
         let budget = *self.driver.stores.hash_node().budget.read();
         match peeker.plan(&demand, &budget) {
             Err(exceeded) => CacheAdmission::ReturnOnly {
@@ -142,7 +142,7 @@ impl ArtifactNode for FlowSliceHashNodeDemand<'_> {
                 reason: NonAdmissionReason::BudgetExceeded,
             },
             Ok(plan) => {
-                let slice_hash = compute_flow_slice_hash(&plan, &bundle.graph, &bundle.skeleton);
+                let slice_hash = compute_flow_slice_hash(&plan, bundle.graph(), bundle.skeleton());
                 CacheAdmission::Cacheable {
                     value: FlowSliceHashOutcome::Planned(Arc::new(PlannedFlowSlice::new(
                         slice_hash, plan,
@@ -210,8 +210,8 @@ impl ArtifactNode for FlowSliceLoweredBodyNodeDemand<'_> {
         CacheAdmission::Cacheable {
             value: Arc::new(lower_slice_plan(
                 planned.selection(),
-                &bundle.graph,
-                &bundle.skeleton,
+                bundle.graph(),
+                bundle.skeleton(),
             )),
             signature: ReadSetSignature::empty(),
             self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),

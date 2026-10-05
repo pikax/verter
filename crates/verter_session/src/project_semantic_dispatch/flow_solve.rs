@@ -1006,20 +1006,20 @@ fn require_retained_selection_of_bound_graph(
         .value_nodes()
         .iter()
         .chain(selection.effect_only_nodes().iter())
-        .all(|node| node.index() < bundle.graph.node_count());
+        .all(|node| node.index() < bundle.graph().node_count());
     if !nodes_in_range {
         return Err(FlowDemandPlanError::SelectionOutOfRange);
     }
     let origins_in_range = selection.origins().iter().all(|origin| match origin {
-        SliceOrigin::Return(site) => site.index() < bundle.skeleton.return_sites.len(),
-        SliceOrigin::Expr(site) => site.index() < bundle.skeleton.expr_sites.len(),
-        SliceOrigin::Parameter(binding) => binding.index() < bundle.skeleton.bindings.len(),
+        SliceOrigin::Return(site) => site.index() < bundle.skeleton().return_sites.len(),
+        SliceOrigin::Expr(site) => site.index() < bundle.skeleton().expr_sites.len(),
+        SliceOrigin::Parameter(binding) => binding.index() < bundle.skeleton().bindings.len(),
     });
     if !origins_in_range {
         return Err(FlowDemandPlanError::SelectionOutOfRange);
     }
     let names_in_range = selection.demand_path().iter().all(|segment| match segment {
-        DemandSegment::Named(name) => name.index() < bundle.skeleton.names.len(),
+        DemandSegment::Named(name) => name.index() < bundle.skeleton().names.len(),
         DemandSegment::Foreign(_) => true,
     });
     if !names_in_range {
@@ -1028,7 +1028,7 @@ fn require_retained_selection_of_bound_graph(
     // The selection must address the demand the QUERY derives: the
     // demand's origins and projection path are recomputed from the
     // query's own demand axis, never re-planned.
-    let expected = SliceDemand::for_return_projection(&bundle.skeleton, &subject.projection_path);
+    let expected = SliceDemand::for_return_projection(bundle.skeleton(), &subject.projection_path);
     if expected.origins.as_ref() != selection.origins()
         || expected.path.as_ref() != selection.demand_path()
     {
@@ -1036,7 +1036,7 @@ fn require_retained_selection_of_bound_graph(
     }
     // The minted slice identity must be THIS selection over THIS graph:
     // a selection retained for another graph fails closed here.
-    if compute_flow_slice_hash(selection, &bundle.graph, &bundle.skeleton) != retained.hash() {
+    if compute_flow_slice_hash(selection, bundle.graph(), bundle.skeleton()) != retained.hash() {
         return Err(FlowDemandPlanError::SelectionProvenanceMismatch);
     }
     // The selection must satisfy the REQUEST's slice budget: the retained
@@ -1235,9 +1235,9 @@ pub(crate) fn build_flow_demand_plan_from_execution(
     }
 
     // Validated once by the content-pinned graph owner.
-    let identities = &bundle.bindings;
+    let identities = &bundle.bindings();
 
-    let graph = &bundle.graph;
+    let graph = &bundle.graph();
     let mut selected: Vec<_> = structural_selection.value_nodes().iter()
         .chain(structural_selection.effect_only_nodes().iter()).copied().collect();
     selected.sort_by_key(|node| node.index());
@@ -1271,7 +1271,7 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                                 slot: FlowBindingBasis { binding: FlowBindingRef::Local(binding), identity: identity.clone() },
                             },
                             None => FlowObligationBasis::UnmodeledBinding {
-                                node: *node, binding, kind: bundle.skeleton.binding(binding).kind,
+                                node: *node, binding, kind: bundle.skeleton().binding(binding).kind,
                             },
                         },
                         FlowNodeKind::CapturedBinding(binding) => {
@@ -1301,7 +1301,7 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 // per selected predicated region.
                 for node in &selected {
                     let FlowNodeKind::Region(region) = graph.node_kind(*node) else { continue };
-                    let Some(control_input) = bundle.skeleton.region(region).control_input else { continue };
+                    let Some(control_input) = bundle.skeleton().region(region).control_input else { continue };
                     let id = push(FlowRequirement { operation: tag, requirement: RK::FactFamily(F::GuardPredicate) }, FlowObligationOrigin::Expansion(E::GuardPredicate), FlowObligationBasis::Guard { node: *node, region, control_input }, Arc::from([]), Arc::from([]))?;
                     note_node_obligation(&mut node_obligations, *node, id);
                     expanded.push(id);
@@ -1313,7 +1313,7 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 // never one per site.
                 for node in &selected {
                     let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
-                    let calls = &bundle.skeleton.expr_site(site).calls;
+                    let calls = &bundle.skeleton().expr_site(site).calls;
                     for (call_ordinal, _call) in calls.iter().enumerate() {
                         let call_ordinal = u32::try_from(call_ordinal).unwrap_or(u32::MAX);
                         let id = push(
@@ -1347,7 +1347,7 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 // below.
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
-                    if !matches!(bundle.skeleton.binding(binding).kind, SkeletonBindingKind::Class) { continue; }
+                    if !matches!(bundle.skeleton().binding(binding).kind, SkeletonBindingKind::Class) { continue; }
                     let id = push(
                         FlowRequirement { operation: tag, requirement: RK::FactFamily(F::Capture) },
                         FlowObligationOrigin::Expansion(E::Capture),
@@ -1369,7 +1369,7 @@ pub(crate) fn build_flow_demand_plan_from_execution(
                 // have any local declaration in this frame.
                 for node in &selected {
                     let FlowNodeKind::ExprSite(site) = graph.node_kind(*node) else { continue };
-                    let site_record = bundle.skeleton.expr_site(site);
+                    let site_record = bundle.skeleton().expr_site(site);
                     if site_record.closures.is_empty() { continue; }
                     for (ordinal, record) in site_record.closures.iter().enumerate() {
                         let closure = SkeletonClosureId::from_index(u32::try_from(ordinal).unwrap_or(u32::MAX));

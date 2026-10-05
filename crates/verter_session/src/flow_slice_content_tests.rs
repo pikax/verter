@@ -81,8 +81,8 @@ fn selection_for(
     verter_session_query::flow::bundle::BoundFlowGraph,
 ) {
     let bound = memo.flow_bound_graph_for_tests(matched.entry());
-    let skeleton = &bound.bundle().skeleton;
-    let graph = &bound.bundle().graph;
+    let skeleton = &bound.bundle().skeleton();
+    let graph = &bound.bundle().graph();
     let demand = SliceDemand::for_return_projection(skeleton, path);
     let plan = ReturnPathPeeker::new(graph)
         .plan(&demand, &FlowSliceBudget::default())
@@ -6097,7 +6097,7 @@ fn selected_assignment_definition_lookup_ignores_unrelated_write_inventory() {
         assert_eq!(
             bound
                 .bundle()
-                .skeleton
+                .skeleton()
                 .expr_site(definitions[0])
                 .span
                 .to_absolute(entry.entry().span().start),
@@ -6120,8 +6120,8 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     let index = memo.function_program_index();
     let entry = entry_of(&index, "f");
     let bound = memo.flow_bound_graph_for_tests(entry.entry());
-    let skeleton = &bound.bundle().skeleton;
-    let graph = &bound.bundle().graph;
+    let skeleton = &bound.bundle().skeleton();
+    let graph = &bound.bundle().graph();
     let demand = SliceDemand::for_return_projection(skeleton, &[]);
     let plan = ReturnPathPeeker::new(graph)
         .plan(&demand, &FlowSliceBudget::default())

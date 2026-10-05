@@ -1,9 +1,12 @@
 //! A content-pinned function identity and the immutable flow-graph bundle built for it.
 
 use crate::analysis::types::Hash16;
-use crate::flow::flow_graph::FunctionFlowGraph;
-use crate::flow::{binding::FlowBindingMap, skeleton::FunctionBodySkeleton};
-use crate::function_program::FunctionProgramKey;
+use crate::flow::flow_graph::{build_function_flow_graph, FunctionFlowGraph};
+use crate::flow::{
+    binding::FlowBindingMap,
+    skeleton::{FunctionBodySkeleton, PreparedFunctionBodySkeleton},
+};
+use crate::function_program::{FunctionProgramEntry, FunctionProgramKey};
 use std::sync::Arc;
 use verter_language::{FileLanguage, ParseKey};
 
@@ -18,9 +21,10 @@ use verter_language::{FileLanguage, ParseKey};
 /// parser version.
 ///
 /// A public REQUEST/identity value, not a certificate: any crate may build
-/// one, and a key does not prove its axes describe live source. Whatever
-/// acquires or publishes a product under a key must bind that product to
-/// the key's complete source identity itself.
+/// one, and a key does not prove its axes describe live source. A product
+/// is bound to a key only through [`KeyedFunctionStructure::bind`], which
+/// admits every axis against the acquired source identity; a bundle then
+/// carries that key, and publication under any other key is refused.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowSliceFunctionKey {
     /// Canonical id of the file serving the function.
@@ -60,34 +64,186 @@ pub struct FlowSliceFunctionKey {
     pub build_toolchain_fingerprint: crate::source::toolchain::BuildToolchainFingerprint,
 }
 
-/// One memoized per-function flow bundle: the skeleton, exact indexed
-/// binding correspondence, and graph, shared by every demand against
-/// the same content version.
-pub struct FlowGraphBundle {
-    /// The arena-free body skeleton.
-    pub skeleton: Arc<FunctionBodySkeleton>,
-    /// The authoritative indexed declaration map built once with the skeleton.
-    pub bindings: Arc<FlowBindingMap>,
-    /// The typed-edge dependence graph built once from the skeleton.
-    pub graph: Arc<FunctionFlowGraph>,
+/// The complete live source identity a flow structure is acquired under:
+/// the serving file's canonical, its parse environment, exact parse
+/// identity and language row, and the toolchain that built it.
+///
+/// Filled by the acquiring host from the serving artifact; a key is
+/// admitted only when every one of its source axes equals this identity
+/// ([`FlowSourceIdentity::admits`]).
+#[derive(Debug, Clone, Copy)]
+pub struct FlowSourceIdentity<'a> {
+    pub canonical_id: &'a str,
+    pub parse_env_hash: Hash16,
+    pub parse_key: &'a ParseKey,
+    pub file_language: &'a FileLanguage,
+    pub build_toolchain_fingerprint: crate::source::toolchain::BuildToolchainFingerprint,
 }
 
-/// A flow graph bundle SEALED to the store key it was built for. Fields
-/// are private and the sole constructors are [`FunctionFlowGraphStore`]
-/// methods, so a consumer can never plan over one graph while naming
-/// another's body identity. This is the completeness-proof layer's graph
-/// handle: the production demand preparation mints it from the memoized
-/// bundle ([`FunctionFlowGraphStore::bound_graph`]); the gated test mint
-/// below serves the hermetic fixtures.
+/// The first key axis that does not describe the acquired source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowKeyMismatch {
+    Canonical,
+    Function,
+    StableBodyHash,
+    ExactBodyHash,
+    ParseEnv,
+    ParseKey,
+    Language,
+    Toolchain,
+}
+
+impl FlowSourceIdentity<'_> {
+    /// Whether `key` names exactly this source's version of `entry`: every
+    /// key axis — canonical, function, both body hashes, parse
+    /// environment, parse identity, language row and toolchain — must
+    /// match.
+    pub fn admits(
+        &self,
+        key: &FlowSliceFunctionKey,
+        entry: &FunctionProgramEntry,
+    ) -> Result<(), FlowKeyMismatch> {
+        if key.canonical_id.as_ref() != self.canonical_id {
+            return Err(FlowKeyMismatch::Canonical);
+        }
+        if &key.function != entry.key() {
+            return Err(FlowKeyMismatch::Function);
+        }
+        if key.flow_body_stable_hash != entry.flow_body_stable_hash() {
+            return Err(FlowKeyMismatch::StableBodyHash);
+        }
+        if Some(key.flow_body_exact_hash) != entry.flow_body_exact_hash() {
+            return Err(FlowKeyMismatch::ExactBodyHash);
+        }
+        if key.parse_env_hash != self.parse_env_hash {
+            return Err(FlowKeyMismatch::ParseEnv);
+        }
+        if &key.parse_key != self.parse_key {
+            return Err(FlowKeyMismatch::ParseKey);
+        }
+        if &key.file_language != self.file_language {
+            return Err(FlowKeyMismatch::Language);
+        }
+        if key.build_toolchain_fingerprint != self.build_toolchain_fingerprint {
+            return Err(FlowKeyMismatch::Toolchain);
+        }
+        Ok(())
+    }
+}
+
+/// A prepared function structure bound to the content key it was
+/// validated against. Both fields are private: [`Self::bind`] is the one
+/// production constructor, and it admits the key against the acquired
+/// source identity and the indexed function the structure was prepared
+/// for.
+pub struct KeyedFunctionStructure {
+    key: FlowSliceFunctionKey,
+    prepared: PreparedFunctionBodySkeleton,
+}
+
+impl KeyedFunctionStructure {
+    /// Bind `prepared` (prepared for `entry`) to `key`, refusing a key any
+    /// of whose axes does not describe `source`'s version of `entry`.
+    pub fn bind(
+        key: FlowSliceFunctionKey,
+        prepared: PreparedFunctionBodySkeleton,
+        entry: &FunctionProgramEntry,
+        source: FlowSourceIdentity<'_>,
+    ) -> Result<Self, FlowKeyMismatch> {
+        source.admits(&key, entry)?;
+        if prepared.bindings().function() != entry.key() {
+            return Err(FlowKeyMismatch::Function);
+        }
+        Ok(Self { key, prepared })
+    }
+
+    /// Bind a hermetic fixture's structure to its fixture key. The fixture
+    /// has no serving artifact, so only the function relationship is
+    /// checked.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bind_fixture(key: FlowSliceFunctionKey, prepared: PreparedFunctionBodySkeleton) -> Self {
+        assert_eq!(
+            &key.function,
+            prepared.bindings().function(),
+            "prepared fixture must match its content key"
+        );
+        Self { key, prepared }
+    }
+
+    /// The content key the structure was validated against.
+    pub fn key(&self) -> &FlowSliceFunctionKey {
+        &self.key
+    }
+}
+
+/// One memoized per-function flow bundle: the content key it was built
+/// for, the skeleton, the exact indexed binding correspondence, and the
+/// graph, shared by every demand against the same content version.
+///
+/// Every field is private. [`FlowGraphBundle::build`] is the one
+/// constructor: it takes a [`KeyedFunctionStructure`] and derives the graph
+/// and the binding map from that one prepared structure, so a bundle's key,
+/// graph and binding map always describe the same structure.
+pub struct FlowGraphBundle {
+    key: FlowSliceFunctionKey,
+    skeleton: Arc<FunctionBodySkeleton>,
+    bindings: Arc<FlowBindingMap>,
+    graph: Arc<FunctionFlowGraph>,
+}
+
+impl FlowGraphBundle {
+    /// Build the bundle of one keyed structure: the graph consumes the
+    /// sealed prepared structure, whose binding map rides along unchanged.
+    pub fn build(structure: KeyedFunctionStructure) -> Self {
+        let KeyedFunctionStructure { key, prepared } = structure;
+        let graph = build_function_flow_graph(&prepared);
+        let (skeleton, bindings) = prepared.into_parts();
+        Self {
+            key,
+            skeleton: Arc::new(skeleton),
+            bindings: Arc::new(bindings),
+            graph: Arc::new(graph),
+        }
+    }
+
+    /// The content key the bundle was built for.
+    pub fn key(&self) -> &FlowSliceFunctionKey {
+        &self.key
+    }
+
+    /// The arena-free body skeleton.
+    pub fn skeleton(&self) -> &Arc<FunctionBodySkeleton> {
+        &self.skeleton
+    }
+
+    /// The authoritative indexed declaration map built once with the skeleton.
+    pub fn bindings(&self) -> &Arc<FlowBindingMap> {
+        &self.bindings
+    }
+
+    /// The typed-edge dependence graph built once from the skeleton.
+    pub fn graph(&self) -> &Arc<FunctionFlowGraph> {
+        &self.graph
+    }
+}
+
+/// An immutable handle on one keyed flow bundle: the completeness-proof
+/// layer's graph handle. Its key is the bundle's own, so a consumer can
+/// never plan over one graph while naming another's body identity. There
+/// is no constructor taking a separately supplied key.
 pub struct BoundFlowGraph {
-    pub key: FlowSliceFunctionKey,
-    pub bundle: Arc<FlowGraphBundle>,
+    bundle: Arc<FlowGraphBundle>,
 }
 
 impl BoundFlowGraph {
+    /// The handle on a memoized keyed bundle.
+    pub fn new(bundle: Arc<FlowGraphBundle>) -> Self {
+        Self { bundle }
+    }
+
     /// The content-pinned function identity the bundle was built for.
     pub fn key(&self) -> &FlowSliceFunctionKey {
-        &self.key
+        self.bundle.key()
     }
 
     /// The memoized bundle the key names.

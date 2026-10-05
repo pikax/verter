@@ -4,9 +4,9 @@
 use super::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use super::request_ports::OwnedLowering;
 use std::sync::Arc;
-use verter_session_query::flow::bundle::FlowSliceFunctionKey;
-use verter_session_query::flow::{
-    binding::FlowBindingMapError, skeleton::PreparedFunctionBodySkeleton,
+use verter_session_query::flow::binding::FlowBindingMapError;
+use verter_session_query::flow::bundle::{
+    FlowSliceFunctionKey, FlowSourceIdentity, KeyedFunctionStructure,
 };
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_session_query::{QueryHostAdmission, QueryHostError, QueryHostServe};
@@ -40,10 +40,18 @@ fn lower_authored(
     }
 }
 
+/// Acquire the prepared flow structure `key` names, bound to that key.
+///
+/// The key is a request: every one of its axes is admitted against the
+/// serving artifact's live source identity — canonical, function, both
+/// body hashes, parse environment, exact parse identity, language row and
+/// this process's toolchain — before the structure is built, and the
+/// product is bound to the key through the same admission. A key differing
+/// on any axis is a typed miss, never a product published under it.
 fn prepare_structure(
     inputs: &impl SourceInputProvider,
     key: &FlowSliceFunctionKey,
-) -> Result<Option<PreparedFunctionBodySkeleton>, FlowBindingMapError> {
+) -> Result<Option<KeyedFunctionStructure>, FlowBindingMapError> {
     let Some(serve) = inputs.raw_serve(&key.canonical_id) else {
         return Ok(None);
     };
@@ -54,14 +62,24 @@ fn prepare_structure(
         return Ok(None);
     };
     let entry = matched.entry();
-    if entry.flow_body_stable_hash() != key.flow_body_stable_hash
-        || entry.flow_body_exact_hash() != Some(key.flow_body_exact_hash)
-        || indexed.source_parse_key().as_ref() != Some(&key.parse_key)
-        || indexed.file_language != key.file_language
-    {
+    let Some(parse_key) = indexed.source_parse_key() else {
+        return Ok(None);
+    };
+    let source = FlowSourceIdentity {
+        canonical_id: &key.canonical_id,
+        parse_env_hash: indexed.parse_env_hash,
+        parse_key: &parse_key,
+        file_language: &indexed.file_language,
+        build_toolchain_fingerprint:
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
+    };
+    if source.admits(key, entry).is_err() {
         return Ok(None);
     }
-    memo.function_flow_structure(entry)
+    let Some(prepared) = memo.function_flow_structure(entry)? else {
+        return Ok(None);
+    };
+    Ok(KeyedFunctionStructure::bind(key.clone(), prepared, entry, source).ok())
 }
 
 trait SourceInputProvider {
@@ -698,7 +716,7 @@ impl<
     fn prepare_function_structure(
         &self,
         key: &FlowSliceFunctionKey,
-    ) -> Result<Option<PreparedFunctionBodySkeleton>, FlowBindingMapError> {
+    ) -> Result<Option<KeyedFunctionStructure>, FlowBindingMapError> {
         prepare_structure(self, key)
     }
     #[cfg(test)]

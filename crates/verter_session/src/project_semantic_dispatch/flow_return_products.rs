@@ -121,14 +121,14 @@ mod tests {
             resources,
             additional_requirements: Arc::from([]),
         };
-        let selection = ReturnPathPeeker::new(&bundle.graph)
+        let selection = ReturnPathPeeker::new(bundle.graph())
             .plan(
-                &SliceDemand::for_return_projection(&bundle.skeleton, &[]),
+                &SliceDemand::for_return_projection(bundle.skeleton(), &[]),
                 &request.resources.slice_budget,
             )
             .unwrap();
         let retained = crate::cache_runtime::flow_slice_node::PlannedFlowSlice::for_test(
-            compute_flow_slice_hash(&selection, &bundle.graph, &bundle.skeleton),
+            compute_flow_slice_hash(&selection, bundle.graph(), bundle.skeleton()),
             selection,
         );
         let plan = build_flow_demand_plan(request, &bound, &retained).unwrap();
@@ -150,26 +150,26 @@ mod tests {
         );
         let bundle = bound.bundle();
         let binding = bundle
-            .graph
+            .graph()
             .nodes()
             .find_map(|node| {
-                let FlowNodeKind::Binding(binding) = bundle.graph.node_kind(node) else {
+                let FlowNodeKind::Binding(binding) = bundle.graph().node_kind(node) else {
                     return None;
                 };
-                (bundle.bindings.identity(binding)?.name.as_ref() == "x").then_some(binding)
+                (bundle.bindings().identity(binding)?.name.as_ref() == "x").then_some(binding)
             })
             .unwrap();
         let subject = FlowBindingRef::Local(binding);
         let initializer = bundle
-            .graph
-            .expr_site_node(bundle.skeleton.binding(binding).initializer.unwrap());
+            .graph()
+            .expr_site_node(bundle.skeleton().binding(binding).initializer.unwrap());
         let writes: Vec<_> = bundle
-            .skeleton
+            .skeleton()
             .writes
             .iter()
             .map(|write| {
                 bundle
-                    .graph
+                    .graph()
                     .expr_site_node(write.value.expect("assignment RHS"))
             })
             .collect();
@@ -250,9 +250,9 @@ mod tests {
             let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
             let bindings: Vec<_> = bound
                 .bundle()
-                .graph
+                .graph()
                 .nodes()
-                .filter_map(|node| match bound.bundle().graph.node_kind(node) {
+                .filter_map(|node| match bound.bundle().graph().node_kind(node) {
                     FlowNodeKind::Binding(binding) => Some(binding),
                     _ => None,
                 })
@@ -264,10 +264,10 @@ mod tests {
                     DefiniteAssignmentProduct::assigned(),
                     ReachingTypeProduct::of(number),
                     Some(
-                        bound.bundle().graph.expr_site_node(
+                        bound.bundle().graph().expr_site_node(
                             bound
                                 .bundle()
-                                .skeleton
+                                .skeleton()
                                 .binding(*binding)
                                 .initializer
                                 .unwrap(),
@@ -291,10 +291,10 @@ mod tests {
                 .ptr_eq(&products.writes_by_sequence));
             let binding = bindings[count / 2];
             let subject = FlowBindingRef::Local(binding);
-            let definition = bound.bundle().graph.expr_site_node(
+            let definition = bound.bundle().graph().expr_site_node(
                 bound
                     .bundle()
-                    .skeleton
+                    .skeleton()
                     .binding(binding)
                     .initializer
                     .unwrap(),
@@ -414,11 +414,11 @@ mod tests {
             fixture("function products(x:string|number){x=1;return x;}", false);
         let binding = bound
             .bundle()
-            .graph
+            .graph()
             .nodes()
-            .find_map(|node| match bound.bundle().graph.node_kind(node) {
+            .find_map(|node| match bound.bundle().graph().node_kind(node) {
                 FlowNodeKind::Binding(binding)
-                    if bound.bundle().skeleton.binding(binding).kind
+                    if bound.bundle().skeleton().binding(binding).kind
                         == verter_session_query::flow::skeleton::SkeletonBindingKind::Param =>
                 {
                     Some(binding)
@@ -449,8 +449,8 @@ mod tests {
         let mut end = entering.clone();
         let definition = bound
             .bundle()
-            .graph
-            .expr_site_node(bound.bundle().skeleton.writes[0].value.unwrap());
+            .graph()
+            .expr_site_node(bound.bundle().skeleton().writes[0].value.unwrap());
         end.bind_at(
             &subject,
             DefiniteAssignmentProduct::assigned(),
@@ -485,14 +485,17 @@ mod tests {
         );
         let (hub, identity) = bound
             .bundle()
-            .graph
+            .graph()
             .nodes()
             .find_map(|node| {
-                let FlowNodeKind::CapturedBinding(binding) = bound.bundle().graph.node_kind(node)
+                let FlowNodeKind::CapturedBinding(binding) = bound.bundle().graph().node_kind(node)
                 else {
                     return None;
                 };
-                Some((node, bound.bundle().graph.captured_binding(binding).clone()))
+                Some((
+                    node,
+                    bound.bundle().graph().captured_binding(binding).clone(),
+                ))
             })
             .expect("real selected captured hub");
         let graph = crate::semantic_query_memo::SemanticGraphStore::new();

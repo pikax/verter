@@ -73,9 +73,9 @@ pub struct FlowProductInputs {
 impl FlowProductInputs {
     pub(crate) fn for_bound_graph(bound: &BoundFlowGraph) -> Self {
         Self {
-            graph: Arc::clone(&bound.bundle().graph),
+            graph: Arc::clone(bound.bundle().graph()),
             scope: bound.key().clone(),
-            bindings: Arc::clone(&bound.bundle().bindings),
+            bindings: Arc::clone(bound.bundle().bindings()),
         }
     }
 
@@ -625,7 +625,7 @@ impl FlowProductExecution {
         bound: &BoundFlowGraph,
     ) -> Result<FlowProductContent, FlowProductKeyError> {
         if bound.key() != &self.scope.inputs.scope
-            || !Arc::ptr_eq(&bound.bundle().graph, &self.scope.inputs.graph)
+            || !Arc::ptr_eq(bound.bundle().graph(), &self.scope.inputs.graph)
         {
             return Err(FlowProductKeyError::GraphMismatch);
         }
