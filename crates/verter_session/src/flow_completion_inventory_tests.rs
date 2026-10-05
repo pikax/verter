@@ -398,7 +398,7 @@ pub(crate) fn every_site_row_is_reached_and_every_reached_row_is_listed() {
 /// Every transport row names the real type that stores the fact.
 ///
 /// The match is EXHAUSTIVE, so a new [`CompletionTransport`] variant does
-/// not compile until a type claims it through the sealed
+/// not compile until a type claims it through its registered
 /// [`TransportsCompletion`] impl — which is what keeps the row list
 /// code-first rather than a name someone wrote down.
 #[test]

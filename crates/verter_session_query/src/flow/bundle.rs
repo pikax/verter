@@ -16,6 +16,11 @@ use verter_language::{FileLanguage, ParseKey};
 /// ([`FileLanguage`]) of the serving file — the same source axes
 /// [`verter_session_query::source::artifact_key::FileArtifactKey`] carries — and the
 /// parser version.
+///
+/// A public REQUEST/identity value, not a certificate: any crate may build
+/// one, and a key does not prove its axes describe live source. Whatever
+/// acquires or publishes a product under a key must bind that product to
+/// the key's complete source identity itself.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowSliceFunctionKey {
     /// Canonical id of the file serving the function.

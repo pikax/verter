@@ -44,6 +44,12 @@ pub(crate) struct RefusalObservationScope {
 
 impl RefusalObservationScope {
     /// Push a fresh scope onto this thread's stack.
+    ///
+    /// Opening a scope is purely OBSERVATIONAL: it records the reasons other
+    /// code reports while it is active, clears no other scope, removes only
+    /// its own registration when dropped, and neither records a refusal nor
+    /// fabricates a cacheable result. Refusals are recorded through
+    /// [`record_refusal`].
     pub(crate) fn enter() -> Self {
         let cell = Rc::new(Cell::new(None));
         ACTIVE_REFUSAL_SCOPES.with(|scopes| scopes.borrow_mut().push(Rc::clone(&cell)));

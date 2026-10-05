@@ -25,20 +25,31 @@
 //!
 //! 1. **The fact cannot be produced or read without naming a row.** A
 //!    normal-completion fact is an opaque type whose inner boolean is
-//!    private to this module. [`NormalCompletion::minted`] is its ONLY
-//!    constructor and takes a [`CompletionConstruction`];
-//!    [`NormalCompletion::reaches_end`] is its ONLY reader and takes a
-//!    [`CompletionDischarge`]. A new site that wants to derive anything
-//!    from a completion fact therefore cannot compile until it names a
-//!    row. This is the direction an amended prose list could never cover.
+//!    private to this module. [`NormalCompletion::minted`] is its
+//!    production constructor and takes a [`CompletionConstruction`];
+//!    [`NormalCompletion::reaches_end`] is its production reader and takes
+//!    a [`CompletionDischarge`]. Both are public: the source lowering, the
+//!    evaluator and the result rebuild are all legitimate producers, in
+//!    different crates. What the API guarantees is ROW-QUALIFIED production
+//!    — a new site that wants to derive anything from a completion fact
+//!    cannot compile until it names a row. It does not register a unique
+//!    call site per row, and it does not prove the supplied boolean is
+//!    correct. This is the direction an amended prose list could never
+//!    cover.
 //! 2. **The two site vocabularies cannot be confused.** They are distinct
 //!    closed enums, so a construction row is unrepresentable at a
 //!    discharge and the reverse — a mismatch is a type error, not a
 //!    runtime assertion that compiles out of a shipped build.
-//! 3. **Every stored carrier binds to a real type.** [`TransportsCompletion`]
-//!    is SEALED and implemented once per carrier type, so a
-//!    [`CompletionTransport`] row always names a type that exists and
-//!    really holds the fact.
+//! 3. **Every listed carrier row is registered against a real type.**
+//!    [`TransportsCompletion`] is a public test-support registration trait,
+//!    implemented once per carrier type through
+//!    [`transports_completion!`](crate::transports_completion), so a
+//!    [`CompletionTransport`] row names a type that exists. The trait is
+//!    NOT sealed — any crate can implement it under test support, and the
+//!    carrier types live in several crates — and an implementation binds a
+//!    type to a row without proving the type stores the fact. The closed
+//!    row vocabulary and the inventory suite's equality check (4) are what
+//!    keep the registrations honest.
 //! 4. **The listed inventory and the cited inventory are the same set.**
 //!    The suite records which rows real evaluations visit and requires
 //!    that set to EQUAL the listed one. The equality is what closes both
@@ -112,8 +123,10 @@ pub enum FlowCompletionRole {
 /// Every point that MINTS a completion fact.
 ///
 /// Passing one of these to [`NormalCompletion::minted`] is what puts a
-/// construction on the inventory: there is no other way to build the
-/// fact, so a new minting site does not compile until it has a row.
+/// construction on the inventory: production has no other way to build the
+/// fact, so a new minting site does not compile until it names a row. Rows
+/// qualify production; they are not unique call-site registrations, and
+/// several sites may cite one row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CompletionConstruction {
     /// The statement-list lowering's running reachability accumulator —
@@ -229,8 +242,10 @@ impl CompletionConstruction {
         Self::ResultRebuild,
     ];
 
-    /// The fact this site mints. Exhaustive: a new variant must decide
-    /// what it produces before it compiles.
+    /// The fact this row mints. Exhaustive: a new variant must decide
+    /// what it produces before it compiles. A pure mapping over the closed
+    /// row vocabulary — it names which fact a row stands for and
+    /// manufactures no evidence.
     pub fn fact(self) -> FlowCompletionFact {
         match self {
             Self::RegionAccumulator
@@ -373,21 +388,15 @@ impl FlowCompletionCarrier {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-/// The sealing module: [`TransportsCompletion`] is implementable only
-/// inside this crate's declared carrier set, so a transport row always
-/// names a type this inventory vouched for.
-pub mod sealed {
-    /// Sealed: only this crate's declared completion carriers implement
-    /// it, and it is the supertrait bound on [`super::TransportsCompletion`].
-    pub trait Sealed {}
-}
-
-#[cfg(any(test, feature = "test-support"))]
-/// A type that stores a completion fact.
+/// Public test-support registration of a type that stores a completion
+/// fact.
 ///
 /// The impl is what makes [`CompletionTransport`] code-first: the row
-/// exists because a real type claims it.
-pub trait TransportsCompletion: sealed::Sealed {
+/// exists because a real type claims it. Registration is open, not sealed:
+/// carrier types live in several crates, so the declaring macro must be
+/// usable from each of them. An impl binds a type to a row; it does not
+/// prove the type actually holds a completion fact.
+pub trait TransportsCompletion {
     /// This carrier's inventory row.
     const TRANSPORT: CompletionTransport;
 }
@@ -396,8 +405,6 @@ pub trait TransportsCompletion: sealed::Sealed {
 #[macro_export]
 macro_rules! transports_completion {
     ($ty:ty => $row:ident) => {
-        #[cfg(any(test, feature = "test-support"))]
-        impl $crate::flow::completion::sealed::Sealed for $ty {}
         #[cfg(any(test, feature = "test-support"))]
         impl $crate::flow::completion::TransportsCompletion for $ty {
             const TRANSPORT: $crate::flow::completion::CompletionTransport =
@@ -408,10 +415,12 @@ macro_rules! transports_completion {
 
 /// Whether control can reach past a region or body without returning.
 ///
-/// The inner fact is PRIVATE to this module. It is minted only through
-/// [`Self::minted`] and read only through [`Self::reaches_end`], and both
-/// take an inventory row — so every site that produces or consumes a
-/// normal-completion fact is, by construction, on the inventory.
+/// The inner fact is PRIVATE to this module. Production mints it through
+/// [`Self::minted`] and reads it through [`Self::reaches_end`], and both
+/// are public and take an inventory row — so every site that produces or
+/// consumes a normal-completion fact names a row. That is row-qualified
+/// production, not unique call-site registration: several sites may cite
+/// one row, and the row does not vouch for the boolean a caller supplies.
 ///
 /// The type deliberately offers no `From<bool>`, no `Into<bool>`, and no
 /// `Deref`: a conversion with no row would be exactly the silent carrier
@@ -420,7 +429,7 @@ macro_rules! transports_completion {
 pub struct NormalCompletion(bool);
 
 impl NormalCompletion {
-    /// Mint the fact at one inventory construction site.
+    /// Mint the fact, citing the construction row it is produced under.
     #[must_use]
     pub fn minted(reaches_end: bool, at: CompletionConstruction) -> Self {
         observe_construction(at);

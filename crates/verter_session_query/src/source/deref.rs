@@ -95,6 +95,13 @@ pub enum DerefedBodyShape {
 /// `TypeParam` shells in the authored position's own lexical scope under
 /// the correct per-position frame). NEVER a `SemanticNodeId` — graph
 /// lowering is the session phase's job.
+///
+/// A transient result DTO with public fields. Its authority comes from its
+/// DELIVERY through the owned source-lowering port, not from its type: the
+/// fields carry real type expressions and lexical visibility, so a value
+/// built anywhere else and handed to a consumer would be lowered as if it
+/// were authored source — not merely miss a cache. Consumers accept it only
+/// from that port.
 #[derive(Debug, Clone)]
 pub struct DerefedAuthoredBody {
     pub shape: DerefedBodyShape,

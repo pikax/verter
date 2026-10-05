@@ -6,6 +6,11 @@
 /// canonical's LIVE `parse_env_hash` dimension (content validity stays
 /// on the `FileWholeHash` rail). Snapshot value backing the strict
 /// `FileSourceEnv` validation branch.
+///
+/// A public identity VALUE, not a certificate: any crate may build one.
+/// Correctness comes from obtaining the live values through the
+/// authoritative store view and comparing them strictly, never from who
+/// constructed the record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEnvIdentity {
     pub parse_env_hash: crate::facts::fact_cache::ParseEnvHash,

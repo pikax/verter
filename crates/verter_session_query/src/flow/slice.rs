@@ -2410,18 +2410,12 @@ pub enum FrameShadowedName {
     Namespace(Arc<str>),
 }
 
-/// One `TypeExpr` minted INSIDE slice content, carrying the frame gate's
-/// verdict: the frame-owned names its answer references.
-///
-/// The shared shallow-pass lowering has no frame — it resolves every
-/// name it meets in FILE-OWNER SCOPE — so any answer produced inside a
-/// function body position is wrong whenever the frame binds one of the
-/// names it references. Both fields are PRIVATE and both constructors
-/// live in this module, so "produce a `TypeExpr` in slice content
-/// without deciding what the frame does to it" is inexpressible at every
-/// call site rather than merely discouraged: a new producer must pick
 /// A function's authored type predicate: its subject and assertion flag,
 /// with the target gated exactly like the return it stands beside.
+///
+/// Both fields are currently public, so nothing in the type ties the gated
+/// `target` to the authored `predicate`'s own target: that correspondence
+/// is upheld by the producers, not by the compiler.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlicePredicate {
     pub predicate: Arc<verter_type_expr::TypePredicate>,
@@ -2442,8 +2436,17 @@ impl SlicePredicate {
     }
 }
 
-/// [`Lowerer::gate`] or the explicitly-named
-/// [`GatedType::root_signature`].
+/// One `TypeExpr` minted INSIDE slice content, carrying the frame gate's
+/// verdict: the frame-owned names its answer references.
+///
+/// The shared shallow-pass lowering has no frame — it resolves every
+/// name it meets in FILE-OWNER SCOPE — so any answer produced inside a
+/// function body position is wrong whenever the frame binds one of the
+/// names it references. Producers mint a value through the frame gate
+/// (`Lowerer::gate`) or the explicitly-named [`GatedType::root_signature`].
+/// Both fields are currently public, so that discipline is upheld by the
+/// producers rather than enforced by the compiler: any crate can build a
+/// value or replace its type or shadow list without consulting a frame.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GatedType {
     pub ty: TypeExpr,
@@ -2492,8 +2495,8 @@ impl GatedType {
     /// produced by one of the two above, and this only records
     /// additional frame-owned names it references — the signature's own
     /// PARAMETER LIST inventory, and a default initializer's
-    /// reference-chain root. Private to this module, so the mint surface
-    /// stays exactly two entrances.
+    /// reference-chain root. It only adds entries, so it cannot erase a
+    /// verdict; it is public, like the fields.
     pub fn add_shadowed(&mut self, extra: impl IntoIterator<Item = FrameShadowedName>) {
         let mut shadowed = self.shadowed.to_vec();
         let before = shadowed.len();
