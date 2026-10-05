@@ -468,7 +468,7 @@ mod tests {
         let refused_hash = [9u8; 16];
         let refused = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
             .get_or_compute(&host, "/w/refused.ts", refused_hash, &view, || {
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(

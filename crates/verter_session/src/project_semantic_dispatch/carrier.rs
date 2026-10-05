@@ -850,7 +850,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .force_carrier_direct_serve_fence_for_tests
                         .load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                     );
                 }

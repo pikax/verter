@@ -8,8 +8,8 @@
 //!   request's immutable view, but a DETERMINISTIC non-cacheable read was
 //!   consumed. Reusable within the request; never publishable. Every
 //!   cold return, request-memo hit and singleflight follower of such a
-//!   value must [`NonCacheableRefusal::replay`] the stored refusal into
-//!   the enclosing tracer before returning.
+//!   value must replay the stored refusal ([`ReuseClass::refusal_replay`])
+//!   into the enclosing tracer before returning.
 //! * [`ReuseClass::NoReuse`] — a TRANSIENT refusal, an unattributed
 //!   refusal, an incomplete result, or a non-reproducible miss. Not safe
 //!   even for request-scoped reuse.
@@ -25,26 +25,20 @@
 //! for this request's view), the lease miss produced a degraded answer
 //! that a later demand under a live lease would improve.
 //!
-//! So the marking chokepoint
-//! ([`note_non_cacheable_read_fan_out`](note_non_cacheable_read_fan_out))
-//! also records its TYPED reason into every active
-//! [`RefusalObservationScope`] on the thread — the same fan-out shape the
-//! tracer stack uses, so an inner producer's refusal is observed by every
-//! enclosing scope that consumes its value. The scope is deliberately
-//! independent of the fact tracer: a consumer that needs the reason may
-//! run without a tracer installed, and a scheduler-boundary carrier needs
-//! a value it can move across threads.
+//! So the engine's marking chokepoint also records its TYPED reason into
+//! every active refusal-observation scope on the thread — the same fan-out
+//! shape the tracer stack uses, so an inner producer's refusal is observed
+//! by every enclosing scope that consumes its value. This module holds only
+//! the pure vocabulary and operations; applying a refusal to the running
+//! thread's tracers and scopes belongs to the engine that owns them.
 //!
 //! ## Dominance
 //!
-//! A scope that observes several refusals keeps ONE. A transient refusal
-//! DOMINATES a deterministic one (the conservative direction: a value
-//! whose basis includes a transient miss must not be frozen for the
-//! request), and within a class the FIRST observation wins so the
-//! recorded cause is the earliest, not the last.
-
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+//! A scope that observes several refusals keeps ONE ([`dominant_refusal`]).
+//! A transient refusal DOMINATES a deterministic one (the conservative
+//! direction: a value whose basis includes a transient miss must not be
+//! frozen for the request), and within a class the FIRST observation wins
+//! so the recorded cause is the earliest, not the last.
 
 use crate::facts::fact_read_set::NonCacheablePropagation;
 
@@ -83,8 +77,8 @@ impl NonCacheableRefusal {
     }
 
     /// The exact marking-site discriminant. Fixture-facing: the reuse
-    /// DECISION is made by [`classify_reuse`] and applied by
-    /// [`ReuseClass::replay_refusal`], so only a discriminating test
+    /// DECISION is made by [`classify_reuse`] and its replay is described
+    /// by [`ReuseClass::refusal_replay`], so only a discriminating test
     /// needs to read the reason back out.
     #[cfg(any(test, feature = "test-support"))]
     #[inline]
@@ -100,21 +94,6 @@ impl NonCacheableRefusal {
     #[inline]
     pub fn propagation(&self) -> NonCacheablePropagation {
         self.reason.propagation()
-    }
-
-    /// Re-apply this refusal to the current thread's active tracer stack
-    /// and refusal scopes — the replay every reuse of a
-    /// [`ReuseClass::RequestOnly`] value performs before returning.
-    ///
-    /// Idempotent: the tracer records a monotone strongest-propagation
-    /// and a refusal scope keeps its dominant reason, so replaying on the
-    /// cold return (where the original fan-out already fired on this
-    /// thread) changes nothing, while replaying on a memo hit or a
-    /// singleflight follower — where it did NOT fire on this thread — is
-    /// the only thing that keeps the taint attached to the value.
-    #[inline]
-    pub(crate) fn replay(&self) {
-        crate::facts::reuse::note_non_cacheable_read_fan_out(self.reason);
     }
 }
 
@@ -165,7 +144,7 @@ impl ReuseClass {
 
     /// The stored refusal, for a [`Self::RequestOnly`] value.
     /// Fixture-facing: production replays through
-    /// [`Self::replay_refusal`] rather than unwrapping the class.
+    /// [`Self::refusal_replay`] rather than unwrapping the class.
     #[cfg(any(test, feature = "test-support"))]
     #[inline]
     pub fn request_only_refusal(&self) -> Option<&NonCacheableRefusal> {
@@ -175,21 +154,31 @@ impl ReuseClass {
         }
     }
 
-    /// Replay this class's refusal, if it has one. Called on EVERY
-    /// return of a reused value — cold, memo hit, singleflight follower.
+    /// The refusal EVERY return of a reused value — cold, memo hit,
+    /// singleflight follower — must re-apply to its reader, or `None` when
+    /// the class replays nothing. Pure: the engine owning the running
+    /// thread's tracers applies it.
+    ///
+    /// Replaying is idempotent: the tracer records a monotone
+    /// strongest-propagation and a refusal scope keeps its dominant reason,
+    /// so replaying on the cold return (where the original fan-out already
+    /// fired on this thread) changes nothing, while replaying on a memo hit
+    /// or a singleflight follower — where it did NOT fire on this thread —
+    /// is the only thing that keeps the taint attached to the value.
     #[inline]
-    pub fn replay_refusal(&self) {
+    #[must_use]
+    pub fn refusal_replay(&self) -> Option<RefusalReplay> {
         match self {
-            Self::RequestOnly(refusal) => refusal.replay(),
+            Self::RequestOnly(refusal) => Some(RefusalReplay::Reason(refusal.reason)),
             Self::NoReuse(NoReuseCause::TransientRefusal(reason)) => {
-                crate::facts::reuse::note_non_cacheable_read_fan_out(*reason);
+                Some(RefusalReplay::Reason(*reason))
             }
             Self::NoReuse(NoReuseCause::UnattributedRefusal(propagation)) => {
-                crate::facts::reuse::note_non_cacheable_propagation(*propagation);
+                Some(RefusalReplay::Propagation(*propagation))
             }
             Self::Shared
             | Self::NoReuse(NoReuseCause::Incomplete)
-            | Self::NoReuse(NoReuseCause::NonReproducibleMiss) => {}
+            | Self::NoReuse(NoReuseCause::NonReproducibleMiss) => None,
         }
     }
 
@@ -206,7 +195,18 @@ impl ReuseClass {
     }
 }
 
-/// What a producer's [`RefusalObservationScope`] saw, folded with any
+/// The refusal a reused value re-applies to its reader
+/// ([`ReuseClass::refusal_replay`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReplay {
+    /// A typed reason: recorded into every refusal-observation scope and
+    /// fanned out with the propagation the reason selects.
+    Reason(NonCacheableReadReason),
+    /// An unattributed refusal: only its propagation reaches the tracers.
+    Propagation(NonCacheablePropagation),
+}
+
+/// What a producer's refusal-observation scope saw, folded with any
 /// cacheability-scope verdict the producer also holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObservedRefusal {
@@ -244,75 +244,11 @@ pub fn classify_reuse(observed: ObservedRefusal, complete: bool) -> ReuseClass {
     }
 }
 
-thread_local! {
-    /// The active refusal-observation scopes on this thread, innermost
-    /// last. A recorded reason fans out to ALL of them, mirroring the
-    /// fact-tracer stack: an inner producer's refusal is part of every
-    /// enclosing consumer's basis.
-    static ACTIVE_REFUSAL_SCOPES: RefCell<Vec<Rc<Cell<Option<NonCacheableReadReason>>>>> =
-        const { RefCell::new(Vec::new()) };
-}
-
-/// RAII scope that observes the typed non-cacheable reasons recorded
-/// while it is active.
-///
-/// `!Send + !Sync` by construction (`Rc`): like the fact tracer this is
-/// per-compute, per-thread state and must never cross a task boundary.
-pub struct RefusalObservationScope {
-    cell: Rc<Cell<Option<NonCacheableReadReason>>>,
-}
-
-impl RefusalObservationScope {
-    /// Push a fresh scope onto this thread's stack.
-    pub fn enter() -> Self {
-        let cell = Rc::new(Cell::new(None));
-        ACTIVE_REFUSAL_SCOPES.with(|scopes| scopes.borrow_mut().push(Rc::clone(&cell)));
-        Self { cell }
-    }
-
-    /// The dominant reason observed so far, if any.
-    pub fn observed(&self) -> Option<NonCacheableReadReason> {
-        self.cell.get()
-    }
-}
-
-impl Drop for RefusalObservationScope {
-    fn drop(&mut self) {
-        ACTIVE_REFUSAL_SCOPES.with(|scopes| {
-            let mut scopes = scopes.borrow_mut();
-            // Pop by identity rather than by position: an unwind can drop
-            // scopes out of order, and popping the wrong cell would leave
-            // a dangling observer collecting another compute's refusals.
-            if let Some(index) = scopes
-                .iter()
-                .rposition(|entry| Rc::ptr_eq(entry, &self.cell))
-            {
-                scopes.remove(index);
-            }
-        });
-    }
-}
-
-/// Record a typed non-cacheable reason into every active scope. Called
-/// from the single marking chokepoint so no producer can taint a value
-/// without the reason being observable.
-#[inline]
-pub(crate) fn record_refusal(reason: NonCacheableReadReason) {
-    ACTIVE_REFUSAL_SCOPES.with(|scopes| {
-        for cell in scopes.borrow().iter() {
-            let merged = match cell.get() {
-                None => reason,
-                Some(existing) => dominant(existing, reason),
-            };
-            cell.set(Some(merged));
-        }
-    });
-}
-
 /// Keep the more restrictive of two observed reasons; on a tie keep the
 /// FIRST observed so the recorded cause is the earliest one.
 #[inline]
-fn dominant(
+#[must_use]
+pub fn dominant_refusal(
     existing: NonCacheableReadReason,
     incoming: NonCacheableReadReason,
 ) -> NonCacheableReadReason {
@@ -375,58 +311,67 @@ mod tests {
 
     #[test]
     fn a_transient_refusal_dominates_a_deterministic_one_in_either_order() {
-        let scope = RefusalObservationScope::enter();
-        record_refusal(NonCacheableReadReason::FencedServe);
-        record_refusal(NonCacheableReadReason::LeaseMiss);
         assert_eq!(
-            scope.observed(),
-            Some(NonCacheableReadReason::LeaseMiss),
-            "a transient refusal must UPGRADE a deterministic one — otherwise a bundle \
-             whose basis includes a recoverable miss would be frozen for the request"
+            dominant_refusal(
+                NonCacheableReadReason::FencedServe,
+                NonCacheableReadReason::LeaseMiss
+            ),
+            NonCacheableReadReason::LeaseMiss,
+            "a transient refusal must UPGRADE a deterministic one"
         );
-        drop(scope);
-
-        let scope = RefusalObservationScope::enter();
-        record_refusal(NonCacheableReadReason::LeaseMiss);
-        record_refusal(NonCacheableReadReason::FencedServe);
         assert_eq!(
-            scope.observed(),
-            Some(NonCacheableReadReason::LeaseMiss),
-            "and a deterministic refusal must never DOWNGRADE an already-transient one"
+            dominant_refusal(
+                NonCacheableReadReason::LeaseMiss,
+                NonCacheableReadReason::FencedServe
+            ),
+            NonCacheableReadReason::LeaseMiss,
+            "a deterministic refusal must never DOWNGRADE an already-transient one"
+        );
+        assert_eq!(
+            dominant_refusal(
+                NonCacheableReadReason::LeaseMiss,
+                NonCacheableReadReason::PreparationFailure
+            ),
+            NonCacheableReadReason::LeaseMiss,
+            "within a class the FIRST observation is kept"
         );
     }
 
     #[test]
-    fn a_refusal_fans_out_to_every_enclosing_scope() {
-        let outer = RefusalObservationScope::enter();
-        {
-            let inner = RefusalObservationScope::enter();
-            record_refusal(NonCacheableReadReason::UnrootableRoute);
-            assert_eq!(
-                inner.observed(),
-                Some(NonCacheableReadReason::UnrootableRoute)
-            );
+    fn every_class_describes_its_replay() {
+        let fenced = NonCacheableRefusal::new(NonCacheableReadReason::FencedServe);
+        assert_eq!(
+            ReuseClass::RequestOnly(fenced).refusal_replay(),
+            Some(RefusalReplay::Reason(NonCacheableReadReason::FencedServe))
+        );
+        assert_eq!(
+            ReuseClass::NoReuse(NoReuseCause::TransientRefusal(
+                NonCacheableReadReason::LeaseMiss
+            ))
+            .refusal_replay(),
+            Some(RefusalReplay::Reason(NonCacheableReadReason::LeaseMiss))
+        );
+        assert_eq!(
+            ReuseClass::NoReuse(NoReuseCause::UnattributedRefusal(
+                NonCacheablePropagation::LocalOnly
+            ))
+            .refusal_replay(),
+            Some(RefusalReplay::Propagation(
+                NonCacheablePropagation::LocalOnly
+            ))
+        );
+        for silent in [
+            ReuseClass::Shared,
+            ReuseClass::NoReuse(NoReuseCause::Incomplete),
+            ReuseClass::NoReuse(NoReuseCause::NonReproducibleMiss),
+        ] {
+            assert_eq!(silent.refusal_replay(), None, "{silent:?} replays nothing");
         }
-        assert_eq!(
-            outer.observed(),
-            Some(NonCacheableReadReason::UnrootableRoute),
-            "an inner producer's refusal is part of every enclosing consumer's basis — \
-             observing it only innermost would let an outer compute publish a value built \
-             on a refused read"
-        );
-        drop(outer);
-        let after = RefusalObservationScope::enter();
-        assert_eq!(
-            after.observed(),
-            None,
-            "a scope that has been dropped must stop collecting — a leaked observer would \
-             attribute another compute's refusal to this one"
-        );
     }
 }
 
 /// A typed reason a read was NON-CACHEABLE — the discriminant a marking
-/// site passes to [`note_non_cacheable_read_fan_out`].
+/// site passes to the engine's non-cacheable read fan-out.
 ///
 /// The tracer records only a boolean (any non-cacheable read refuses
 /// shared-cache admission for the enclosing compute); the reason is a
@@ -473,7 +418,8 @@ impl NonCacheableReadReason {
     /// declining retention in one cache family, so every current read class
     /// propagates through all enclosing cold-compute scopes.
     #[inline]
-    pub(crate) fn propagation(self) -> crate::facts::fact_read_set::NonCacheablePropagation {
+    #[must_use]
+    pub fn propagation(self) -> crate::facts::fact_read_set::NonCacheablePropagation {
         match self {
             Self::FencedServe
             | Self::LeaseMiss
@@ -522,49 +468,4 @@ impl NonCacheableReadReason {
             Self::OutputMaterializationLoss => super::reuse::RequestReuse::Deterministic,
         }
     }
-}
-
-/// Mark every active tracer on the current thread's stack as having
-/// consumed a NON-CACHEABLE read — the by-value rail enclosing traced cold
-/// computes consult to refuse shared-cache admission. `reason` is the typed
-/// marking-site discriminant; the tracer records only the boolean, so the
-/// reason documents intent and keeps the marking surface typed (not an
-/// untyped suppress). No-op when the stack is empty (no traced compute is
-/// in scope).
-#[inline]
-pub fn note_non_cacheable_read_fan_out(reason: NonCacheableReadReason) {
-    // The typed half: every active `RefusalObservationScope` records the
-    // REASON, so a producer can classify its result's reuse rail instead
-    // of inferring it from a boolean that a fenced serve and a broken
-    // lease set identically.
-    super::reuse::record_refusal(reason);
-    note_non_cacheable_propagation(reason.propagation());
-}
-
-/// Apply an already-classified refusal to the active tracer stack. Cache
-/// owners use this after a typed `ReturnOnly` result escapes its own tracing
-/// scope; ordinary read sites should use [`note_non_cacheable_read_fan_out`]
-/// so their closed reason enum selects the propagation policy.
-#[inline]
-pub fn note_non_cacheable_propagation(
-    propagation: crate::facts::fact_read_set::NonCacheablePropagation,
-) {
-    if let Some(sink) = NON_CACHEABLE_READ_SINK.get() {
-        sink(propagation);
-    }
-}
-
-/// The engine's tracer-stack receiver of non-cacheable read marks. The engine
-/// installs it before it first pushes a tracer or recorder, so a mark noted
-/// while no receiver is installed has no active tracer to reach.
-static NON_CACHEABLE_READ_SINK: std::sync::OnceLock<
-    fn(crate::facts::fact_read_set::NonCacheablePropagation),
-> = std::sync::OnceLock::new();
-
-/// Install the receiver of non-cacheable read marks. The first installed
-/// receiver stays for the process; later installs are no-ops.
-pub fn install_non_cacheable_read_sink(
-    sink: fn(crate::facts::fact_read_set::NonCacheablePropagation),
-) {
-    let _ = NON_CACHEABLE_READ_SINK.set(sink);
 }

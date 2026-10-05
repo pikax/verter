@@ -2376,7 +2376,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let completed = self.dispatch_txn.borrow().flow.results.get(key)?.clone();
         let replay = &completed.replay;
         crate::resolver_core::resolver_context::observe_fan_out_borrowed(&replay.reads.facts);
-        completed.reuse.replay_refusal();
+        crate::fact_tracing::replay_reuse_refusal(&completed.reuse);
         self.deposit_operand_self_roots(&replay.observed_self_roots);
         if replay.canonical_evidence_deposited {
             self.canonical_evidence_epoch
@@ -2611,7 +2611,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .force_flow_member_fenced_serve_for_tests
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
             }
@@ -2646,7 +2646,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let queued_before = self.dispatch_txn.borrow().flow.completed_members.len();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let refusals = verter_session_query::facts::reuse::RefusalObservationScope::enter();
+        let refusals = crate::fact_tracing::RefusalObservationScope::enter();
         let started = crate::resolver_core::resolver_context::mark_evidence();
         let (step, reads) = crate::resolver_core::resolver_context::record_fact_reads(run);
         let ended = crate::resolver_core::resolver_context::mark_evidence();

@@ -19,7 +19,7 @@ use super::request_ports::{
     Cancellation, ExecutionSubmission, IndexedInputs, OwnedLowering, RouteLookup,
 };
 
-use crate::resolver_core::fact_tracer_tls;
+use crate::fact_tracing::tracing as tracer_stack;
 
 use verter_session_query::analysis::types::Hash16;
 
@@ -165,7 +165,7 @@ static_assertions::assert_obj_safe!(RequestBoundResolverContext);
 /// No-op when the stack is empty.
 #[inline]
 pub(crate) fn observe_fan_out(fact: verter_session_query::facts::fact_cache::FactVersionRef) {
-    fact_tracer_tls::observe_fan_out(fact);
+    tracer_stack::observe_fan_out(fact);
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ pub(crate) fn observe_fan_out(fact: verter_session_query::facts::fact_cache::Fac
 pub(crate) fn observe_fan_out_borrowed(
     sig: &[verter_session_query::facts::fact_cache::FactVersionRef],
 ) {
-    fact_tracer_tls::observe_fan_out_borrowed(sig);
+    tracer_stack::observe_fan_out_borrowed(sig);
 }
 
 /// Whether any fact tracer is installed on the current thread's stack.
@@ -191,7 +191,7 @@ pub(crate) fn observe_fan_out_borrowed(
 /// no-op, so the producer skips the derivation entirely.
 #[inline]
 pub(crate) fn fact_tracer_installed() -> bool {
-    fact_tracer_tls::current_tracer().is_some()
+    tracer_stack::current_tracer().is_some()
 }
 
 /// The fact reads a computation made, for replay into scopes that were
@@ -208,13 +208,13 @@ pub(crate) struct RecordedFactReads {
 /// Where the active scopes stood when a computation began, so its
 /// observations can be replaced by its receipt if it completes
 /// ([`complete_with_receipt`]).
-pub(crate) use fact_tracer_tls::EvidenceMarks;
+pub(crate) use tracer_stack::EvidenceMarks;
 
 /// Mark every active tracer and recorder before a computation whose
 /// completed result may be answered by a receipt.
 #[inline]
 pub(crate) fn mark_evidence() -> EvidenceMarks {
-    fact_tracer_tls::mark_evidence()
+    tracer_stack::mark_evidence()
 }
 
 /// A computation that ran between `start` and `end` completed with the
@@ -230,21 +230,21 @@ pub(crate) fn complete_with_receipt(
     let receipt = verter_session_query::facts::fact_cache::FactVersionRef::Receipt(
         verter_session_query::facts::fact_cache::ResultReceipt::new(reads.facts.to_vec()),
     );
-    fact_tracer_tls::collapse_evidence(start, end, &receipt);
+    tracer_stack::collapse_evidence(start, end, &receipt);
     receipt
 }
 
 /// Run `work` under a passive fact-read recorder and return what it read.
 ///
 /// Recording changes nothing the installed tracers observe (see
-/// [`fact_tracer_tls::FactReadRecorder`]). A producer skips deriving an
+/// [`tracer_stack::FactReadRecorder`]). A producer skips deriving an
 /// observation when no tracer is installed, so a recording is complete only
 /// if a tracer was installed throughout — the caller checks
 /// [`fact_tracer_installed`] first.
 pub(crate) fn record_fact_reads<R>(work: impl FnOnce() -> R) -> (R, RecordedFactReads) {
-    let recorder = fact_tracer_tls::FactReadRecorder::default();
+    let recorder = tracer_stack::FactReadRecorder::default();
     let result = {
-        let _scope = fact_tracer_tls::install_recorder(&recorder);
+        let _scope = tracer_stack::install_recorder(&recorder);
         work()
     };
     let (facts, non_cacheable) = recorder.into_parts();
@@ -281,11 +281,11 @@ pub(crate) fn record_fact_reads<R>(work: impl FnOnce() -> R) -> (R, RecordedFact
 //      nest inside a cold build's tracer.
 //   3. Readers must go through `ResolverContext::current_fact_tracer`,
 //      never through the TLS slot directly. The slot is private to
-//      this module.
+//      `crate::fact_tracing::tracing`.
 //
 // The trait-method discipline is the architectural contract. The TLS
-// implementation is hidden inside this module and is not part of any
-// public surface.
+// implementation is hidden inside `crate::fact_tracing::tracing` and is not
+// part of any public surface.
 
 /// RAII guard that clears the TLS tracer slot on drop.
 ///
@@ -296,7 +296,7 @@ struct TracerScope;
 
 impl Drop for TracerScope {
     fn drop(&mut self) {
-        fact_tracer_tls::clear();
+        tracer_stack::clear();
     }
 }
 
@@ -319,7 +319,7 @@ impl OwnedFactTracer {
 
     /// Install the cell until the returned scope drops, unwinding included.
     pub(crate) fn install(&self) -> OwnedTracerScope<'_> {
-        fact_tracer_tls::install(&self.cell);
+        tracer_stack::install(&self.cell);
         OwnedTracerScope {
             _tracer: std::marker::PhantomData,
         }
@@ -338,7 +338,7 @@ pub(crate) struct OwnedTracerScope<'t> {
 
 impl Drop for OwnedTracerScope<'_> {
     fn drop(&mut self) {
-        fact_tracer_tls::clear();
+        tracer_stack::clear();
     }
 }
 
@@ -354,7 +354,7 @@ where
     cell.set_aggregate_basis(basis);
     // Push onto the tracer stack. The RAII guard pops on drop
     // (including on panic unwind) so no dangling pointer remains.
-    fact_tracer_tls::install(&cell);
+    tracer_stack::install(&cell);
     let scope = TracerScope;
     let result = f(&cell);
     // Explicit drop so the stack is popped before we consume

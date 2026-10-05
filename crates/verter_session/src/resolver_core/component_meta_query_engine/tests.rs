@@ -3256,6 +3256,7 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
         state
             .decl_bodies()
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
+            .value
             .is_some(),
         "fixture invariant: the pin demand must acquire the owner's retained-snapshot lease",
     );
@@ -3328,6 +3329,7 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
         state
             .decl_bodies()
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
+            .value
             .is_some(),
         "fixture invariant: the pin demand must acquire the owner's retained-snapshot lease",
     );

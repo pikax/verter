@@ -763,6 +763,7 @@ fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability()
     // owner in the owner-aware inventory.
     assert!(
         memo.type_decl_in(verter_type_expr::TopLevelOwnerId::instance(0), "Local",)
+            .value
             .is_some(),
         "the local type body must lower under a live lease (this pins the retained snapshot)"
     );
@@ -806,51 +807,61 @@ fn broken_lease_macro_arg_leaves_mirror_slot_vacant_and_marks_non_cacheability()
     );
 }
 
-/// LB3 — the CENTRAL `DemandOutcome::into_option` collapse marks the generalized
-/// non-cacheability rail on a broken decl-body lease. This is the ONE structural
-/// collapse point for the plain type / value / augmentation decl-body accessors
-/// (`type_decl` / `value_decl` / augmentation) that the carrier & frontier
+/// LB3 — a broken decl-body lease at the plain type accessor carries its
+/// refusal BY VALUE, and the engine consumer that takes the value marks the
+/// generalized non-cacheability rail. The plain type / value / augmentation
+/// decl-body accessors are the collapse points the carrier & frontier
 /// consumers ride, so a transient `LeaseMiss` consumed by an enclosing traced
 /// compute refuses that compute's shared-cache admission.
 ///
-/// DISCRIMINATING: pin the retained lease with one successful demand, break it, then
-/// demand a DIFFERENT not-yet-lowered symbol through the plain `type_decl` accessor
-/// inside a fact tracer. Post-fix the tracer observed a non-cacheable read; pre-fix
-/// (`into_option` collapsed `LeaseMiss` to `None` with no mark) it did not.
+/// DISCRIMINATING: pin the retained lease with one successful demand, break it,
+/// then demand a DIFFERENT not-yet-lowered symbol through the plain accessor
+/// inside a fact tracer. The read itself marks nothing (source code cannot
+/// reach the tracer); consuming it does. A collapse that dropped the
+/// `LeaseMiss` evidence would leave the tracer unmarked.
 #[test]
-fn broken_lease_type_decl_accessor_marks_non_cacheability_via_into_option() {
+fn broken_lease_type_decl_accessor_carries_its_refusal_to_the_consumer() {
     let host = host();
     upsert_ts(
         &host,
         "/d.ts",
-        "export type A = { x: number };\nexport type B = { y: string };\n",
+        "export type A = { x: number };
+export type B = { y: string };
+",
     );
     let indexed = host.ensure_indexed_ready("/d.ts").expect("indexed");
     let memo = indexed.shallow_state.decl_bodies();
 
     // Pin the retained parse-snapshot lease with A, then break it so a demand for a
-    // DIFFERENT not-yet-lowered symbol (B) lease-misses through `into_option`.
+    // DIFFERENT not-yet-lowered symbol (B) lease-misses.
     assert!(
         memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "A")
+            .value
             .is_some(),
         "A's body must lower under a live lease (pins the retained snapshot)"
     );
     memo.release_retained_snapshot_for_test();
 
-    let (result, read_set) = host.with_fact_tracer(
+    let ((read, unconsumed), read_set) = host.with_fact_tracer(
         verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
-        || memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "B"),
+        || {
+            let read = memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "B");
+            let unconsumed = crate::fact_tracing::tracing::current_tracer()
+                .is_some_and(|tracer| tracer.non_cacheable_read_observed());
+            (crate::fact_tracing::consume_source_read(read), unconsumed)
+        },
     );
     assert!(
-        result.is_none(),
+        !unconsumed,
+        "the source-side read must not reach the tracer itself — it returns its evidence"
+    );
+    assert!(
+        read.is_none(),
         "a broken-lease type_decl demand reads as None (fail-closed)"
     );
     assert!(
         read_set.non_cacheable_read_observed(),
-        "the central DemandOutcome::into_option LeaseMiss arm MUST mark the generalized \
-         non-cacheability rail so an enclosing traced compute (the carrier / frontier / plain \
-         accessor consumers) refuses shared-cache admission — pre-fix into_option collapsed \
-         LeaseMiss to None with NO mark"
+        "consuming the broken-lease read MUST mark the generalized non-cacheability rail so          an enclosing traced compute refuses shared-cache admission"
     );
 }
 

@@ -61,7 +61,7 @@ pub trait FactValidation {
     #[inline]
     #[allow(dead_code)]
     fn observe(&self, fact: verter_session_query::facts::fact_cache::FactVersionRef) {
-        super::fact_tracer_tls::observe_fan_out(fact);
+        crate::fact_tracing::tracing::observe_fan_out(fact);
     }
 
     /// Bulk-record a routed-hit's existing dep-signature onto the
@@ -76,7 +76,7 @@ pub trait FactValidation {
         &self,
         sig: &[verter_session_query::facts::fact_cache::FactVersionRef],
     ) {
-        super::fact_tracer_tls::observe_fan_out_borrowed(sig);
+        crate::fact_tracing::tracing::observe_fan_out_borrowed(sig);
     }
     fn compat_token(&self) -> StoreViewCompatToken;
     fn validates(&self, fact: &FactVersionRef) -> bool;

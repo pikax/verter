@@ -379,7 +379,7 @@ impl VerterHost {
                 self.provenance
                     .bundle_request_memo_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                reuse.replay_refusal();
+                crate::fact_tracing::replay_reuse_refusal(&reuse);
                 return (Some(bundle), reuse);
             }
         }
@@ -487,7 +487,7 @@ impl VerterHost {
             // active scope — so the classification below reads what was
             // actually refused instead of inferring it from a boolean a
             // fenced serve and a broken lease set identically.
-            let refusals = verter_session_query::facts::reuse::RefusalObservationScope::enter();
+            let refusals = crate::fact_tracing::RefusalObservationScope::enter();
             let built = match self
                 .materialize_prepared_decl_bundle_from_routed_shallow(view, canonical_id)
             {
@@ -596,7 +596,7 @@ impl VerterHost {
                 // replaying the carried refusal is the only thing that
                 // keeps the taint attached to the value it describes.
                 let flight = &run_result.value;
-                flight.reuse.replay_refusal();
+                crate::fact_tracing::replay_reuse_refusal(&flight.reuse);
                 let bundle = flight.value.clone().map(std::sync::Arc::new);
                 if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
                     memo.insert(
@@ -618,7 +618,7 @@ impl VerterHost {
                 // thread's rails; the replay is idempotent and keeps the
                 // return path uniform across roles.
                 let flight = &run_result.value;
-                flight.reuse.replay_refusal();
+                crate::fact_tracing::replay_reuse_refusal(&flight.reuse);
                 let bundle = flight.value.clone().map(std::sync::Arc::new);
                 if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
                     memo.insert(
@@ -642,7 +642,7 @@ impl VerterHost {
         // partiality.
         match last_unpublished {
             Some((bundle, reuse)) if bundle.is_some() => {
-                reuse.replay_refusal();
+                crate::fact_tracing::replay_reuse_refusal(&reuse);
                 let bundle = bundle.map(std::sync::Arc::new);
                 if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
                     memo.insert(
@@ -752,7 +752,7 @@ impl VerterHost {
                         self.provenance
                             .bundle_request_memo_hits
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        reuse.replay_refusal();
+                        crate::fact_tracing::replay_reuse_refusal(&reuse);
                         return Some(bundle);
                     }
                 }
@@ -766,7 +766,7 @@ impl VerterHost {
                 // overflow or a mutation-instability verdict names no
                 // reason, and the conservative class is the only sound
                 // answer for it.
-                let refusals = verter_session_query::facts::reuse::RefusalObservationScope::enter();
+                let refusals = crate::fact_tracing::RefusalObservationScope::enter();
                 let (bundle, non_cacheable) =
                     crate::fact_signature_helpers::with_cacheability_scope(
                         &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
@@ -2080,7 +2080,7 @@ impl VerterHost {
         {
             if let Some(serve) = serve {
                 if serve.store_published {
-                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                     );
                     return Some(IndexedReadyServe {
@@ -2710,7 +2710,7 @@ impl VerterHost {
                 // (semantic-memo builds, the owner-import-surface and
                 // component-meta proof producers) so their admission
                 // gates refuse the fenced-derived result by value.
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
                 return Some(IndexedReadyServe {
@@ -2740,7 +2740,7 @@ impl VerterHost {
             //
             // Chokepoint: flag every enclosing traced cold compute —
             // same rail as the fenced-leader arm above.
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }
@@ -3451,7 +3451,7 @@ impl VerterHost {
                     // the route-walk shape of the same hole. This is a VALID
                     // (Complete) unrootable surface, NOT a partial result —
                     // cache non-admission only, never request partiality.
-                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                     );
                     let surface = crate::owner_import_surface::build_owner_import_surface(

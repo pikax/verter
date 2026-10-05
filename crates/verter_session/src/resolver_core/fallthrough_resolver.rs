@@ -710,7 +710,7 @@ mod tests {
 
         state.clear_cache();
         let served = state.compute_and_maybe_admit(&host, || {
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
             (

@@ -10,10 +10,11 @@ use verter_session_query::resolution::{AmbientSymbolHit, ProjectStableKey};
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use super::resolver_context::MaterializeScopeObservation;
+use crate::fact_tracing::note_non_cacheable_read_fan_out;
 use crate::resolver_core::ValueDeclIdentity;
 use crate::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
-use verter_session_query::facts::reuse::{note_non_cacheable_read_fan_out, NonCacheableReadReason};
+use verter_session_query::facts::reuse::NonCacheableReadReason;
 
 pub struct OperandEnvEpoch {
     root: Option<Arc<verter_workspace::published_state::PublishedRoot>>,

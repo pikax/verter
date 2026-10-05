@@ -540,7 +540,7 @@ fn resolution_retarget_between_snapshots_misses_memo() {
 fn unattributed_refusal_is_not_memoized() {
     let host = host_with_base_files();
     *host.materialize_seam_hook.lock() = Some(Arc::new(|| {
-        verter_session_query::facts::reuse::note_non_cacheable_propagation(
+        crate::fact_tracing::note_non_cacheable_propagation(
             verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
         );
     }));
@@ -917,7 +917,7 @@ fn assert_transient_refusal_is_not_memoized(
     // the bundle producer's own observation scope, exactly as a real
     // nested producer's would.
     *host.materialize_seam_hook.lock() = Some(Arc::new(move || {
-        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(reason);
+        crate::fact_tracing::note_non_cacheable_read_fan_out(reason);
     }));
 
     let request = CanonicalCompletionOverlay::new();

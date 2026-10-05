@@ -265,8 +265,9 @@ impl RequestBundleMemo {
     /// already materialised it under exactly this view identity.
     ///
     /// Returns the bundle together with its [`ReuseClass`]; the caller
-    /// must [`ReuseClass::replay_refusal`] before returning the value, or
-    /// the reuse launders the taint the cold return carried.
+    /// must replay its refusal ([`crate::fact_tracing::replay_reuse_refusal`])
+    /// before returning the value, or the reuse launders the taint the cold
+    /// return carried.
     pub(crate) fn get(
         &self,
         canonical: &str,

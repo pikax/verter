@@ -2399,7 +2399,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .carrier_normalization_force_fence_for_tests
                         .load(std::sync::atomic::Ordering::Relaxed)
                     {
-                        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                        crate::fact_tracing::note_non_cacheable_read_fan_out(
                             verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                         );
                     }
@@ -2526,7 +2526,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .force_fenced_serve_for_tests
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }

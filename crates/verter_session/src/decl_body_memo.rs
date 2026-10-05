@@ -27,6 +27,7 @@
 //! produced).
 use verter_session_query::source::demand::DemandOutcome;
 use verter_session_query::source::demand::ExpressionSourceDemand;
+use verter_session_query::source::demand::SourceRead;
 use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 
 use std::sync::atomic::Ordering;
@@ -785,12 +786,16 @@ impl DeclBodyMemo {
         }
     }
 
+    /// Demand the lowered body of one TYPE symbol, collapsing a broken
+    /// lease to an absent value that carries its `LeaseMiss` refusal by
+    /// value ([`DemandOutcome::into_source_read`]); the engine consumer
+    /// applies the refusal.
     pub(crate) fn type_decl_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<LoweredTypeDecl>> {
-        self.type_decl_outcome_in(owner, name).into_option()
+    ) -> SourceRead<Option<Arc<LoweredTypeDecl>>> {
+        self.type_decl_outcome_in(owner, name).into_source_read()
     }
 
     pub(crate) fn type_decl_outcome_in(
@@ -837,7 +842,7 @@ impl DeclBodyMemo {
     }
 
     /// Demand the lowered body of one file-scope VALUE symbol.
-    pub(crate) fn value_decl(&self, name: &str) -> Option<Arc<LoweredValueDecl>> {
+    pub(crate) fn value_decl(&self, name: &str) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
         self.value_decl_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
@@ -845,8 +850,8 @@ impl DeclBodyMemo {
         &self,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<LoweredValueDecl>> {
-        self.value_decl_outcome_in(owner, name).into_option()
+    ) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
+        self.value_decl_outcome_in(owner, name).into_source_read()
     }
 
     pub(crate) fn value_decl_outcome_in(
@@ -1005,7 +1010,10 @@ impl DeclBodyMemo {
     /// memo-owned fact — no lens, no locator deref, no re-lowering. Demanding
     /// the symbol's body (the one lazy lowering) is the only work this read
     /// can trigger.
-    pub(crate) fn compat_type_body_hash_input(&self, name: &str) -> Option<HashOutcome> {
+    pub(crate) fn compat_type_body_hash_input(
+        &self,
+        name: &str,
+    ) -> SourceRead<Option<HashOutcome>> {
         self.compat_type_body_hash_input_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
@@ -1014,8 +1022,9 @@ impl DeclBodyMemo {
         &self,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> Option<HashOutcome> {
-        Some(self.type_decl_in(owner, name)?.body_hash.clone())
+    ) -> SourceRead<Option<HashOutcome>> {
+        self.type_decl_in(owner, name)
+            .map(|decl| decl.map(|decl| decl.body_hash.clone()))
     }
 
     pub(crate) fn augmentation_type_decl_in(
@@ -1023,9 +1032,9 @@ impl DeclBodyMemo {
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<LoweredTypeDecl>> {
+    ) -> SourceRead<Option<Arc<LoweredTypeDecl>>> {
         self.augmentation_type_decl_outcome_in(scope, owner, name)
-            .into_option()
+            .into_source_read()
     }
 
     pub(crate) fn augmentation_type_decl_outcome_in(
@@ -1084,7 +1093,7 @@ impl DeclBodyMemo {
         &self,
         scope: &AugmentationScopeKind,
         name: &str,
-    ) -> Option<Arc<LoweredValueDecl>> {
+    ) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
         self.augmentation_value_decl_in(scope, TopLevelOwnerId::ordinary_file(), name)
     }
 
@@ -1093,9 +1102,9 @@ impl DeclBodyMemo {
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<LoweredValueDecl>> {
+    ) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
         self.augmentation_value_decl_outcome_in(scope, owner, name)
-            .into_option()
+            .into_source_read()
     }
 
     pub(crate) fn augmentation_value_decl_outcome_in(

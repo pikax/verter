@@ -1973,7 +1973,7 @@ impl VerterHost {
                     // serve would — one admission rail
                     // (`non_cacheable_read_observed`), consulted below.
                     if prefetch_observation.fenced_serve_observed {
-                        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                        crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                     );
                     }

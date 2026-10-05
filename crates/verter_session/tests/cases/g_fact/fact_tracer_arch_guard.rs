@@ -90,12 +90,12 @@ fn r18_carve_out_documented_for_tls_installer() {
     // The documented carve-out is the rationale for why a
     // per-cold-compute thread-local does NOT violate R18. The
     // substring below is from the comment block above the
-    // `fact_tracer_tls` module — search for the specific phrase
+    // `with_fact_tracer` installer — search for the specific phrase
     // so accidental deletion of the rationale fires the guard.
     assert!(
         src.contains("Why this is NOT an R18 violation"),
         "The TLS installer for the fact tracer must carry a documented R18 carve-out — see the \
-         block comment above the `fact_tracer_tls` module. R18 forbids hidden view globals; the \
+         block comment above the `with_fact_tracer` installer. R18 forbids hidden view globals; the \
          tracer is per-compute instrumentation reachable only through a documented trait method, \
          and the carve-out states why that distinction matters."
     );

@@ -357,3 +357,172 @@ fn request_only_bundle_never_publishes_shared() {
          admits no warm bundle candidate. Admitted signatures: {candidates:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Decl-body lease-miss evidence at the collapsing accessors.
+//
+// A broken decl-body lease collapses to `None` at the plain body accessors.
+// The miss is transient, so every traced cold compute that consumed it must
+// refuse shared-cache admission and observe the typed `LeaseMiss` reason —
+// including when a later fallback supplies a value. A genuine absence
+// (`Ready(None)`) stays a cacheable answer.
+// ---------------------------------------------------------------------------
+
+/// What a traced compute observed: shared-cache admission, and the typed
+/// refusal reason its refusal-observation scope recorded.
+struct TracedRead<R> {
+    value: R,
+    admitted: bool,
+    reason: Option<NonCacheableReadReason>,
+}
+
+fn traced_read<R>(host: &VerterHost, work: impl FnOnce() -> R) -> TracedRead<R> {
+    let ((value, reason), read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
+            let scope = crate::fact_tracing::RefusalObservationScope::enter();
+            let value = work();
+            (value, scope.observed())
+        },
+    );
+    let admission = verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise(
+        read_set.finalise(),
+    );
+    TracedRead {
+        value,
+        admitted: admission.cacheable().is_some(),
+        reason,
+    }
+}
+
+/// Index `path`, lower `A` (pinning the retained parse snapshot), then break
+/// the lease so any not-yet-lowered declaration lease-misses.
+fn indexed_with_broken_lease(
+    host: &VerterHost,
+    path: &str,
+    source: &str,
+    file_language: verter_language::FileLanguage,
+) -> Arc<crate::project_type_store::IndexedReady> {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(path.to_string()),
+            input_id: path.to_string(),
+            source: Arc::from(source),
+            file_language,
+            aliases: Vec::new(),
+        })
+        .unwrap_or_else(|e| panic!("upsert {path} failed: {e:?}"));
+    let indexed = host.ensure_indexed_ready(path).expect("indexed");
+    assert!(
+        indexed.shallow_state.type_decl("A").is_some(),
+        "A lowers under a live lease, pinning the retained snapshot"
+    );
+    indexed
+        .shallow_state
+        .decl_bodies()
+        .release_retained_snapshot_for_test();
+    indexed
+}
+
+const LEASE_FIXTURE: &str = "export type A = { x: number };\n\
+     export type B = { y: string };\n\
+     export declare const v: number;\n\
+     declare global {\n  interface GT { g: number }\n  var gv: boolean;\n}\n";
+
+#[test]
+fn a_lease_miss_at_every_collapsing_body_accessor_refuses_shared_admission() {
+    use verter_session_query::declarations::AugmentationScopeKind;
+
+    type Probe = fn(&crate::resolver_core::ShallowFileState) -> bool;
+    let probes: [(&str, Probe); 4] = [
+        ("type", |state| state.type_decl("B").is_some()),
+        ("value", |state| state.value_decl("v").is_some()),
+        ("augmentation type", |state| {
+            state
+                .augmentation_type_decl(&AugmentationScopeKind::Global, "GT")
+                .is_some()
+        }),
+        ("augmentation value", |state| {
+            state
+                .augmentation_value_decl(&AugmentationScopeKind::Global, "gv")
+                .is_some()
+        }),
+    ];
+    for (accessor, probe) in probes {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let indexed = indexed_with_broken_lease(
+            &host,
+            "/lease/d.ts",
+            LEASE_FIXTURE,
+            verter_language::FileLanguage::script_ts(),
+        );
+        let read = traced_read(&host, || probe(&indexed.shallow_state));
+        assert!(
+            !read.value,
+            "{accessor}: a broken-lease demand reads as a miss"
+        );
+        assert!(
+            !read.admitted,
+            "{accessor}: a compute that consumed a broken-lease miss must be refused \
+             shared-cache admission — admitting it would freeze a recoverable miss"
+        );
+        assert_eq!(
+            read.reason,
+            Some(NonCacheableReadReason::LeaseMiss),
+            "{accessor}: the refusal must carry the typed transient reason"
+        );
+    }
+}
+
+#[test]
+fn a_lease_miss_stays_refused_when_a_fallback_supplies_the_value() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let indexed = indexed_with_broken_lease(
+        &host,
+        "/lease/r.svelte.ts",
+        "export declare function $state<T>(initial: T): T;\nexport type A = { x: number };\n",
+        verter_language::FileLanguage::adapter_module(
+            verter_language::ScriptSourceType::Ts,
+            verter_language::FrameworkAdapterId::svelte(),
+            verter_language::LanguageId::new(verter_language::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+        ),
+    );
+    let read = traced_read(&host, || {
+        indexed
+            .shallow_state
+            .effective_value_decl("$state")
+            .is_some()
+    });
+    assert!(
+        read.value,
+        "the user declaration lease-misses, so the rune ambient fallback answers"
+    );
+    assert!(
+        !read.admitted,
+        "the fallback's value does not erase the lease miss the compute consumed first: \
+         the compute must still be refused shared-cache admission"
+    );
+    assert_eq!(read.reason, Some(NonCacheableReadReason::LeaseMiss));
+}
+
+#[test]
+fn a_genuine_absence_stays_cacheable_under_a_broken_lease() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let indexed = indexed_with_broken_lease(
+        &host,
+        "/lease/absent.ts",
+        LEASE_FIXTURE,
+        verter_language::FileLanguage::script_ts(),
+    );
+    let read = traced_read(&host, || {
+        indexed.shallow_state.type_decl("Missing").is_none()
+            && indexed.shallow_state.value_decl("Missing").is_none()
+    });
+    assert!(read.value, "an un-inventoried name is a genuine absence");
+    assert!(
+        read.admitted,
+        "a genuine absence is a reproducible answer: it must stay cacheable even while the \
+         lease is broken"
+    );
+    assert_eq!(read.reason, None);
+}

@@ -1575,6 +1575,7 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         aug1_state
             .decl_bodies()
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin1")
+            .value
             .is_some(),
         "the file-scope pin demand must acquire aug1's retained-snapshot lease"
     );

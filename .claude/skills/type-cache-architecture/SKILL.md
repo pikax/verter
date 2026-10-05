@@ -940,12 +940,35 @@ distinguishable at the carrier type; the warm-hit oracle cannot conflate them.
 Overflow produces `FactSignatureOverflow` audit event + candidate is admitted
 as `NonCacheable`.
 
+### Non-cacheability marking and source evidence
+
+The reuse vocabulary (`NonCacheableReadReason`, `ReuseClass`,
+`classify_reuse`, `dominant_refusal`, the pure `ReuseClass::refusal_replay`
+description) is pure data in `verter_session_query::facts::reuse`. APPLYING a
+refusal belongs to the one tracing runtime, `verter_session::fact_tracing`: the
+tracer/recorder stacks (`tracing.rs`), the typed refusal-observation scopes
+(`refusal_scope.rs`, `replay_reuse_refusal`), and the direct-call fan-out
+`note_non_cacheable_read_fan_out` / `note_non_cacheable_propagation`. There is
+no process-global receiver or callback: a mark reaches the running thread's
+tracers only by a direct call into that module, which depends on nothing but
+`verter_session_query`, the audit leaf and std.
+
+Source-side code (the decl-body memo, decl lowering, flow-slice content, the
+parsed eval program) never calls the tracer. A collapsing body accessor returns
+`SourceRead<T> { value, refusal }` (`DemandOutcome::into_source_read`: a
+`LeaseMiss` is `None` + `Some(LeaseMiss)`, a `Ready(None)` absence carries no
+refusal and stays cacheable). Composition keeps every consulted read's evidence
+(`SourceRead::or_else` keeps the refused read's reason even when a fallback
+answers). The FIRST engine consumer calls `fact_tracing::consume_source_read`
+before any early return, admission decision or memo insertion. Typed
+`DemandOutcome` consumers keep their own matches and marks.
+
 ### Completed results and their receipts
 
 Completion and retention are separate verdicts. A flow evaluation that
 completes as its own component's root lands in the dispatch transaction's
 demand-keyed result table (`FlowResultTable` in `dispatch_txn.rs`), classified
-on the shared reuse rail (`resolver_core/reuse.rs`): `Shared` (complete and
+on the shared reuse rail (`verter_session_query::facts::reuse`): `Shared` (complete and
 retained), `RequestOnly` (complete, persistent admission refused for a
 deterministic reason, whose refusal replays into every consumer) or never kept
 (incomplete, transient or unattributed refusal). The table is separate from

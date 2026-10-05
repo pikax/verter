@@ -1279,6 +1279,7 @@ fn broken_lease_lower_locator_suppresses_parent_admission() {
     let memo = indexed.shallow_state.decl_bodies();
     assert!(
         memo.type_decl_in(TopLevelOwnerId::ordinary_file(), "Wide")
+            .value
             .is_some(),
         "the unrelated demand must pin the lease"
     );

@@ -2711,7 +2711,7 @@ pub(super) fn deref_slot_body(
         // (`UnknownSymbol`, canonical mismatch, path/annotation absence) is a
         // DETERMINISTIC refusal — cacheable, never marked.
         Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss) => {
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
             );
             None

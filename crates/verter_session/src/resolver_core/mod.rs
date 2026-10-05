@@ -35,7 +35,6 @@ pub mod svelte_default_synth;
 pub mod vue_default_synth;
 
 pub mod fact_read_set;
-mod fact_tracer_tls;
 pub(crate) mod fact_validation_port;
 pub mod fuses;
 pub(crate) mod host_resolver_context;
@@ -364,7 +363,7 @@ pub(crate) struct StableExecutionValue<V> {
     /// generic driver, retained as a joinable rendezvous. It rides the
     /// VALUE rather than a side channel so a FOLLOWER that adopts a
     /// retained rendezvous observes the refusal atomically with the value
-    /// and can [`replay_refusal`](reuse::ReuseClass::replay_refusal) it
+    /// and can replay it ([`crate::fact_tracing::replay_reuse_refusal`])
     /// into its OWN tracer stack — the leader's original fan-out ran on
     /// the leader's thread and never touched the follower's.
     ///
@@ -574,7 +573,7 @@ where
                     executor.store_stable(&value, StableAdmission { _private: () });
                 }
                 if let Some(propagation) = cache_refusal {
-                    verter_session_query::facts::reuse::note_non_cacheable_propagation(propagation);
+                    crate::fact_tracing::note_non_cacheable_propagation(propagation);
                 }
                 return Ok(RequestRunResult {
                     value,
@@ -593,7 +592,7 @@ where
             // result now.
             if executor.snapshot_is_immutable() {
                 if let Some(propagation) = executor.capture_cache_refusal() {
-                    verter_session_query::facts::reuse::note_non_cacheable_propagation(propagation);
+                    crate::fact_tracing::note_non_cacheable_propagation(propagation);
                 }
                 return Ok(RequestRunResult {
                     value,
@@ -731,7 +730,7 @@ where
             if matches!(flight.role, SingleflightRole::Follower) {
                 executor.fold_follower_completeness(flight.value.completeness);
             }
-            flight.value.reuse.replay_refusal();
+            crate::fact_tracing::replay_reuse_refusal(&flight.value.reuse);
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source,
@@ -749,7 +748,7 @@ where
         // result now instead of recomputing it every remaining attempt plus
         // the fallback.
         if executor.snapshot_is_immutable() {
-            flight.value.reuse.replay_refusal();
+            crate::fact_tracing::replay_reuse_refusal(&flight.value.reuse);
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source: RequestSource::Fallback,
@@ -766,7 +765,7 @@ where
     let value = executor.compute(&store_view)?;
     let completeness = executor.capture_completeness();
     if let Some(propagation) = executor.capture_cache_refusal() {
-        verter_session_query::facts::reuse::note_non_cacheable_propagation(propagation);
+        crate::fact_tracing::note_non_cacheable_propagation(propagation);
     }
     Ok(RequestRunResult {
         value,

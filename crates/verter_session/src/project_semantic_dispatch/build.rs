@@ -1713,7 +1713,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         output = output.with_observed_self_roots(fresh);
         if unobservable {
             output.cache_suppress = true;
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
         }
@@ -4824,7 +4824,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 return InstantiateStart::Done(Box::new(out));
             }
             PreparedTypeDeclResolution::Failed { failure, .. } => {
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                 );
                 tracing::error!(
@@ -4944,7 +4944,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .as_ref()
                 .is_some_and(|debt| debt.finish());
             if unresolved_owner_debt {
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                 );
                 self.fold_local_partial_completeness(
@@ -5386,7 +5386,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .as_ref()
             .is_some_and(|debt| debt.finish());
         if unresolved_owner_debt {
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
             );
             self.fold_local_partial_completeness(
@@ -5414,7 +5414,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             // facts validate live while a contributor's source-env is
             // unobservable). Same rail as the external augmentation collector
             // (`collect_augmentation_contributions`).
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
         }
@@ -6657,7 +6657,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // refusal to the component-meta warm gate WITHOUT false-`Partial`ing it.
         if source_env_unobservable {
             self.fold_into_top_build_local_taint(false, true);
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
         }
@@ -7347,7 +7347,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             } => Some(prepared),
             PreparedTypeDeclResolution::Missing => None,
             PreparedTypeDeclResolution::Failed { .. } => {
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                 );
                 None

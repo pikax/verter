@@ -122,7 +122,7 @@ impl<T> PreparedDeclOutcome<T> {
         match self {
             PreparedDeclOutcome::Ready(value) => Ok(value),
             PreparedDeclOutcome::LeaseMiss => {
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)
@@ -1040,7 +1040,7 @@ impl PreparedTypeDeclCache {
                 // (retry on the next live-lease demand) AND mark the
                 // generalized non-cacheability rail so an enclosing traced
                 // compute refuses admission.
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)
@@ -1297,7 +1297,7 @@ impl PreparedValueDeclCache {
                 // (retry on the next live-lease demand) AND mark the
                 // generalized non-cacheability rail so an enclosing traced
                 // compute refuses admission.
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)

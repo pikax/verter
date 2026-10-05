@@ -351,12 +351,12 @@ impl MacroFactFootprint {
             Self::Rooted(facts) => resolver_context::observe_fan_out_borrowed(facts),
             Self::RootedNonCacheable(facts) => {
                 resolver_context::observe_fan_out_borrowed(facts);
-                verter_session_query::facts::reuse::note_non_cacheable_propagation(
+                crate::fact_tracing::note_non_cacheable_propagation(
                     NonCacheablePropagation::Transitive,
                 );
             }
             Self::Overflowed | Self::MutationUnstable | Self::Unobserved => {
-                verter_session_query::facts::reuse::note_non_cacheable_propagation(
+                crate::fact_tracing::note_non_cacheable_propagation(
                     NonCacheablePropagation::Transitive,
                 );
             }
@@ -419,7 +419,7 @@ impl ClassInferenceFailure {
         match self {
             Self::InferenceUnavailable(reason) => {
                 crate::request_context::mark_request_result_inference_budget_exceeded();
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::InferenceBudgetExceeded,
                 );
                 TscDeclarationFailureReason::SemanticInferenceUnavailable(match reason {

@@ -89,7 +89,7 @@ impl VerterHost {
                 admitted.into_result()?
             }
             verter_workspace::ResolutionPublication::Refused(_) => {
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
@@ -643,7 +643,7 @@ impl VerterHost {
         // retargets a hop without moving a single byte of any file in the
         // walk — invisible to every parse fact, visible to this witness.
         let (route_result, traversal_witness, refused_edge) = {
-            let refusals = verter_session_query::facts::reuse::RefusalObservationScope::enter();
+            let refusals = crate::fact_tracing::RefusalObservationScope::enter();
             let scope = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
             let route_result = self.resolve_named_type_export_route_uncached(
                 ctx,

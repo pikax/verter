@@ -764,7 +764,7 @@ impl ComponentMetaQueryEngine<'_> {
                     .ctx
                     .prepared_type_from_input(&bundle, owner, symbol_name);
                 if let Err(failure) = &result {
-                    verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                    crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                     );
                     tracing::error!(

@@ -28,6 +28,7 @@ use verter_session_query::analysis::route_inventory::{
 };
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::source::demand::DemandOutcome;
+use verter_session_query::source::demand::SourceRead;
 use verter_type_expr::facts::TypeDependencyPathFact;
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId, TypeExpr};
 
@@ -731,7 +732,7 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredTypeDecl>> {
-        self.decl_bodies.type_decl_in(owner, name)
+        crate::fact_tracing::consume_source_read(self.decl_bodies.type_decl_in(owner, name))
     }
 
     pub(crate) fn type_decl_outcome_in(
@@ -752,7 +753,7 @@ impl ShallowFileState {
         {
             return Some(Arc::clone(body));
         }
-        self.decl_bodies.value_decl(name)
+        crate::fact_tracing::consume_source_read(self.decl_bodies.value_decl(name))
     }
 
     pub(crate) fn value_decl_in(
@@ -760,11 +761,21 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredValueDecl>> {
+        crate::fact_tracing::consume_source_read(self.value_decl_read_in(owner, name))
+    }
+
+    /// [`Self::value_decl_in`] with its source evidence still attached, for a
+    /// composition that may fall back to another value.
+    fn value_decl_read_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
         if let Some(body) = self
             .synthesised_value_bodies
             .get(&DeclBindingKey::new(owner, name))
         {
-            return Some(Arc::clone(body));
+            return SourceRead::clean(Some(Arc::clone(body)));
         }
         self.decl_bodies.value_decl_in(owner, name)
     }
@@ -859,13 +870,18 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredValueDecl>> {
-        if let Some(decl) = self.value_decl_in(owner, name) {
-            return Some(decl);
-        }
-        if owner == TopLevelOwnerId::ordinary_file() && self.decl_bodies.rune_ambient_visible() {
-            return crate::host_resolve::rune_ambient_value_decl(name);
-        }
-        None
+        // The user declaration is consulted first; a broken-lease miss there
+        // stays in the evidence even when the rune ambient answers.
+        crate::fact_tracing::consume_source_read(self.value_decl_read_in(owner, name).or_else(
+            || {
+                SourceRead::clean(
+                    (owner == TopLevelOwnerId::ordinary_file()
+                        && self.decl_bodies.rune_ambient_visible())
+                    .then(|| crate::host_resolve::rune_ambient_value_decl(name))
+                    .flatten(),
+                )
+            },
+        ))
     }
 
     /// TYPE-space counterpart of [`Self::effective_value_decl`]: a user
@@ -880,13 +896,18 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredTypeDecl>> {
-        if let Some(decl) = self.type_decl_in(owner, name) {
-            return Some(decl);
-        }
-        if owner == TopLevelOwnerId::ordinary_file() && self.decl_bodies.rune_ambient_visible() {
-            return crate::host_resolve::rune_ambient_type_decl(name);
-        }
-        None
+        // The user declaration is consulted first; a broken-lease miss there
+        // stays in the evidence even when the rune ambient answers.
+        crate::fact_tracing::consume_source_read(
+            self.decl_bodies.type_decl_in(owner, name).or_else(|| {
+                SourceRead::clean(
+                    (owner == TopLevelOwnerId::ordinary_file()
+                        && self.decl_bodies.rune_ambient_visible())
+                    .then(|| crate::host_resolve::rune_ambient_type_decl(name))
+                    .flatten(),
+                )
+            }),
+        )
     }
 
     /// Demand the dependency-edge classification of a local TYPE symbol —
@@ -921,9 +942,9 @@ impl ShallowFileState {
                 // Broken decl-body lease pin: mark the generalized
                 // non-cacheability rail so an enclosing traced compute refuses
                 // shared-cache admission (this accessor collapses the
-                // `DemandOutcome` directly, bypassing `into_option`), and fail
+                // `DemandOutcome` directly, bypassing `into_source_read`), and fail
                 // closed — never cache the transient empty classification.
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 None
@@ -968,8 +989,10 @@ impl ShallowFileState {
         self.decl_bodies
             .header_index()
             .augmentation_type_header_in(scope, owner, name)?;
-        self.decl_bodies
-            .augmentation_type_decl_in(scope, owner, name)
+        crate::fact_tracing::consume_source_read(
+            self.decl_bodies
+                .augmentation_type_decl_in(scope, owner, name),
+        )
     }
 
     pub(crate) fn augmentation_type_decl_outcome_in(
@@ -1019,7 +1042,9 @@ impl ShallowFileState {
         self.decl_bodies
             .header_index()
             .augmentation_value_header(scope, name)?;
-        self.decl_bodies.augmentation_value_decl(scope, name)
+        crate::fact_tracing::consume_source_read(
+            self.decl_bodies.augmentation_value_decl(scope, name),
+        )
     }
 
     /// Classify one file-scope TYPE symbol's dependency edges: the local
@@ -1111,7 +1136,7 @@ impl ShallowFileState {
             }
 
             if self.has_type_symbol_in(owner, &current) {
-                let Some(lowered) = self.decl_bodies.type_decl_in(owner, &current) else {
+                let Some(lowered) = self.type_decl_in(owner, &current) else {
                     continue;
                 };
                 let references = match closure {
@@ -1386,11 +1411,11 @@ impl SfsRouteFactProvider<'_> {
                 ))
             }
             // The DISTINCT transient-body broken-lease pin: this wildcard
-            // collapse bypasses `into_option`, so mark the generalized
+            // collapse bypasses `into_source_read`, so mark the generalized
             // non-cacheability rail on `LeaseMiss` (a genuine `Ready(None)` /
             // body-less re-borrow stays an unmarked, cacheable undecided miss).
             verter_session_query::source::demand::DemandOutcome::LeaseMiss => {
-                verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 None

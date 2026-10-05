@@ -95,7 +95,7 @@ fn observe_component_meta_owner_whole_hash(
         .map(|captured| captured.whole_hash)
         .or_else(uncaptured_hash);
     let Some(whole_hash) = whole_hash else {
-        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+        crate::fact_tracing::note_non_cacheable_read_fan_out(
             verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
         );
         return None;

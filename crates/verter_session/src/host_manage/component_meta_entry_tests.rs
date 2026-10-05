@@ -797,7 +797,7 @@ fn meta_payload_under_recorded_signature_misses_after_project_mutation() {
 /// seed-fence token recheck cannot be what declines the publish.
 fn arm_force_fenced_serve_flag(host: &VerterHost) {
     *host.materialize_seam_hook.lock() = Some(Arc::new(|| {
-        verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+        crate::fact_tracing::note_non_cacheable_read_fan_out(
             verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
         );
     }));

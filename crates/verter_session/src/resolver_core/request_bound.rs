@@ -1,6 +1,6 @@
 //! The session's request-bound resolver contexts: the direct-host test seam and the
 //! request-bound adapter that serves the engine's resolver ports from a lifecycle.
-use verter_session_query::facts::reuse::note_non_cacheable_read_fan_out;
+use crate::fact_tracing::note_non_cacheable_read_fan_out;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
 
 use std::sync::Arc;
@@ -14,8 +14,8 @@ use super::request_ports::{Cancellation, ExecutionSubmission, IndexedInputs, Rou
 use super::resolver_context::*;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
 
+use crate::fact_tracing::tracing as tracer_stack;
 use crate::project_type_store::IndexedReady;
-use crate::resolver_core::fact_tracer_tls;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::ShallowFileState;
 use crate::resolver_core::ValueDeclIdentity;
@@ -1158,7 +1158,7 @@ impl crate::VerterHost {
     pub fn current_fact_tracer(
         &self,
     ) -> Option<&verter_session_query::facts::fact_read_set::FactReadSetCell> {
-        fact_tracer_tls::current_tracer()
+        tracer_stack::current_tracer()
     }
 }
 

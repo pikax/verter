@@ -197,6 +197,7 @@ mod value_symbol_depth_equivalence_tests;
 // `ReadSetSignature` — the return type of the public inspector
 // `compile_slot_fact_dep_signature` — selectively re-exported below.
 pub(crate) mod fact_signature_helpers;
+pub(crate) mod fact_tracing;
 pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 #[cfg(test)]
 mod error_propagation_lattice_tests;

@@ -1480,7 +1480,7 @@ fn macro_hot_product(
             // Transient broken lease: leave the slot VACANT (the build lock is
             // released on scope exit, so the next demand re-enters the cold path
             // and retries), and mark the generalized non-cacheability rail.
-            verter_session_query::facts::reuse::note_non_cacheable_read_fan_out(
+            crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
             );
             None

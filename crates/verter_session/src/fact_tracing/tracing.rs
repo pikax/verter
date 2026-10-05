@@ -4,6 +4,10 @@
 //! lifetime. The installer — [`crate::VerterHost::with_fact_tracer`], which
 //! lives in `resolver_context.rs` — plants the cell into this per-thread stack
 //! and the trait method `ResolverContext::current_fact_tracer` reads it back.
+//! This module also APPLIES non-cacheability: a non-cacheable read mark
+//! reaches the tracers and recorders on this stack by a direct call
+//! ([`apply_non_cacheable_propagation`]), never through a process-global
+//! hook.
 //! The documented R18 carve-out that justifies this per-compute thread-local
 //! (and the installer itself) lives above the installer in
 //! `resolver_context.rs`, where the `r18_carve_out_documented_for_tls_installer`
@@ -165,7 +169,7 @@ pub(crate) fn collapse_evidence(
 }
 
 /// Pops the recorder its scope installed, unwinding included.
-pub(super) struct RecorderScope(());
+pub(crate) struct RecorderScope(());
 
 impl Drop for RecorderScope {
     fn drop(&mut self) {
@@ -179,8 +183,7 @@ impl Drop for RecorderScope {
 ///
 /// SAFETY: the caller keeps `recorder` alive for as long as the scope,
 /// and drops the scope first.
-pub(super) fn install_recorder(recorder: &FactReadRecorder) -> RecorderScope {
-    verter_session_query::facts::reuse::install_non_cacheable_read_sink(note_non_cacheable_read);
+pub(crate) fn install_recorder(recorder: &FactReadRecorder) -> RecorderScope {
     ACTIVE_RECORDERS.with(|slot| {
         slot.borrow_mut().push(recorder as *const FactReadRecorder);
     });
@@ -200,15 +203,14 @@ fn active_recorders() -> SmallVec<[*const FactReadRecorder; 4]> {
 /// SAFETY: the caller (`with_fact_tracer`) keeps `cell` alive for the
 /// entire scope duration. `clear` is called on the RAII guard's drop —
 /// even on panic — so the pointer is removed before the cell is freed.
-pub(super) fn install(cell: &FactReadSetCell) {
-    verter_session_query::facts::reuse::install_non_cacheable_read_sink(note_non_cacheable_read);
+pub(crate) fn install(cell: &FactReadSetCell) {
     ACTIVE_TRACERS.with(|slot| {
         slot.borrow_mut().push(cell as *const FactReadSetCell);
     });
 }
 
 /// Pop the top-of-stack entry. Called on the installer's `Drop`.
-pub(super) fn clear() {
+pub(crate) fn clear() {
     ACTIVE_TRACERS.with(|slot| {
         slot.borrow_mut().pop();
     });
@@ -220,7 +222,7 @@ pub(super) fn clear() {
 /// active scope. These callers write into the top cell; the fan-out
 /// functions below reach all cells.
 #[inline]
-pub(super) fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
+pub(crate) fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
     ACTIVE_TRACERS.with(|slot| {
         let stack = slot.borrow();
         let ptr = stack.last().copied();
@@ -245,7 +247,7 @@ pub(super) fn current_tracer<'a>() -> Option<&'a FactReadSetCell> {
 /// during the `observe` calls, so re-entrant `install`/`clear` calls
 /// from inside a tracer are safe.
 #[inline]
-pub(super) fn observe_fan_out(fact: FactVersionRef) {
+pub(crate) fn observe_fan_out(fact: FactVersionRef) {
     verter_audit::attribute_n!(FactObserve, 1);
     for recorder in active_recorders() {
         // SAFETY: see `ACTIVE_RECORDERS`.
@@ -279,7 +281,7 @@ pub(super) fn observe_fan_out(fact: FactVersionRef) {
 
 /// Fan a borrowed signature into **every** active tracer on the stack.
 #[inline]
-pub(super) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
+pub(crate) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
     if sig.is_empty() {
         return;
     }
@@ -305,17 +307,19 @@ pub(super) fn observe_fan_out_borrowed(sig: &[FactVersionRef]) {
 /// NON-CACHEABLE read (a fenced serve, a broken decl-body lease, an
 /// unrootable route, or an unobservable source-env identity).
 ///
-/// Called from the non-cacheability marking chokepoints (the
-/// `IndexedReady` serve chokepoint, the overlay materialiser, the
-/// frontier route reader's per-walk memo, and the typed `LeaseMiss`
-/// collapse boundaries) on the consuming thread, so every enclosing
+/// Reached only through the fan-out in [`super`]
+/// (`note_non_cacheable_read_fan_out` / `note_non_cacheable_propagation`),
+/// which the non-cacheability marking chokepoints (the `IndexedReady` serve
+/// chokepoint, the overlay materialiser, the frontier route reader's
+/// per-walk memo, and the engine consumers of source-side `LeaseMiss`
+/// evidence) call on the consuming thread, so every enclosing
 /// traced cold compute — the semantic-memo build, the
 /// owner-import-surface producer, the component-meta proof producers —
 /// observes the non-cacheable consumption by value and can refuse
 /// shared-cache admission. Same snapshot-then-iterate reentrancy
 /// discipline as [`observe_fan_out`].
 #[inline]
-pub(super) fn note_non_cacheable_read(propagation: NonCacheablePropagation) {
+pub(super) fn apply_non_cacheable_propagation(propagation: NonCacheablePropagation) {
     // A recorder notes EVERY mark, local-only included: a recording that
     // saw one is never replayed, so the conservative read costs only reuse.
     for recorder in active_recorders() {
@@ -348,7 +352,7 @@ mod propagation_tests {
         install(&outer);
         install(&inner);
 
-        note_non_cacheable_read(NonCacheablePropagation::LocalOnly);
+        apply_non_cacheable_propagation(NonCacheablePropagation::LocalOnly);
 
         clear();
         clear();
@@ -363,7 +367,7 @@ mod propagation_tests {
         install(&outer);
         install(&inner);
 
-        note_non_cacheable_read(NonCacheablePropagation::Transitive);
+        apply_non_cacheable_propagation(NonCacheablePropagation::Transitive);
 
         clear();
         clear();
@@ -395,7 +399,7 @@ mod recorder_tests {
             };
             observe_fan_out(fact.clone());
             observe_fan_out_borrowed(&[fact]);
-            note_non_cacheable_read(NonCacheablePropagation::LocalOnly);
+            apply_non_cacheable_propagation(NonCacheablePropagation::LocalOnly);
         }
         // Observed after the scope closed: not recorded.
         observe_fan_out(FactVersionRef::FileWholeHash {
