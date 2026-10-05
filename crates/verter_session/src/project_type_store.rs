@@ -1249,26 +1249,10 @@ impl ProjectTypeStore {
         &self,
         observers: crate::project_semantic_dispatch::EngineObservers,
         macro_mirrors: crate::resolver_core::request_inputs::MacroMirrorSelector,
-        vue_surfaces: Arc<
-            crate::framework::surface_store::FrameworkSurfaceStore<
-                crate::typeinfo::framework_surface::VueSurfaceKey,
-                crate::typeinfo::framework_surface::MacroSurfaceDtos,
-            >,
-        >,
-        svelte_surfaces: Arc<
-            crate::framework::surface_store::FrameworkSurfaceStore<
-                crate::typeinfo::framework_surface::SvelteSurfaceKey,
-                crate::typeinfo::framework_surface::MacroSurfaceDtos,
-            >,
-        >,
     ) -> crate::project_semantic_dispatch::EngineBinding {
         crate::project_semantic_dispatch::EngineBinding::new(
             observers,
             macro_mirrors,
-            #[cfg(any(test, feature = "test-support"))]
-            Arc::clone(&self.app_config_no_override_proof),
-            #[cfg(any(test, feature = "test-support"))]
-            Arc::clone(&self.binder_identity_facts),
             Arc::clone(&self.semantic_graph),
             Arc::clone(&self.flow_slice),
             Arc::clone(&self.intrinsic_registry),
@@ -1277,8 +1261,6 @@ impl ProjectTypeStore {
             Arc::clone(&self.resolvability_db),
             Arc::clone(&self.owner_collection_db),
             Arc::clone(&self.shape_cache_db),
-            vue_surfaces,
-            svelte_surfaces,
             Arc::clone(&self.identity_interner),
             Arc::clone(&self.mapper_binder_registry),
         )

@@ -60,18 +60,13 @@ impl<
     }
 }
 /// Read-only typed output operations; no source services or mutation escape.
-pub(crate) struct MemoRead<'a, D, O = ()> {
+pub(crate) struct MemoRead<'a, D> {
     db: &'a D,
     facts: &'a dyn FactValidation,
-    observations: O,
 }
 impl<'a, D> MemoRead<'a, D> {
     pub(super) fn new(db: &'a D, facts: &'a dyn FactValidation) -> Self {
-        Self {
-            db,
-            facts,
-            observations: (),
-        }
+        Self { db, facts }
     }
 }
 /// Request-local output coordination; storage never owns cold callbacks.
@@ -1190,6 +1185,75 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     }
 }
 
+/// Narrow traced operations a host-owned result store's facade composes.
+///
+/// Each one runs against this dispatch's own request facts, so a facade that
+/// owns its store's policy (key, admission decision, counters) still reads,
+/// validates and traces through exactly the request the dispatch serves.
+/// None of them exposes the fact service, the binding, or a store.
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
+    /// The request's live project generation.
+    #[must_use]
+    pub(crate) fn current_project_generation(&self) -> u64 {
+        FactValidation::current_project_generation(self.ctx)
+    }
+
+    /// Whether every fact in `facts` still validates under the request's live
+    /// view.
+    #[must_use]
+    pub(crate) fn validates_fact_signature(&self, facts: &[FactVersionRef]) -> bool {
+        self.ctx.validates_fact_signature(facts)
+    }
+
+    /// Run `compute` under a fresh fact tracer seeded from the request's live
+    /// aggregate clocks (an unvouched basis), and return its value with the
+    /// finalised read set.
+    pub(crate) fn traced_compute<R>(
+        &self,
+        compute: impl FnOnce() -> R,
+    ) -> (
+        R,
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+    ) {
+        let (value, read_set) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
+            verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
+                &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                &self.ctx.aggregate_clock_reader().live(),
+            ),
+            |_cell| compute(),
+        );
+        (value, read_set.finalise())
+    }
+
+    /// Run `compute` under a fact tracer that is bound to no request port: the
+    /// basis is the engine's own unbound observers (the overflow counter and
+    /// the test forcing knobs).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn traced_unbound<R>(
+        &self,
+        compute: impl FnOnce() -> R,
+    ) -> (
+        R,
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+    ) {
+        crate::fact_signature_helpers::install_fact_tracer(
+            &crate::fact_signature_helpers::FactTracerBasisSource::unbound_observers(
+                &self.binding.observers.overflow,
+                #[cfg(test)]
+                &self.binding.observers.forcing,
+            ),
+            compute,
+        )
+    }
+
+    /// The host attachment this dispatch's request carries, opaque to the
+    /// engine.
+    #[must_use]
+    pub(crate) fn host_attachment(&self) -> &C::HostAttachment {
+        self.host_attachment
+    }
+}
+
 impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     pub(crate) fn intern_resolved_identity(
         &self,
@@ -1204,473 +1268,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             pool.intern(name),
         )
     }
-}
-
-impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
-    pub(crate) fn read_vue_surface(
-        &self,
-        key: &crate::framework::surface_store::FullKey<
-            crate::typeinfo::framework_surface::VueSurfaceKey,
-        >,
-        generation: u64,
-    ) -> Option<
-        Arc<
-            crate::framework::surface_store::StoredSurfaceDto<
-                crate::typeinfo::framework_surface::MacroSurfaceDtos,
-            >,
-        >,
-    > {
-        read_framework_surface(
-            self.binding.vue_surfaces.as_ref(),
-            key,
-            |facts| self.ctx.validates_fact_signature(facts),
-            generation,
-        )
-    }
-    pub(crate) fn publish_vue_surface(
-        &self,
-        key: crate::framework::surface_store::FullKey<
-            crate::typeinfo::framework_surface::VueSurfaceKey,
-        >,
-        entry: crate::framework::surface_store::StoredSurfaceDto<
-            crate::typeinfo::framework_surface::MacroSurfaceDtos,
-        >,
-    ) -> Arc<
-        crate::framework::surface_store::StoredSurfaceDto<
-            crate::typeinfo::framework_surface::MacroSurfaceDtos,
-        >,
-    > {
-        self.binding.vue_surfaces.insert(key, entry)
-    }
-    pub(crate) fn read_svelte_surface(
-        &self,
-        key: &crate::framework::surface_store::FullKey<
-            crate::typeinfo::framework_surface::SvelteSurfaceKey,
-        >,
-        generation: u64,
-    ) -> Option<
-        Arc<
-            crate::framework::surface_store::StoredSurfaceDto<
-                crate::typeinfo::framework_surface::MacroSurfaceDtos,
-            >,
-        >,
-    > {
-        read_framework_surface(
-            self.binding.svelte_surfaces.as_ref(),
-            key,
-            |facts| self.ctx.validates_fact_signature(facts),
-            generation,
-        )
-    }
-    pub(crate) fn publish_svelte_surface(
-        &self,
-        key: crate::framework::surface_store::FullKey<
-            crate::typeinfo::framework_surface::SvelteSurfaceKey,
-        >,
-        entry: crate::framework::surface_store::StoredSurfaceDto<
-            crate::typeinfo::framework_surface::MacroSurfaceDtos,
-        >,
-    ) -> Arc<
-        crate::framework::surface_store::StoredSurfaceDto<
-            crate::typeinfo::framework_surface::MacroSurfaceDtos,
-        >,
-    > {
-        self.binding.svelte_surfaces.insert(key, entry)
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
-    pub(crate) fn app_config_no_override_proof_get_or_compute(
-        &self,
-        key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
-    ) -> Option<Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
-        let ctx = self.ctx;
-        let db = self.binding.app_config_proofs.as_ref();
-        // Warm-hit peek — validate the cached fact_dep_signature against
-        // the live store view. The peek bubbles the signature into any
-        // active outer tracer on success.
-        if let Some(entry) = self.app_config_proof_read(key) {
-            return Some(entry);
-        }
-
-        // Cold compute. The closure observes the decl-canonical's whole
-        // hash so an edit invalidates the proof.
-        let (decl_canonical, _component_key_literal) = key;
-        let decl_canonical_for_compute = Arc::clone(decl_canonical);
-        let cold_body = move || -> bool {
-            // Look up the IndexedReady for the decl canonical. The
-            // tracer fan-out picks up any indirect observations the
-            // resolver substrate emits.
-            //
-            // Content-pinned: the observed `FileWholeHash` fact becomes
-            // part of this proof entry's `read_set_signature`. A permissive
-            // `get_any` could observe a stale artifact's `whole_hash`,
-            // sealing the proof against a content hash that is no longer
-            // current. A stale candidate is treated identically to "file
-            // removed" — `current_content_pinned_indexed` returns `None`,
-            // the sentinel-zero hash is observed, and the validator
-            // re-derives the proof on the next read.
-            let ir = ctx.indexed_for_current_content(decl_canonical_for_compute.as_ref());
-            // Observe the file's whole-hash explicitly. If no IndexedReady
-            // is present (file removed), record a sentinel zero hash so
-            // the validator picks up the absence on the next read.
-            let whole_hash = ir.as_ref().map(|ir| ir.whole_hash).unwrap_or_default();
-            ctx.observe(
-                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                    canonical_id: decl_canonical_for_compute.as_ref().to_string(),
-                    hash: whole_hash,
-                },
-            );
-            // The "no override" determination is a structural query
-            // into the interface members. For the producer's
-            // substrate-correctness contract, the
-            // `declares_interface_app_config` flag short-circuits the
-            // walk: a file without `interface AppConfig` cannot
-            // contribute an override.
-            //
-            // Files that DO declare `interface AppConfig` participate in
-            // the proof's fact_dep_signature via the file_whole_hash
-            // observation above; any edit to the interface body shifts
-            // the whole-hash and invalidates the proof. This is the
-            // R3/R26/R28 substrate contract — the producer does NOT
-            // need to walk the interface body to decide the proof's
-            // validation oracle.
-            ir.as_ref()
-                .map(|ir| !ir.declares_interface_app_config)
-                .unwrap_or(true)
-        };
-        let (no_override, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-            cold_body,
-        );
-        self.binding
-            .observers
-            .provenance
-            .app_config_proof_fact_tracer_installs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // ReturnOnly never publishes — fenced-serve arm: a proof derived
-        // from a served-without-publication artifact must not seal a
-        // shared no-override entry whose facts validate against the live
-        // view. Decline to publish; the consumer takes the slow path.
-        match finalise {
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
-                fact_dep_signature,
-            ) => {
-                if !no_override {
-                    // The file declares `interface AppConfig` — we
-                    // cannot prove "no override" without walking the
-                    // member set. Decline to publish; the fast-path
-                    // consumer must take the slow path.
-                    return None;
-                }
-                db.publish(key.clone(), Arc::clone(&fact_dep_signature));
-                Some(Arc::new(
-                    crate::app_config_proof_db::AppConfigNoOverrideProofEntry {
-                        fact_dep_signature,
-                    },
-                ))
-            }
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
-                self.binding
-                    .observers
-                    .provenance
-                    .app_config_proof_overflow_refusals
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                None
-            }
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
-                self.binding
-                    .observers
-                    .provenance
-                    .app_config_proof_overflow_refusals
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                None
-            }
-            // Refuses like an overflow and is counted as neither: the
-            // overflow counter is a SIZE observable and a stability refusal
-            // must not inflate it.
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
-                None
-            }
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
-    pub(crate) fn produce_binder_identity_facts(
-        &self,
-        canonical: &str,
-    ) -> Option<Arc<BinderIdentityFactsEntry>> {
-        let ctx = self.ctx;
-        let serve = ctx.ensure_indexed_ready_serve(canonical)?;
-        let indexed = serve.indexed;
-        let parse_stable_hash =
-            crate::parse_stable_hash::compute_parse_stable_hash_inputs(&indexed);
-        let key = BinderIdentityFactsKey {
-            canonical: Arc::from(canonical),
-            parse_stable_hash,
-            parse_env_hash: indexed.parse_env_hash,
-        };
-        let store = self.binding.binder_facts.as_ref();
-        if let Some(entry) = store.get(&key) {
-            if entry
-                .read_set_signature
-                .validate_with_self_roots(ctx, std::slice::from_ref(&key.canonical))
-            {
-                // A warm hit must BUBBLE the entry's read-set into any
-                // active outer tracer: an enclosing traced computation
-                // admits its own value with THESE binder facts observed, so
-                // it is invalidated when a pinned fact moves (the sibling
-                // `AppConfigNoOverrideProofDb::peek` pattern).
-                crate::fact_signature_helpers::bubble_fact_signature(
-                    ctx,
-                    &entry.read_set_signature.facts,
-                );
-                return Some(entry);
-            }
-            // Stale under the same key (a recorded fact moved): drop it so
-            // the fresh recompute below wins future warm reads, then fall
-            // through to the cold recompute, which re-pins the signature.
-            store.remove(&key);
-        }
-
-        let indexed_for_body = Arc::clone(&indexed);
-        let canonical_for_body = key.canonical.clone();
-        let cold_body = move || -> (BinderIdentityFacts, bool) {
-            let facts = project_binder_identity_facts_inputs(
-                canonical_for_body.as_ref(),
-                &indexed_for_body.shallow_state,
-            );
-            // Pin the eager parse-lane facts covering the artifact's
-            // inputs against the OBSERVED content version. All are header
-            // facts — no body-sensitive (`Export` / `LocalDecl` / `Member`)
-            // fact is forced, so production lowers zero declaration bodies.
-            let mut all_pinned = true;
-            let mut pin = |fact_key: FactKey| {
-                match crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
-                    ctx,
-                    canonical_for_body.as_ref(),
-                    indexed_for_body.whole_hash,
-                    fact_key,
-                    FactLane::Semantic,
-                ) {
-                    Some(fact_ref) => {
-                        ctx.observe(
-                            verter_session_query::facts::fact_cache::FactVersionRef::Parse(
-                                fact_ref,
-                            ),
-                        );
-                    }
-                    None => {
-                        all_pinned = false;
-                    }
-                }
-            };
-            pin(FactKey::SyntacticExportSet);
-            // Whole-file scope-inventory set pins: a NEW augmentation target
-            // (a first `declare module "m" {…}` in a file that had none) or
-            // a new namespace block moves the signature even when the
-            // parse-stable skeleton is unchanged (EMPTY blocks included).
-            pin(FactKey::AugmentationTargetSet);
-            pin(FactKey::NamespaceScopeSet);
-            for seed in facts.decl_slots.iter() {
-                pin(FactKey::MemberShape {
-                    exporter: crate::file_artifact_store::InternedName::from(
-                        seed.merged_symbol_name.as_ref(),
-                    ),
-                    space: fact_space(seed.symbol_space),
-                });
-            }
-            // Order-sensitive contributor-sequence pins for every
-            // file-surface slot (an overload-group reorder or a same-file
-            // declaration swap moves this fact; a comment BETWEEN
-            // declarations does not, so the cosmetic warm rate survives).
-            for record in facts.declaration_order.iter() {
-                pin(FactKey::DeclContributionOrder {
-                    name: crate::file_artifact_store::InternedName::from(
-                        record.seed.merged_symbol_name.as_ref(),
-                    ),
-                    owner: record.seed.owner,
-                    space: fact_space(record.seed.symbol_space),
-                });
-            }
-            // Per-record augmentation pins for BOTH `declare module`
-            // and `declare global` contributions (global blocks key on the
-            // `$global` sentinel specifier, the emission's own encoding).
-            for record in facts.augmentation_contributions.iter() {
-                let specifier = match &record.scope_kind {
-                    AugmentationScopeKind::Global => {
-                        verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG
-                            .to_string()
-                    }
-                    AugmentationScopeKind::Module(specifier) => specifier.clone(),
-                };
-                pin(FactKey::ModuleAugmentation {
-                    specifier: crate::file_artifact_store::InternedSpecifier::from(
-                        specifier.as_str(),
-                    ),
-                    owner: record.owner,
-                    augmented_name: crate::file_artifact_store::InternedName::from(
-                        record.name.as_ref(),
-                    ),
-                    space: fact_space(record.symbol_space),
-                });
-            }
-            // The per-target contribution SET + ORDER pins, derived from the
-            // shallow walk's BLOCK inventory (every `declare module "X" {…}`
-            // / `declare global {…}` block, EMPTY ones included): an empty
-            // target pins its bare-target hash, so an empty →
-            // first-contribution edit moves a pinned hash even when the
-            // target set itself is unchanged. The scope-kind tag keeps
-            // `declare global {…}` and `declare module "$global" {…}` in
-            // DISTINCT target identities (never string-matched at consumers).
-            let header_index = &indexed_for_body.shallow_state.headers;
-            let mut augmentation_targets: Vec<(
-                verter_session_query::facts::AugmentationScopeKindTag,
-                String,
-                verter_type_expr::TopLevelOwnerId,
-            )> = Vec::new();
-            for block in &header_index.augmentation_blocks {
-                let (scope_kind_tag, specifier) = match &block.scope {
-                    AugmentationScopeKind::Global => (
-                        verter_session_query::facts::AugmentationScopeKindTag::Global,
-                        verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG
-                            .to_string(),
-                    ),
-                    AugmentationScopeKind::Module(specifier) => (
-                        verter_session_query::facts::AugmentationScopeKindTag::Module,
-                        specifier.clone(),
-                    ),
-                };
-                let target = (scope_kind_tag, specifier, block.owner);
-                if !augmentation_targets.contains(&target) {
-                    augmentation_targets.push(target);
-                }
-            }
-            for (scope_kind_tag, specifier, owner) in augmentation_targets {
-                pin(FactKey::AugmentationContributionSet {
-                    scope_kind_tag,
-                    specifier: crate::file_artifact_store::InternedSpecifier::from(
-                        specifier.as_str(),
-                    ),
-                    owner,
-                });
-                pin(FactKey::AugmentationContributionOrder {
-                    scope_kind_tag,
-                    specifier: crate::file_artifact_store::InternedSpecifier::from(
-                        specifier.as_str(),
-                    ),
-                    owner,
-                });
-            }
-            (facts, all_pinned)
-        };
-        let ((facts, all_pinned), finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound_observers(
-                &self.binding.observers.overflow,
-                #[cfg(test)]
-                &self.binding.observers.forcing,
-            ),
-            cold_body,
-        );
-        let facts = Arc::new(facts);
-        // A fenced serve, an unrecoverable observed-version fact registry,
-        // or a non-cacheable / overflowed read set never enters the shared
-        // store — the fresh artifact is returned without admission.
-        let admissible = serve.store_published && all_pinned;
-        match finalise {
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
-                fact_dep_signature,
-            ) if admissible => {
-                let entry = Arc::new(BinderIdentityFactsEntry {
-                    facts,
-                    read_set_signature: ReadSetSignature::new(fact_dep_signature),
-                });
-                store.insert(key, Arc::clone(&entry));
-                Some(entry)
-            }
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
-                fact_dep_signature,
-            ) => Some(Arc::new(BinderIdentityFactsEntry {
-                facts,
-                read_set_signature: ReadSetSignature::new(fact_dep_signature),
-            })),
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
-            | verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
-            | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
-                Some(Arc::new(BinderIdentityFactsEntry {
-                    facts,
-                    read_set_signature: ReadSetSignature::overflow(),
-                }))
-            }
-        }
-    }
-}
-
-#[cfg(any(test, feature = "test-support"))]
-use crate::binder_identity_facts::{
-    project_binder_identity_facts_inputs, BinderIdentityFacts, BinderIdentityFactsEntry,
-    BinderIdentityFactsKey,
-};
-#[cfg(any(test, feature = "test-support"))]
-use verter_session_query::{
-    declarations::AugmentationScopeKind,
-    facts::{FactKey, FactLane},
-};
-#[cfg(any(test, feature = "test-support"))]
-fn fact_space(
-    space: crate::semantic_query::SemanticSymbolSpace,
-) -> verter_session_query::facts::SymbolSpace {
-    match space {
-        crate::semantic_query::SemanticSymbolSpace::Type => {
-            verter_session_query::facts::SymbolSpace::Type
-        }
-        crate::semantic_query::SemanticSymbolSpace::Value => {
-            verter_session_query::facts::SymbolSpace::Value
-        }
-        crate::semantic_query::SemanticSymbolSpace::Namespace => {
-            verter_session_query::facts::SymbolSpace::Namespace
-        }
-    }
-}
-#[cfg(any(test, feature = "test-support"))]
-impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
-    fn app_config_proof_read(
-        &self,
-        key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
-    ) -> Option<Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
-        let entry = self.binding.app_config_proofs.candidate(key)?;
-        if !self.ctx.validates_fact_signature(&entry.fact_dep_signature) {
-            return None;
-        }
-        self.ctx
-            .observe_borrowed_signature(&entry.fact_dep_signature);
-        Some(entry)
-    }
-}
-
-/// Read a selected framework surface only after its generation and facts validate.
-pub(crate) fn read_framework_surface<K, B, F>(
-    store: &crate::framework::surface_store::FrameworkSurfaceStore<K, B>,
-    key: &crate::framework::surface_store::FullKey<K>,
-    validates: F,
-    generation: u64,
-) -> Option<Arc<crate::framework::surface_store::StoredSurfaceDto<B>>>
-where
-    K: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
-    B: Send + Sync + 'static,
-    F: FnOnce(&[verter_session_query::facts::fact_cache::FactVersionRef]) -> bool,
-{
-    let candidate = store.candidate(key)?;
-    if candidate.validated_at_generation != generation
-        || !validates(&candidate.read_set_signature.facts)
-    {
-        return None;
-    }
-    store.touch(&key.canonical, key.owner_whole_hash);
-    Some(candidate)
 }
 
 /// Validate an ordered candidate snapshot after all storage guards have dropped.
@@ -1739,262 +1336,3 @@ fn release_shape_entries(
     }
     removed
 }
-
-impl<'a, P: Send + Sync>
-    MemoRead<
-        'a,
-        crate::component_meta_result_db::ComponentMetaResultDb<P>,
-        &'a crate::meta_provenance::MetaProvenance,
-    >
-{
-    pub(crate) fn for_result(
-        db: &'a crate::component_meta_result_db::ComponentMetaResultDb<P>,
-        facts: &'a dyn FactValidation,
-        observations: &'a crate::meta_provenance::MetaProvenance,
-    ) -> Self {
-        Self {
-            db,
-            facts,
-            observations,
-        }
-    }
-    pub(crate) fn peek(
-        &self,
-        key: &ComponentMetaResultKey,
-        owner_whole_hash: Hash16,
-    ) -> Option<Arc<ComponentMetaResultEntry<P>>> {
-        let bump_miss = |observations: &crate::meta_provenance::MetaProvenance| {
-            observations
-                .component_meta_result_cache_misses
-                .fetch_add(1, Ordering::Relaxed);
-            // Keep the per-request `cache_layers.component_meta` audit
-            // counter in sync with the `.get()` accessor so
-            // joiner-accounting assertions continue to attribute a miss
-            // to the cold winner.
-            if let Some(ctx) = crate::request_context::current_request_context() {
-                ctx.cache_counters
-                    .component_meta
-                    .misses
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-        };
-        if !self.db.is_current_schema() {
-            bump_miss(self.observations);
-            return None;
-        }
-        // Clone the candidate `Arc` out of the slot before validating —
-        // a concurrent eviction cannot invalidate this borrow.
-        let candidate = match self.db.candidate(key, owner_whole_hash) {
-            Some(c) => c,
-            None => {
-                bump_miss(self.observations);
-                return None;
-            }
-        };
-        // Project-generation gate. The carrier validates only
-        // file-content whole-hashes; a `ProjectGeneration` reset bumps
-        // no file content, so an entry whose `validated_at_generation`
-        // no longer equals the live generation is stale even though its
-        // carrier still validates. Reject before the fact rail so the
-        // miss is attributed correctly.
-        if candidate.value.validated_at_generation != self.facts.current_project_generation() {
-            bump_miss(self.observations);
-            return None;
-        }
-        // Fact-precise validation: every entry in the signature must
-        // validate under the live view. An empty signature trivially
-        // passes (entries published outside an installed tracer scope —
-        // typically test fixtures — fall through to the legacy validator
-        // on the caller side).
-        if !self
-            .facts
-            .validates_fact_signature(&candidate.value.read_set_signature.facts)
-        {
-            bump_miss(self.observations);
-            return None;
-        }
-        if let Some(ctx) = crate::request_context::current_request_context() {
-            ctx.cache_counters
-                .component_meta
-                .hits
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        self.observations
-            .component_meta_result_cache_hits
-            .fetch_add(1, Ordering::Relaxed);
-        Some(Arc::new(candidate.value.clone()))
-    }
-}
-
-pub(crate) fn record_component_meta_result_miss(
-    observations: &crate::meta_provenance::MetaProvenance,
-) {
-    observations
-        .component_meta_result_cache_misses
-        .fetch_add(1, Ordering::Relaxed);
-    if let Some(ctx) = crate::request_context::current_request_context() {
-        ctx.cache_counters
-            .component_meta
-            .misses
-            .fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-impl<P: Send + Sync, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
-    MemoPublish<'_, crate::component_meta_result_db::ComponentMetaResultDb<P>, W>
-{
-    pub(crate) fn compute_and_admit_with_entry<R, Compute, Decide>(
-        &self,
-        canonical: &str,
-        path_label: &str,
-        compute: Compute,
-        decide: Decide,
-    ) -> (R, Option<AdmittedComponentMetaResult<P>>)
-    where
-        Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
-        P: verter_session_query::retention::RetainedFootprint,
-    {
-        let (value, read_set) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
-            verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
-                &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
-                &self.facts.aggregate_clock_reader().live(),
-            ),
-            |_cell| compute(),
-        );
-        let finalise = read_set.finalise();
-        let mut admitted = None;
-        match finalise {
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
-                match decide(&value) {
-                    ComponentMetaPublishDecision::Publish {
-                        key,
-                        owner_whole_hash,
-                        payload,
-                        validated_at_generation,
-                    } => {
-                        let admitted_facts =
-                            crate::component_meta_result_db::strip_owner_route_fact(
-                                &key.owner_canonical,
-                                &facts,
-                            );
-                        let entry = Arc::new(ComponentMetaResultEntry {
-                            payload,
-                            read_set_signature:
-                                verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                                    admitted_facts,
-                                ),
-                            validated_at_generation,
-                        });
-                        // A retention refusal leaves `admitted` unset: the
-                        // caller keeps its complete value, and no evidence
-                        // carrier claims an entry the cache never stored.
-                        if self.db.publish_core(
-                            key.clone(),
-                            owner_whole_hash,
-                            entry.as_ref().clone(),
-                        ) {
-                            admitted = Some(AdmittedComponentMetaResult {
-                                key,
-                                owner_whole_hash,
-                                entry,
-                            });
-                        }
-                    }
-                    ComponentMetaPublishDecision::ReturnOnly(reason) => {
-                        crate::cache_runtime::admission::propagate_non_admission(reason);
-                        tracing::debug!(
-                            target: "verter::audit::record",
-                            file = %canonical,
-                            path = %path_label,
-                            reason = %reason,
-                            "skipping component-meta cache promotion: typed admission refusal",
-                        );
-                    }
-                    ComponentMetaPublishDecision::NoValue => {}
-                }
-            }
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
-                let reason = crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: cold compute consumed a non-cacheable read",
-                );
-            }
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
-                let reason = crate::cache_runtime::NonAdmissionReason::SignatureOverflow;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: fact-signature overflowed cap",
-                );
-            }
-            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
-                let reason = crate::cache_runtime::NonAdmissionReason::MutationUnstable;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
-                tracing::debug!(
-                    target: "verter::audit::record",
-                    file = %canonical,
-                    path = %path_label,
-                    "skipping component-meta cache promotion: a compaction domain advanced \
-                     mid-compute",
-                );
-            }
-        }
-        (value, admitted)
-    }
-}
-
-impl<P: Send + Sync, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
-    MemoPublish<'_, crate::component_meta_result_db::ComponentMetaResultDb<P>, W>
-{
-    pub(crate) fn compute_and_admit<R, Compute, Decide>(
-        &self,
-        canonical: &str,
-        path_label: &str,
-        compute: Compute,
-        decide: Decide,
-    ) -> R
-    where
-        Compute: FnOnce() -> R,
-        Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
-        P: verter_session_query::retention::RetainedFootprint,
-    {
-        self.compute_and_admit_with_entry(canonical, path_label, compute, decide)
-            .0
-    }
-}
-
-impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
-    /// Read the final component-meta result cache. The caller passes the
-    /// store its project type store owns; the read validates candidates
-    /// against this dispatch's fact service.
-    pub(crate) fn component_meta_result_read<'s, P: Send + Sync>(
-        &'s self,
-        db: &'s crate::component_meta_result_db::ComponentMetaResultDb<P>,
-    ) -> MemoRead<
-        's,
-        crate::component_meta_result_db::ComponentMetaResultDb<P>,
-        &'s crate::meta_provenance::MetaProvenance,
-    > {
-        MemoRead::for_result(db, self.ctx, &self.binding.observers.provenance)
-    }
-    /// Publish into the final component-meta result cache the caller owns.
-    pub(crate) fn component_meta_result_publish<'s, P: Send + Sync>(
-        &'s self,
-        db: &'s crate::component_meta_result_db::ComponentMetaResultDb<P>,
-    ) -> MemoPublish<'s, crate::component_meta_result_db::ComponentMetaResultDb<P>, C::Clocks> {
-        MemoPublish::new(db, self.ctx)
-    }
-}
-
-use crate::component_meta_result_db::{
-    AdmittedComponentMetaResult, ComponentMetaPublishDecision, ComponentMetaResultEntry,
-    ComponentMetaResultKey,
-};
-use verter_session_query::analysis::types::Hash16;

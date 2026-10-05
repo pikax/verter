@@ -644,6 +644,9 @@ impl VerterHost {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
+            session_attachment: crate::session_attachment::SessionAttachment::from_registry(
+                framework_services.framework_registry(),
+            ),
             framework_services,
             framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1234,59 +1237,12 @@ impl VerterHost {
         &self.typeinfo_scratch_cache
     }
 
-    /// The Vue adapter's typed framework-surface DTO store — the host-owned
-    /// cache of `.vue` macro-surface normalized DTOs.
-    ///
-    /// The store lives erased on the Vue registration row
-    /// ([`crate::framework::registry::FrameworkRegistration::surface_store`]);
-    /// this accessor performs the ONE downcast at store acquisition to the typed
-    /// [`FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
-    /// exactly the public-hidden downcast doctrine the carriers use. Used by the
-    /// [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]
-    /// to materialize each `.vue` macro surface once per `(canonical, content,
-    /// macro, level)`.
-    ///
-    /// Panics only on a build defect (the Vue registration absent, or its
-    /// surface store erased to the wrong concrete type) — neither is reachable
-    /// on a correctly-constructed host (`framework_registry_complete` +
-    /// `vue_registration_carries_every_leg` pin the registration).
-    pub(crate) fn vue_surface_store_handle(
-        &self,
-    ) -> Arc<
-        crate::framework::surface_store::FrameworkSurfaceStore<
-            crate::typeinfo::framework_surface::VueSurfaceKey,
-            crate::typeinfo::framework_surface::MacroSurfaceDtos,
-        >,
-    > {
-        Arc::clone(
-            &self
-                .framework_registry()
-                .get(&verter_language::FrameworkAdapterId::vue())
-                .expect("the Vue adapter is registered")
-                .surface_store,
-        )
-        .into_any_arc()
-        .downcast()
-        .expect("typed Vue surface store")
-    }
-    pub(crate) fn svelte_surface_store_handle(
-        &self,
-    ) -> Arc<
-        crate::framework::surface_store::FrameworkSurfaceStore<
-            crate::typeinfo::framework_surface::SvelteSurfaceKey,
-            crate::typeinfo::framework_surface::MacroSurfaceDtos,
-        >,
-    > {
-        Arc::clone(
-            &self
-                .framework_registry()
-                .get(&verter_language::FrameworkAdapterId::svelte())
-                .expect("the Svelte adapter is registered")
-                .surface_store,
-        )
-        .into_any_arc()
-        .downcast()
-        .expect("typed Svelte surface store")
+    /// The host-owned state a request reaches beside the engine (the typed
+    /// framework-surface DTO stores, selected once from the registry rows that
+    /// own them). Request contexts hand it out through the host-attachment
+    /// port.
+    pub(crate) fn session_attachment(&self) -> &crate::session_attachment::SessionAttachment {
+        &self.session_attachment
     }
     #[cfg(test)]
     pub(crate) fn vue_surface_store(

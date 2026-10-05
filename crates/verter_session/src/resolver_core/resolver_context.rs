@@ -20,8 +20,8 @@ use std::sync::Arc;
 
 use super::fact_validation_port::{FactValidation, LiveFactValidation};
 use super::request_ports::{
-    Cancellation, ExecutionSubmission, ExpressionSourceSelection, IndexedInputs, OwnedLowering,
-    RouteLookup,
+    Cancellation, ExecutionSubmission, ExpressionSourceSelection, HostAttachmentPort,
+    IndexedInputs, OwnedLowering, RouteLookup,
 };
 
 use crate::fact_tracing::tracing as tracer_stack;
@@ -121,6 +121,7 @@ pub(crate) trait ResolverContext<C: ResolverCapabilities>:
     + LiveFactValidation<Clocks = C::Clocks>
     + Cancellation
     + ExecutionSubmission
+    + HostAttachmentPort<HostAttachment = C::HostAttachment>
 {
 }
 
@@ -136,6 +137,9 @@ pub trait ResolverCapabilities: 'static {
         + 'static;
     /// The workspace clock source a live aggregate sample reads.
     type Clocks: verter_session_query::facts::clocks::WorkspaceClocks + Clone + 'static;
+    /// The composition-owned attachment the host hands out beside the engine.
+    /// Opaque to the engine.
+    type HostAttachment: ?Sized + 'static;
 }
 
 // Sealed marker — `VerterHost` is the base implementer,

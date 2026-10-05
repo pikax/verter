@@ -4346,9 +4346,9 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
             let ctx =
                 crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
-            crate::project_semantic_dispatch::memo::MemoRead::for_result(
+            crate::component_meta_result_admission::ComponentMetaResultRead::new(
+                &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
                 db,
-                &ctx,
                 host.provenance(),
             )
             .peek(&key, owner_whole_hash)
@@ -4389,9 +4389,9 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
                 &view_after,
                 overlay,
             );
-            crate::project_semantic_dispatch::memo::MemoRead::for_result(
+            crate::component_meta_result_admission::ComponentMetaResultRead::new(
+                &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
                 db,
-                &ctx,
                 host.provenance(),
             )
             .peek(&key, owner_whole_hash)

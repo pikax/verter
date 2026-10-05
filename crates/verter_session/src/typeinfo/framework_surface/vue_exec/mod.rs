@@ -895,7 +895,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value<
 /// [`ctx.ensure_indexed_ready_serve`]: crate::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve
 /// [`FactValidation`]: crate::resolver_core::fact_validation_port::FactValidation
 #[must_use]
-pub(crate) fn vue_macro_dtos_with_ctx<C: crate::resolver_core::ResolverCapabilities>(
+pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     request: &VueMacroSurfaceRequest,
@@ -954,7 +954,13 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::resolver_core::ResolverCapabilit
     // project generation against the live view invalidates the entry lazily on a
     // carrier edit.
     let generation = ctx.current_project_generation();
-    if let Some(cached) = dispatch.read_vue_surface(&key, generation) {
+    let surfaces = dispatch.host_attachment().vue_surfaces();
+    if let Some(cached) = crate::framework::surface_store::read_framework_surface(
+        surfaces,
+        &key,
+        |facts| dispatch.validates_fact_signature(facts),
+        generation,
+    ) {
         // Bubble the cached entry's cross-file carrier fact signature into any
         // active outer fact tracer so an outer component-meta cold trace inherits
         // the DTO's carrier facts on this warm hit.
@@ -1160,7 +1166,7 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::resolver_core::ResolverCapabilit
                 validated_at_generation: generation,
             };
             MacroDtosRead {
-                dtos: Arc::clone(&dispatch.publish_vue_surface(key, entry).dto_bundle),
+                dtos: Arc::clone(&surfaces.insert(key, entry).dto_bundle),
                 completeness,
             }
         }

@@ -2601,7 +2601,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let mut index = start_index;
 
         // Supplement §5.D.0 r17 — honour
-        // `HostConfig::depth_budget` so §5.D.4
+        // the engine policy's depth budget so §5.D.4
         // `no_cache_promotion_for_budget_exceeded_*` tests can
         // construct a constrained host and observe a budget-exceeded
         // sentinel (Recursive).
@@ -6075,7 +6075,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let _enter = span.enter();
 
         // Production default. Tests may opt in to a smaller cap via
-        // `HostConfig::recursion_budget_overrides.walker_pathological_cap`
+        // the engine policy's `walker_pathological_cap`
         // so the cap-fire path is reachable on hermetic fixtures
         // without requiring a 10_000-node corpus.
         const PATHOLOGICAL_CAP_DEFAULT: usize = 10_000;

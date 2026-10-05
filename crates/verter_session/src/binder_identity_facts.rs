@@ -52,6 +52,8 @@
 
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "test-support"))]
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::project_type_store::IndexedReady;
 use crate::semantic_query::{BinderScopeId, DeclarationSlotSeed, SemanticSymbolSpace};
 use dashmap::DashMap;
@@ -709,10 +711,212 @@ fn scope_kind_sort_key(kind: &crate::semantic_query::BinderScopeKind) -> (u8, St
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn produce_binder_identity_facts(
     ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    store: &BinderIdentityFactsStore,
     canonical: &str,
 ) -> Option<Arc<BinderIdentityFactsEntry>> {
-    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
-        .produce_binder_identity_facts(canonical)
+    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let serve = ctx.ensure_indexed_ready_serve(canonical)?;
+    let indexed = serve.indexed;
+    let parse_stable_hash = crate::parse_stable_hash::compute_parse_stable_hash_inputs(&indexed);
+    let key = BinderIdentityFactsKey {
+        canonical: Arc::from(canonical),
+        parse_stable_hash,
+        parse_env_hash: indexed.parse_env_hash,
+    };
+    if let Some(entry) = store.get(&key) {
+        if entry
+            .read_set_signature
+            .validate_with_self_roots(ctx, std::slice::from_ref(&key.canonical))
+        {
+            // A warm hit must BUBBLE the entry's read-set into any
+            // active outer tracer: an enclosing traced computation
+            // admits its own value with THESE binder facts observed, so
+            // it is invalidated when a pinned fact moves (the sibling
+            // `AppConfigNoOverrideProofDb::peek` pattern).
+            crate::fact_signature_helpers::bubble_fact_signature(
+                ctx,
+                &entry.read_set_signature.facts,
+            );
+            return Some(entry);
+        }
+        // Stale under the same key (a recorded fact moved): drop it so
+        // the fresh recompute below wins future warm reads, then fall
+        // through to the cold recompute, which re-pins the signature.
+        store.remove(&key);
+    }
+
+    let indexed_for_body = Arc::clone(&indexed);
+    let canonical_for_body = key.canonical.clone();
+    let cold_body = move || -> (BinderIdentityFacts, bool) {
+        let facts = project_binder_identity_facts_inputs(
+            canonical_for_body.as_ref(),
+            &indexed_for_body.shallow_state,
+        );
+        // Pin the eager parse-lane facts covering the artifact's
+        // inputs against the OBSERVED content version. All are header
+        // facts — no body-sensitive (`Export` / `LocalDecl` / `Member`)
+        // fact is forced, so production lowers zero declaration bodies.
+        let mut all_pinned = true;
+        let mut pin = |fact_key: FactKey| {
+            match crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+                ctx,
+                canonical_for_body.as_ref(),
+                indexed_for_body.whole_hash,
+                fact_key,
+                FactLane::Semantic,
+            ) {
+                Some(fact_ref) => {
+                    ctx.observe(
+                        verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact_ref),
+                    );
+                }
+                None => {
+                    all_pinned = false;
+                }
+            }
+        };
+        pin(FactKey::SyntacticExportSet);
+        // Whole-file scope-inventory set pins: a NEW augmentation target
+        // (a first `declare module "m" {…}` in a file that had none) or
+        // a new namespace block moves the signature even when the
+        // parse-stable skeleton is unchanged (EMPTY blocks included).
+        pin(FactKey::AugmentationTargetSet);
+        pin(FactKey::NamespaceScopeSet);
+        for seed in facts.decl_slots.iter() {
+            pin(FactKey::MemberShape {
+                exporter: crate::file_artifact_store::InternedName::from(
+                    seed.merged_symbol_name.as_ref(),
+                ),
+                space: fact_space(seed.symbol_space),
+            });
+        }
+        // Order-sensitive contributor-sequence pins for every
+        // file-surface slot (an overload-group reorder or a same-file
+        // declaration swap moves this fact; a comment BETWEEN
+        // declarations does not, so the cosmetic warm rate survives).
+        for record in facts.declaration_order.iter() {
+            pin(FactKey::DeclContributionOrder {
+                name: crate::file_artifact_store::InternedName::from(
+                    record.seed.merged_symbol_name.as_ref(),
+                ),
+                owner: record.seed.owner,
+                space: fact_space(record.seed.symbol_space),
+            });
+        }
+        // Per-record augmentation pins for BOTH `declare module`
+        // and `declare global` contributions (global blocks key on the
+        // `$global` sentinel specifier, the emission's own encoding).
+        for record in facts.augmentation_contributions.iter() {
+            let specifier = match &record.scope_kind {
+                AugmentationScopeKind::Global => {
+                    verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG.to_string()
+                }
+                AugmentationScopeKind::Module(specifier) => specifier.clone(),
+            };
+            pin(FactKey::ModuleAugmentation {
+                specifier: crate::file_artifact_store::InternedSpecifier::from(specifier.as_str()),
+                owner: record.owner,
+                augmented_name: crate::file_artifact_store::InternedName::from(
+                    record.name.as_ref(),
+                ),
+                space: fact_space(record.symbol_space),
+            });
+        }
+        // The per-target contribution SET + ORDER pins, derived from the
+        // shallow walk's BLOCK inventory (every `declare module "X" {…}`
+        // / `declare global {…}` block, EMPTY ones included): an empty
+        // target pins its bare-target hash, so an empty →
+        // first-contribution edit moves a pinned hash even when the
+        // target set itself is unchanged. The scope-kind tag keeps
+        // `declare global {…}` and `declare module "$global" {…}` in
+        // DISTINCT target identities (never string-matched at consumers).
+        let header_index = &indexed_for_body.shallow_state.headers;
+        let mut augmentation_targets: Vec<(
+            verter_session_query::facts::AugmentationScopeKindTag,
+            String,
+            verter_type_expr::TopLevelOwnerId,
+        )> = Vec::new();
+        for block in &header_index.augmentation_blocks {
+            let (scope_kind_tag, specifier) = match &block.scope {
+                AugmentationScopeKind::Global => (
+                    verter_session_query::facts::AugmentationScopeKindTag::Global,
+                    verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG.to_string(),
+                ),
+                AugmentationScopeKind::Module(specifier) => (
+                    verter_session_query::facts::AugmentationScopeKindTag::Module,
+                    specifier.clone(),
+                ),
+            };
+            let target = (scope_kind_tag, specifier, block.owner);
+            if !augmentation_targets.contains(&target) {
+                augmentation_targets.push(target);
+            }
+        }
+        for (scope_kind_tag, specifier, owner) in augmentation_targets {
+            pin(FactKey::AugmentationContributionSet {
+                scope_kind_tag,
+                specifier: crate::file_artifact_store::InternedSpecifier::from(specifier.as_str()),
+                owner,
+            });
+            pin(FactKey::AugmentationContributionOrder {
+                scope_kind_tag,
+                specifier: crate::file_artifact_store::InternedSpecifier::from(specifier.as_str()),
+                owner,
+            });
+        }
+        (facts, all_pinned)
+    };
+    let ((facts, all_pinned), finalise) = dispatch.traced_unbound(cold_body);
+    let facts = Arc::new(facts);
+    // A fenced serve, an unrecoverable observed-version fact registry,
+    // or a non-cacheable / overflowed read set never enters the shared
+    // store — the fresh artifact is returned without admission.
+    let admissible = serve.store_published && all_pinned;
+    match finalise {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(fact_dep_signature)
+            if admissible =>
+        {
+            let entry = Arc::new(BinderIdentityFactsEntry {
+                facts,
+                read_set_signature: ReadSetSignature::new(fact_dep_signature),
+            });
+            store.insert(key, Arc::clone(&entry));
+            Some(entry)
+        }
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(fact_dep_signature) => {
+            Some(Arc::new(BinderIdentityFactsEntry {
+                facts,
+                read_set_signature: ReadSetSignature::new(fact_dep_signature),
+            }))
+        }
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            Some(Arc::new(BinderIdentityFactsEntry {
+                facts,
+                read_set_signature: ReadSetSignature::overflow(),
+            }))
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+use verter_session_query::facts::{FactKey, FactLane};
+#[cfg(any(test, feature = "test-support"))]
+fn fact_space(
+    space: crate::semantic_query::SemanticSymbolSpace,
+) -> verter_session_query::facts::SymbolSpace {
+    match space {
+        crate::semantic_query::SemanticSymbolSpace::Type => {
+            verter_session_query::facts::SymbolSpace::Type
+        }
+        crate::semantic_query::SemanticSymbolSpace::Value => {
+            verter_session_query::facts::SymbolSpace::Value
+        }
+        crate::semantic_query::SemanticSymbolSpace::Namespace => {
+            verter_session_query::facts::SymbolSpace::Namespace
+        }
+    }
 }
 
 #[cfg(test)]
@@ -812,14 +1016,24 @@ pub(crate) mod tests {
         let _ = host.analyze_with_audit("/w/b.ts");
 
         // Cold-admit the entry.
-        let cold = super::produce_binder_identity_facts(host.as_ref(), "/w/b.ts")
-            .expect("cold produce must succeed");
+        let cold = super::produce_binder_identity_facts(
+            host.as_ref(),
+            host.project_type_store().binder_identity_facts_store(),
+            "/w/b.ts",
+        )
+        .expect("cold produce must succeed");
 
         // An outer traced computation that WARM-HITS the store must
         // carry the binder facts in its own finalized read-set.
         let (hit, finalise) = crate::fact_signature_helpers::install_fact_tracer(
             &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
-            || super::produce_binder_identity_facts(host.as_ref(), "/w/b.ts"),
+            || {
+                super::produce_binder_identity_facts(
+                    host.as_ref(),
+                    host.project_type_store().binder_identity_facts_store(),
+                    "/w/b.ts",
+                )
+            },
         );
         let hit = hit.expect("warm produce must succeed");
         assert!(

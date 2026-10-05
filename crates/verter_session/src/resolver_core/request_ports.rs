@@ -419,6 +419,18 @@ pub trait ExecutionSubmission {
     fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding;
 }
 
+/// The composition-owned state a request's host attaches beside the engine.
+///
+/// The engine never reads it: the attachment type is chosen by the context's
+/// [](super::resolver_context::ResolverCapabilities)
+/// family and carries no engine-visible operation. Host-owned result stores and
+/// the host's output lease travel here instead of through the engine binding,
+/// so the engine's resources stay exactly the engine's own.
+pub trait HostAttachmentPort {
+    type HostAttachment: ?Sized;
+    fn host_attachment(&self) -> &Self::HostAttachment;
+}
+
 /// A single population read and its owned query result. The all-space shape
 /// fingerprint travels beside the filtered answer, including an empty answer.
 pub struct ContributorAnswer {

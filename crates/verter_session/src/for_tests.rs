@@ -566,7 +566,12 @@ pub fn app_config_no_override_proof_get_or_compute_for_tests(
     host: &crate::VerterHost,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
 ) -> Option<std::sync::Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
-    crate::component_meta_caches::app_config_no_override_proof_get_or_compute(host, key)
+    crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+        host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
+        key,
+    )
 }
 
 /// Drive the family-A `BinderIdentityFacts` production producer
@@ -579,7 +584,11 @@ pub fn binder_identity_facts_get_or_compute_for_tests(
     host: &crate::VerterHost,
     canonical: &str,
 ) -> Option<std::sync::Arc<crate::binder_identity_facts::BinderIdentityFactsEntry>> {
-    crate::binder_identity_facts::produce_binder_identity_facts(host, canonical)
+    crate::binder_identity_facts::produce_binder_identity_facts(
+        host,
+        host.project_type_store().binder_identity_facts_store(),
+        canonical,
+    )
 }
 
 /// Return the published `ComponentMetaResultEntry`'s

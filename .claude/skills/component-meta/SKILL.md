@@ -34,14 +34,14 @@ For full architecture, API reference, and debug workflows see [`docs/audit-footp
 
 ## Final-Result Cache (post-rewrite)
 
-`get_component_meta(owner)` uses the existing request facade's `component_meta_result_read()` before running the resolver. `ProjectTypeStore` owns the passive `ComponentMetaResultDb<CachedComponentMetaResult>`; its content-free `ComponentMetaResultKey` contains the owner canonical, options fingerprint, project identity, and parse/resolve/type/lib environment hashes. The owner whole-hash discriminates value-side candidates.
+`get_component_meta(owner)` reads through the session facade `ComponentMetaResultRead` (`component_meta_result_admission.rs`) before running the resolver. `ProjectTypeStore` owns the passive `ComponentMetaResultDb<CachedComponentMetaResult>`; its content-free `ComponentMetaResultKey` contains the owner canonical, options fingerprint, project identity, and parse/resolve/type/lib environment hashes. The owner whole-hash discriminates value-side candidates.
 
 Flow per call:
 
 1. Look up `shallow_file_state(owner)` for the current whole-hash.
 2. Build `ComponentMetaResultKey` with `component_meta_options_fingerprint(&ComponentMetaOptions::default())` — xxh3-128 over a manually-versioned encoding (schema + `compat` + `include_fallthrough`).
-3. The private request root rejects a non-current view before probing storage. `component_meta_result_read().peek(&key, whole_hash)` validates the candidate's generation and `ReadSetSignature.facts` through the captured `FactValidation` port, then counts the warm hit. Stable signatures return the cached payload with zero resolver work.
-4. On miss or stale signature, the existing facade's `component_meta_result_publish()` wraps cold compute in the original raw `Unvouched` tracer, finalizes the transitive fact signature, and applies the existing admission gates before passive storage publishes the owned record. Warm resolution templates reconstruct purely from the exact indexed snapshot selected by the request root after validation.
+3. The private request root rejects a non-current view before probing storage. `ComponentMetaResultRead::peek(&key, whole_hash)` validates the candidate's generation and `ReadSetSignature.facts` through the request dispatch's narrow validation operations, then counts the warm hit. Stable signatures return the cached payload with zero resolver work.
+4. On miss or stale signature, the session facade `ComponentMetaResultPublish` runs cold compute through the dispatch's `traced_compute` (the original raw `Unvouched` tracer), finalizes the transitive fact signature, and applies the existing admission gates before passive storage publishes the owned record. Warm resolution templates reconstruct purely from the exact indexed snapshot selected by the request root after validation.
 
 Cache eviction is automatic: `host.upsert(...)` calls `project_type_store.evict_canonical(owner)`, which `invalidate_owner`s every key for the changed canonical. Workspace-shape shifts (tsconfig / SDK / project-graph) call `bump_project_generation_and_evict`, clearing all result entries.
 

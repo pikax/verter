@@ -160,6 +160,7 @@ mod component_meta_repo_first_pass_diagnosis_tests;
 pub mod component_meta_resolution_policy;
 #[cfg(test)]
 mod component_meta_resolve_owner_route_strip_tests;
+pub(crate) mod component_meta_result_admission;
 pub mod component_meta_result_db;
 #[cfg(test)]
 mod component_meta_slot_binding_skip_tests;
@@ -396,6 +397,7 @@ pub(crate) mod semantic_query_memo;
 /// provider-surface store charges THIS one, not a second per-crate ceiling.
 #[cfg(test)]
 mod semantic_retention_account_tests;
+pub(crate) mod session_attachment;
 pub(crate) mod session_runtime;
 pub(crate) mod session_vfs_sink;
 pub mod session_view;
@@ -736,6 +738,10 @@ pub struct VerterHost {
     /// authority cannot describe different framework sets. Built ONCE at host
     /// construction and immutable thereafter. See `framework::registry::HostServices`.
     pub(crate) framework_services: std::sync::Arc<crate::framework::HostServices>,
+    /// Host-owned state a request reaches beside the engine (the framework
+    /// surface DTO stores), selected once from the registry rows that own
+    /// them. See [`crate::session_attachment::SessionAttachment`].
+    pub(crate) session_attachment: crate::session_attachment::SessionAttachment,
     /// Host-owned framework script-fact caches — the resolved-validation half
     /// of the script-fact seam. The content-addressed candidate store + the
     /// resolved-fact store the registry's active providers write through.

@@ -370,6 +370,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     pub(crate) policy: EnginePolicy,
     cancellation: crate::resolver_core::request_ports::CancellationCheckpoint,
     pub(super) ctx: &'a dyn ResolverContext<C>,
+    /// The request's host attachment, selected once at construction. The
+    /// engine never reads it; host facades borrow it beside the dispatch.
+    host_attachment: &'a C::HostAttachment,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[ActiveInstantiation; 8]>>,
     /// The operands each awaited relation is unwrapping on the current
     /// path — the checker's `awaitedTypeStack`. A run pushes every operand
@@ -757,6 +760,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             binding: ctx.attach_engine(),
             policy: ctx.engine_policy(),
             cancellation: ctx.cancellation_checkpoint(),
+            host_attachment:
+                crate::resolver_core::request_ports::HostAttachmentPort::host_attachment(ctx),
             ctx,
             instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
             awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
@@ -3990,7 +3995,7 @@ pub(crate) fn node_data_for(
 // `SemanticQueryKey` variants: the surface materialisation, public-instance
 // resolution, and fallthrough-surface resolution are expressed by composing
 // the existing dispatchers (`ProjectPath` / `Instantiate`) and reading the
-// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar
+// host-owned component-meta result sidecar
 // (`verter_semantic/src/analysis/component_meta.rs`), so the query taxonomy
 // stays closed while these helpers thread the composition. The single
 // publication `TypeExpr` is materialised at the registered surface sink, never

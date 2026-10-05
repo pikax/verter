@@ -204,8 +204,12 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let proof_cold =
-        crate::component_meta_caches::app_config_no_override_proof_get_or_compute(&*host, &key);
+    let proof_cold = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+        &*host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
+        &key,
+    );
     // ^ This is a `pub(crate)` API exercising the `&dyn ResolverContext`
     // entry; `&*host` derefs `Arc<VerterHost>` to a concrete `&VerterHost`
     // which coerces to `&dyn ResolverContext` via the trait impl.
@@ -264,6 +268,8 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .load(std::sync::atomic::Ordering::Relaxed);
     let proof_no_ac = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
         &*host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
         &key_no_app_config,
     );
     let installs_after_no_ac = host
@@ -291,6 +297,8 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .load(std::sync::atomic::Ordering::Relaxed);
     let proof_warm = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
         &*host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
         &key_no_app_config,
     );
     let installs_after_warm = host
@@ -326,6 +334,8 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .load(std::sync::atomic::Ordering::Relaxed);
     let _ = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
         &*host,
+        host.project_type_store().app_config_no_override_proof_db(),
+        host.provenance(),
         &key_no_app_config,
     );
     let installs_after_invalidate = host

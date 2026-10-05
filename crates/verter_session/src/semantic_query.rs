@@ -784,7 +784,7 @@ pub enum BinderScopeKind {
 }
 
 /// Stable STRUCTURAL lexical-scope id — the query-identity projection of
-/// the family-A scope tree (`binder_identity_facts`). This is the
+/// the family-A scope tree (the binder-identity facts substrate). This is the
 /// `binder_scope_id` a context-sensitive query identity carries as a
 /// content-free resolution-context discriminator (the role generic
 /// type-args play in `Instantiate`), NOT a content/version hash and NOT a
@@ -1605,7 +1605,7 @@ impl ResolvedDeclSlotIdentity {
     /// Project the env-free [`DeclarationSlotSeed`] this slot was
     /// finalized from — the four content-free identity fields verbatim,
     /// dropping the sealed env tail. The seed is what the family-A
-    /// `BinderIdentityFacts` artifact stores (an env-invariant,
+    /// binder-identity facts artifact stores (an env-invariant,
     /// parse-stable artifact never carries an env dimension).
     #[must_use]
     pub fn seed(&self) -> DeclarationSlotSeed {
@@ -2337,7 +2337,7 @@ pub enum ResolveCallFailure {
 /// identity fields of the landed five-field
 /// [`ResolvedDeclSlotIdentity`], with every env dimension deliberately
 /// omitted. This is the `BinderDeclSlotFact` payload the family-A
-/// `BinderIdentityFacts` artifact stores.
+/// binder-identity facts artifact stores.
 ///
 /// **Contract (R7 + family-A keying):**
 ///
@@ -8438,7 +8438,7 @@ pub enum SemanticQueryKey {
     /// (`MaterializeSurface`, `ResolvePublicInstance`,
     /// `ResolveFallthroughSurface`) are non-variant dispatch helpers
     /// that compose existing variants and read the
-    /// `ComponentMetaResultDb<ComponentMetaAnalysis>` sidecar.
+    /// host-owned component-meta result sidecar.
     ///
     /// `owner` is the synthetic SFC declaration slot (`defining_canonical`
     /// = the SFC file path, `merged_symbol_name` per repo convention).

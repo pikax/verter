@@ -141,7 +141,13 @@ pub(crate) fn resolve_svelte_surface(
     // Warm read against the SAME `ctx` view the surface resolves under — a
     // carrier edit (a cross-file dependency the captured `TypeExpr` reaches)
     // invalidates the entry lazily via the recorded fact signature + generation.
-    if let Some(cached) = dispatch.read_svelte_surface(&key, generation) {
+    let surfaces = dispatch.host_attachment().svelte_surfaces();
+    if let Some(cached) = crate::framework::surface_store::read_framework_surface(
+        surfaces,
+        &key,
+        |facts| dispatch.validates_fact_signature(facts),
+        generation,
+    ) {
         cached.read_set_signature.bubble_via_tls();
         return ResolvedOutcome::Resolved(Arc::clone(&cached.dto_bundle));
     }
@@ -209,9 +215,7 @@ pub(crate) fn resolve_svelte_surface(
                 ),
                 validated_at_generation: generation,
             };
-            return ResolvedOutcome::Resolved(Arc::clone(
-                &dispatch.publish_svelte_surface(key, entry).dto_bundle,
-            ));
+            return ResolvedOutcome::Resolved(Arc::clone(&surfaces.insert(key, entry).dto_bundle));
         }
     }
     outcome

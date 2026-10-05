@@ -32,6 +32,18 @@ pub enum HostCapabilities {}
 impl ResolverCapabilities for HostCapabilities {
     type ExpressionDemand = crate::decl_body_memo::IndexedExpressionDemand;
     type Clocks = crate::resolver_store::WorkspaceSlotClocks;
+    type HostAttachment = crate::session_attachment::SessionAttachment;
+}
+
+/// Translate the host's configuration into the engine's immutable execution
+/// policy. The engine takes the selected values; it never reads the host
+/// configuration itself.
+fn engine_policy_for(config: &crate::HostConfig) -> crate::project_semantic_dispatch::EnginePolicy {
+    crate::project_semantic_dispatch::EnginePolicy::new(
+        config.depth_budget,
+        config.recursion_budget_overrides.synthesis_steps,
+        config.recursion_budget_overrides.walker_pathological_cap,
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -133,7 +145,7 @@ impl IndexedInputs for crate::VerterHost {
     }
 
     fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy {
-        crate::project_semantic_dispatch::EnginePolicy::from_config(&self.config)
+        engine_policy_for(&self.config)
     }
 
     // Cache accessors -------------------------------------------------
@@ -482,9 +494,15 @@ impl ExecutionSubmission for crate::VerterHost {
                 #[cfg(test)]
                 Arc::clone(&self.macro_hot_lowering_count),
             ),
-            self.vue_surface_store_handle(),
-            self.svelte_surface_store_handle(),
         )
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl super::request_ports::HostAttachmentPort for crate::VerterHost {
+    type HostAttachment = crate::session_attachment::SessionAttachment;
+    fn host_attachment(&self) -> &Self::HostAttachment {
+        self.session_attachment()
     }
 }
 
@@ -741,7 +759,7 @@ where
     }
 
     fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy {
-        crate::project_semantic_dispatch::EnginePolicy::from_config(&self.0.host().config)
+        engine_policy_for(&self.0.host().config)
     }
 
     fn normalized_analysis_canonical(&self, raw_canonical: &str) -> String {
@@ -1060,9 +1078,17 @@ where
                     #[cfg(test)]
                     Arc::clone(&self.0.host().macro_hot_lowering_count),
                 ),
-            self.0.host().vue_surface_store_handle(),
-            self.0.host().svelte_surface_store_handle(),
         )
+    }
+}
+
+impl<L: RequestBoundLifecycle> super::request_ports::HostAttachmentPort for RequestBoundAdapter<L>
+where
+    Self: sealed::Sealed + sealed::RequestBoundSealed,
+{
+    type HostAttachment = crate::session_attachment::SessionAttachment;
+    fn host_attachment(&self) -> &Self::HostAttachment {
+        self.0.host().session_attachment()
     }
 }
 

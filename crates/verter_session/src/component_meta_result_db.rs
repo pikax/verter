@@ -286,19 +286,6 @@ impl<P> ComponentMetaResultDb<P> {
     > {
         self.inner.get_candidate(key, &owner_whole_hash)
     }
-    #[cfg(test)]
-    pub(crate) fn fixture<'a>(
-        &'a self,
-        facts: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<
-            Clocks = crate::resolver_store::WorkspaceSlotClocks,
-        >,
-    ) -> crate::project_semantic_dispatch::memo::MemoPublish<
-        'a,
-        Self,
-        crate::resolver_store::WorkspaceSlotClocks,
-    > {
-        crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, facts)
-    }
 
     /// Per-slot candidate cap. One owner + one options fingerprint is one
     /// slot; concurrent content versions of that owner are candidates in
@@ -715,27 +702,38 @@ mod tests {
         let base_producer = include_str!("host_manage/component_meta_entry.rs");
         let resolution_producer = include_str!("host_manage/component_meta_entry_resolution.rs");
 
-        let driver_source = include_str!("project_semantic_dispatch/memo.rs");
+        let engine_source = include_str!("project_semantic_dispatch/memo.rs");
+        let trace_start = engine_source
+            .find("    pub(crate) fn traced_compute<R>(")
+            .expect("the engine must export the traced cold-compute operation");
+        let trace_end = engine_source[trace_start..]
+            .find("\n\n")
+            .map(|offset| trace_start + offset)
+            .expect("the traced compute must have a bounded implementation");
+        let trace_body = &engine_source[trace_start..trace_end];
+        assert!(
+            trace_body.contains("resolver_context::with_fact_tracer_cell")
+                && trace_body.contains("AggregateBasisSeed::Unvouched")
+                && trace_body.contains("read_set.finalise()"),
+            "the engine operation must install the original raw tracer around cold compute \
+             and finalise its read set"
+        );
+        let driver_source = include_str!("component_meta_result_admission.rs");
         let compute_start = driver_source
             .find("    pub(crate) fn compute_and_admit_with_entry")
-            .expect("the selected MemoPublish must own cold trace/finalise/admit");
+            .expect("the result facade must own trace/admit sequencing");
         let compute_end = driver_source[compute_start..]
-            .find(
-                "\nimpl<P: Send + Sync, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>\n    MemoPublish",
-            )
+            .find("    pub(crate) fn compute_and_admit<")
             .map(|offset| compute_start + offset)
             .expect("the result driver must have a bounded implementation");
         let compute_body = &driver_source[compute_start..compute_end];
-        assert!(
-            compute_body.contains("resolver_context::with_fact_tracer_cell")
-                && compute_body.contains("AggregateBasisSeed::Unvouched"),
-            "the engine-owned funnel must install the original raw tracer around cold compute"
-        );
         let compact_compute: String = compute_body
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        let finalise = compact_compute.find("read_set.finalise()").unwrap();
+        let finalise = compact_compute
+            .find("self.dispatch.traced_compute(")
+            .unwrap();
         let publish = compact_compute.find("self.db.publish_core(").unwrap();
         assert!(
             finalise < publish,
@@ -762,7 +760,7 @@ mod tests {
         );
         assert!(
             compact_compute.contains("self.db.publish_core("),
-            "only the selected engine funnel may consume finalized evidence into storage"
+            "only the result facade may consume finalized evidence into storage"
         );
         assert!(
             !base_producer.contains("component_meta_results().insert(")
@@ -808,7 +806,10 @@ mod tests {
             hash: owner_hash,
         };
 
-        let value = db.fixture(&host).compute_and_admit(
+        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let results =
+            crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
+        let value = results.compute_and_admit(
             "/w/owner.vue",
             "unit-test",
             || {
@@ -827,7 +828,7 @@ mod tests {
 
         let refused_key = mk_result_key("/w/refused.vue", [0u8; 16]);
         let refused_hash = [8u8; 16];
-        let refused_value = db.fixture(&host).compute_and_admit(
+        let refused_value = results.compute_and_admit(
             "/w/refused.vue",
             "unit-test",
             || {
