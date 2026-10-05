@@ -2,6 +2,7 @@ use oxc_ast::ast::*;
 use oxc_ast::Comment;
 
 use oxc_span::GetSpan;
+use verter_analyzer_mint::MemberListAnchorMint;
 use verter_type_expr::{TopLevelOwnerId, TypeExpr};
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -3966,7 +3967,11 @@ fn closing_delimiter_anchor(span: oxc_span::Span, is_empty: bool) -> MacroAnchor
     if span.end <= span.start {
         return MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList);
     }
-    MacroAnchor::Available(MemberListAnchor::new(span.end - 1, is_empty))
+    MacroAnchor::Available(MemberListAnchor::new(
+        MemberListAnchorMint::grant(),
+        span.end - 1,
+        is_empty,
+    ))
 }
 
 /// The appendable member-list anchor of an object TYPE at this position.

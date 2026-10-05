@@ -23,6 +23,8 @@ test-support = ["verter_session_query/test-support"]
 
 [dependencies]
 verter_session_query = { workspace = true }
+# The analyzer alone mints member-list anchors from live syntax nodes.
+verter_analyzer_mint = { workspace = true }
 verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span" }
 # Leaf observability substrate (layer 1): path helpers keep their

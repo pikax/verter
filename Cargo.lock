@@ -3289,6 +3289,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_analyzer_mint"
+version = "0.0.1-beta.6"
+
+[[package]]
 name = "verter_audit"
 version = "0.0.1-beta.6"
 dependencies = [
@@ -3838,6 +3842,7 @@ dependencies = [
  "sha2",
  "static_assertions",
  "trybuild",
+ "verter_analyzer_mint",
  "verter_audit",
  "verter_css_syntax",
  "verter_debug_assert",
@@ -3956,6 +3961,7 @@ dependencies = [
  "smallvec",
  "static_assertions",
  "verter_analysis_inputs",
+ "verter_analyzer_mint",
  "verter_audit",
  "verter_debug_assert",
  "verter_language",

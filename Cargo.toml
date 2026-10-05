@@ -51,6 +51,7 @@ syn = { version = "2.0", features = ["full", "visit"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 verter_css_syntax = { path = "crates/verter_css_syntax" }
+verter_analyzer_mint = { path = "crates/verter_analyzer_mint" }
 verter_debug_assert = { path = "crates/verter_debug_assert" }
 verter_macro_dto = { path = "crates/verter_macro_dto" }
 verter_ecma = { path = "crates/verter_ecma" }

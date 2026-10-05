@@ -429,7 +429,11 @@ mod analyzed_macro_serde_tests {
     fn analyzed_macro_serde_roundtrip_preserves_anchor_values() {
         let mut m = empty_macro();
         m.edit_anchors = MacroEditAnchors {
-            type_literal: MacroAnchor::Available(MemberListAnchor::new(41, false)),
+            type_literal: MacroAnchor::Available(MemberListAnchor::new(
+                verter_analyzer_mint::MemberListAnchorMint::grant(),
+                41,
+                false,
+            )),
             runtime_array: MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList),
         };
         let json = serde_json::to_string(&m).unwrap();

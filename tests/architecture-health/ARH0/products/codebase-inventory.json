@@ -15,9 +15,9 @@
     "note": "packages/* root-level build/config scripts counted as otherLoc, not production"
   },
   "rustWorkspace": {
-    "members": 51,
-    "crates": 50,
-    "productionLoc": 1156976,
+    "members": 52,
+    "crates": 51,
+    "productionLoc": 1157008,
     "testLoc": 1074704,
     "generatedLoc": 12926
   },
@@ -48,6 +48,16 @@
       "srcFiles": 7,
       "fanIn": 2,
       "fanOut": 1
+    },
+    {
+      "module": "crates/verter_analyzer_mint",
+      "crate": "verter_analyzer_mint",
+      "productionLoc": 32,
+      "testLoc": 0,
+      "generatedLoc": 0,
+      "srcFiles": 1,
+      "fanIn": 2,
+      "fanOut": 0
     },
     {
       "module": "crates/verter_audit",
@@ -337,7 +347,7 @@
       "generatedLoc": 9971,
       "srcFiles": 181,
       "fanIn": 13,
-      "fanOut": 11
+      "fanOut": 12
     },
     {
       "module": "crates/verter_session",
@@ -367,7 +377,7 @@
       "generatedLoc": 0,
       "srcFiles": 107,
       "fanIn": 15,
-      "fanOut": 8
+      "fanOut": 9
     },
     {
       "module": "crates/verter_shipped_cfg_contract",

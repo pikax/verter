@@ -88,6 +88,7 @@
       "crate": "crates/verter_semantic",
       "rule": "the semantic core never depends upward on orchestration or transport",
       "mayImport": [
+        "verter_analyzer_mint",
         "verter_audit",
         "verter_css_syntax",
         "verter_debug_assert",

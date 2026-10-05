@@ -1003,6 +1003,20 @@
       ]
     },
     {
+      "module": "crates/verter_analyzer_mint",
+      "owner": {
+        "id": "rev11.flow",
+        "kind": "train"
+      },
+      "responsibility": [
+        "construction authorities reserved for the syntax analyzer, sealed by the dependency graph: a crate mints an analyzer-only record only by depending on this crate directly"
+      ],
+      "evidence": [
+        "documented: crate contract; the permitted direct dependents are the analyzer and the record crate whose constructors take the authority",
+        "graph: zero dependencies; fan-in 2"
+      ]
+    },
+    {
       "module": "crates/verter_session_query",
       "owner": {
         "id": "rev11.host-session",

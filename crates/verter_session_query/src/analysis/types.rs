@@ -3,6 +3,7 @@
 //! per-file analysis carriers built from them.
 
 use sha2::{Digest, Sha256};
+use verter_analyzer_mint::MemberListAnchorMint;
 use verter_span::Span;
 use verter_type_expr::facts::ResolvedLocalShape;
 use verter_type_expr::locators::MacroPayloadLocator;
@@ -989,10 +990,12 @@ pub struct AnalyzedEmitField {
 /// The offset is SFC-ABSOLUTE and always the byte offset of the list's closing
 /// delimiter, so an insertion at this offset lands as the list's LAST member.
 ///
-/// The field is private and the constructor is crate-private: an edit position
-/// for a macro member list is only ever minted by this crate's analyzer from a
-/// live OXC node. A consumer that wanted to derive one from `span.end - N`
-/// arithmetic cannot — it is a compile error, not a convention.
+/// The fields are private and the constructor demands the analyzer-only
+/// [`MemberListAnchorMint`] authority: an edit position for a macro member
+/// list is only ever minted by the analyzer from a live OXC node. A consumer
+/// that wanted to derive one from `span.end - N` arithmetic cannot obtain the
+/// authority without a direct dependency on its crate — it is a compile error,
+/// not a convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemberListAnchor {
@@ -1001,9 +1004,9 @@ pub struct MemberListAnchor {
 }
 
 impl MemberListAnchor {
-    /// Mint an anchor from a live OXC node's span. Crate-private by design
-    /// (see the type docs).
-    pub fn new(insert_offset: u32, is_empty: bool) -> Self {
+    /// Mint an anchor from a live OXC node's span. Requires the analyzer-only
+    /// mint authority (see the type docs).
+    pub fn new(_mint: MemberListAnchorMint, insert_offset: u32, is_empty: bool) -> Self {
         Self {
             insert_offset,
             is_empty,

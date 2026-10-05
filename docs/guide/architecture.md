@@ -77,6 +77,7 @@ flowchart LR
 | `crates/verter_compiler/`    | Runtime and IDE code generation                                          |
 | `crates/verter_semantic/`    | Reusable semantic facts and typed IR                                     |
 | `crates/verter_session_query/` | Session query contracts and owned resolution inputs/answers            |
+| `crates/verter_analyzer_mint/` | Analyzer-only construction authorities, sealed by the dependency graph |
 | `crates/verter_resolution/`  | Parser-free implementation of workspace module-resolution authority     |
 | `crates/verter_session/`     | Host-backed resolution, semantic graph, caches, and compilation sessions |
 | `crates/verter_type_runtime/` | Shared runtime support for native type evaluation                       |
