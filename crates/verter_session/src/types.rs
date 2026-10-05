@@ -1,14 +1,12 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use verter_session_query::analysis::types::Hash16;
 
 use rustc_hash::FxHashMap;
 
 use thiserror::Error;
 pub use verter_language::FileLanguage;
-
-/// 128-bit hash (xxh3) stored as a byte array, used for content and semantic hashing.
-pub type Hash16 = [u8; 16];
 
 /// Compact hex rendering of a [`Hash16`] for audit trace detail strings.
 /// The `{:?}` byte-array form costs ~4 chars per byte (`"255, "`) — on

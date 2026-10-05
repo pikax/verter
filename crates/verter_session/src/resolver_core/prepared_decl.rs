@@ -9,10 +9,11 @@ use verter_session_query::type_solver::{
 };
 use verter_type_expr::TopLevelOwnerId;
 
-use super::shallow_file_state::ClassifiedTypeDeps;
-use super::{ExportTarget, ShallowFileState};
+use super::ShallowFileState;
 use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
 use crate::identity_interner::IdentityInterner;
+use verter_session_query::inputs::shallow::ClassifiedTypeDeps;
+use verter_session_query::inputs::shallow::ExportTarget;
 
 #[path = "prepared_decl_type_prep.rs"]
 mod type_prep;

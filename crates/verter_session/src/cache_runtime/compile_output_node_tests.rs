@@ -16,7 +16,8 @@ use super::{
     CompileOutputPureContentKey, CompileOutputValue, SessionPublishOutcome,
 };
 use crate::fact_signature_helpers::empty_fact_signature;
-use crate::types::{CachedVirtualFile, DiagnosticsSnapshot, Hash16, ProfileState, VirtualNodeKind};
+use crate::types::{CachedVirtualFile, DiagnosticsSnapshot, ProfileState, VirtualNodeKind};
+use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;

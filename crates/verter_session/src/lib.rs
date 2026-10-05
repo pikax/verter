@@ -63,7 +63,6 @@ mod audited_request_tests;
 mod authored_evidence_producer;
 pub mod binder_identity_facts;
 mod block_content;
-pub mod build_toolchain_fingerprint;
 mod cache;
 pub mod cache_schema;
 pub mod carrier_artifact_cohort;
@@ -713,7 +712,7 @@ pub struct VerterHost {
     /// a parse-env-moving configuration change mid-flight. **Compiled
     /// out in production builds.**
     #[cfg(test)]
-    pub(crate) parse_env_override: parking_lot::Mutex<Option<crate::types::Hash16>>,
+    pub(crate) parse_env_override: parking_lot::Mutex<Option<verter_session_query::analysis::types::Hash16>>,
     /// Host-owned LRU cache for the typeinfo `evaluate_type_expression`
     /// scratch URIs. See `typeinfo::scratch_cache` for the LRU policy
     /// and §5.3 of the typeinfo plan for the deterministic-URI

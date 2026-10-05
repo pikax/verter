@@ -2473,7 +2473,8 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
     // tombstone for the probe canonical — the session deleted the
     // file and did not re-upsert it.
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-    let overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     let mut overlay_tombstones: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     overlay_tombstones.insert(deleted_canonical.to_string());
@@ -2827,7 +2828,8 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
     };
 
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-    let overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
 
     // --- Case 1: child-deleted → parent warm read MISSES -----------
     {

@@ -465,7 +465,10 @@ impl crate::session_view::SessionView for EmptyBaseSessionView {
     fn source(&self, _canonical: &str) -> Option<Arc<str>> {
         None
     }
-    fn content_hash_for(&self, _canonical: &str) -> Option<crate::types::Hash16> {
+    fn content_hash_for(
+        &self,
+        _canonical: &str,
+    ) -> Option<verter_session_query::analysis::types::Hash16> {
         None
     }
     fn project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {

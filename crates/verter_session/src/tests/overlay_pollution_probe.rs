@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use crate::resolver_core::request_ports::IndexedInputs;
 use crate::session_view::OverlaidView;
-use crate::types::Hash16;
 use crate::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 
 /// Observable facts about an overlay-bearing prepared-decl bundle —
 /// returned by [`overlay_prepared_decl_bundle_probe`].

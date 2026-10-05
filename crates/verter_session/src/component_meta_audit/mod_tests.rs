@@ -10,7 +10,7 @@ use super::{
     RequestAuditRecord, RequestFootprintAudit, RequestKind, RequestKindPayload, SemanticNodeKind,
     SharedLoadReuseRecord, VfsLayer, VfsReadRecord,
 };
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 #[test]
 fn audit_builder_captures_total_timing() {

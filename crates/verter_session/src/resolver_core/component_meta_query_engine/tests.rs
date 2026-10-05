@@ -1534,9 +1534,8 @@ fn step8_route_hash_pure_content_derived() {
     use std::sync::Arc;
     use verter_session_query::analysis::types::Hash16;
 
-    let routes = Arc::new(
-        verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
-    );
+    let routes =
+        Arc::new(verter_session_query::analysis::route_inventory::ScriptRouteInventory::default());
     let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
     let h1 = crate::resolver_store::hash_route_surface(&state);

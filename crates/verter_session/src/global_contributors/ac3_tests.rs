@@ -423,8 +423,8 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
 
 #[test]
 fn script_file_scope_values_enter_the_population_by_name() {
-    use super::ContributorOrigin;
     use verter_session_query::facts::SymbolSpace;
+    use verter_session_query::inputs::contributors::ContributorOrigin;
     let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -570,7 +570,7 @@ fn snapshot_replacement_discovers_new_globals_without_membership_change() {
 /// and removing the script drops every record it held.
 #[test]
 fn script_file_scope_types_are_released_on_supersession_and_removal() {
-    use super::ContributorOrigin;
+    use verter_session_query::inputs::contributors::ContributorOrigin;
     let host = VerterHost::new(
         HostConfig::default(),
         Arc::new(verter_workspace::MemoryWorkspace::new(

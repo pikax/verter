@@ -31,14 +31,18 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
     });
 }
 
-fn alpha_fact(host: &VerterHost, canonical_id: &str, hash: crate::types::Hash16) -> FactVersionRef {
+fn alpha_fact(
+    host: &VerterHost,
+    canonical_id: &str,
+    hash: verter_session_query::analysis::types::Hash16,
+) -> FactVersionRef {
     alpha_fact_at(host, canonical_id, hash, 0)
 }
 
 fn alpha_fact_at(
     _host: &VerterHost,
     canonical_id: &str,
-    hash: crate::types::Hash16,
+    hash: verter_session_query::analysis::types::Hash16,
     overload_ordinal: u32,
 ) -> FactVersionRef {
     FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
@@ -54,7 +58,10 @@ fn alpha_fact_at(
     })
 }
 
-fn live_alpha_hash(host: &VerterHost, canonical_id: &str) -> crate::types::Hash16 {
+fn live_alpha_hash(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> verter_session_query::analysis::types::Hash16 {
     host.ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .shallow_state

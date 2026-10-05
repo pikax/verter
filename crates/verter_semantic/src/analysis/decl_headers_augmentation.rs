@@ -7,6 +7,7 @@
 //! `Ns.Member` names) into the `DeclHeaderIndex` augmentation-scope
 //! inventories, mirroring the whole-env augmentation walk in
 //! `crate::analysis::type_eval_build::build_eval_env`.
+use verter_session_query::declarations::header_index::AugmentationBlockRecord;
 
 use super::*;
 

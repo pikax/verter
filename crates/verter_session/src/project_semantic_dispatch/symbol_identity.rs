@@ -14,11 +14,11 @@ use verter_type_expr::{
 };
 
 use super::ProjectSemanticDispatch;
-use crate::resolver_core::shallow_file_state::ExportTarget;
 use crate::semantic_query::{
     PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
     ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
+use verter_session_query::inputs::shallow::ExportTarget;
 
 /// Typed identity-demand outcome. A partial result deliberately carries no
 /// graph node or speculative identity.
@@ -187,7 +187,7 @@ impl ProjectSemanticDispatch<'_> {
                     None => return Err(PropCallableRoleUnresolvedReason::MissingDependency),
                 }
             }
-            if let Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(
+            if let Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(
                 target,
             )) = shallow.visible_value_binding(current_owner, head.as_ref())
             {

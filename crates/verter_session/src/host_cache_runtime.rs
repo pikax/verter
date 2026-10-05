@@ -464,7 +464,7 @@ impl VerterHost {
                 // `resolve_type_dependency_canonical` — the same
                 // authority the binding-driven walk above uses.
                 {
-                    use crate::resolver_core::shallow_file_state::ExportTarget;
+                    use verter_session_query::inputs::shallow::ExportTarget;
                     // The barrel edges come from the artifact the ensure
                     // above returned (never a permissive `get_any` scan,
                     // which can surface a stale multi-candidate row); the

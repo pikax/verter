@@ -17,7 +17,8 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::types::{CompileProfile, DescriptorMin, Hash16, SliceHashes};
+use crate::types::{CompileProfile, DescriptorMin, SliceHashes};
+use verter_session_query::analysis::types::Hash16;
 
 pub(crate) fn hash_16(input: &[u8]) -> Hash16 {
     verter_audit::attribute_n!(ContentHash, input.len());

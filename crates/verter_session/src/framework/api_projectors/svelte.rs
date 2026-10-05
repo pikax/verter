@@ -143,7 +143,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // The synthesized `default` carries the instance shape
         // (`{ $props: Props, …exports }`). A `.svelte` with no synth default
         // (no props, no exports) projects no public API.
-        let Some(crate::resolver_core::shallow_file_state::ExportTarget::Local {
+        let Some(verter_session_query::inputs::shallow::ExportTarget::Local {
             owner: component_owner,
             symbol_name: component_name,
         }) = shallow.exports.get("default")
@@ -1190,7 +1190,7 @@ fn render_leaf_display(leaf: &LeafTypeFact) -> String {
 /// (`imported_name == "default"`) renders `import type <local> from '<source>'`.
 fn render_type_only_import(
     local: &str,
-    import: &crate::resolver_core::shallow_file_state::ImportTarget,
+    import: &verter_session_query::inputs::shallow::ImportTarget,
 ) -> String {
     let source = &import.source_specifier;
     if import.imported_name == "default" {

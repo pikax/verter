@@ -7,10 +7,10 @@
 //! When the bound [`SessionView`](crate::session_view::SessionView)
 //! carries an explicit overlay for the canonical, the candidate is
 //! published under an
-//! [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+//! [`overlay_scoped`](verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped)
 //! key — the overlay content hash plus the view's overlay-set
 //! discriminator — so it stays isolated from the base artifact (always
-//! the [`base`](crate::file_artifact_store::FileArtifactKey::base)
+//! the [`base`](verter_session_query::source::artifact_key::FileArtifactKey::base)
 //! key) and from other sessions, even when the overlay source bytes are
 //! identical to the base file.
 //!
@@ -31,7 +31,7 @@ use super::is_raw_import_specifier_id;
 ///
 /// An overlay [`IndexedReady`](crate::project_type_store::IndexedReady)
 /// is published into [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
-/// under a [`FileArtifactKey`](crate::file_artifact_store::FileArtifactKey)
+/// under a [`FileArtifactKey`](verter_session_query::source::artifact_key::FileArtifactKey)
 /// whose three components do NOT all come from one canonical id — they
 /// span two distinct identities, and conflating them is a keying defect:
 ///
@@ -45,7 +45,7 @@ use super::is_raw_import_specifier_id;
 /// * **`analysis_canonical`** — the `normalized_analysis_canonical`
 ///   rewrite (e.g. a runtime `.js` whose `.d.ts` companion is the
 ///   analysis target). It is the analysis / parse / resolve target and
-///   the [`FileArtifactKey::canonical`](crate::file_artifact_store::FileArtifactKey)
+///   the [`FileArtifactKey::canonical`](verter_session_query::source::artifact_key::FileArtifactKey)
 ///   identity.
 ///
 /// The two coincide for an ordinary `.ts` / `.tsx` / `.d.ts` file
@@ -97,14 +97,14 @@ impl OverlayArtifactIdentity {
         &self,
         host: &VerterHost,
         view: &dyn crate::session_view::SessionView,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         let source = view.source(&self.raw_overlay_owner)?;
         let content_hash = view.content_hash_for(&self.raw_overlay_owner)?;
         let file_language = self.file_language(host);
         let parse_env_hash = view
             .overlay_artifact_discriminator(&self.raw_overlay_owner)
-            .unwrap_or(crate::file_artifact_store::BASE_PARSE_ENV_HASH);
-        crate::file_artifact_store::FileArtifactKey::for_source_identity(
+            .unwrap_or(verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH);
+        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
             Arc::from(self.analysis_canonical.as_str()),
             content_hash,
             source.as_ref(),
@@ -114,7 +114,7 @@ impl OverlayArtifactIdentity {
         )
     }
 
-    /// Build the exact overlay artifact [`FileArtifactKey`](crate::file_artifact_store::FileArtifactKey)
+    /// Build the exact overlay artifact [`FileArtifactKey`](verter_session_query::source::artifact_key::FileArtifactKey)
     /// for this identity under `view`.
     ///
     /// Reads the overlay content hash and the overlay-set discriminator
@@ -175,7 +175,7 @@ impl OverlayArtifactIdentity {
         &self,
         view: &dyn crate::session_view::SessionView,
         indexed: &crate::project_type_store::IndexedReady,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         if view
             .overlay_artifact_discriminator(&self.raw_overlay_owner)
             .is_none()
@@ -185,12 +185,14 @@ impl OverlayArtifactIdentity {
         }
         let parse_env_hash = view
             .overlay_artifact_discriminator(&self.raw_overlay_owner)
-            .unwrap_or(crate::file_artifact_store::BASE_PARSE_ENV_HASH);
-        Some(crate::file_artifact_store::FileArtifactKey::for_indexed(
-            Arc::from(self.analysis_canonical.as_str()),
-            indexed,
-            parse_env_hash,
-        ))
+            .unwrap_or(verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH);
+        Some(
+            verter_session_query::source::artifact_key::FileArtifactKey::for_indexed(
+                Arc::from(self.analysis_canonical.as_str()),
+                indexed,
+                parse_env_hash,
+            ),
+        )
     }
 
     /// Read the published overlay [`FileArtifacts`](crate::file_artifact_store::FileArtifacts)
@@ -353,7 +355,7 @@ impl VerterHost {
     pub(crate) fn exact_overlay_artifacts_for_test(
         &self,
         raw_canonical: &str,
-        expected_whole_hash: crate::types::Hash16,
+        expected_whole_hash: verter_session_query::analysis::types::Hash16,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<Arc<crate::file_artifact_store::FileArtifacts>> {
         let identity = self.overlay_artifact_identity(raw_canonical);
@@ -368,7 +370,7 @@ impl VerterHost {
     pub(crate) fn exact_overlay_indexed_for_test(
         &self,
         raw_canonical: &str,
-        expected_whole_hash: crate::types::Hash16,
+        expected_whole_hash: verter_session_query::analysis::types::Hash16,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         self.exact_overlay_artifacts_for_test(raw_canonical, expected_whole_hash, view)
@@ -394,7 +396,7 @@ impl VerterHost {
     /// When the view carries an explicit overlay for `canonical_id`
     /// (`view.overlay_artifact_discriminator(...)` is `Some`) the
     /// candidate is published under an
-    /// [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+    /// [`overlay_scoped`](verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped)
     /// key so it never collides with the base artifact — see the
     /// publish site below. An overlay-FREE view (no overlays, no
     /// tombstones — e.g. `HostView`) yields the base key and the
@@ -735,9 +737,8 @@ impl VerterHost {
             parse_env_hash: flight_parse_env_hash,
         };
         struct ColdIndexProducts {
-            header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
-            route_inventory:
-                verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory,
+            header_index: verter_session_query::declarations::header_index::DeclHeaderIndex,
+            route_inventory: verter_session_query::analysis::route_inventory::ScriptRouteInventory,
             snapshot: Option<crate::types::FileAnalysisSnapshot>,
             svelte_component_runes_mode: bool,
             owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,

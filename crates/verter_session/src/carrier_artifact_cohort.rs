@@ -16,7 +16,7 @@ use verter_language::carrier_versions::{
     CARRIER_SOURCE_MAP_SCHEMA_VERSION, CARRIER_SOURCE_SPACE_SCHEMA_VERSION,
 };
 
-use crate::build_toolchain_fingerprint::{
+use verter_session_query::source::toolchain::{
     current_build_toolchain_fingerprint, BuildToolchainFingerprint,
 };
 

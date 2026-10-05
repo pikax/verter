@@ -110,7 +110,7 @@ struct DiscoveryCtx<'source, 'ast> {
     canonical_id: Arc<str>,
     source: &'source str,
     /// The header walk's classification of the class fields.
-    class_fields: &'source crate::analysis::class_field_value::ClassFieldValues,
+    class_fields: &'source verter_session_query::declarations::class_fields::ClassFieldValues,
     /// The containment every walk of oxc's over a node of the program runs
     /// under, scanning the program at most once for all of them.
     walks: verter_parser::oxc_parse::ProgramWalkStack<'ast>,
@@ -190,7 +190,8 @@ pub fn build_function_program_index(
 ) -> FunctionProgramIndex {
     // No header walk ran: each class's fields are classified as discovery
     // meets them.
-    let class_fields = crate::analysis::class_field_value::ClassFieldValues::default();
+    let class_fields =
+        verter_session_query::declarations::class_fields::ClassFieldValues::default();
     build_function_program_index_impl(program, source, owners, canonical_id, &class_fields, None).0
 }
 
@@ -202,7 +203,7 @@ pub fn build_function_program_index_with_nodes<'ast>(
     source: &str,
     owners: &TopLevelOwnerTable,
     canonical_id: Arc<str>,
-    class_fields: &crate::analysis::class_field_value::ClassFieldValues,
+    class_fields: &verter_session_query::declarations::class_fields::ClassFieldValues,
 ) -> (FunctionProgramIndex, FunctionProgramNodes<'ast>) {
     let (index, nodes) = build_function_program_index_impl(
         program,
@@ -220,7 +221,7 @@ fn build_function_program_index_impl<'ast>(
     source: &str,
     owners: &TopLevelOwnerTable,
     canonical_id: Arc<str>,
-    class_fields: &crate::analysis::class_field_value::ClassFieldValues,
+    class_fields: &verter_session_query::declarations::class_fields::ClassFieldValues,
     nodes: Option<FunctionProgramNodes<'ast>>,
 ) -> (FunctionProgramIndex, Option<FunctionProgramNodes<'ast>>) {
     let mut ctx = DiscoveryCtx {
@@ -2323,7 +2324,7 @@ fn discover_class_members<'ast>(
                     ctx.anchor(contributor_index),
                 ) {
                     let source = if kind
-                        == crate::analysis::class_field_value::ClassFieldValueSource::Initializer
+                        == verter_session_query::declarations::class_fields::ClassFieldValueSource::Initializer
                     {
                         discover_initializer_inner(
                             value,

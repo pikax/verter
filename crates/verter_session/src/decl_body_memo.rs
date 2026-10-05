@@ -39,7 +39,7 @@ use verter_parser::utils::oxc::script::raw_surface::{
 use verter_semantic::analysis::decl_dependencies::{
     collect_statement_dependency_names, DeclDependencyNames, DeclarationPath,
 };
-use verter_semantic::analysis::decl_headers::{build_decl_header_index, DeclHeaderIndex};
+use verter_semantic::analysis::decl_headers::build_decl_header_index;
 use verter_semantic::analysis::framework_facts::svelte::{
     lower_props_annotation_at_with_owners, lower_svelte_type_argument_at_with_owners,
     PropsAnnotationLowering, SvelteTypeArgumentLowering,
@@ -49,6 +49,7 @@ use verter_semantic::analysis::type_eval_build::{
     register_statement_parts, BuildEvalEnvContext, LoweredSignatureParts, LoweredTypeDeclParts,
     LoweredValueDeclParts, StatementLowerCtx,
 };
+use verter_session_query::declarations::header_index::DeclHeaderIndex;
 use verter_session_query::declarations::{
     AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclKind,
     ValueDeclGroup, ValueDeclKind,
@@ -364,7 +365,7 @@ impl SnapshotDemandLease {
 struct FunctionIndexDemand {
     snapshot: Arc<SnapshotDemandLease>,
     owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
-    class_fields: Arc<verter_semantic::analysis::class_field_value::ClassFieldValues>,
+    class_fields: Arc<verter_session_query::declarations::class_fields::ClassFieldValues>,
     function_program_index:
         OnceLock<Arc<verter_session_query::function_program::FunctionProgramIndex>>,
 }
@@ -1579,7 +1580,7 @@ impl DeclBodyMemo {
             parse_key,
             file_language,
             build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+                verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         };
         let prepared = self
             .function_flow_structure(entry)
@@ -1950,8 +1951,8 @@ impl DeclBodyMemo {
     fn lower_demanded(
         &self,
         key: &DeclBindingKey,
-        contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
-        jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
     ) -> DemandLower {
         // A seeded memo has no service: nothing to lower, a genuine (cacheable)
         // body-less miss — NOT a lease-pin break.
@@ -2253,8 +2254,8 @@ impl DeclBodyMemo {
         &self,
         cell: &Arc<OnceLock<DemandCell<D>>>,
         key: &DeclBindingKey,
-        contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
-        jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
         extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
         on_lease_miss_evict: impl FnOnce(&Arc<OnceLock<DemandCell<D>>>),
     ) -> (DemandOutcome<D>, Option<LoweredStatementBatch>) {
@@ -2316,12 +2317,12 @@ impl DeclBodyMemo {
     fn backfill(
         &self,
         batch: LoweredStatementBatch,
-        lowered_statements: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+        lowered_statements: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
         demanded_file_scope: Option<(SymbolSpace, &DeclBindingKey)>,
         demanded_augmentation: Option<(&AugmentationScopeKind, SymbolSpace, &DeclBindingKey)>,
     ) {
         let covers =
-            |contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor]| {
+            |contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor]| {
                 contributors.iter().all(|candidate| {
                     lowered_statements
                         .iter()
@@ -2507,8 +2508,8 @@ impl DeclBodyMemo {
     fn transient_type_parts_for(
         &self,
         key: DeclBindingKey,
-        contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
-        jsdoc_typedef: Option<verter_semantic::analysis::decl_headers::JsdocTypedefHeader>,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
         aug_scope: Option<&AugmentationScopeKind>,
     ) -> DemandOutcome<TransientTypeParts> {
         let Some(service) = self.service.as_ref() else {
@@ -2913,7 +2914,7 @@ impl DeclBodyMemo {
     fn transient_value_parts_for(
         &self,
         name: &str,
-        contributors: Vec<verter_semantic::analysis::decl_headers::DeclHeaderContributor>,
+        contributors: Vec<verter_session_query::declarations::header_index::DeclHeaderContributor>,
         aug_scope: Option<&AugmentationScopeKind>,
     ) -> DemandOutcome<TransientValueParts> {
         let Some(service) = self.service.as_ref() else {
@@ -3618,7 +3619,7 @@ fn collect_augmentation_statement_dependencies(
 /// exactly the affected artifact slots without re-walking the body.
 pub(crate) fn fold_flow_body_env_identity(
     index: &verter_session_query::function_program::FunctionProgramIndex,
-    parse_env_hash: &crate::types::Hash16,
+    parse_env_hash: &verter_session_query::analysis::types::Hash16,
     source_type: oxc_span::SourceType,
 ) -> verter_session_query::function_program::FunctionProgramIndex {
     const SALT: &[u8] = b"verter-flow-body-env-identity:v1";
@@ -3628,7 +3629,8 @@ pub(crate) fn fold_flow_body_env_identity(
         buf.extend_from_slice(stable);
         buf.extend_from_slice(parse_env_hash);
         buf.extend_from_slice(
-            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint().as_bytes(),
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
+                .as_bytes(),
         );
         buf.extend_from_slice(format!("{source_type:?}").as_bytes());
         crate::hash::hash_16(&buf)

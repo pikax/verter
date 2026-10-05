@@ -175,11 +175,11 @@ mod read_set_signature_unit_tests {
 #[cfg(test)]
 mod file_source_env_observation_tests {
     use super::*;
-    use crate::file_artifact_store::FileArtifactKey;
     use crate::{HostConfig, VerterHost};
     use std::sync::Arc as StdArc;
     use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     /// The reverse index registers a `(canonical → entry)` mapping for
     /// every canonical the fact rail names — a `FileSourceEnv`
@@ -189,7 +189,10 @@ mod file_source_env_observation_tests {
         let fact = FactVersionRef::FileSourceEnv {
             canonical_id: "/contrib.d.ts".to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
-            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/contrib.d.ts", 2),
+            parse_key: verter_session_query::source::toolchain::parse_key_for_test(
+                "/contrib.d.ts",
+                2,
+            ),
             file_language_id: FileArtifactKey::synthetic_file_language_for_test("/contrib.d.ts"),
         };
         let sig = ReadSetSignature::new(StdArc::from(vec![fact]));

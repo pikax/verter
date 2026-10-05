@@ -3,6 +3,7 @@
 //! Contains the logic for comparing old and new file states during `upsert()`,
 //! computing granular slice-level diffs, and assembling the final
 //! [`HostUpdateResult`](crate::HostUpdateResult).
+use verter_session_query::analysis::types::Hash16;
 
 use crate::cache::{compute_changed_removed_nodes, sorted_nodes};
 use crate::hash::diff_indices;

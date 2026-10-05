@@ -95,18 +95,18 @@ trait SourceInputProvider {
     fn observed_fact_hash(
         &self,
         canonical: &str,
-        content: crate::types::Hash16,
-        identity: &crate::file_artifact_store::FileArtifactKey,
+        content: verter_session_query::analysis::types::Hash16,
+        identity: &verter_session_query::source::artifact_key::FileArtifactKey,
         key: &verter_session_query::facts::registry::FactKey,
         lane: verter_session_query::facts::registry::FactLane,
-    ) -> Option<crate::types::Hash16>;
+    ) -> Option<verter_session_query::analysis::types::Hash16>;
     fn raw_serve(
         &self,
         canonical: &str,
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe>;
     fn source(
         &self,
-        input: &super::shallow_file_state::ShallowInputRecord,
+        input: &verter_session_query::inputs::shallow::ShallowInputRecord,
     ) -> Option<Arc<super::ShallowFileState>>;
     fn prepared(
         &self,
@@ -163,11 +163,11 @@ where
     fn observed_fact_hash(
         &self,
         canonical: &str,
-        content: crate::types::Hash16,
-        identity: &crate::file_artifact_store::FileArtifactKey,
+        content: verter_session_query::analysis::types::Hash16,
+        identity: &verter_session_query::source::artifact_key::FileArtifactKey,
         key: &verter_session_query::facts::registry::FactKey,
         lane: verter_session_query::facts::registry::FactLane,
-    ) -> Option<crate::types::Hash16> {
+    ) -> Option<verter_session_query::analysis::types::Hash16> {
         self::observed_fact_hash(self.0.host(), canonical, content, identity, key, lane)
     }
     fn raw_serve(
@@ -180,7 +180,7 @@ where
     }
     fn source(
         &self,
-        input: &super::shallow_file_state::ShallowInputRecord,
+        input: &verter_session_query::inputs::shallow::ShallowInputRecord,
     ) -> Option<Arc<super::ShallowFileState>> {
         self.0
             .request_view()
@@ -258,11 +258,11 @@ impl SourceInputProvider for crate::VerterHost {
     fn observed_fact_hash(
         &self,
         canonical: &str,
-        content: crate::types::Hash16,
-        identity: &crate::file_artifact_store::FileArtifactKey,
+        content: verter_session_query::analysis::types::Hash16,
+        identity: &verter_session_query::source::artifact_key::FileArtifactKey,
         key: &verter_session_query::facts::registry::FactKey,
         lane: verter_session_query::facts::registry::FactLane,
-    ) -> Option<crate::types::Hash16> {
+    ) -> Option<verter_session_query::analysis::types::Hash16> {
         self::observed_fact_hash(self, canonical, content, identity, key, lane)
     }
 
@@ -274,7 +274,7 @@ impl SourceInputProvider for crate::VerterHost {
     }
     fn source(
         &self,
-        input: &super::shallow_file_state::ShallowInputRecord,
+        input: &verter_session_query::inputs::shallow::ShallowInputRecord,
     ) -> Option<Arc<super::ShallowFileState>> {
         self.source_input_leases.source(input)
     }
@@ -288,11 +288,11 @@ impl SourceInputProvider for crate::VerterHost {
 fn observed_fact_hash(
     host: &crate::VerterHost,
     canonical: &str,
-    content: crate::types::Hash16,
-    identity: &crate::file_artifact_store::FileArtifactKey,
+    content: verter_session_query::analysis::types::Hash16,
+    identity: &verter_session_query::source::artifact_key::FileArtifactKey,
     key: &verter_session_query::facts::registry::FactKey,
     lane: verter_session_query::facts::registry::FactLane,
-) -> Option<crate::types::Hash16> {
+) -> Option<verter_session_query::analysis::types::Hash16> {
     let artifacts = host
         .project_type_store()
         .indexed()
@@ -454,8 +454,8 @@ impl<
     }
     fn augmenter_artifact_answer(
         &self,
-        captured: &crate::file_artifact_store::FileArtifactKey,
-        observed_hash: crate::types::Hash16,
+        captured: &verter_session_query::source::artifact_key::FileArtifactKey,
+        observed_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<super::request_ports::AugmenterArtifactAnswer> {
         let (artifact, refreshed_key) = self
             .source_host()
@@ -471,7 +471,10 @@ impl<
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
         observed: &crate::file_artifact_store::AugmenterSet,
-        refreshed: Vec<(usize, crate::file_artifact_store::FileArtifactKey)>,
+        refreshed: Vec<(
+            usize,
+            verter_session_query::source::artifact_key::FileArtifactKey,
+        )>,
     ) {
         if refreshed.is_empty() {
             return;
@@ -514,7 +517,7 @@ impl<
     fn member_presence_for_observed_content(
         &self,
         canonical: &str,
-        observed: crate::types::Hash16,
+        observed: verter_session_query::analysis::types::Hash16,
         key: verter_session_query::facts::registry::FactKey,
     ) -> Option<bool> {
         let normalized = self.normalized_analysis_canonical(canonical);
@@ -537,7 +540,7 @@ impl<
     fn parse_fact_for_observed_content(
         &self,
         canonical: &str,
-        observed_hash: crate::types::Hash16,
+        observed_hash: verter_session_query::analysis::types::Hash16,
         key: verter_session_query::facts::registry::FactKey,
         lane: verter_session_query::facts::registry::FactLane,
     ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
@@ -587,7 +590,7 @@ impl<
 
     fn recover_member_spans(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         origin: &verter_type_expr::span_origins::MemberSpansOrigin,
     ) -> verter_type_expr::MemberSpans {
         let Some(source) = self.source(source) else {
@@ -599,7 +602,7 @@ impl<
 
     fn deref_authored_body(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         locator: &AuthoredBodyLocator,
     ) -> Result<
         verter_session_query::source::deref::DerefedAuthoredBody,
@@ -684,7 +687,7 @@ impl<
     #[cfg(test)]
     fn function_program_index(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
     ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
         let Some(source) = self.source(source) else {
             missing_source();
@@ -695,7 +698,7 @@ impl<
 
     fn transient_type_parts(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientTypeParts> {
@@ -707,7 +710,7 @@ impl<
     }
     fn transient_value_parts(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientValueParts> {
@@ -721,7 +724,7 @@ impl<
     #[cfg(any(test, feature = "oracle-gen"))]
     fn lowered_type_decl(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>> {
@@ -733,7 +736,7 @@ impl<
     }
     fn lowered_value_decl(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<crate::decl_body_memo::LoweredValueDecl>> {
@@ -745,7 +748,7 @@ impl<
     }
     fn effective_type_decl(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>> {
@@ -757,7 +760,7 @@ impl<
     }
     fn effective_value_decl(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<crate::decl_body_memo::LoweredValueDecl>> {
@@ -769,10 +772,10 @@ impl<
     }
     fn type_dependencies(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<super::shallow_file_state::ClassifiedTypeDeps>> {
+    ) -> Option<Arc<verter_session_query::inputs::shallow::ClassifiedTypeDeps>> {
         let Some(source) = self.source(source) else {
             missing_source();
             return None;
@@ -782,7 +785,7 @@ impl<
     #[cfg(any(test, feature = "oracle-gen"))]
     fn raw_source_surfaces(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
@@ -795,7 +798,7 @@ impl<
     }
     fn deref_type_argument(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         locator: &verter_type_expr::locators::TypeArgLocator,
     ) -> Result<
         verter_type_expr::TypeExpr,

@@ -112,10 +112,10 @@ fn host_with_n_materialized_files(n: usize) -> Arc<VerterHost> {
         let indexed = Arc::new(crate::project_type_store::IndexedReady::new_for_test(
             whole_hash,
         ));
-        let key = crate::file_artifact_store::FileArtifactKey::for_indexed(
+        let key = verter_session_query::source::artifact_key::FileArtifactKey::for_indexed(
             Arc::clone(&canonical),
             &indexed,
-            crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+            verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         );
         host.project_type_store().indexed().insert_artifacts(
             key,

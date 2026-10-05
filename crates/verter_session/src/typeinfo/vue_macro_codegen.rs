@@ -402,7 +402,7 @@ enum ProjectionFailure {
 struct TscScopeInventory<'a> {
     lowering: &'a dyn crate::resolver_core::request_ports::OwnedLowering,
     analysis: &'a ScriptAnalysisSnapshot,
-    shallow_state: &'a crate::resolver_core::shallow_file_state::ShallowInputRecord,
+    shallow_state: &'a verter_session_query::inputs::shallow::ShallowInputRecord,
     raw_source: &'a str,
 }
 

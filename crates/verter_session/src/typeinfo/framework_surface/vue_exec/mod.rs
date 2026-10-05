@@ -420,7 +420,7 @@ impl VerterHost {
         // macros, or a `.vue` carrying a USERLAND `export default` (synthesis
         // skipped) returns `None` here.
         let indexed = self.ensure_indexed_ready_serve(canonical_id)?.indexed;
-        let crate::resolver_core::shallow_file_state::ExportTarget::Local {
+        let verter_session_query::inputs::shallow::ExportTarget::Local {
             owner: default_owner,
             symbol_name: default_name,
         } = indexed.shallow_state.exports.get("default")?

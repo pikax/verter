@@ -629,11 +629,11 @@ impl VerterHost {
                     .map(|wildcard| (wildcard.source_specifier.clone(), None)),
             );
             specifiers.extend(state.exports.values().filter_map(|export| match export {
-                crate::resolver_core::shallow_file_state::ExportTarget::Reexport {
+                verter_session_query::inputs::shallow::ExportTarget::Reexport {
                     source_specifier,
                     ..
                 } => Some((source_specifier.clone(), None)),
-                crate::resolver_core::shallow_file_state::ExportTarget::Local { .. } => None,
+                verter_session_query::inputs::shallow::ExportTarget::Local { .. } => None,
             }));
         }
 

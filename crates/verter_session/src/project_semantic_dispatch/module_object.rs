@@ -63,10 +63,10 @@ impl ProjectSemanticDispatch<'_> {
     pub(super) fn module_object_of_root(
         &self,
         value_root: &ValueRootKey,
-        shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+        shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
-        use crate::resolver_core::shallow_file_state::LexicalValueBinding;
+        use verter_session_query::inputs::shallow::LexicalValueBinding;
         let canonical = value_root.scope.canonical_id.as_ref();
         let owner = value_root.scope.owner;
         match shallow.visible_value_binding(owner, value_root.name.as_ref()) {
@@ -190,7 +190,7 @@ impl ProjectSemanticDispatch<'_> {
         visited: &mut FxHashSet<String>,
         roots: &mut Vec<ObservedGraphSelfRoot>,
     ) {
-        use crate::resolver_core::shallow_file_state::ExportTarget;
+        use verter_session_query::inputs::shallow::ExportTarget;
         let Some(indexed) = self
             .ctx
             .ensure_indexed_ready_serve(module)
@@ -295,7 +295,7 @@ impl ProjectSemanticDispatch<'_> {
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
-        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if name.contains('.') {
             return None;
         }
@@ -304,15 +304,16 @@ impl ProjectSemanticDispatch<'_> {
             name,
             verter_session_query::facts::SymbolSpace::Namespace,
         );
-        let mut declarations: Vec<&crate::global_contributors::ContributorEntry> = population
-            .entries
-            .iter()
-            .filter(|entry| {
-                !entry.is_automatic_lib
-                    && entry.origin == ContributorOrigin::FileScopeNamespace
-                    && entry.module_kind == FileModuleKind::Script
-            })
-            .collect();
+        let mut declarations: Vec<&verter_session_query::inputs::contributors::ContributorEntry> =
+            population
+                .entries
+                .iter()
+                .filter(|entry| {
+                    !entry.is_automatic_lib
+                        && entry.origin == ContributorOrigin::FileScopeNamespace
+                        && entry.module_kind == FileModuleKind::Script
+                })
+                .collect();
         declarations.sort_by(|left, right| {
             self.ctx
                 .declaration_sequence_rank(left.artifact_key.canonical.as_ref())

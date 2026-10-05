@@ -1,9 +1,9 @@
 //! Owned input records shared by request ports. Source work stays private to
 //! session-owned artifact leases; these records contain only immutable data.
-use super::shallow_file_state::ShallowInputRecord;
 use crate::file_artifact_store::FileArtifactKeySource;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, OnceLock};
+use verter_session_query::inputs::shallow::ShallowInputRecord;
 
 #[derive(Debug)]
 pub(crate) struct CachedProjection<T>(OnceLock<Arc<T>>);
@@ -34,10 +34,10 @@ pub struct IndexedInputIdentity {
 #[derive(Debug, Clone)]
 pub struct IndexedInputRecord {
     pub(crate) identity: IndexedInputIdentity,
-    pub(crate) whole_hash: crate::types::Hash16,
+    pub(crate) whole_hash: verter_session_query::analysis::types::Hash16,
     pub(crate) file_language: verter_language::FileLanguage,
     pub(crate) shallow_state: Arc<ShallowInputRecord>,
-    pub(crate) parse_env_hash: crate::types::Hash16,
+    pub(crate) parse_env_hash: verter_session_query::analysis::types::Hash16,
     pub(crate) raw_source: Arc<str>,
     pub(crate) eval_source: Arc<str>,
     pub(crate) framework_parse:
@@ -53,14 +53,14 @@ pub struct IndexedInputRecord {
     /// mirror is compiled out rather than left as write-only storage.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) declares_interface_app_config: bool,
-    route_surface_hash: OnceLock<Option<crate::types::Hash16>>,
+    route_surface_hash: OnceLock<Option<verter_session_query::analysis::types::Hash16>>,
     source_parse_identity: OnceLock<Option<verter_language::ParseKey>>,
 }
 impl IndexedInputRecord {
     pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
         self.source_parse_identity
             .get_or_init(|| {
-                crate::file_artifact_store::FileArtifactKey::for_source_identity(
+                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
                     Arc::clone(&self.identity.source.canonical),
                     self.whole_hash,
                     &self.raw_source,
@@ -72,7 +72,9 @@ impl IndexedInputRecord {
             })
             .clone()
     }
-    pub(crate) fn route_surface_hash(&self) -> Option<crate::types::Hash16> {
+    pub(crate) fn route_surface_hash(
+        &self,
+    ) -> Option<verter_session_query::analysis::types::Hash16> {
         *self.route_surface_hash.get_or_init(|| {
             self.shallow_state
                 .has_resolvable_surface()
@@ -126,7 +128,7 @@ pub struct IndexedInputServe {
 #[derive(Clone)]
 pub struct PreparedInputRecord {
     pub(crate) observation_id: u64,
-    pub(crate) owner_whole_hash: crate::types::Hash16,
+    pub(crate) owner_whole_hash: verter_session_query::analysis::types::Hash16,
     pub(crate) owner_scopes:
         Arc<FxHashMap<verter_type_expr::TopLevelOwnerId, super::prepared_decl::PreparedOwnerScope>>,
 }

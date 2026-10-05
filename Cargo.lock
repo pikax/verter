@@ -3730,6 +3730,7 @@ dependencies = [
  "stacker",
  "verter_debug_assert",
  "verter_language",
+ "verter_session_query",
  "verter_span",
  "verter_type_expr",
  "verter_type_expr_oxc",

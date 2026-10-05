@@ -2,12 +2,15 @@
 
 use std::sync::Arc;
 
-use super::{classify_module_kind, is_automatic_lib_canonical, ContributorOrigin, FileModuleKind};
+use super::classify_module_kind;
 use crate::file_artifact_store::{
     AugmentationTargetKind, FileArtifactStore, GLOBAL_AUGMENTATION_TAG,
 };
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::ShallowFileState;
+use verter_session_query::inputs::contributors::{
+    is_automatic_lib_canonical, ContributorOrigin, FileModuleKind,
+};
 
 fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
     let state = ShallowFileState::service_backed_for_test_at(canonical, source);
@@ -22,7 +25,10 @@ fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
     store.insert(Arc::from(canonical), indexed);
 }
 
-fn lookup_global(store: &FileArtifactStore, name: &str) -> super::SymbolContributors {
+fn lookup_global(
+    store: &FileArtifactStore,
+    name: &str,
+) -> verter_session_query::inputs::contributors::SymbolContributors {
     store.global_contributor_index().snapshot().lookup(
         &AugmentationTargetKind::GlobalAugmentation,
         name,

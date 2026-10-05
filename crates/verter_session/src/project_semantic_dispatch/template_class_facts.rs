@@ -383,7 +383,7 @@ fn join_subject(
                         .visible_value_binding(TopLevelOwnerId::instance(0), label.as_ref())
                     {
                         Some(
-                            crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(
+                            verter_session_query::inputs::shallow::LexicalValueBinding::Local(
                                 owner,
                             ),
                         ) => Some(owner),

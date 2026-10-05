@@ -1973,4 +1973,4 @@ use crate::component_meta_result_db::{
     AdmittedComponentMetaResult, ComponentMetaPublishDecision, ComponentMetaResultEntry,
     ComponentMetaResultKey,
 };
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;

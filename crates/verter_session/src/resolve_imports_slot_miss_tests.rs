@@ -37,7 +37,7 @@ use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
 
-const ZERO_HASH: crate::types::Hash16 = [0u8; 16];
+const ZERO_HASH: verter_session_query::analysis::types::Hash16 = [0u8; 16];
 
 const OWNER: &str = "/proj/owner.ts";
 const DEP: &str = "/proj/dep.ts";
@@ -67,7 +67,9 @@ fn host_with_owner_and_dep() -> Arc<VerterHost> {
 
 /// The fact shape a consumer records for the `a` binding, at whatever
 /// `expected_hash` the caller wants to claim.
-fn import_clause_fact(expected_hash: crate::types::Hash16) -> FactVersionRef {
+fn import_clause_fact(
+    expected_hash: verter_session_query::analysis::types::Hash16,
+) -> FactVersionRef {
     FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
         canonical_id: OWNER.to_string(),
         key: FactKey::ResolvedImportClause {

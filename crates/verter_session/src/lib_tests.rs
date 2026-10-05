@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use verter_session_query::analysis::types::Hash16;
 
 use rustc_hash::FxHashMap;
 

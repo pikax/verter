@@ -168,7 +168,7 @@ fn function_key(
         parse_key,
         file_language,
         build_toolchain_fingerprint:
-            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
     }
 }
 
@@ -310,15 +310,16 @@ fn skeleton_source_verifies_parse_key_and_language() {
         .next()
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
-    let source_key = crate::file_artifact_store::FileArtifactKey::for_source_identity(
-        Arc::from(canonical),
-        serve.indexed.whole_hash,
-        serve.indexed.raw_source.as_ref(),
-        serve.indexed.file_language.clone(),
-        serve.indexed.framework_parse.as_deref(),
-        serve.indexed.parse_env_hash,
-    )
-    .expect("a served script file has an exact source identity");
+    let source_key =
+        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+            Arc::from(canonical),
+            serve.indexed.whole_hash,
+            serve.indexed.raw_source.as_ref(),
+            serve.indexed.file_language.clone(),
+            serve.indexed.framework_parse.as_deref(),
+            serve.indexed.parse_env_hash,
+        )
+        .expect("a served script file has an exact source identity");
     let env = host.host_view_env_hashes_for(canonical);
     let key = FlowSliceFunctionKey {
         canonical_id: Arc::from(canonical),
@@ -331,7 +332,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
         parse_key: source_key.parse_key.clone(),
         file_language: source_key.file_language_id.clone(),
         build_toolchain_fingerprint:
-            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
     };
     let stores = host.project_type_store().flow_slice();
 
@@ -405,14 +406,16 @@ fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
     let baseline = function_key("/same.ts", "myType", 7, MYTYPE_FIXTURE);
     let repeated = function_key("/same.ts", "myType", 7, MYTYPE_FIXTURE);
     let changed = FlowSliceFunctionKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(0x9a),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            0x9a,
+        ),
         ..baseline.clone()
     };
     assert_eq!(baseline, repeated);
     assert_ne!(baseline, changed);
     assert_eq!(
         baseline.build_toolchain_fingerprint,
-        crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+        verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
     );
 
     let rig = rig(
@@ -983,15 +986,16 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
         .map(|matched| matched.entry())
         .expect("myType is a served function position");
     let env = host.host_view_env_hashes_for(canonical);
-    let source_key = crate::file_artifact_store::FileArtifactKey::for_source_identity(
-        Arc::from(canonical),
-        serve.indexed.whole_hash,
-        serve.indexed.raw_source.as_ref(),
-        serve.indexed.file_language.clone(),
-        serve.indexed.framework_parse.as_deref(),
-        serve.indexed.parse_env_hash,
-    )
-    .expect("a served script file has an exact source identity");
+    let source_key =
+        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+            Arc::from(canonical),
+            serve.indexed.whole_hash,
+            serve.indexed.raw_source.as_ref(),
+            serve.indexed.file_language.clone(),
+            serve.indexed.framework_parse.as_deref(),
+            serve.indexed.parse_env_hash,
+        )
+        .expect("a served script file has an exact source identity");
     let key = FlowSliceHashKey {
         function: FlowSliceFunctionKey {
             canonical_id: Arc::from(canonical),
@@ -1004,7 +1008,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
             parse_key: source_key.parse_key,
             file_language: source_key.file_language_id,
             build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+                verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         },
         demand: FlowSliceDemandIdentity {
             projection_path: Arc::from(vec![Arc::<str>::from("b")].into_boxed_slice()),

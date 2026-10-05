@@ -5359,7 +5359,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             parse_key,
             file_language: indexed.file_language.clone(),
             build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+                verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         };
         let slice_key = crate::cache_runtime::flow_slice_node::FlowSliceHashKey {
             function: slice_key_function.clone(),

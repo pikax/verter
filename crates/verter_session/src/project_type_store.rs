@@ -185,8 +185,7 @@ pub struct IndexedReady {
     pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
     /// Parser-authored import/export routes from the retained program.
     /// Declaration headers and bodies live on the shallow state's memo.
-    pub route_inventory:
-        Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory>,
+    pub route_inventory: Arc<verter_session_query::analysis::route_inventory::ScriptRouteInventory>,
     /// Mirror of `script_analysis.flags & DECLARES_INTERFACE_APP_CONFIG`
     /// projected onto `IndexedReady` so the
     /// `AppConfigNoOverrideProofDb` production producer can short-circuit
@@ -231,13 +230,13 @@ impl IndexedReady {
     /// The exact parse identity of this artifact's source under its
     /// runtime language: its framework parse's key, or a plain script's,
     /// derived from the whole source the first time it is asked for. The
-    /// same identity [`crate::file_artifact_store::FileArtifactKey::for_source_identity`]
+    /// same identity [`verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity`]
     /// derives (`None` where that refuses).
     pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
         self.source_parse_key
             .0
             .get_or_init(|| {
-                crate::file_artifact_store::FileArtifactKey::for_source_identity(
+                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
                     Arc::from(""),
                     self.whole_hash,
                     self.raw_source.as_ref(),
@@ -317,7 +316,7 @@ impl IndexedReady {
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_for_test(whole_hash: Hash16) -> Self {
         let route_inventory = Arc::new(
-            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+            verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
         );
         let shallow =
             crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
@@ -2162,7 +2161,7 @@ mod tests {
         let hash_v1 = [1u8; 16];
         let hash_v2 = [2u8; 16];
         let route_inventory = Arc::new(
-            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+            verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
         );
         let shallow = Arc::new(
             crate::resolver_core::shallow_file_state::ShallowFileState::header_routing_only_for_test(
@@ -2219,7 +2218,7 @@ mod tests {
     fn indexed_counters_reflect_insertions_and_replacements() {
         let store = ProjectTypeStore::new();
         let route_inventory = Arc::new(
-            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+            verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
         );
         let mk_indexed = |hash: Hash16| {
             Arc::new(IndexedReady {

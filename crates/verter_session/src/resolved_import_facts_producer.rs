@@ -355,7 +355,7 @@ impl VerterHost {
     pub(crate) fn resolved_import_facts_witness(
         &self,
         canonical: &str,
-        content_hash: crate::types::Hash16,
+        content_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<Vec<FactVersionRef>> {
         let mut witness = vec![FactVersionRef::FileWholeHash {
             canonical_id: canonical.to_string(),
@@ -373,7 +373,7 @@ impl VerterHost {
     pub fn resolved_import_facts_witness_for(
         &self,
         canonical: &str,
-        content_hash: crate::types::Hash16,
+        content_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<Vec<FactVersionRef>> {
         self.resolved_import_facts_witness(canonical, content_hash)
     }

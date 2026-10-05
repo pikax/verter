@@ -703,14 +703,14 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
         crate::resolver_core::shallow_file_state::ShallowFileState::routing_tables_only_for_test(
             [9u8; 16],
             FxHashMap::default(),
-            vec![crate::resolver_core::shallow_file_state::WildcardReexport {
+            vec![verter_session_query::inputs::shallow::WildcardReexport {
                 source_specifier: "./real_aug".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             }],
             rustc_hash::FxHashSet::default(),
             FxHashMap::default(),
             StdArc::new(
-                verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+                verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
             ),
         );
     let indexed = crate::project_type_store::IndexedReady::new_for_test_with_state(

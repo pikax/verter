@@ -1,9 +1,9 @@
-use crate::types::Hash16;
 use crate::VerterHost;
 use dashmap::DashMap;
 use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use verter_session_query::analysis::types::Hash16;
 
 /// Per-call-site counter for [`HostStoreView::from_host_read`] invocations.
 ///
@@ -1117,7 +1117,7 @@ pub(crate) struct StoreViewSnapshot {
 
 /// The view-current source-env identity of one canonical's artifact:
 /// `parse_key` / `file_language_id` from the
-/// [`crate::file_artifact_store::FileArtifactKey`] identity, plus the
+/// [`verter_session_query::source::artifact_key::FileArtifactKey`] identity, plus the
 /// canonical's LIVE `parse_env_hash` dimension (content validity stays
 /// on the `FileWholeHash` rail). Snapshot value backing the strict
 /// `FileSourceEnv` validation branch.
@@ -1151,7 +1151,7 @@ impl SourceEnvIdentity {
     /// contributor body-source identity has moved.
     pub(crate) fn live_for_artifact_key(
         host: &VerterHost,
-        key: &crate::file_artifact_store::FileArtifactKey,
+        key: &verter_session_query::source::artifact_key::FileArtifactKey,
     ) -> Self {
         Self {
             parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
@@ -2872,7 +2872,7 @@ fn hash_route_surface_uncached(state: &crate::resolver_core::ShallowFileState) -
     hash_route_surface_from_syntactic(state.whole_hash, syntactic_route_interface_hash(state))
 }
 pub(crate) fn hash_route_surface_inputs(
-    state: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+    state: &verter_session_query::inputs::shallow::ShallowInputRecord,
 ) -> Hash16 {
     hash_route_surface_from_syntactic(
         state.whole_hash,
@@ -2900,7 +2900,7 @@ pub(crate) fn syntactic_route_interface_hash(
 }
 
 fn syntactic_route_interface_hash_uncached(
-    state: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+    state: &verter_session_query::inputs::shallow::ShallowInputRecord,
 ) -> Hash16 {
     hash16_from_sorted(|hasher| {
         b"verter:syntactic-route-interface:v2".hash(hasher);
@@ -2908,10 +2908,7 @@ fn syntactic_route_interface_hash_uncached(
         // defaults and its collision policy. Hash it in name order so the
         // fact covers the exact surface consumers traverse without retaining
         // insertion-order noise.
-        let mut exports: Vec<(
-            &str,
-            &crate::resolver_core::shallow_file_state::ExportTarget,
-        )> = state
+        let mut exports: Vec<(&str, &verter_session_query::inputs::shallow::ExportTarget)> = state
             .exports
             .iter()
             .map(|(name, target)| (name.as_str(), target))
@@ -2920,7 +2917,7 @@ fn syntactic_route_interface_hash_uncached(
         for (name, target) in &exports {
             name.hash(hasher);
             match target {
-                crate::resolver_core::shallow_file_state::ExportTarget::Local {
+                verter_session_query::inputs::shallow::ExportTarget::Local {
                     owner,
                     symbol_name,
                 } => {
@@ -2928,7 +2925,7 @@ fn syntactic_route_interface_hash_uncached(
                     owner.hash(hasher);
                     symbol_name.hash(hasher);
                 }
-                crate::resolver_core::shallow_file_state::ExportTarget::Reexport {
+                verter_session_query::inputs::shallow::ExportTarget::Reexport {
                     source_specifier,
                     original_name,
                     is_type,
@@ -2946,7 +2943,7 @@ fn syntactic_route_interface_hash_uncached(
         // projection and is deliberately not a second hash input.
         let mut owner_import_targets: Vec<(
             &verter_type_expr::DeclBindingKey,
-            &crate::resolver_core::shallow_file_state::ImportTarget,
+            &verter_session_query::inputs::shallow::ImportTarget,
         )> = state.owner_import_targets.iter().collect();
         owner_import_targets.sort_unstable_by_key(|(left, _)| *left);
         for (binding, target) in owner_import_targets {

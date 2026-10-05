@@ -48,8 +48,8 @@ use crate::semantic_query::{
     PropertyKey, SemanticNodeData, SemanticNodeId,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
-use crate::types::Hash16;
 use verter_audit::AuditCaps;
+use verter_session_query::analysis::types::Hash16;
 
 use super::footprint_structural_hash::structural_hash_of;
 

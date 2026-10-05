@@ -6,10 +6,10 @@
 //! surface remains rooted at `crate::host_manage::*`; this file
 //! contributes a private `impl VerterHost { … }` block that
 //! continues the parent shell's impl chain.
+use verter_session_query::analysis::types::Hash16;
 
 use std::sync::Arc;
 
-use crate::types::*;
 use crate::VerterHost;
 
 use super::{

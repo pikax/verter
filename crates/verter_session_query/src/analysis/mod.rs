@@ -3,6 +3,7 @@
 pub mod fact_projection;
 pub mod indexed_value;
 pub mod macros;
+pub mod route_inventory;
 pub mod template_class_facts;
 pub mod top_level_owners;
 pub mod types;

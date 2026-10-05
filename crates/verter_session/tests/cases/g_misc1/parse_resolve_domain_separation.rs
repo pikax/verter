@@ -16,11 +16,12 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{InternedName, InternedSpecifier};
 use verter_session::project_type_store::IndexedReady;
-use verter_session::resolver_core::shallow_file_state::{ImportTarget, ShallowFileState};
+use verter_session::resolver_core::shallow_file_state::ShallowFileState;
 use verter_session_query::facts::{FactKey, SymbolSpace};
+use verter_session_query::inputs::shallow::ImportTarget;
 
-fn empty_routes() -> Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory> {
-    Arc::new(verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default())
+fn empty_routes() -> Arc<verter_session_query::analysis::route_inventory::ScriptRouteInventory> {
+    Arc::new(verter_session_query::analysis::route_inventory::ScriptRouteInventory::default())
 }
 
 fn build_with_import(local: &str, specifier: &str, imported: &str) -> Arc<IndexedReady> {

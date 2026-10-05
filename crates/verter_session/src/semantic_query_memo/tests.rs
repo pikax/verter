@@ -1192,7 +1192,7 @@ fn family_map_invalidate_canonical_uses_reverse_index_to_find_affected_pairs() {
 #[test]
 fn node_arena_invalidation_preserves_global_scope() {
     use crate::semantic_query::DeclIdentity;
-    use crate::types::Hash16;
+    use verter_session_query::analysis::types::Hash16;
 
     let store = SemanticGraphStore::new();
 
@@ -7491,7 +7491,7 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
         // Overlay the keyed canonical with a different content hash.
         // `with_session_overlay` re-roots `whole_hashes[keyed]` to this
         // overlay hash, so the winner's base-hash self-root mismatches.
-        let overlay_hash: crate::types::Hash16 = [0xA5u8; 16];
+        let overlay_hash: verter_session_query::analysis::types::Hash16 = [0xA5u8; 16];
         assert_ne!(
             overlay_hash, base_hash,
             "fixture invariant: the overlay hash must differ from the base hash",
@@ -7501,7 +7501,8 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
             keyed_canonical.to_string(),
             Arc::from("export interface Keyed { overlaid: string; }\nexport const keyed = 2;\n"),
         );
-        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        let mut overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+            FxHashMap::default();
         overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
         let tombstones: HashSet<String> = HashSet::new();
         let view = OverlaidViewRef::new(
@@ -7894,7 +7895,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
         // the follower runs under a genuinely DIFFERENT view than the
         // winner. The winner's value was computed under the base view;
         // its non-cacheable result is NOT interchangeable.
-        let overlay_hash: crate::types::Hash16 = [0xA5u8; 16];
+        let overlay_hash: verter_session_query::analysis::types::Hash16 = [0xA5u8; 16];
         assert_ne!(
             overlay_hash, base_hash,
             "fixture invariant: the overlay hash must differ from the base hash",
@@ -7904,7 +7905,8 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
             keyed_canonical.to_string(),
             Arc::from("export interface Keyed { overlaid: string; }\n"),
         );
-        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        let mut overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+            FxHashMap::default();
         overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
         let tombstones: HashSet<String> = HashSet::new();
         let view = OverlaidViewRef::new(
@@ -8165,7 +8167,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     let follower_key = key.clone();
     let follower_cold_flag = Arc::clone(&follower_cold_ran);
     let follower = thread::spawn(move || {
-        let overlay_hash: crate::types::Hash16 = [0xA5u8; 16];
+        let overlay_hash: verter_session_query::analysis::types::Hash16 = [0xA5u8; 16];
         assert_ne!(
             overlay_hash, base_hash,
             "fixture invariant: the overlay hash must differ from the base hash",
@@ -8175,7 +8177,8 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
             keyed_canonical.to_string(),
             Arc::from("export interface Keyed { overlaid: string; }\n"),
         );
-        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        let mut overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+            FxHashMap::default();
         overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
         let tombstones: HashSet<String> = HashSet::new();
         let view = OverlaidViewRef::new(
@@ -8457,7 +8460,7 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
         // The follower's overlay DOES declare `Keyed` — under its view
         // the declaration the winner found missing exists, so its
         // recompute resolves a real non-Miss result.
-        let overlay_hash: crate::types::Hash16 = [0xC9u8; 16];
+        let overlay_hash: verter_session_query::analysis::types::Hash16 = [0xC9u8; 16];
         assert_ne!(
             overlay_hash, base_hash,
             "fixture invariant: the overlay hash must differ from the base hash",
@@ -8467,7 +8470,8 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
             keyed_canonical.to_string(),
             Arc::from("export interface Keyed { overlaid: string; }\n"),
         );
-        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        let mut overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+            FxHashMap::default();
         overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
         let tombstones: HashSet<String> = HashSet::new();
         let view = OverlaidViewRef::new(
@@ -10295,9 +10299,9 @@ fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
             parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
                 [3u8; 16],
             ),
-            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/contrib.d.ts", 2),
+            parse_key: verter_session_query::source::toolchain::parse_key_for_test("/contrib.d.ts", 2),
             file_language_id:
-                crate::file_artifact_store::FileArtifactKey::synthetic_file_language_for_test(
+                verter_session_query::source::artifact_key::FileArtifactKey::synthetic_file_language_for_test(
                     "/contrib.d.ts",
                 ),
         },

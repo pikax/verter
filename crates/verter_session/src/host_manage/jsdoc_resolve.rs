@@ -148,10 +148,10 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
     ) -> Option<(verter_type_expr::TopLevelOwnerId, String)> {
         let state = self.ctx.shallow_file_state(canonical_source)?;
         match state.export_target(exported_name)? {
-            crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
+            verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name } => {
                 Some((*owner, symbol_name.clone()))
             }
-            crate::resolver_core::ExportTarget::Reexport { .. } => None,
+            verter_session_query::inputs::shallow::ExportTarget::Reexport { .. } => None,
         }
     }
 

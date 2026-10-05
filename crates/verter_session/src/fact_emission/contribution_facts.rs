@@ -6,8 +6,8 @@
 //! declaration body lowering, no cross-file resolution.
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::decl_headers::MemberHeader;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::declarations::header_index::MemberHeader;
 use verter_session_query::facts::{Fact, FactKey, FactRegistry, SymbolSpace};
 
 use crate::file_artifact_store::{InternedName, InternedSpecifier};
@@ -160,7 +160,7 @@ pub(super) fn emit_decl_contribution_order_facts(
     let header_index = &shallow.headers;
     let mut emit_for =
         |key: &verter_type_expr::DeclBindingKey,
-         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
          space: SymbolSpace| {
             let mut buf: Vec<u8> = Vec::with_capacity(64 + 24 * contributors.len());
             buf.extend_from_slice(DECL_CONTRIBUTION_ORDER_SALT);
@@ -233,7 +233,7 @@ pub(super) fn emit_augmentation_contribution_facts(
          key: &verter_type_expr::DeclBindingKey,
          kind: &str,
          members: &[MemberHeader],
-         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
          space: SymbolSpace| {
             let fingerprint = super::augmentation_header_fingerprint(
                 scope,

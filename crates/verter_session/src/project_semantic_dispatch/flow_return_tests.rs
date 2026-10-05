@@ -3931,7 +3931,7 @@ fn staged_flow_proof(
             parse_key,
             file_language,
             build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+                verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         },
         query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
         input_basis: verter_identity::identity::InputBasisId::from_canonical(

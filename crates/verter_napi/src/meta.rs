@@ -60,9 +60,9 @@ struct AuditBundleForWalker {
 }
 
 /// Parse a 32-character lowercase hex string into a
-/// `verter_session::types::Hash16`. Returns a NAPI error on malformed
+/// `verter_session_query::analysis::types::Hash16`. Returns a NAPI error on malformed
 /// input.
-fn parse_hash16_hex(hex: &str) -> Result<verter_session::Hash16> {
+fn parse_hash16_hex(hex: &str) -> Result<verter_session_query::analysis::types::Hash16> {
     if hex.len() != 32 {
         return Err(Error::new(
             Status::InvalidArg,

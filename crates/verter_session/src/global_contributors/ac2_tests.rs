@@ -4,12 +4,12 @@ use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use super::{ContributorOrigin, GlobalContributorIndex};
-use crate::file_artifact_store::{
-    AugmentationTargetKind, FileArtifactKey, FileArtifactStore, FileArtifacts, BASE_PARSE_ENV_HASH,
-};
+use super::GlobalContributorIndex;
+use crate::file_artifact_store::{AugmentationTargetKind, FileArtifactStore, FileArtifacts};
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::ShallowFileState;
+use verter_session_query::inputs::contributors::ContributorOrigin;
+use verter_session_query::source::artifact_key::{FileArtifactKey, BASE_PARSE_ENV_HASH};
 
 fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
     let state = ShallowFileState::service_backed_for_test_at(canonical, source);

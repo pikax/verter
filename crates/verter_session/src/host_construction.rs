@@ -1802,7 +1802,7 @@ mod fact_validation_authority {
         }
         fn source_environment(
             &self,
-            key: &crate::file_artifact_store::FileArtifactKey,
+            key: &verter_session_query::source::artifact_key::FileArtifactKey,
         ) -> crate::resolver_store::SourceEnvIdentity {
             crate::resolver_store::SourceEnvIdentity::live_for_artifact_key(self, key)
         }
@@ -1811,7 +1811,10 @@ mod fact_validation_authority {
         }
         fn complete_graph_signature(
             &self,
-            roots: &[(std::sync::Arc<str>, crate::types::Hash16)],
+            roots: &[(
+                std::sync::Arc<str>,
+                verter_session_query::analysis::types::Hash16,
+            )],
             facts: &[FactVersionRef],
         ) -> Result<
             crate::fact_signature_helpers::StructuralCarrierReadSet,
@@ -2020,8 +2023,8 @@ mod fact_validation_authority {
         fn promote_route_completion(
             &self,
             canonical: &str,
-            whole_hash: crate::types::Hash16,
-            route_hash: Option<crate::types::Hash16>,
+            whole_hash: verter_session_query::analysis::types::Hash16,
+            route_hash: Option<verter_session_query::analysis::types::Hash16>,
         ) {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),

@@ -149,15 +149,15 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         provider_canonical: &str,
-        target: &crate::resolver_core::ExportTarget,
+        target: &verter_session_query::inputs::shallow::ExportTarget,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
         route_shallow_cache: &mut RouteShallowStateCache<
-            crate::resolver_core::shallow_file_state::ShallowInputRecord,
+            verter_session_query::inputs::shallow::ShallowInputRecord,
         >,
     ) -> Option<crate::resolver_core::RouteResult> {
         match target {
-            crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
+            verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name } => {
                 let state = self.route_shallow_state_with_context(
                     ctx,
                     provider_canonical,
@@ -186,7 +186,7 @@ impl VerterHost {
                     defining_symbol: symbol_name.clone(),
                 })
             }
-            crate::resolver_core::ExportTarget::Reexport {
+            verter_session_query::inputs::shallow::ExportTarget::Reexport {
                 source_specifier,
                 original_name,
                 ..
@@ -325,8 +325,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
-    ) -> Option<RoutedShallowServe<crate::resolver_core::shallow_file_state::ShallowInputRecord>>
-    {
+    ) -> Option<RoutedShallowServe<verter_session_query::inputs::shallow::ShallowInputRecord>> {
         let mut route_shallow_cache = RouteShallowStateCache::default();
         self.route_shallow_state_serve_with_context(ctx, canonical_id, &mut route_shallow_cache)
     }
@@ -336,10 +335,9 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
         route_shallow_cache: &mut RouteShallowStateCache<
-            crate::resolver_core::shallow_file_state::ShallowInputRecord,
+            verter_session_query::inputs::shallow::ShallowInputRecord,
         >,
-    ) -> Option<RoutedShallowServe<crate::resolver_core::shallow_file_state::ShallowInputRecord>>
-    {
+    ) -> Option<RoutedShallowServe<verter_session_query::inputs::shallow::ShallowInputRecord>> {
         let cache_key = ctx.normalized_analysis_canonical(canonical_id);
         if let Some(cached) = route_shallow_cache.get(cache_key.as_str()) {
             return Some(cached.clone());
@@ -360,9 +358,9 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
         route_shallow_cache: &mut RouteShallowStateCache<
-            crate::resolver_core::shallow_file_state::ShallowInputRecord,
+            verter_session_query::inputs::shallow::ShallowInputRecord,
         >,
-    ) -> Option<Arc<crate::resolver_core::shallow_file_state::ShallowInputRecord>> {
+    ) -> Option<Arc<verter_session_query::inputs::shallow::ShallowInputRecord>> {
         self.route_shallow_state_serve_with_context(ctx, canonical_id, route_shallow_cache)
             .map(|serve| serve.state)
     }
@@ -441,7 +439,7 @@ impl VerterHost {
         active: &mut rustc_hash::FxHashSet<(String, String)>,
         participants: &mut rustc_hash::FxHashSet<String>,
         route_shallow_cache: &mut RouteShallowStateCache<
-            crate::resolver_core::shallow_file_state::ShallowInputRecord,
+            verter_session_query::inputs::shallow::ShallowInputRecord,
         >,
     ) -> Option<crate::resolver_core::RouteResult> {
         let key = (provider_canonical.to_string(), exported_name.to_string());
@@ -540,10 +538,11 @@ impl VerterHost {
                     {
                         let ordinary = verter_type_expr::TopLevelOwnerId::ordinary_file();
                         if exported_name == "default" {
-                            let target = crate::resolver_core::ExportTarget::Local {
-                                owner: ordinary,
-                                symbol_name: assigned.to_string(),
-                            };
+                            let target =
+                                verter_session_query::inputs::shallow::ExportTarget::Local {
+                                    owner: ordinary,
+                                    symbol_name: assigned.to_string(),
+                                };
                             return self.resolve_named_type_export_route_from_target(
                                 ctx,
                                 canonical.as_str(),

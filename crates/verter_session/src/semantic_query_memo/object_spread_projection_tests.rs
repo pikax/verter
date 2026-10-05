@@ -496,14 +496,15 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
     let follower_key = key.clone();
     let follower_flag = Arc::clone(&follower_cold_ran);
     let follower = thread::spawn(move || {
-        let overlay_hash: crate::types::Hash16 = [0xA5u8; 16];
+        let overlay_hash: verter_session_query::analysis::types::Hash16 = [0xA5u8; 16];
         assert_ne!(overlay_hash, base_hash);
         let mut overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
         overlays.insert(
             keyed_canonical.to_string(),
             Arc::from("export interface Keyed { overlaid: string; }\n"),
         );
-        let mut overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+        let mut overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+            FxHashMap::default();
         overlay_hashes.insert(keyed_canonical.to_string(), overlay_hash);
         let tombstones: HashSet<String> = HashSet::new();
         let view = OverlaidViewRef::new(

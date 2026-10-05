@@ -132,8 +132,8 @@ impl ParsedEvalProgram {
         &self,
         owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
         canonical: Arc<str>,
-        parse_env_hash: &crate::types::Hash16,
-        class_fields: &verter_semantic::analysis::class_field_value::ClassFieldValues,
+        parse_env_hash: &verter_session_query::analysis::types::Hash16,
+        class_fields: &verter_session_query::declarations::class_fields::ClassFieldValues,
     ) -> Option<Arc<FunctionProgramIndex>> {
         if let Some(cell) = self.functions.get() {
             return Some(Arc::clone(&cell.borrow_dependent().index));
@@ -164,8 +164,8 @@ impl ParsedEvalProgram {
         &self,
         owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
         canonical: Arc<str>,
-        parse_env_hash: &crate::types::Hash16,
-        class_fields: &verter_semantic::analysis::class_field_value::ClassFieldValues,
+        parse_env_hash: &verter_session_query::analysis::types::Hash16,
+        class_fields: &verter_session_query::declarations::class_fields::ClassFieldValues,
     ) -> Arc<FunctionProgramIndex> {
         let cell = self.functions.get_or_init(|| {
             IndexedProgramFunctionsCell::new(Rc::clone(&self.cell), |owner| {

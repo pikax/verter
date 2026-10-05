@@ -14,11 +14,14 @@ pub trait FactValidation {
     fn current_project_generation(&self) -> u64;
     fn source_environment(
         &self,
-        key: &crate::file_artifact_store::FileArtifactKey,
+        key: &verter_session_query::source::artifact_key::FileArtifactKey,
     ) -> crate::resolver_store::SourceEnvIdentity;
     fn complete_graph_signature(
         &self,
-        roots: &[(std::sync::Arc<str>, crate::types::Hash16)],
+        roots: &[(
+            std::sync::Arc<str>,
+            verter_session_query::analysis::types::Hash16,
+        )],
         facts: &[FactVersionRef],
     ) -> Result<
         crate::fact_signature_helpers::StructuralCarrierReadSet,
@@ -116,8 +119,8 @@ pub trait FactValidation {
     fn promote_route_completion(
         &self,
         canonical: &str,
-        whole_hash: crate::types::Hash16,
-        route_hash: Option<crate::types::Hash16>,
+        whole_hash: verter_session_query::analysis::types::Hash16,
+        route_hash: Option<verter_session_query::analysis::types::Hash16>,
     );
 }
 
@@ -127,7 +130,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     }
     fn source_environment(
         &self,
-        key: &crate::file_artifact_store::FileArtifactKey,
+        key: &verter_session_query::source::artifact_key::FileArtifactKey,
     ) -> crate::resolver_store::SourceEnvIdentity {
         crate::resolver_store::SourceEnvIdentity::live_for_artifact_key(self.0.host(), key)
     }
@@ -139,7 +142,10 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     }
     fn complete_graph_signature(
         &self,
-        roots: &[(std::sync::Arc<str>, crate::types::Hash16)],
+        roots: &[(
+            std::sync::Arc<str>,
+            verter_session_query::analysis::types::Hash16,
+        )],
         facts: &[FactVersionRef],
     ) -> Result<
         crate::fact_signature_helpers::StructuralCarrierReadSet,
@@ -276,8 +282,8 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn promote_route_completion(
         &self,
         canonical: &str,
-        whole_hash: crate::types::Hash16,
-        route_hash: Option<crate::types::Hash16>,
+        whole_hash: verter_session_query::analysis::types::Hash16,
+        route_hash: Option<verter_session_query::analysis::types::Hash16>,
     ) {
         self.0
             .request_view()
@@ -385,8 +391,8 @@ impl StoreView for FactValidationView<'_> {
     fn promote_route_completion(
         &self,
         canonical: &str,
-        whole_hash: crate::types::Hash16,
-        route_hash: Option<crate::types::Hash16>,
+        whole_hash: verter_session_query::analysis::types::Hash16,
+        route_hash: Option<verter_session_query::analysis::types::Hash16>,
     ) {
         self.port
             .promote_route_completion(canonical, whole_hash, route_hash)

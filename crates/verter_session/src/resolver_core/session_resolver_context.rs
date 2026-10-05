@@ -13,7 +13,7 @@ use crate::resolver_core::resolver_context::{
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_store::HostStoreView;
 use crate::session_view::SessionView;
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 pub(crate) struct SessionRequestLifecycle<'a> {
     inner: &'a crate::VerterHost,
@@ -219,7 +219,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
     fn artifact_key_for_current_content(
         &self,
         canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         if self.view.overlay_content_hash_for(canonical).is_some() {
             return self
                 .inner

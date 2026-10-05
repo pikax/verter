@@ -14,10 +14,10 @@
 //!   overlay covers the canonical) → publish an overlay-content
 //!   [`IndexedReady`](crate::project_type_store::IndexedReady) candidate
 //!   under an
-//!   [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+//!   [`overlay_scoped`](verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped)
 //!   key (overlay content hash + overlay-set discriminator), then
 //!   return it. Base-host reads stay on the
-//!   [`base`](crate::file_artifact_store::FileArtifactKey::base)
+//!   [`base`](verter_session_query::source::artifact_key::FileArtifactKey::base)
 //!   key and never reach the candidate — even when the overlay bytes
 //!   are identical to the base file.
 //! - View has no overlay for the canonical → fall through to the

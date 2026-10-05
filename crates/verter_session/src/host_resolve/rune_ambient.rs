@@ -166,8 +166,8 @@ pub(crate) fn rune_ambient_type_decl(name: &str) -> Option<Arc<LoweredTypeDecl>>
 
 /// The rune ambient inventory's presence lookups, carried by the shallow
 /// record of every rune module.
-pub(crate) const RUNE_AMBIENT_LOOKUP: crate::resolver_core::shallow_file_state::RuneAmbientLookup =
-    crate::resolver_core::shallow_file_state::RuneAmbientLookup {
+pub(crate) const RUNE_AMBIENT_LOOKUP: verter_session_query::inputs::shallow::RuneAmbientLookup =
+    verter_session_query::inputs::shallow::RuneAmbientLookup {
         has_value: rune_ambient_has_value,
         has_type: rune_ambient_has_type,
     };

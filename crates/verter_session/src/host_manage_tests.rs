@@ -11008,10 +11008,11 @@ fn base_seed_does_not_rebake_stale_known_miss_after_target_appears() {
             .exports
             .values()
             .filter_map(|export| match export {
-                crate::resolver_core::ExportTarget::Reexport {
-                    source_specifier, ..
+                verter_session_query::inputs::shallow::ExportTarget::Reexport {
+                    source_specifier,
+                    ..
                 } => Some(source_specifier.as_str()),
-                crate::resolver_core::ExportTarget::Local { .. } => None,
+                verter_session_query::inputs::shallow::ExportTarget::Local { .. } => None,
             })
             .collect::<Vec<_>>(),
         vec!["./missing"],
@@ -11090,10 +11091,11 @@ fn overlay_seed_does_not_rebake_stale_known_miss_after_target_appears() {
             .exports
             .values()
             .filter_map(|export| match export {
-                crate::resolver_core::ExportTarget::Reexport {
-                    source_specifier, ..
+                verter_session_query::inputs::shallow::ExportTarget::Reexport {
+                    source_specifier,
+                    ..
                 } => Some(source_specifier.as_str()),
-                crate::resolver_core::ExportTarget::Local { .. } => None,
+                verter_session_query::inputs::shallow::ExportTarget::Local { .. } => None,
             })
             .collect::<Vec<_>>(),
         vec!["./missing"],
@@ -11873,10 +11875,9 @@ fn non_wildcard_route_fact_resolves_after_dependency_appears_on_warm_host() {
 ///   not vacuously true.
 #[test]
 fn indexed_surface_reuse_is_parse_env_only_never_content_generation() {
-    use crate::resolver_core::shallow_file_state::{
-        ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
-    };
+    use crate::resolver_core::shallow_file_state::ShallowFileState;
     use rustc_hash::{FxHashMap, FxHashSet};
+    use verter_session_query::inputs::shallow::{ExportTarget, ImportTarget, WildcardReexport};
 
     let ws = Arc::new(CountingWorkspace::new());
     ws.inject_file("/workspace/x.ts", "export const a = 1;\n");
@@ -11891,7 +11892,7 @@ fn indexed_surface_reuse_is_parse_env_only_never_content_generation() {
     }
     let make_artifact = |shape: EdgeShape| {
         let routes = Arc::new(
-            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+            verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
         );
         let mut exports = FxHashMap::default();
         let mut wildcard_reexports = Vec::new();
@@ -13288,7 +13289,7 @@ export type Props = {
     assert!(
         matches!(
             state.export_target("Props"),
-            Some(crate::resolver_core::ExportTarget::Local { owner, symbol_name })
+            Some(verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name })
                 if *owner == verter_type_expr::TopLevelOwnerId::module(0)
                     && symbol_name == "Props"
         ),

@@ -73,7 +73,9 @@ struct WasmAuditBundleForWalker {
 
 /// Parse a 32-char lowercase hex string into `Hash16`. WASM-error
 /// variant of the NAPI helper with the same name.
-fn parse_hash16_hex_wasm(hex: &str) -> Result<host::Hash16, JsValue> {
+fn parse_hash16_hex_wasm(
+    hex: &str,
+) -> Result<verter_session_query::analysis::types::Hash16, JsValue> {
     if hex.len() != 32 {
         return Err(JsValue::from_str(&format!(
             "args_fingerprint_hex must be 32 hex chars (16 bytes), got {} chars",

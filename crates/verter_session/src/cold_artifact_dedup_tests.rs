@@ -932,23 +932,25 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
 
     // Forge a stored candidate whose parse env MOVED — the one dimension
     // the reuse gate consults.
-    let forge = |parse_env_hash: crate::types::Hash16| crate::project_type_store::IndexedReady {
-        whole_hash: built.whole_hash,
-        file_language: built.file_language.clone(),
-        shallow_state: Arc::clone(&built.shallow_state),
-        built_at_content_generation: built.built_at_content_generation,
-        parse_env_hash,
-        raw_source: Arc::clone(&built.raw_source),
-        eval_source: Arc::clone(&built.eval_source),
-        framework_parse: built.framework_parse.clone(),
-        script_analysis: built.script_analysis.clone(),
-        export_signatures: built.export_signatures.clone(),
-        snapshot: Arc::clone(&built.snapshot),
-        route_inventory: Arc::clone(&built.route_inventory),
-        declares_interface_app_config: built.declares_interface_app_config,
-        macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
-        source_parse_key: crate::project_type_store::SourceParseKey::default(),
-        input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
+    let forge = |parse_env_hash: verter_session_query::analysis::types::Hash16| {
+        crate::project_type_store::IndexedReady {
+            whole_hash: built.whole_hash,
+            file_language: built.file_language.clone(),
+            shallow_state: Arc::clone(&built.shallow_state),
+            built_at_content_generation: built.built_at_content_generation,
+            parse_env_hash,
+            raw_source: Arc::clone(&built.raw_source),
+            eval_source: Arc::clone(&built.eval_source),
+            framework_parse: built.framework_parse.clone(),
+            script_analysis: built.script_analysis.clone(),
+            export_signatures: built.export_signatures.clone(),
+            snapshot: Arc::clone(&built.snapshot),
+            route_inventory: Arc::clone(&built.route_inventory),
+            declares_interface_app_config: built.declares_interface_app_config,
+            macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+            source_parse_key: crate::project_type_store::SourceParseKey::default(),
+            input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
+        }
     };
     let mut moved_env = live_env;
     moved_env[0] = moved_env[0].wrapping_add(1);

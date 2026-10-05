@@ -2,7 +2,7 @@
 //! is owned by the query facade; these ports only serve inputs and typed work.
 
 use super::request_inputs::{IndexedInputRecord, IndexedInputServe, PreparedInputRecord};
-use super::shallow_file_state::ShallowInputRecord;
+use verter_session_query::inputs::shallow::ShallowInputRecord;
 
 use std::sync::Arc;
 use verter_session_query::declarations::DeclarationId;
@@ -13,8 +13,8 @@ use super::resolver_context::{
     note_non_cacheable_read_fan_out, MaterializeScopeObservation, NonCacheableReadReason,
 };
 use crate::resolver_core::ValueDeclIdentity;
-use crate::types::Hash16;
 use crate::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::Hash16;
 
 pub struct OperandEnvEpoch {
     root: Option<Arc<verter_workspace::published_state::PublishedRoot>>,
@@ -203,7 +203,7 @@ pub trait IndexedInputs {
     fn artifact_key_for_current_content(
         &self,
         canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey>;
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey>;
 
     /// Establish ONE tear-free [`MaterializeScopeObservation`] for a
     /// materialize-memo scope canonical.
@@ -315,7 +315,7 @@ pub trait RouteLookup {
     fn routed_shallow_state(
         &self,
         canonical_id: &str,
-    ) -> Option<std::sync::Arc<super::shallow_file_state::ShallowInputRecord>>;
+    ) -> Option<std::sync::Arc<verter_session_query::inputs::shallow::ShallowInputRecord>>;
 
     /// resolve a type declaration via the
     /// `meta_resolve::resolve_type_declaration` host-tier helper. Used by
@@ -422,26 +422,26 @@ pub trait ExecutionSubmission {
 /// A single population read and its owned query result. The all-space shape
 /// fingerprint travels beside the filtered answer, including an empty answer.
 pub struct ContributorAnswer {
-    pub population_fingerprint: crate::types::Hash16,
-    pub contributors: crate::global_contributors::SymbolContributors,
+    pub population_fingerprint: verter_session_query::analysis::types::Hash16,
+    pub contributors: verter_session_query::inputs::contributors::SymbolContributors,
 }
 
 /// Header facts and exact artifact identity selected by the established
 /// augmentation self-heal. No fact registry, source worker, or store escapes.
 pub struct AugmenterArtifactAnswer {
     pub augmentations: Arc<Vec<crate::file_artifact_store::ModuleAugmentationFact>>,
-    pub refreshed_key: Option<crate::file_artifact_store::FileArtifactKey>,
+    pub refreshed_key: Option<verter_session_query::source::artifact_key::FileArtifactKey>,
 }
 
 pub struct TerminalMacroInventory {
-    pub(crate) origin_whole_hash: Option<crate::types::Hash16>,
+    pub(crate) origin_whole_hash: Option<verter_session_query::analysis::types::Hash16>,
     pub(crate) script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
 }
 pub trait OwnedLowering {
     fn member_presence_for_observed_content(
         &self,
         canonical: &str,
-        observed: crate::types::Hash16,
+        observed: verter_session_query::analysis::types::Hash16,
         key: verter_session_query::facts::registry::FactKey,
     ) -> Option<bool>;
     fn terminal_macro_inventory(&self, canonical: &str) -> TerminalMacroInventory;
@@ -549,14 +549,17 @@ pub trait OwnedLowering {
     ) -> ContributorAnswer;
     fn augmenter_artifact_answer(
         &self,
-        captured: &crate::file_artifact_store::FileArtifactKey,
-        observed_hash: crate::types::Hash16,
+        captured: &verter_session_query::source::artifact_key::FileArtifactKey,
+        observed_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<AugmenterArtifactAnswer>;
     fn refresh_augmentation_keys(
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
         observed: &crate::file_artifact_store::AugmenterSet,
-        refreshed: Vec<(usize, crate::file_artifact_store::FileArtifactKey)>,
+        refreshed: Vec<(
+            usize,
+            verter_session_query::source::artifact_key::FileArtifactKey,
+        )>,
     );
     #[cfg(any(test, feature = "test-support"))]
     fn augmentation_source_env_forced_unobservable(&self) -> bool;
@@ -568,7 +571,7 @@ pub trait OwnedLowering {
     fn parse_fact_for_observed_content(
         &self,
         canonical: &str,
-        observed_hash: crate::types::Hash16,
+        observed_hash: verter_session_query::analysis::types::Hash16,
         key: verter_session_query::facts::registry::FactKey,
         lane: verter_session_query::facts::registry::FactLane,
     ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef>;
@@ -636,18 +639,18 @@ pub trait OwnedLowering {
     #[cfg(test)]
     fn function_program_index(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
     ) -> Option<Arc<verter_session_query::function_program::FunctionProgramIndex>>;
 
     fn transient_type_parts(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientTypeParts>;
     fn transient_value_parts(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> crate::decl_body_memo::DemandOutcome<crate::decl_body_memo::TransientValueParts>;
@@ -660,34 +663,34 @@ pub trait OwnedLowering {
     #[cfg(any(test, feature = "oracle-gen"))]
     fn lowered_type_decl(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>>;
     fn lowered_value_decl(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<crate::decl_body_memo::LoweredValueDecl>>;
     fn effective_type_decl(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>>;
     fn effective_value_decl(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<crate::decl_body_memo::LoweredValueDecl>>;
     fn type_dependencies(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<super::shallow_file_state::ClassifiedTypeDeps>>;
+    ) -> Option<Arc<verter_session_query::inputs::shallow::ClassifiedTypeDeps>>;
     /// The owner's raw-source surfaces in one `SymbolSpace` — the port's
     /// escape-free read for the syntactic symbol inventory. Gated to the
     /// `typeinfo::oracle_core` consumer module
@@ -696,14 +699,14 @@ pub trait OwnedLowering {
     #[cfg(any(test, feature = "oracle-gen"))]
     fn raw_source_surfaces(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         space: verter_parser::utils::oxc::script::raw_surface::SymbolSpace,
     ) -> Option<Arc<Vec<verter_parser::utils::oxc::script::raw_surface::RawSourceSurface>>>;
     fn deref_type_argument(
         &self,
-        source: &super::shallow_file_state::ShallowInputRecord,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         locator: &verter_type_expr::locators::TypeArgLocator,
     ) -> Result<
         verter_type_expr::TypeExpr,

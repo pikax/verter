@@ -1236,8 +1236,10 @@ impl MetaSession {
     ) -> R {
         let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> =
             rustc_hash::FxHashMap::default();
-        let mut overlay_hashes: rustc_hash::FxHashMap<String, crate::types::Hash16> =
-            rustc_hash::FxHashMap::default();
+        let mut overlay_hashes: rustc_hash::FxHashMap<
+            String,
+            verter_session_query::analysis::types::Hash16,
+        > = rustc_hash::FxHashMap::default();
         let mut overlay_tombstones: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut resolution_authority = None;

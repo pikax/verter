@@ -272,7 +272,10 @@ fn session_overlay_rooting_runs_once_per_request() {
         fn source(&self, _canonical: &str) -> Option<Arc<str>> {
             None
         }
-        fn content_hash_for(&self, _canonical: &str) -> Option<crate::types::Hash16> {
+        fn content_hash_for(
+            &self,
+            _canonical: &str,
+        ) -> Option<verter_session_query::analysis::types::Hash16> {
             None
         }
         fn project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
@@ -711,15 +714,16 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
         .script_parse_key
         .clone()
         .expect("a plain script's snapshot carries its parse identity");
-    let from_source = crate::file_artifact_store::FileArtifactKey::for_source_identity(
-        Arc::from(canonical.as_str()),
-        state.whole_hash,
-        state.source.as_ref(),
-        state.file_language.clone(),
-        None,
-        crate::file_artifact_store::BASE_PARSE_ENV_HASH,
-    )
-    .expect("the script's language has a parse identity");
+    let from_source =
+        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+            Arc::from(canonical.as_str()),
+            state.whole_hash,
+            state.source.as_ref(),
+            state.file_language.clone(),
+            None,
+            verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
+        )
+        .expect("the script's language has a parse identity");
     assert_eq!(
         crate::file_artifact_store::source_parse_identity_derivations_for_tests() - before,
         1,
@@ -896,7 +900,10 @@ fn terminal_macro_inventory_preserves_indexed_absence_and_paired_base_fallback()
         fn source(&self, _: &str) -> Option<Arc<str>> {
             None
         }
-        fn content_hash_for(&self, _: &str) -> Option<crate::types::Hash16> {
+        fn content_hash_for(
+            &self,
+            _: &str,
+        ) -> Option<verter_session_query::analysis::types::Hash16> {
             None
         }
         fn project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {

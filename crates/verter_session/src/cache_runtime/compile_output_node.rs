@@ -43,9 +43,9 @@ use super::admission::{
 use super::node::{ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};
 use super::singleflight::InflightTable;
 use crate::types::{
-    CachedTsx, CachedVirtualFile, CompileSlot, DiagnosticsSnapshot, Hash16, ProfileState,
-    VirtualNodeKind,
+    CachedTsx, CachedVirtualFile, CompileSlot, DiagnosticsSnapshot, ProfileState, VirtualNodeKind,
 };
+use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 

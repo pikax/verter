@@ -22,8 +22,9 @@
 
 use std::sync::OnceLock;
 use verter_session::file_artifact_store::{
-    AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, ProjectIdentity,
+    AugmentationTargetKey, AugmentationTargetKind, ProjectIdentity,
 };
+use verter_session_query::source::artifact_key::FileArtifactKey;
 
 use verter_session_query::resolution::{
     IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias,

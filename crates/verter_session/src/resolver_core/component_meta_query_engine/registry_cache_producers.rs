@@ -257,7 +257,7 @@ impl ComponentMetaQueryEngine<'_> {
         canonical_id: &str,
         source_owner: verter_type_expr::TopLevelOwnerId,
         exported_name: &str,
-        observed_keyed_hash: Option<crate::types::Hash16>,
+        observed_keyed_hash: Option<verter_session_query::analysis::types::Hash16>,
     ) -> crate::cache_runtime::singleflight::ComputeAdmission<
         Option<std::sync::Arc<super::ResolvedImportedRegistrySymbol>>,
         crate::component_meta_caches::ImportedRegistryEntry,

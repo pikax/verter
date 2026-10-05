@@ -39,9 +39,9 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::decl_headers::MemberHeader;
 use verter_session_query::analysis::types::hash_16;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::declarations::header_index::MemberHeader;
 use verter_session_query::facts::{
     compute_member_presence_hash, compute_member_shape_hash, CrossDeclLens, CrossDeclRef, Fact,
     FactKey, FactRegistry, HashOutcome, MemberKind, SymbolSpace,
@@ -52,7 +52,8 @@ use crate::file_artifact_store::{
     FileFacts, InternedName, InternedSpecifier, ModuleAugmentationFact,
 };
 use crate::project_type_store::IndexedReady;
-use crate::resolver_core::shallow_file_state::{ExportTarget, ShallowFileState};
+use crate::resolver_core::shallow_file_state::ShallowFileState;
+use verter_session_query::inputs::shallow::ExportTarget;
 
 /// The contribution-set / order-sensitive fact family: augmentation
 /// contribution set+order, declaration contribution order, and the
@@ -112,12 +113,11 @@ pub struct ParseFactsEmission {
 mod inventory_view {
     use std::cell::Cell;
 
-    use verter_semantic::analysis::decl_headers::{MemberHeader, ValueDeclHeader};
+    use verter_session_query::declarations::header_index::{MemberHeader, ValueDeclHeader};
     use verter_session_query::declarations::AugmentationScopeKind;
 
-    use crate::resolver_core::shallow_file_state::{
-        ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
-    };
+    use crate::resolver_core::shallow_file_state::ShallowFileState;
+    use verter_session_query::inputs::shallow::{ExportTarget, ImportTarget, WildcardReexport};
 
     /// Per-call inventory-access tally. Exact and deterministic: a
     /// function of the input alone, so it cannot be perturbed by machine
@@ -210,7 +210,7 @@ mod inventory_view {
             Item = (
                 &AugmentationScopeKind,
                 &verter_type_expr::DeclBindingKey,
-                &verter_semantic::analysis::decl_headers::TypeDeclHeader,
+                &verter_session_query::declarations::header_index::TypeDeclHeader,
             ),
         > {
             self.note_traversal();
@@ -971,7 +971,7 @@ fn emit_syntactic_export_set(registry: &mut FactRegistry, view: &FactEmissionVie
 fn emit_import_refs(registry: &mut FactRegistry, view: &FactEmissionView<'_>) {
     let mut sorted: Vec<(
         &String,
-        &crate::resolver_core::shallow_file_state::ImportTarget,
+        &verter_session_query::inputs::shallow::ImportTarget,
     )> = view.import_targets().collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
     // Exact incoming batch: one `ImportRef` fact per import binding.

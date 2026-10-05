@@ -368,7 +368,7 @@ pub fn project_binder_identity_facts(
 }
 pub(crate) fn project_binder_identity_facts_inputs(
     canonical: &str,
-    shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+    shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
 ) -> BinderIdentityFacts {
     let headers = &shallow.headers;
     let canonical: Arc<str> = Arc::from(canonical);

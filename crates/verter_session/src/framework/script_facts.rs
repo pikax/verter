@@ -52,8 +52,8 @@ use crate::fact_signature_helpers::{
 };
 use crate::framework::registry::FrameworkRegistration;
 use crate::resolver_core::{ResolverContext, StoreView};
-use crate::types::Hash16;
 use crate::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 
@@ -451,7 +451,8 @@ pub struct CandidateSlotKey {
     /// Exact syntax-construction identity.
     pub parse_key: verter_language::ParseKey,
     /// Session-private derived-artifact shape identity.
-    pub build_toolchain_fingerprint: crate::build_toolchain_fingerprint::BuildToolchainFingerprint,
+    pub build_toolchain_fingerprint:
+        verter_session_query::source::toolchain::BuildToolchainFingerprint,
     /// The file's `FileLanguage` row.
     pub file_language_id: verter_language::FileLanguage,
     /// The capturing provider's adapter id.
@@ -935,7 +936,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             |artifact| artifact.parse_key().clone(),
         ),
         build_toolchain_fingerprint:
-            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         file_language_id: file_language.clone(),
         provider_id: provider.adapter_id(),
         provider_version: provider.provider_version(),

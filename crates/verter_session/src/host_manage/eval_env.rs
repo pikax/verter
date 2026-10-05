@@ -6,6 +6,7 @@
 //! per-owner evaluated-type compute path. Public surface
 //! remains rooted at `crate::host_manage::*`; this file contributes a
 //! continuation `impl VerterHost { … }` block.
+use verter_session_query::analysis::types::Hash16;
 
 use std::sync::Arc;
 
@@ -899,8 +900,9 @@ impl VerterHost {
             }
 
             for export in facts.shallow_state.exports.values() {
-                if let crate::resolver_core::ExportTarget::Reexport {
-                    source_specifier, ..
+                if let verter_session_query::inputs::shallow::ExportTarget::Reexport {
+                    source_specifier,
+                    ..
                 } = export
                 {
                     if let Some(resolved) =
@@ -1015,7 +1017,7 @@ impl VerterHost {
         };
         let mut admitted = std::collections::BTreeSet::new();
         for demand in requested_bindings {
-            let Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(owner)) =
+            let Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(owner)) =
                 indexed
                     .shallow_state
                     .visible_value_binding(demand.owner, demand.name.as_ref())

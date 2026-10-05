@@ -23,7 +23,7 @@ use crate::file_artifact_store::{AugmentationTargetKind, ProjectIdentity};
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
 use crate::resolver_core::{SingleflightGroup, StoreView, ValidatedFactCache};
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// Substrate version for the route/barrel resolution algorithm. A bump

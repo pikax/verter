@@ -6,11 +6,12 @@ use std::sync::Arc;
 use verter_session_query::analysis::types::Hash16;
 
 use super::{
-    AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
-    FileArtifacts, ProjectIdentity,
+    AugmentationTargetKey, AugmentationTargetKind, FileArtifactStore, FileArtifacts,
+    ProjectIdentity,
 };
-use crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint;
 use crate::project_type_store::IndexedReady;
+use verter_session_query::source::artifact_key::FileArtifactKey;
+use verter_session_query::source::toolchain::current_build_toolchain_fingerprint;
 
 fn synth_indexed(hash: u8) -> Arc<IndexedReady> {
     Arc::new(IndexedReady::new_for_test([hash; 16]))
@@ -77,7 +78,7 @@ fn vue_key(source: &str, options: &verter_language::ParseOptions) -> FileArtifac
     FileArtifactKey {
         canonical: Arc::from("/component.vue"),
         content_hash: crate::hash::hash_16(source.as_bytes()),
-        parse_env_hash: super::BASE_PARSE_ENV_HASH,
+        parse_env_hash: verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         parse_key,
         build_toolchain_fingerprint: current_build_toolchain_fingerprint(),
         file_language_id: language,
@@ -337,7 +338,9 @@ fn stale_build_fingerprint_is_rejected_by_current_base_key() {
     let store = FileArtifactStore::new();
     let current = FileArtifactKey::base_for_test(Arc::from("/owner-exact.ts"), [3u8; 16]);
     let stale = FileArtifactKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(3),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            3,
+        ),
         ..current.clone()
     };
     let stale_payload = synth_artifacts(3);
@@ -373,7 +376,9 @@ fn another_stale_build_fingerprint_is_rejected_by_current_base_key() {
     let store = FileArtifactStore::new();
     let current = FileArtifactKey::base_for_test(Arc::from("/authored-import.ts"), [4u8; 16]);
     let stale = FileArtifactKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(4),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            4,
+        ),
         ..current.clone()
     };
     let stale_payload = synth_artifacts(4);
@@ -502,7 +507,8 @@ fn augmentation_index_starts_empty() {
 fn augmentation_index_round_trip() {
     use smallvec::smallvec;
 
-    use super::{AugmenterEntry, AugmenterSet, FileArtifactKey};
+    use super::{AugmenterEntry, AugmenterSet};
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let store = FileArtifactStore::new();
     let key = AugmentationTargetKey {
@@ -1750,8 +1756,8 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
 
     use super::{
         augmentation_contribution_equivalent, compute_augmenter_set_fingerprint, AugmenterEntry,
-        FileArtifactKey,
     };
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     // Helper: the single fingerprint input that varies per augmenter at a
     // fixed canonical is `parse_stable_hash`. Build the one-entry augmenter

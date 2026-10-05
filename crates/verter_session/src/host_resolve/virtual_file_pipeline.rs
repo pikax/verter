@@ -2,6 +2,7 @@
 //!
 //! Public resolve / ensure / get / list accessors and the on-demand
 //! compile path through the scheduler-backed cache.
+use verter_session_query::analysis::types::Hash16;
 
 use super::compile_request_build::BoundCompiledProducts;
 use std::sync::Arc;

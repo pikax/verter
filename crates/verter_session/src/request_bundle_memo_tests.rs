@@ -357,7 +357,8 @@ fn tombstoned_canonical_is_not_memoized() {
     let host = host_with_base_files();
 
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-    let overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     let mut tombstones: std::collections::HashSet<String> = std::collections::HashSet::new();
     tombstones.insert(OWNER.to_string());
     let view =

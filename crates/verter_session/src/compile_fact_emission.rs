@@ -74,8 +74,9 @@ use verter_session_query::facts::registry::{
 };
 use verter_session_query::facts::FactLane;
 
-use crate::types::{ExternalSourceRequest, Hash16};
+use crate::types::ExternalSourceRequest;
 use crate::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
 
 /// Observe the compile-tier fact-dependency set for a single SFC

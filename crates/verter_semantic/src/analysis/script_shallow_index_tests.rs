@@ -1,7 +1,7 @@
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 use verter_parser::oxc_parse::Parser;
-use verter_parser::utils::oxc::script::route_inventory::{
+use verter_session_query::analysis::route_inventory::{
     RouteCapability, RouteImportForm, RouteImportedName, ScriptImportRoute, ScriptLocalExportRoute,
 };
 use verter_type_expr::{DeclBindingKey, TopLevelOwnerId};

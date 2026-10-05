@@ -195,7 +195,7 @@ pub(crate) fn resolve_bare_name_in_scope(
         }
         if matches!(
             entry.shallow_state.export_target(name),
-            Some(crate::resolver_core::ExportTarget::Local { owner, .. }) if *owner == scope_owner
+            Some(verter_session_query::inputs::shallow::ExportTarget::Local { owner, .. }) if *owner == scope_owner
         ) {
             return Some(mint_in_owner(scope_owner));
         }
@@ -385,10 +385,10 @@ fn resolve_namespace_member_from_facts(
                     .shallow_state
                     .visible_value_binding(owner, prefix)?
                 {
-                    crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(
-                        target,
-                    ) => Some(!target.is_namespace),
-                    crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_) => None,
+                    verter_session_query::inputs::shallow::LexicalValueBinding::Import(target) => {
+                        Some(!target.is_namespace)
+                    }
+                    verter_session_query::inputs::shallow::LexicalValueBinding::Local(_) => None,
                 }
             })
             .unwrap_or(false);
@@ -486,7 +486,7 @@ fn resolve_namespace_import_canonical_from_facts(
         .ensure_indexed_ready_serve(canonical_id)
         .map(|serve| serve.indexed)?;
     let target = match indexed.shallow_state.visible_value_binding(owner, prefix)? {
-        crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(target)
+        verter_session_query::inputs::shallow::LexicalValueBinding::Import(target)
             if target.is_namespace =>
         {
             target
@@ -610,7 +610,7 @@ pub(crate) fn resolve_prepared_type_decl_via_host(
 #[allow(dead_code)]
 pub(crate) fn resolve_namespace_sibling_in_scope(
     payload: &crate::semantic_query::LocalScopePayload,
-    state: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+    state: &verter_session_query::inputs::shallow::ShallowInputRecord,
     scope_canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,

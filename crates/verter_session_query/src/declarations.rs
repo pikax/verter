@@ -22,6 +22,8 @@
 //! merge-aware carriers ([`TypeDeclBody`], the merged enum accessors) compose
 //! per-contributor locators/facts — they never evaluate a body here.
 
+pub mod class_fields;
+pub mod header_index;
 pub mod headers;
 
 use std::sync::Arc;

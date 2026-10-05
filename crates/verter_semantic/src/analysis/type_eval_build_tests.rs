@@ -1187,7 +1187,9 @@ fn merges_repeated_declare_global_namespace_jsx_intrinsic_elements() {
 /// private `index_for` in `decl_headers_tests`), so a body-builder test can
 /// assert header↔body parity on the VALUE-augmentation table without reaching
 /// into a sibling test module.
-fn header_index_for(source: &str) -> crate::analysis::decl_headers::DeclHeaderIndex {
+fn header_index_for(
+    source: &str,
+) -> verter_session_query::declarations::header_index::DeclHeaderIndex {
     use oxc_allocator::Allocator;
     use oxc_span::SourceType;
     use verter_parser::oxc_parse::Parser;

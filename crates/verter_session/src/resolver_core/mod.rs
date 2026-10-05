@@ -151,9 +151,8 @@ pub use runtime_values::{
     materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver, ValueDeclIdentity,
 };
 pub use shallow_file_state::{
-    BudgetDomain, BudgetExceededFailure, ClassifiedTypeDeps, ExportTarget, ExternalSymbolRef,
-    ImportTarget, LocalClosureResult, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
-    ShallowFileState, ShallowTypeSymbol, ShallowTypeView, ShallowValueSymbol, WildcardReexport,
+    BudgetDomain, BudgetExceededFailure, LocalClosureResult, LocalClosureStatus, ResolutionBudgets,
+    ResolutionCounters, ShallowFileState, ShallowTypeView,
 };
 
 /// Lane-identity token for singleflight / stability-request
@@ -504,8 +503,8 @@ pub trait StoreView {
     fn promote_route_completion(
         &self,
         _canonical: &str,
-        _whole_hash: crate::types::Hash16,
-        _route_hash: Option<crate::types::Hash16>,
+        _whole_hash: verter_session_query::analysis::types::Hash16,
+        _route_hash: Option<verter_session_query::analysis::types::Hash16>,
     ) {
     }
 }
@@ -635,8 +634,8 @@ impl<T: StoreView + ?Sized> StoreView for &T {
     fn promote_route_completion(
         &self,
         canonical: &str,
-        whole_hash: crate::types::Hash16,
-        route_hash: Option<crate::types::Hash16>,
+        whole_hash: verter_session_query::analysis::types::Hash16,
+        route_hash: Option<verter_session_query::analysis::types::Hash16>,
     ) {
         (**self).promote_route_completion(canonical, whole_hash, route_hash)
     }
@@ -5004,8 +5003,8 @@ mod tests {
 #[cfg(test)]
 mod file_source_env_fact_rail_tests {
     use super::*;
-    use crate::file_artifact_store::FileArtifactKey;
     use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     fn source_env_fact(
         canonical: &str,
@@ -5016,7 +5015,7 @@ mod file_source_env_fact_rail_tests {
         FactVersionRef::FileSourceEnv {
             canonical_id: canonical.to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
-            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(
+            parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                 language_of,
                 parse_marker,
             ),
@@ -5137,9 +5136,9 @@ mod fact_signature_fingerprint_pins {
     //! implementation; they lock the contract, not the byte values.
 
     use super::*;
-    use crate::file_artifact_store::FileArtifactKey;
     use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     fn export_key(name: &str) -> FactKey {
         FactKey::Export {
@@ -5182,7 +5181,9 @@ mod fact_signature_fingerprint_pins {
             FactVersionRef::FileSourceEnv {
                 canonical_id: "/w/env.ts".to_string(),
                 parse_env_hash: ParseEnvHash::from_env_hash([6u8; 16]),
-                parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/dep.ts", 2),
+                parse_key: verter_session_query::source::toolchain::parse_key_for_test(
+                    "/dep.ts", 2,
+                ),
                 file_language_id: FileArtifactKey::synthetic_file_language_for_test("/w/env.ts"),
             },
             FactVersionRef::ProjectGeneration { generation: 7 },
@@ -5257,7 +5258,9 @@ mod fact_signature_fingerprint_pins {
                 FactVersionRef::FileSourceEnv {
                     canonical_id: "/w/env.ts".to_string(),
                     parse_env_hash: ParseEnvHash::from_env_hash([66u8; 16]),
-                    parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/dep.ts", 2),
+                    parse_key: verter_session_query::source::toolchain::parse_key_for_test(
+                        "/dep.ts", 2,
+                    ),
                     file_language_id: FileArtifactKey::synthetic_file_language_for_test(
                         "/w/env.ts",
                     ),

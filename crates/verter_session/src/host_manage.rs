@@ -2,6 +2,7 @@
 //!
 //! Contains [`VerterHost::remove`], [`VerterHost::get_analysis`],
 //! [`VerterHost::get_diagnostics`], and [`VerterHost::set_import_dependencies`].
+use verter_session_query::analysis::types::Hash16;
 
 use std::sync::{Arc, OnceLock};
 

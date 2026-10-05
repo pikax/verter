@@ -102,7 +102,10 @@ where
             exported_name,
         )
     } else if source_owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
-        if let Some(crate::resolver_core::ExportTarget::Local { owner, symbol_name }) = ctx
+        if let Some(verter_session_query::inputs::shallow::ExportTarget::Local {
+            owner,
+            symbol_name,
+        }) = ctx
             .shallow_file_state(canonical_id)
             .and_then(|state| state.export_target(exported_name).cloned())
         {

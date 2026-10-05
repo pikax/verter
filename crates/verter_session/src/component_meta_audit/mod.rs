@@ -918,7 +918,10 @@ pub fn merge_dep_signature_into_local_fence(
 /// on the happy path) and the equivalent [`StructuredAuditEvent`]
 /// (fallback lane when the direct records vec is empty). No-op when
 /// no request context is installed.
-pub fn record_indexed_ready_built(canonical_id: Arc<str>, whole_hash: crate::types::Hash16) {
+pub fn record_indexed_ready_built(
+    canonical_id: Arc<str>,
+    whole_hash: verter_session_query::analysis::types::Hash16,
+) {
     if let Some(acc) = crate::request_context::current_accumulator() {
         acc.push_indexed_ready_build(IndexedReadyBuildRecord {
             canonical_id: Arc::clone(&canonical_id),

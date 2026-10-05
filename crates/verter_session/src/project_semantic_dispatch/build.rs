@@ -83,7 +83,7 @@ pub(super) type EffectivePreparedValueDecl = (
 struct AugmentationContributorRoot {
     canonical: Arc<str>,
     whole_hash: crate::semantic_query::HashValue,
-    artifact_key: crate::file_artifact_store::FileArtifactKey,
+    artifact_key: verter_session_query::source::artifact_key::FileArtifactKey,
 }
 
 /// Result of a cross-file declaration-augmentation stitch
@@ -818,7 +818,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 joined.push_str(segment);
                 if matches!(
                     shallow.visible_value_binding(value_root.scope.owner, &joined),
-                    Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
+                    Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
                 ) && shallow
                     .headers
                     .namespace_member_is_exported(value_root.scope.owner, &joined)
@@ -843,7 +843,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // module reaches it here).
         let has_value = matches!(
             visible_value,
-            Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(_))
+            Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
         ) || (visible_value.is_none()
             && matches!(
                 shallow.value_fallback_augmentation_scope(
@@ -854,7 +854,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             ));
         let has_import_local = matches!(
             visible_value,
-            Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(_))
+            Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(_))
         );
         let has_type_symbol = shallow
             .visible_local_type_owner(value_root.scope.owner, value_root.name.as_ref())
@@ -868,7 +868,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let has_namespace_prefix = value_root.name.split_once('.').is_some_and(|(prefix, _)| {
             matches!(
                 shallow.visible_value_binding(value_root.scope.owner, prefix),
-                Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Import(_))
+                Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(_))
             )
         });
 
@@ -1675,7 +1675,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .indexed;
         let exports_this_declaration = matches!(
             indexed.shallow_state.export_target(exported),
-            Some(crate::resolver_core::shallow_file_state::ExportTarget::Local { owner, symbol_name })
+            Some(verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name })
                 if *owner == prepared.root_identity.owner
                     && symbol_name.as_str() == prepared.root_identity.symbol_name.as_ref()
         );
@@ -1693,7 +1693,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
             .ensure_indexed_ready_serve(canonical)
             .is_some_and(|serve| {
                 crate::global_contributors::classify_module_kind(&serve.indexed)
-                    == crate::global_contributors::FileModuleKind::Module
+                    == verter_session_query::inputs::contributors::FileModuleKind::Module
             })
     }
 
@@ -2121,7 +2121,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         path: &[Arc<str>],
         visited: &mut FxHashSet<(ValueRootKey, Vec<Arc<str>>)>,
     ) -> Option<(ResolvedRootIdentity, Vec<Arc<str>>)> {
-        use crate::resolver_core::shallow_file_state::LexicalValueBinding;
+        use verter_session_query::inputs::shallow::LexicalValueBinding;
         if !visited.insert((value_root.clone(), path.to_vec())) {
             return None;
         }
@@ -2197,10 +2197,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         value_root: &ValueRootKey,
         path: &[Arc<str>],
-        shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+        shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
         unbound: bool,
     ) -> Option<(ValueRootKey, usize)> {
-        use crate::resolver_core::shallow_file_state::LexicalValueBinding;
+        use verter_session_query::inputs::shallow::LexicalValueBinding;
         let qualified = |base: &str, segments: &[Arc<str>]| {
             let mut name = base.to_string();
             for segment in segments {
@@ -5731,9 +5731,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
                     canonical_id: shape_attribution.clone(),
-                    key: crate::global_contributors::population_contributor_fact_key(
-                        &target, decl_name,
-                    ),
+                    key:
+                        verter_session_query::inputs::contributors::population_contributor_fact_key(
+                            &target, decl_name,
+                        ),
                     lane: verter_session_query::facts::FactLane::Semantic,
                     expected_hash: population_answer.population_fingerprint,
                 },
@@ -5742,8 +5743,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let has_file_scope = population_hit.entries.iter().any(|entry| {
             matches!(
                 entry.origin,
-                crate::global_contributors::ContributorOrigin::FileScopeInterface
-                    | crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                verter_session_query::inputs::contributors::ContributorOrigin::FileScopeInterface
+                    | verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
             )
         });
         if augmenter_set.entries.is_empty() && !has_file_scope {
@@ -5762,8 +5763,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // Stale-key self-heals discovered below are written back into the
         // cached `AugmenterSet` after the loop so the NEXT stitch hits the
         // fast exact-key path instead of re-healing every call.
-        let mut refreshed_keys: Vec<(usize, crate::file_artifact_store::FileArtifactKey)> =
-            Vec::new();
+        let mut refreshed_keys: Vec<(
+            usize,
+            verter_session_query::source::artifact_key::FileArtifactKey,
+        )> = Vec::new();
         let mut base_position: Option<usize> = None;
         enum OrderedOrigin {
             Augmenter(usize),
@@ -5775,14 +5778,14 @@ impl<'a> ProjectSemanticDispatch<'a> {
             parse_stable_hash: verter_session_query::analysis::types::Hash16,
             origin: OrderedOrigin,
         }
-        let file_scope_entries: Vec<&crate::global_contributors::ContributorEntry> = population_hit
+        let file_scope_entries: Vec<&verter_session_query::inputs::contributors::ContributorEntry> = population_hit
             .entries
             .iter()
             .filter(|entry| {
                 matches!(
                     entry.origin,
-                    crate::global_contributors::ContributorOrigin::FileScopeInterface
-                        | crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                    verter_session_query::inputs::contributors::ContributorOrigin::FileScopeInterface
+                        | verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
                 )
             })
             .collect();
@@ -5843,7 +5846,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                     // script gaining module syntax misses the warm read).
                     if matches!(target, AugmentationTargetKind::GlobalAugmentation)
                         && crate::global_contributors::classify_module_kind(&indexed)
-                            == crate::global_contributors::FileModuleKind::Script
+                            == verter_session_query::inputs::contributors::FileModuleKind::Script
                     {
                         continue;
                     }
@@ -6160,10 +6163,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         .clone()
                         .unwrap_or_else(|| entry.artifact_key.clone());
                     if entry.origin
-                        == crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                        == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
                         && population_hit.entries.iter().any(|other| {
                             other.origin
-                                == crate::global_contributors::ContributorOrigin::FileScopeInterface
+                                == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeInterface
                                 && other.artifact_key.canonical == entry.artifact_key.canonical
                                 && other.symbol.as_ref() == entry.symbol.as_ref()
                         })
@@ -6216,7 +6219,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                         owner: entry.owner,
                         symbol: Arc::from(decl_name),
                         space: if entry.origin
-                            == crate::global_contributors::ContributorOrigin::FileScopeNamespace
+                            == verter_session_query::inputs::contributors::ContributorOrigin::FileScopeNamespace
                         {
                             verter_type_expr::locators::LocatorSymbolSpace::Namespace
                         } else {
@@ -6367,7 +6370,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// declared qualified member (`AN.f`) the rest of the path names.
     fn ambient_import_member_root(
         &self,
-        target: &crate::resolver_core::ImportTarget,
+        target: &verter_session_query::inputs::shallow::ImportTarget,
         path: &[Arc<str>],
     ) -> Option<(ValueRootKey, usize)> {
         let blocks = self.ambient_module_blocks(&target.source_specifier);
@@ -6688,7 +6691,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         demand_canonical: &str,
         name: &str,
         space: verter_session_query::facts::SymbolSpace,
-    ) -> crate::global_contributors::SymbolContributors {
+    ) -> verter_session_query::inputs::contributors::SymbolContributors {
         use crate::file_artifact_store::AugmentationTargetKind;
         let target = AugmentationTargetKind::GlobalAugmentation;
         let answer = self.ctx.global_contributor_answer(name, space);
@@ -6696,7 +6699,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
                     canonical_id: String::new(),
-                    key: crate::global_contributors::population_contributor_fact_key(&target, name),
+                    key:
+                        verter_session_query::inputs::contributors::population_contributor_fact_key(
+                            &target, name,
+                        ),
                     lane: verter_session_query::facts::FactLane::Semantic,
                     expected_hash: answer.population_fingerprint,
                 },
@@ -6713,7 +6719,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         }) {
             return contributors;
         }
-        crate::global_contributors::SymbolContributors {
+        verter_session_query::inputs::contributors::SymbolContributors {
             entries: contributors
                 .entries
                 .iter()
@@ -6786,7 +6792,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         demand_canonical: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if let Some(lib) = self.lib_global_declaration(demand_canonical, name, GlobalSpace::Type) {
             return Some(lib);
         }
@@ -6844,22 +6850,23 @@ impl<'a> ProjectSemanticDispatch<'a> {
         demand_canonical: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
+        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         let (head, _) = name.split_once('.')?;
         let population = self.global_contributors_in(
             demand_canonical,
             head,
             verter_session_query::facts::SymbolSpace::Namespace,
         );
-        let mut declarations: Vec<&crate::global_contributors::ContributorEntry> = population
-            .entries
-            .iter()
-            .filter(|entry| {
-                !entry.is_automatic_lib
-                    && entry.origin == ContributorOrigin::FileScopeNamespace
-                    && entry.module_kind == FileModuleKind::Script
-            })
-            .collect();
+        let mut declarations: Vec<&verter_session_query::inputs::contributors::ContributorEntry> =
+            population
+                .entries
+                .iter()
+                .filter(|entry| {
+                    !entry.is_automatic_lib
+                        && entry.origin == ContributorOrigin::FileScopeNamespace
+                        && entry.module_kind == FileModuleKind::Script
+                })
+                .collect();
         declarations.sort_by(|left, right| {
             self.ctx
                 .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
@@ -6939,8 +6946,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             verter_session_query::declarations::ValueDeclKind,
         )>,
     > {
-        use crate::global_contributors::{ContributorOrigin, FileModuleKind};
         use verter_session_query::declarations::ValueDeclKind;
+        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         let lib = self
             .lib_global_declaration(demand_canonical, name, GlobalSpace::Value)
             .and_then(|identity| {
@@ -6960,8 +6967,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
             name,
             verter_session_query::facts::SymbolSpace::Value,
         );
-        let mut declarations: Vec<(&crate::global_contributors::ContributorEntry, ValueDeclKind)> =
-            Vec::new();
+        let mut declarations: Vec<(
+            &verter_session_query::inputs::contributors::ContributorEntry,
+            ValueDeclKind,
+        )> = Vec::new();
         for entry in population.entries.iter() {
             let declares = !entry.is_automatic_lib
                 && match entry.origin {
@@ -7134,10 +7143,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
         };
         let shallow = &indexed.shallow_state;
         match crate::global_contributors::classify_module_kind(&indexed) {
-            crate::global_contributors::FileModuleKind::Module => {
+            verter_session_query::inputs::contributors::FileModuleKind::Module => {
                 !shallow.has_type_symbol_in(owner, name) && shallow.has_global_augmentation(name)
             }
-            crate::global_contributors::FileModuleKind::Script => {
+            verter_session_query::inputs::contributors::FileModuleKind::Script => {
                 shallow.has_type_symbol_in(owner, name)
             }
         }
@@ -9478,7 +9487,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// the program first), so a lib declaration reached that way is the
     /// name's only one.
     pub(super) fn is_lib_environment_canonical(&self, canonical: &str) -> bool {
-        crate::global_contributors::is_automatic_lib_canonical(canonical)
+        verter_session_query::inputs::contributors::is_automatic_lib_canonical(canonical)
     }
 
     /// Whether `identity` is the builtin-sentinel `Function` carrier the

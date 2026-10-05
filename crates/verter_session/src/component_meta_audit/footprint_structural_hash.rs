@@ -12,7 +12,7 @@ use crate::semantic_query::{
     SurfaceMember, ValueRootKey,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// Depth backstop for the structural walk, secondary to the visited-set cycle
 /// guard. The visited set already terminates every cycle reachable through the

@@ -2662,7 +2662,7 @@ impl SemanticGraphStore {
 /// current content inside the signature builder would reopen the publish
 /// race a concurrent `upsert` between value-compute and signature-build
 /// otherwise creates.
-pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
+pub(crate) type ObservedGraphSelfRoot = (Arc<str>, verter_session_query::analysis::types::Hash16);
 
 /// Build the [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
 /// carrier for a [`SemanticGraphStore`] query-identity memo entry —
@@ -2724,8 +2724,10 @@ pub(crate) fn semantic_graph_read_set_signature(
 
     // Collapse the observed self-roots into a per-canonical hash map;
     // a conflicting hash for the same canonical is a torn observation.
-    let mut self_root_hashes: rustc_hash::FxHashMap<Arc<str>, crate::types::Hash16> =
-        rustc_hash::FxHashMap::default();
+    let mut self_root_hashes: rustc_hash::FxHashMap<
+        Arc<str>,
+        verter_session_query::analysis::types::Hash16,
+    > = rustc_hash::FxHashMap::default();
     for (canonical, observed_hash) in observed_self_roots {
         match self_root_hashes.get(canonical) {
             Some(existing) if existing != observed_hash => {

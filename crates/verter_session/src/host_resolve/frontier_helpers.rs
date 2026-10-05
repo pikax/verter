@@ -206,7 +206,7 @@ pub(crate) fn wildcard_source_stem_for_matching(path: &str) -> Option<String> {
 
 pub(crate) fn wildcard_match_score(
     exported_name: &str,
-    wildcard: &crate::resolver_core::WildcardReexport,
+    wildcard: &verter_session_query::inputs::shallow::WildcardReexport,
 ) -> usize {
     let Some(stem) = wildcard_source_stem_for_matching(wildcard.source_specifier.as_str()) else {
         return 0;
@@ -219,7 +219,7 @@ pub(crate) fn wildcard_match_score(
 }
 
 pub(crate) fn ordered_wildcard_indices_for_exported_name(
-    wildcards: &[crate::resolver_core::WildcardReexport],
+    wildcards: &[verter_session_query::inputs::shallow::WildcardReexport],
     exported_name: &str,
 ) -> Vec<usize> {
     let mut scored = wildcards

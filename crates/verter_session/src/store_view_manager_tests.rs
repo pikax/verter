@@ -439,7 +439,7 @@ fn token_does_not_advance_on_noop_reachability_gc() {
 
     // Live set covers the single artifact's (canonical, whole_hash)
     // projection → nothing is unreachable → no removal.
-    let mut live: rustc_hash::FxHashSet<(Arc<str>, crate::types::Hash16)> =
+    let mut live: rustc_hash::FxHashSet<(Arc<str>, verter_session_query::analysis::types::Hash16)> =
         rustc_hash::FxHashSet::default();
     live.insert((Arc::from("/proj/keep.ts"), indexed.whole_hash));
     host.project_type_store()
@@ -627,7 +627,8 @@ fn distinct_overlays_yield_distinct_token_identities() {
         canonical.clone(),
         Arc::from("export interface A { v: 1 }\n"),
     );
-    let mut hashes_a: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let mut hashes_a: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     hashes_a.insert(canonical.clone(), [0xAAu8; 16]);
     let view_a = OverlaidView::with_overlay_hashes(
         Arc::clone(&host),
@@ -641,7 +642,8 @@ fn distinct_overlays_yield_distinct_token_identities() {
         canonical.clone(),
         Arc::from("export interface A { v: 2 }\n"),
     );
-    let mut hashes_b: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let mut hashes_b: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     hashes_b.insert(canonical.clone(), [0xBBu8; 16]);
     let view_b = OverlaidView::with_overlay_hashes(
         Arc::clone(&host),
@@ -708,7 +710,8 @@ fn base_view_overlay_does_not_mutate_shared_snapshot() {
         canonical.clone(),
         Arc::from("export interface A { w: 9 }\n"),
     );
-    let mut hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let mut hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     hashes.insert(canonical.clone(), [0xCCu8; 16]);
     let view = OverlaidView::with_overlay_hashes(
         Arc::clone(&host),

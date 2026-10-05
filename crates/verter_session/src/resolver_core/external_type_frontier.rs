@@ -22,9 +22,10 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::shallow_file_state::{
-    BudgetDomain, BudgetExceededFailure, ExportTarget, ExternalSymbolRef, LocalClosureStatus,
-    ResolutionBudgets, ResolutionCounters, ShallowFileState,
+    BudgetDomain, BudgetExceededFailure, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
+    ShallowFileState,
 };
+use verter_session_query::inputs::shallow::{ExportTarget, ExternalSymbolRef};
 use verter_type_expr::facts::{NarrowFrontierBody, NarrowTypeParam};
 use verter_type_expr::locators::{
     AuthoredAnchor, LocatorSymbolSpace, SymbolBodyLocator, TypeBodySlot,
@@ -840,7 +841,7 @@ mod tests {
 
     fn make_routes(
         source: &str,
-    ) -> Arc<verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory> {
+    ) -> Arc<verter_session_query::analysis::route_inventory::ScriptRouteInventory> {
         let alloc = oxc_allocator::Allocator::new();
         let parsed =
             verter_parser::oxc_parse::Parser::new(&alloc, source, oxc_span::SourceType::ts())

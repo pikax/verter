@@ -47,8 +47,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::file_artifact_store::ProjectIdentity;
-use crate::types::Hash16;
 use crate::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 
 /// Five-way environment-hash carrier (R21), dependency-neutral because it
 /// contains only four plain `Hash16` fields. Production view constructors
@@ -134,11 +134,11 @@ pub trait SessionView: Send + Sync {
     /// which [`Self::overlay_content_hash_for`] reports `Some`. The
     /// discriminator is a non-zero [`Hash16`] derived from the view's
     /// overlay-set [`Self::fingerprint`]; it is the `parse_env_hash`
-    /// dimension of [`crate::file_artifact_store::FileArtifactKey::overlay_scoped`].
+    /// dimension of [`verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped`].
     ///
     /// Purpose: an overlay `IndexedReady` whose source bytes are
     /// identical to the base file has a content hash equal to the
-    /// base hash, so a [`crate::file_artifact_store::FileArtifactKey::base`]
+    /// base hash, so a [`verter_session_query::source::artifact_key::FileArtifactKey::base`]
     /// key for it would collide with the base artifact. The overlay
     /// materialiser can resolve a relative import to an overlay-only
     /// helper the base workspace cannot see, so the overlay's import
@@ -472,7 +472,7 @@ impl SessionView for HostView {
 /// materialised on demand and published into
 /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore)
 /// under an
-/// [`overlay_scoped`](crate::file_artifact_store::FileArtifactKey::overlay_scoped)
+/// [`overlay_scoped`](verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped)
 /// key — the overlay content hash plus this view's overlay-set
 /// discriminator — so it stays isolated from the base artifact even
 /// when the overlay bytes are identical to the base file.
@@ -1002,7 +1002,7 @@ impl SessionView for OverlaidViewRef<'_> {
     }
 }
 
-/// Derive the [`crate::file_artifact_store::FileArtifactKey::overlay_scoped`]
+/// Derive the [`verter_session_query::source::artifact_key::FileArtifactKey::overlay_scoped`]
 /// `parse_env_hash` discriminator from a view's overlay-set
 /// [`SessionView::fingerprint`].
 ///

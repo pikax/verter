@@ -23,7 +23,7 @@ use super::request_inputs::{IndexedInputRecord, IndexedInputServe, PreparedInput
 use super::request_ports::{
     Cancellation, ExecutionSubmission, IndexedInputs, OwnedLowering, RouteLookup,
 };
-use super::shallow_file_state::ShallowInputRecord;
+use verter_session_query::inputs::shallow::ShallowInputRecord;
 
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::fact_tracer_tls;
@@ -31,8 +31,8 @@ use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::ShallowFileState;
 use crate::resolver_core::ValueDeclIdentity;
 
-use crate::types::Hash16;
 use crate::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::Hash16;
 
 /// Private markers used to seal `ResolverContext` (and its request-bound
 /// refinement) against external implementations.
@@ -389,7 +389,7 @@ impl IndexedInputs for crate::VerterHost {
     fn artifact_key_for_current_content(
         &self,
         canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         self.authoritative_current_artifact_key(canonical)
     }
     /// Establish ONE tear-free [`MaterializeScopeObservation`] for a
@@ -534,7 +534,7 @@ impl RouteLookup for crate::VerterHost {
     fn routed_shallow_state(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<super::shallow_file_state::ShallowInputRecord>> {
+    ) -> Option<Arc<verter_session_query::inputs::shallow::ShallowInputRecord>> {
         crate::VerterHost::routed_shallow_state(self, canonical_id)
             .map(|state| self.source_input_leases.retain_shallow(state))
     }
@@ -731,7 +731,7 @@ pub(crate) trait RequestBoundLifecycle {
     fn artifact_key_for_current_content(
         &self,
         canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         self.host().authoritative_current_artifact_key(canonical)
     }
 
@@ -999,7 +999,7 @@ where
     fn artifact_key_for_current_content(
         &self,
         canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         self.0.artifact_key_for_current_content(canonical)
     }
 

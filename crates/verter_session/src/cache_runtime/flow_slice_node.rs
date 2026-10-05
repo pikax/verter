@@ -69,7 +69,7 @@ use verter_session_query::function_program::FunctionProgramKey;
 use super::admission::CacheEntry;
 use super::node::QueryFlightKey;
 use super::singleflight::InflightTable;
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 #[cfg(test)]
 #[path = "flow_slice_node_tests.rs"]
@@ -84,7 +84,7 @@ pub(crate) mod tests;
 /// EXACT per-function byte hash, the parse-env hash, the exact parse
 /// identity ([`ParseKey`]) and runtime-authoritative language row
 /// ([`FileLanguage`]) of the serving file — the same source axes
-/// [`crate::file_artifact_store::FileArtifactKey`] carries — and the
+/// [`verter_session_query::source::artifact_key::FileArtifactKey`] carries — and the
 /// parser version.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FlowSliceFunctionKey {
@@ -123,7 +123,7 @@ pub struct FlowSliceFunctionKey {
     pub(crate) file_language: FileLanguage,
     /// Parser version.
     pub(crate) build_toolchain_fingerprint:
-        crate::build_toolchain_fingerprint::BuildToolchainFingerprint,
+        verter_session_query::source::toolchain::BuildToolchainFingerprint,
 }
 
 /// The demand identity of one slice: the demanded return-projection

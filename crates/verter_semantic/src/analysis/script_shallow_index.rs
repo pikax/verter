@@ -7,11 +7,13 @@
 
 use oxc_ast::ast::Program;
 use verter_parser::utils::oxc::script::route_inventory::{
-    build_script_route_inventory_with_owner_iter, RouteOwnerTableError, ScriptRouteInventory,
+    build_script_route_inventory_with_owner_iter, RouteOwnerTableError,
 };
+use verter_session_query::analysis::route_inventory::ScriptRouteInventory;
 
-use super::decl_headers::{build_decl_header_index_with_owners, DeclHeaderIndex};
+use super::decl_headers::build_decl_header_index_with_owners;
 use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
+use verter_session_query::declarations::header_index::DeclHeaderIndex;
 
 #[derive(Debug, Clone)]
 pub struct ScriptShallowIndex {

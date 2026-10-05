@@ -128,10 +128,10 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
 
 mod file_source_env_validation {
     use super::*;
-    use crate::file_artifact_store::FileArtifactKey;
     use crate::resolver_store::SourceEnvIdentity;
     use verter_session_query::facts::fact_cache::FactVersionRef;
     use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     const CONTRIB: &str = "/contrib.d.ts";
     const CONTRIB_HASH: [u8; 16] = [5u8; 16];
@@ -139,7 +139,7 @@ mod file_source_env_validation {
     fn live_identity() -> SourceEnvIdentity {
         SourceEnvIdentity {
             parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
-            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(CONTRIB, 2),
+            parse_key: verter_session_query::source::toolchain::parse_key_for_test(CONTRIB, 2),
             file_language_id: FileArtifactKey::synthetic_file_language_for_test(CONTRIB),
         }
     }
@@ -153,7 +153,7 @@ mod file_source_env_validation {
         FactVersionRef::FileSourceEnv {
             canonical_id: canonical.to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
-            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(
+            parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                 language_of,
                 parse_marker,
             ),
@@ -291,12 +291,11 @@ mod file_source_env_validation {
 // ── `hash_route_surface` — purity pin + per-state memoization ──
 
 mod route_surface_hash {
-    use crate::resolver_core::shallow_file_state::{
-        ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
-    };
+    use crate::resolver_core::shallow_file_state::ShallowFileState;
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
     use verter_session_query::analysis::types::Hash16;
+    use verter_session_query::inputs::shallow::{ExportTarget, ImportTarget, WildcardReexport};
 
     fn parsed_state(
         canonical: &str,
@@ -369,7 +368,7 @@ mod route_surface_hash {
             import_locals,
             import_targets,
             Arc::new(
-                verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+                verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
             ),
         )
     }
@@ -671,7 +670,7 @@ mod route_surface_hash {
 // the same `routed_state` fixture.
 mod route_surface_hash_memo {
     use super::route_surface_hash::routed_state;
-    use crate::resolver_core::shallow_file_state::ExportTarget;
+    use verter_session_query::inputs::shallow::ExportTarget;
 
     /// The memo populates on the state's FIRST hash and every later call
     /// returns the identical value; a CLONE starts with an EMPTY memo

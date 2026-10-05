@@ -88,7 +88,7 @@ use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::reuse::ReuseClass;
 use crate::resolver_core::{ResolverHash16, StoreView, StoreViewCompatToken};
 use crate::resolver_store::HostStoreView;
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
 };
@@ -681,7 +681,7 @@ impl CanonicalCompletionOverlay {
         host: &crate::VerterHost,
         view: &dyn crate::session_view::SessionView,
         canonical: &str,
-        overlay_hash: crate::types::Hash16,
+        overlay_hash: verter_session_query::analysis::types::Hash16,
     ) {
         let overlay_identity = host.overlay_artifact_identity(canonical);
         let file_artifacts = overlay_identity.lookup_overlay_artifacts(host, view);
@@ -696,7 +696,7 @@ impl CanonicalCompletionOverlay {
         &self,
         host: &crate::VerterHost,
         canonical: &str,
-        whole_hash: crate::types::Hash16,
+        whole_hash: verter_session_query::analysis::types::Hash16,
         file_artifacts: Option<Arc<crate::file_artifact_store::FileArtifacts>>,
     ) {
         // Per-canonical `IndexedReady` projection — populates `file_facts`

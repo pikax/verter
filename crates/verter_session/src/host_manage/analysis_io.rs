@@ -10,6 +10,7 @@
 //! export-graph resolution helpers. Public surface remains rooted at
 //! `crate::host_manage::*`; this file contributes a continuation
 //! `impl VerterHost { … }` block.
+use verter_session_query::analysis::types::Hash16;
 
 use crate::file_artifact_store::FileArtifactKeySource;
 #[cfg(any(test, feature = "test-support"))]
@@ -998,7 +999,7 @@ impl VerterHost {
     pub(crate) fn authoritative_current_artifact_key(
         &self,
         canonical: &str,
-    ) -> Option<crate::file_artifact_store::FileArtifactKey> {
+    ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         if self
@@ -1014,22 +1015,22 @@ impl VerterHost {
         // every artifact read.
         if let (None, Some(parse_key)) = (state.framework_parse.as_ref(), state.script_parse_key) {
             return Some(
-                crate::file_artifact_store::FileArtifactKey::for_script_parse_identity(
+                verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
                     Arc::from(analysis_canonical),
                     state.whole_hash,
                     parse_key,
                     state.file_language,
-                    crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+                    verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
                 ),
             );
         }
-        crate::file_artifact_store::FileArtifactKey::for_source_identity(
+        verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
             Arc::from(analysis_canonical),
             state.whole_hash,
             state.source.as_ref(),
             state.file_language,
             state.framework_parse.as_deref(),
-            crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+            verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         )
     }
 

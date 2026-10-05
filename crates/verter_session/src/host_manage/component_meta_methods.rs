@@ -16,10 +16,11 @@ use crate::host_manage::{
 use crate::resolver_core::{
     run_component_meta_request, ComponentMetaRequestResult, RequestSource, SingleflightRole,
 };
-use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
+use crate::types::{FileAnalysisSnapshot, ProjectionMode};
 use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::instant::Instant;
 

@@ -8,6 +8,7 @@
 //! the indexed-ready upsert path, and the owner-direct-import surface.
 //! Public surface remains rooted at `crate::host_manage::*`; this file
 //! contributes a continuation `impl VerterHost { … }` block.
+use verter_session_query::analysis::types::Hash16;
 
 use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
@@ -144,14 +145,16 @@ impl VerterHost {
         }
 
         let parse_env_hash = self.host_view_env_hashes_for(canonical_id).parse_env_hash;
-        let Some(old_key) = crate::file_artifact_store::FileArtifactKey::for_source_identity(
-            Arc::from(canonical_id),
-            old_source.whole_hash,
-            old_source.source.as_ref(),
-            old_data.file_language.clone(),
-            old_data.framework_parse.as_deref(),
-            parse_env_hash,
-        ) else {
+        let Some(old_key) =
+            verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
+                Arc::from(canonical_id),
+                old_source.whole_hash,
+                old_source.source.as_ref(),
+                old_data.file_language.clone(),
+                old_data.framework_parse.as_deref(),
+                parse_env_hash,
+            )
+        else {
             return false;
         };
         let Some(old_artifacts) = self.project_type_store.indexed().get_artifacts_for_content(
@@ -1617,8 +1620,8 @@ impl VerterHost {
         exported_name: &str,
         route: &crate::resolver_core::RouteDemand,
     ) -> rustc_hash::FxHashMap<String, crate::resolver_core::RouteDemand> {
-        use crate::resolver_core::shallow_file_state::ExportTarget;
         use crate::resolver_core::RouteDemand;
+        use verter_session_query::inputs::shallow::ExportTarget;
 
         if let Some(state) = self.routed_shallow_state(canonical_id) {
             let budget = crate::resolver_core::shallow_file_state::ResolutionBudgets::default()
@@ -1907,7 +1910,7 @@ impl VerterHost {
         whole_hash: Hash16,
         snapshot: &crate::types::FileAnalysisSnapshot,
         route_inventory: &Arc<
-            verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory,
+            verter_session_query::analysis::route_inventory::ScriptRouteInventory,
         >,
         decl_bodies: &Arc<crate::decl_body_memo::DeclBodyMemo>,
         eval_source: Option<&str>,
@@ -2316,9 +2319,9 @@ impl VerterHost {
             };
 
             struct ColdIndexProducts {
-                header_index: verter_semantic::analysis::decl_headers::DeclHeaderIndex,
+                header_index: verter_session_query::declarations::header_index::DeclHeaderIndex,
                 route_inventory:
-                    verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory,
+                    verter_session_query::analysis::route_inventory::ScriptRouteInventory,
                 svelte_component_runes_mode: bool,
                 owner_table:
                     Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
@@ -2856,7 +2859,7 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
-        known_shallow: Option<&crate::resolver_core::shallow_file_state::ShallowInputRecord>,
+        known_shallow: Option<&verter_session_query::inputs::shallow::ShallowInputRecord>,
         facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
@@ -2985,13 +2988,13 @@ impl VerterHost {
                             // dep's `FileWholeHash` remains the (sufficient)
                             // covering fact for a direct local export.
                             let dep_key =
-                                crate::file_artifact_store::FileArtifactKey::for_source_identity(
+                                verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
                                     Arc::from(dep_canonical),
                                     source_data.parse.whole_hash,
                                     source_snapshot.as_ref()?.source.as_ref(),
                                     source_data.file_language.clone(),
                                     source_data.framework_parse.as_deref(),
-                                    crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+                                    verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
                                 );
                             if let Some(indexed) = dep_key.as_ref().and_then(|key| {
                                 self.project_type_store.indexed().get(
@@ -3029,7 +3032,7 @@ impl VerterHost {
         let dep_serve = self.routed_shallow_state_serve_with_context(ctx, dep_canonical)?;
         let shallow = std::sync::Arc::clone(&dep_serve.state);
         let (target_canonical, target_symbol) = match shallow.export_target(imported_name)? {
-            crate::resolver_core::ExportTarget::Reexport {
+            verter_session_query::inputs::shallow::ExportTarget::Reexport {
                 source_specifier,
                 original_name,
                 ..
@@ -3038,7 +3041,7 @@ impl VerterHost {
                     self.resolve_route_type_edge(dep_canonical, source_specifier)?;
                 (next_canonical, original_name.clone())
             }
-            crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
+            verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name } => {
                 let Some(import_target) = shallow.import_target_in(*owner, symbol_name.as_str())
                 else {
                     if !shallow.has_type_symbol_in(*owner, symbol_name.as_str())
@@ -3078,10 +3081,12 @@ impl VerterHost {
                 self.routed_shallow_state_serve_with_context(ctx, normalized_target.as_str())?;
             let target_state = &target_serve.state;
             match target_state.export_target(target_symbol.as_str())? {
-                crate::resolver_core::ExportTarget::Local { owner, symbol_name }
-                    if target_state
-                        .import_target_in(*owner, symbol_name.as_str())
-                        .is_none() =>
+                verter_session_query::inputs::shallow::ExportTarget::Local {
+                    owner,
+                    symbol_name,
+                } if target_state
+                    .import_target_in(*owner, symbol_name.as_str())
+                    .is_none() =>
                 {
                     (
                         *owner,

@@ -34,6 +34,7 @@ pub mod enum_scalar;
 pub mod facts;
 pub mod flow;
 pub mod function_program;
+pub mod inputs;
 pub mod resolution;
 pub mod retention;
 pub mod source;

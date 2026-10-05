@@ -74,7 +74,7 @@ use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, Sym
 use crate::cache_runtime::NonAdmissionReason;
 use crate::resolver_core::{ResolverContext, StoreView};
 use crate::semantic_query::{DepSignature, DepVersion};
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::{
     fact_cache::{FactVersionRef, ParseFactRef},
@@ -786,7 +786,7 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
 /// view.
 pub(crate) fn observe_file_source_env_from_artifact_key(
     ctx: &dyn ResolverContext,
-    artifact_key: Option<&crate::file_artifact_store::FileArtifactKey>,
+    artifact_key: Option<&verter_session_query::source::artifact_key::FileArtifactKey>,
 ) -> Option<FactVersionRef> {
     let key = artifact_key?;
     let identity = ctx.source_environment(key);

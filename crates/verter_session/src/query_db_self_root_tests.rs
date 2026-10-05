@@ -4484,7 +4484,12 @@ fn owner_import_surface_get_with_view_rejects_surface_from_superseded_generation
     let surface = build_owner_import_surface(
         Arc::from(owner),
         owner_whole_hash,
-        Vec::<(Arc<str>, Arc<str>, Arc<str>, Option<crate::types::Hash16>)>::new(),
+        Vec::<(
+            Arc<str>,
+            Arc<str>,
+            Arc<str>,
+            Option<verter_session_query::analysis::types::Hash16>,
+        )>::new(),
         Vec::new(),
         gen0,
     );
@@ -5874,7 +5879,12 @@ fn owner_resolution_set_published_only_by_owner_import_surface_db() {
         ComputeAdmission::Cacheable(build_owner_import_surface(
             Arc::from(owner),
             owner_whole_hash,
-            Vec::<(Arc<str>, Arc<str>, Arc<str>, Option<crate::types::Hash16>)>::new(),
+            Vec::<(
+                Arc<str>,
+                Arc<str>,
+                Arc<str>,
+                Option<verter_session_query::analysis::types::Hash16>,
+            )>::new(),
             Vec::new(),
             host.project_type_store().current_project_generation(),
         ))

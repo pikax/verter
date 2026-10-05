@@ -32,11 +32,11 @@ fn candidate_key(canonical: &str, content: [u8; 16]) -> CandidateSlotKey {
         canonical: Arc::from(canonical),
         content_hash: content,
         parse_env_hash: [0u8; 16],
-        parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(canonical, 1),
+        parse_key: verter_session_query::source::toolchain::parse_key_for_test(canonical, 1),
         build_toolchain_fingerprint:
-            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         file_language_id:
-            crate::file_artifact_store::FileArtifactKey::synthetic_file_language_for_test(canonical),
+            verter_session_query::source::artifact_key::FileArtifactKey::synthetic_file_language_for_test(canonical),
         provider_id: FrameworkAdapterId::new("fixture-fw"),
         provider_version: 1,
     }
@@ -92,7 +92,9 @@ fn stale_build_fingerprint_candidate_is_rejected_by_current_key() {
         ..candidate_key("/Fixture.vue", [3u8; 16])
     };
     let stale = CandidateSlotKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(4),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            4,
+        ),
         ..current.clone()
     };
     store.insert(stale.clone(), fixture_candidates());
@@ -116,7 +118,9 @@ fn another_stale_build_fingerprint_candidate_is_rejected_by_current_key() {
     let store = FrameworkScriptCandidateStore::new();
     let current = candidate_key("/AuthoredImport.vue", [6u8; 16]);
     let stale = CandidateSlotKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(5),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            5,
+        ),
         ..current.clone()
     };
     store.insert(stale.clone(), fixture_candidates());

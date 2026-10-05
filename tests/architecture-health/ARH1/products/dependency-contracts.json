@@ -707,7 +707,6 @@
         ],
         "external": ["rustc_hash", "smallvec", "tracing"],
         "crateInternal": [
-          "build_toolchain_fingerprint",
           "cache_runtime",
           "decl_body_memo",
           "flow_return_audit",

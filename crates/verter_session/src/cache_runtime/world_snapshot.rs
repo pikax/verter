@@ -40,7 +40,7 @@
 #![allow(dead_code)]
 
 use crate::resolver_core::{ResolverContext, StoreViewCompatToken};
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// Newtype wrapper around the session id used to scope an overlay.
 ///

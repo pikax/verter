@@ -5240,7 +5240,7 @@ impl<'a, 'b> PathWalker<'a, 'b> {
                 else {
                     return value;
                 };
-                let Some(crate::resolver_core::shallow_file_state::ExportTarget::Local {
+                let Some(verter_session_query::inputs::shallow::ExportTarget::Local {
                     owner,
                     symbol_name,
                 }) = serve.indexed.shallow_state.exports.get(exported.as_str())

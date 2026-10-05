@@ -57,8 +57,8 @@
 //! The skeleton folds header SHAPE only — it never inspects declaration
 //! bodies (no member value types, no lowered clauses).
 
-use verter_semantic::analysis::decl_headers::MemberHeader;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::declarations::header_index::MemberHeader;
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::project_type_store::IndexedReady;
@@ -91,7 +91,7 @@ pub(crate) fn compute_parse_stable_hash_inputs(
     compute_parse_stable_hash_parts(&indexed.shallow_state, indexed.framework_parse.as_deref())
 }
 fn compute_parse_stable_hash_parts(
-    shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
+    shallow: &verter_session_query::inputs::shallow::ShallowInputRecord,
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
 ) -> Hash16 {
     verter_audit::attribute!(ParseStableHash);
@@ -339,9 +339,9 @@ fn write_member_header(buf: &mut Vec<u8>, member: &MemberHeader) {
 
 fn write_export_target(
     buf: &mut Vec<u8>,
-    target: &crate::resolver_core::shallow_file_state::ExportTarget,
+    target: &verter_session_query::inputs::shallow::ExportTarget,
 ) {
-    use crate::resolver_core::shallow_file_state::ExportTarget;
+    use verter_session_query::inputs::shallow::ExportTarget;
     match target {
         ExportTarget::Local { owner, symbol_name } => {
             buf.push(b'L');

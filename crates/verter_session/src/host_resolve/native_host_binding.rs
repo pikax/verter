@@ -46,9 +46,10 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 use verter_scheduler::node::SourceSnapshot;
 
 use crate::types::{
-    CompileCacheMode, CompileFailure, DiagnosticsSnapshot, Hash16, HostDiagnostic, HostSeverity,
+    CompileCacheMode, CompileFailure, DiagnosticsSnapshot, HostDiagnostic, HostSeverity,
 };
 use crate::HostError;
+use verter_session_query::analysis::types::Hash16;
 
 // The binding is request-scoped and consumed exactly once by value: it
 // must never be duplicated (Clone/Copy) nor round-tripped through a

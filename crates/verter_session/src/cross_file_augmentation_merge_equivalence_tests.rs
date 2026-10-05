@@ -496,13 +496,13 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
 fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     use rustc_hash::FxHashMap;
 
-    use crate::file_artifact_store::FileArtifactKey;
     use crate::resolver_core::StoreView;
     use crate::resolver_store::{HostStoreView, SourceEnvIdentity};
     use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let host = make_host();
     upsert_augmentation_fixture(&host);
@@ -761,10 +761,10 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
 /// `FileSourceEnv` fact here and fails.
 #[test]
 fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
-    use crate::file_artifact_store::FileArtifactKey;
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let host = make_host();
     upsert_ts(
@@ -1672,11 +1672,12 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
 #[test]
 fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     use crate::file_artifact_store::{
-        compute_augmenter_set_fingerprint, AugmentationTargetKind, AugmenterEntry, FileArtifactKey,
+        compute_augmenter_set_fingerprint, AugmentationTargetKind, AugmenterEntry,
     };
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let host = make_host();
     // NO augmenter anywhere in the workspace — the augmentation index for
