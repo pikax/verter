@@ -68,9 +68,14 @@ pub struct FlowSliceFunctionKey {
 /// the serving file's canonical, its parse environment, exact parse
 /// identity and language row, and the toolchain that built it.
 ///
-/// Filled by the acquiring host from the serving artifact; a key is
-/// admitted only when every one of its source axes equals this identity
-/// ([`FlowSourceIdentity::admits`]).
+/// Filled by the acquiring host; a key is admitted only when every one of
+/// its source axes equals this identity ([`FlowSourceIdentity::admits`]).
+/// The parse environment, parse identity and language row come from the
+/// serving artifact, as do the function and body hashes (from its indexed
+/// entry). The canonical and the toolchain are request-side axes: the
+/// canonical is the id the artifact was served under and the toolchain is
+/// this process's own fingerprint, so those two refuse a key minted for
+/// another file or another build, not a stale artifact.
 #[derive(Debug, Clone, Copy)]
 pub struct FlowSourceIdentity<'a> {
     pub canonical_id: &'a str,

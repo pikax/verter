@@ -596,6 +596,43 @@ fn rig(fixtures: Vec<(FlowSliceFunctionKey, &'static str)>, budget: FlowSliceBud
 /// `FunctionFlowGraphStore::peek`/`FlowSliceStores::peek_skeleton_for` —
 /// the `ResolverObservation::function_body_skeleton` backing
 /// primitive: a non-blocking read that must NEVER drive a build.
+/// A publication claim only ever holds the product of its own key: a bundle
+/// built for a key that differs from the claimed one (here only in its parse
+/// environment) is refused, publishes nothing under either key, and leaves
+/// the slot claimable.
+#[test]
+fn graph_publication_refuses_a_bundle_built_for_another_key() {
+    let claimed = function_key("/publish.ts", "myType", 3, MYTYPE_FIXTURE);
+    let other = FlowSliceFunctionKey {
+        parse_env_hash: [0xee; 16],
+        ..claimed.clone()
+    };
+    let store = FunctionFlowGraphStore::new();
+    let foreign = FlowGraphBundle::build(KeyedFunctionStructure::bind_fixture(
+        other.clone(),
+        prepared_of(MYTYPE_FIXTURE),
+    ));
+    let GraphClaim::Produce(lease) = store.claim(&claimed) else {
+        panic!("an empty store hands out the publication claim");
+    };
+    assert!(
+        lease.publish(foreign).is_none(),
+        "a bundle keyed for another key is refused"
+    );
+    assert!(store.peek(&claimed).is_none());
+    assert!(store.peek(&other).is_none());
+    assert_eq!(store.build_count(), 0);
+    let GraphClaim::Produce(lease) = store.claim(&claimed) else {
+        panic!("a refused publication leaves the slot claimable");
+    };
+    let own = FlowGraphBundle::build(KeyedFunctionStructure::bind_fixture(
+        claimed.clone(),
+        prepared_of(MYTYPE_FIXTURE),
+    ));
+    assert!(lease.publish(own).is_some());
+    assert!(store.peek(&claimed).is_some());
+}
+
 #[test]
 fn peek_reports_none_before_build_and_the_memoized_skeleton_after() {
     let key = function_key("/peek.ts", "myType", 1, MYTYPE_FIXTURE);

@@ -232,10 +232,12 @@ block before the corresponding rule becomes executable policy.
 and `Arc<FlowBindingMap>` for one `FlowSliceFunctionKey` content version; all fields
 are private and `FlowGraphBundle::build` derives the graph and binding map from one
 `KeyedFunctionStructure`. The key is a request, not a certificate:
-`KeyedFunctionStructure::bind` admits EVERY key axis (canonical, function, both body
-hashes, parse environment, exact parse identity, language row, toolchain) against the
-serving artifact's `FlowSourceIdentity`, and a mismatch is a typed miss that
-publishes nothing. The graph store refuses to publish a bundle under any key but its
+`KeyedFunctionStructure::bind` admits EVERY key axis against `FlowSourceIdentity`, and
+a mismatch is a typed miss that publishes nothing. Function, both body hashes, parse
+environment, exact parse identity and language row are compared against the serving
+artifact; canonical (the id the artifact was served under) and toolchain (this
+process's own fingerprint) are request-side axes that refuse a key minted for another
+file or build. The graph store refuses to publish a bundle under any key but its
 own, and `BoundFlowGraph` is a handle on the keyed bundle with no constructor taking a
 separate key. Because the key is admitted on every axis, the content-addressed
 artifacts keep their empty fact signatures. The graph store publishes the complete bundle once; every

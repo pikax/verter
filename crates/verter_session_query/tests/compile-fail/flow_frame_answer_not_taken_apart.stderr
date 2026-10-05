@@ -1,0 +1,17 @@
+error[E0599]: no method named `into_parts` found for struct `FrameAnswer` in the current scope
+ --> tests/compile-fail/flow_frame_answer_not_taken_apart.rs:6:28
+  |
+6 |     let _ = answer.clone().into_parts();
+  |                            ^^^^^^^^^^ method not found in `FrameAnswer`
+
+error[E0599]: no method named `into_ty` found for struct `FrameAnswer` in the current scope
+ --> tests/compile-fail/flow_frame_answer_not_taken_apart.rs:7:20
+  |
+7 |     let _ = answer.into_ty();
+  |                    ^^^^^^^
+  |
+help: there is a method `into` with a similar name
+  |
+7 -     let _ = answer.into_ty();
+7 +     let _ = answer.into();
+  |

@@ -280,14 +280,8 @@ fn lowers_in_frame(argument: &oxc_ast::ast::Argument<'_>) -> bool {
 
 /// The arguments slot of the call carrier `lowered` is (through
 /// frame-shadow wrappers), if it is one.
-fn call_arguments_slot(mut lowered: &mut SliceExpr) -> Option<&mut SliceCallArguments> {
-    loop {
-        match lowered {
-            SliceExpr::Call(_, _, arguments) => return Some(arguments),
-            SliceExpr::FrameShadowed { inner, .. } => lowered = inner,
-            _ => return None,
-        }
-    }
+fn call_arguments_slot(lowered: &mut SliceExpr) -> Option<&mut SliceCallArguments> {
+    lowered.call_arguments_mut()
 }
 
 /// An object literal's lowering in progress, stepped by
@@ -11409,23 +11403,13 @@ impl<'a> Lowerer<'a> {
             // call position, warm and clean.
             LeafLowering::Answer(answer) if is_any(answer.ty()) => SliceExpr::UnreducedCallValue,
             LeafLowering::Answer(answer) => {
-                let frame_root = self
-                    .frame_gate
-                    .value_root(answer.ty(), self.leaf_root(expr));
-                let (ty, shadowed) = answer.into_parts();
-                let symbolic = SliceExpr::Call(
-                    SliceCall::Symbolic(ty, frame_root),
+                let root = self.leaf_root(expr);
+                self.frame_gate.symbolic_call(
+                    answer,
+                    root,
                     call_site(call),
                     SliceCallArguments::none(),
-                );
-                if shadowed.is_empty() {
-                    symbolic
-                } else {
-                    SliceExpr::FrameShadowed {
-                        inner: Box::new(symbolic),
-                        shadowed,
-                    }
-                }
+                )
             }
         }
     }
@@ -13286,30 +13270,19 @@ impl<'a> Lowerer<'a> {
             LeafLowering::Unmodeled => return None,
             // A free answer is gated again as the type it now is (a
             // namespace member read is re-rooted under its block).
-            LeafLowering::Answer(answer) if answer.is_free() => {
-                self.gate(answer.into_ty(), super_class.span(), &[])
-            }
+            LeafLowering::Answer(answer) if answer.is_free() => self
+                .frame_gate
+                .regate(answer, self.rebase(super_class.span())),
             LeafLowering::Answer(answer) => answer.into_gated(),
         };
-        let shadowed = heritage.shared_shadowed();
-        let call_expr = SliceExpr::Call(
-            SliceCall::OnHeritage {
-                heritage,
-                member: Arc::from(member.to_vec().into_boxed_slice()),
-                static_side: heritage_access.static_side,
-                this: self.keyword_this(),
-            },
+        let this = self.keyword_this();
+        Some(self.frame_gate.heritage_call(
+            heritage,
+            Arc::from(member.to_vec().into_boxed_slice()),
+            heritage_access.static_side,
+            this,
             call_site(call),
-            SliceCallArguments::none(),
-        );
-        Some(if shadowed.is_empty() {
-            call_expr
-        } else {
-            SliceExpr::FrameShadowed {
-                inner: Box::new(call_expr),
-                shadowed,
-            }
-        })
+        ))
     }
 
     fn optional_chain_root_has_prior_flow_change(

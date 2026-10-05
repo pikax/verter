@@ -7458,7 +7458,7 @@ fn slice_expr_reads_frame(expr: &verter_session_query::flow::slice::SliceExpr) -
         // The frame's receiver is only the frame's to read.
         SliceExpr::Param { .. }
         | SliceExpr::Local { .. }
-        | SliceExpr::FrameShadowed { .. }
+        | SliceExpr::FrameShadowed(_)
         | SliceExpr::This(_) => true,
         SliceExpr::Call(call, _, arguments) => {
             arguments.iter().any(slice_expr_reads_frame)
@@ -7466,7 +7466,7 @@ fn slice_expr_reads_frame(expr: &verter_session_query::flow::slice::SliceExpr) -
                     SliceCall::OnBinding { .. } | SliceCall::Direct(_) | SliceCall::DirectSelf => {
                         true
                     }
-                    SliceCall::Symbolic(_, root) => root.is_some(),
+                    SliceCall::Symbolic(callee) => callee.frame_root().is_some(),
                     SliceCall::Nested(inner)
                     | SliceCall::Construct(inner)
                     | SliceCall::TaggedTemplate(inner) => slice_expr_reads_frame(inner),
@@ -7555,7 +7555,7 @@ fn expression_effect_tree(
                 out.push(expr);
                 children.push(value);
             }
-            SliceExpr::FrameShadowed { inner, .. } => children.push(inner),
+            SliceExpr::FrameShadowed(shadowed) => children.push(shadowed.inner()),
             SliceExpr::OptionalAnyChain { root } => children.push(root),
             SliceExpr::Object { entries, .. } => {
                 for entry in entries.iter() {
@@ -18857,8 +18857,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         .collect(),
                 )
             }
-            verter_session_query::flow::slice::SliceExpr::FrameShadowed { inner, .. } => {
-                return self.fresh_narrowed_literal(inner, node);
+            verter_session_query::flow::slice::SliceExpr::FrameShadowed(shadowed) => {
+                return self.fresh_narrowed_literal(shadowed.inner(), node);
             }
             _ => return None,
         };
@@ -21795,8 +21795,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             verter_session_query::flow::slice::SliceExpr::Type(leaf) => leaf,
             // A member read through a frame binding holding an enum's
             // object: the object's member is the member's fresh literal.
-            verter_session_query::flow::slice::SliceExpr::FrameShadowed { inner, .. } => {
-                return match inner.as_ref() {
+            verter_session_query::flow::slice::SliceExpr::FrameShadowed(shadowed) => {
+                return match shadowed.inner() {
                     verter_session_query::flow::slice::SliceExpr::Type(leaf) => {
                         self.reads_enum_object_member(leaf, node)
                     }
@@ -21871,8 +21871,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .rev()
                     .find(|call| call.span == span && call.node == node)
             }
-            verter_session_query::flow::slice::SliceExpr::FrameShadowed { inner, .. } => {
-                self.fresh_call_return_for(inner, node)
+            verter_session_query::flow::slice::SliceExpr::FrameShadowed(shadowed) => {
+                self.fresh_call_return_for(shadowed.inner(), node)
             }
             verter_session_query::flow::slice::SliceExpr::MemberOf { span, .. } => self
                 .call_fresh_literal_returns
@@ -24930,7 +24930,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             verter_session_query::flow::slice::SliceExpr::Type(leaf) => {
                 Positional::Value(self.lower_body_type(leaf.ty()))
             }
-            verter_session_query::flow::slice::SliceExpr::FrameShadowed { inner, shadowed } => {
+            verter_session_query::flow::slice::SliceExpr::FrameShadowed(wrapped) => {
+                let (inner, shadowed) = (wrapped.inner(), wrapped.shadowed());
                 // The root-identifier gate's decision point. The content
                 // half found that this leaf's answer names bindings the
                 // FRAME owns, and the shared shallow-pass lowering that
@@ -24956,7 +24957,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // through the one shared path projection. So whatever the
                 // owner scope answers for the same name, the frame's read
                 // is the answer.
-                if let verter_session_query::flow::slice::SliceExpr::Type(leaf) = inner.as_ref() {
+                if let verter_session_query::flow::slice::SliceExpr::Type(leaf) = inner {
                     if let Some(node) =
                         self.eval_frame_rooted_typeof_path(leaf.ty(), leaf.frame_root())
                     {
@@ -24968,20 +24969,22 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // its callee references no other name, and the call rail
                 // resolves that root through the frame.
                 if let verter_session_query::flow::slice::SliceExpr::Call(
-                    verter_session_query::flow::slice::SliceCall::Symbolic(
-                        verter_type_expr::TypeExpr::Ref { type_arguments, .. },
-                        binding,
-                    ),
+                    verter_session_query::flow::slice::SliceCall::Symbolic(callee),
                     _,
                     _,
-                ) = inner.as_ref()
+                ) = inner
                 {
-                    if type_arguments.len() == 1
-                        && self
-                            .frame_rooted_typeof_path_node(&type_arguments[0], binding.as_ref())
-                            .is_some()
-                    {
-                        return self.eval_expr(inner);
+                    if let verter_type_expr::TypeExpr::Ref { type_arguments, .. } = callee.ty() {
+                        if type_arguments.len() == 1
+                            && self
+                                .frame_rooted_typeof_path_node(
+                                    &type_arguments[0],
+                                    callee.frame_root(),
+                                )
+                                .is_some()
+                        {
+                            return self.eval_expr(inner);
+                        }
                     }
                 }
                 if shadowed
@@ -26672,7 +26675,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 };
                 self.call_return_of_callee_node(callee, site)
             }
-            verter_session_query::flow::slice::SliceCall::Symbolic(ty, binding) => {
+            verter_session_query::flow::slice::SliceCall::Symbolic(callee) => {
+                let (ty, binding) = (callee.ty(), callee.frame_root());
                 // The symbolic `ReturnType<typeof …>` carrier: lower the
                 // callee, resolve its signature through the same builtin
                 // `ReturnType` reduction every consumer uses, and take the
@@ -26699,20 +26703,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // `typeof` leaf does. Everything else lowers in owner
                 // scope as before.
                 let mut frame_rooted = false;
-                let Some(callee_node) = (match self
-                    .frame_rooted_typeof_path_node(&type_arguments[0], binding.as_ref())
-                {
-                    Some(node) => {
-                        frame_rooted = true;
-                        Some(node)
-                    }
-                    None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                        self.canonical,
-                        self.owner,
-                        &type_arguments[0],
-                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                    ),
-                }) else {
+                let Some(callee_node) =
+                    (match self.frame_rooted_typeof_path_node(&type_arguments[0], binding) {
+                        Some(node) => {
+                            frame_rooted = true;
+                            Some(node)
+                        }
+                        None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                            self.canonical,
+                            self.owner,
+                            &type_arguments[0],
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        ),
+                    })
+                else {
                     return self.degraded_unrepresentable_callee();
                 };
                 // A FRAME-ROOTED member callee carries receiver semantics

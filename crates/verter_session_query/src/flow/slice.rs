@@ -1433,6 +1433,72 @@ impl GatedLeaf {
     }
 }
 
+/// A carrier wrapped with the frame-owned names its answer references.
+///
+/// Both fields are private: [`DefiningFrameGate::leaf`],
+/// [`DefiningFrameGate::symbolic_call`] and
+/// [`DefiningFrameGate::heritage_call`] build it, from the verdict their
+/// frame computed, and only when that verdict is non-empty. Readers see the
+/// wrapped carrier and the names through getters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameShadowedExpr {
+    inner: Box<SliceExpr>,
+    shadowed: Arc<[FrameShadowedName]>,
+}
+
+impl FrameShadowedExpr {
+    /// The carrier the gate wrapped ([`SliceExpr::Type`] or a
+    /// [`SliceExpr::Call`]).
+    #[must_use]
+    pub fn inner(&self) -> &SliceExpr {
+        &self.inner
+    }
+
+    /// The frame-owned names the answer references, by name space.
+    #[must_use]
+    pub fn shadowed(&self) -> &[FrameShadowedName] {
+        &self.shadowed
+    }
+}
+
+/// Wrap `carrier` in the shadow carrier exactly when `shadowed` is non-empty.
+fn shadow_wrapped(carrier: SliceExpr, shadowed: Arc<[FrameShadowedName]>) -> SliceExpr {
+    if shadowed.is_empty() {
+        carrier
+    } else {
+        SliceExpr::FrameShadowed(FrameShadowedExpr {
+            inner: Box::new(carrier),
+            shadowed,
+        })
+    }
+}
+
+/// The callee of a symbolic `ReturnType<typeof …>` call: the answer type
+/// and the frame binding its `typeof` path is rooted at.
+///
+/// Both fields are private: [`DefiningFrameGate::symbolic_call`] is the one
+/// constructor and derives the frame root from the frame's own indexed
+/// root occurrence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymbolicCallee {
+    ty: TypeExpr,
+    frame_root: Option<FlowBindingRef>,
+}
+
+impl SymbolicCallee {
+    /// The callee's answer type.
+    #[must_use]
+    pub fn ty(&self) -> &TypeExpr {
+        &self.ty
+    }
+
+    /// The frame binding the callee's `typeof` path is rooted at.
+    #[must_use]
+    pub fn frame_root(&self) -> Option<&FlowBindingRef> {
+        self.frame_root.as_ref()
+    }
+}
+
 /// Whether a type is built only from primitives and literals.
 fn names_nothing(ty: &TypeExpr) -> bool {
     match ty {
@@ -1532,6 +1598,21 @@ impl Drop for SliceExpr {
 }
 
 impl SliceExpr {
+    /// The arguments slot of the call carrier this expression is, seen
+    /// through a shadow wrapper — the one mutable access a wrapped call
+    /// gives: its arguments attach after the call is lowered, while the
+    /// wrapper and the callee stay as the frame built them.
+    pub fn call_arguments_mut(&mut self) -> Option<&mut SliceCallArguments> {
+        let mut current = self;
+        loop {
+            match current {
+                SliceExpr::Call(_, _, arguments) => return Some(arguments),
+                SliceExpr::FrameShadowed(shadowed) => current = &mut shadowed.inner,
+                _ => return None,
+            }
+        }
+    }
+
     /// Move the sub-expressions this expression solely owns onto `out`,
     /// leaving [`SliceExpr::Elided`] in their place.
     fn take_sub_expressions(&mut self, out: &mut Vec<SliceExpr>) {
@@ -1548,7 +1629,7 @@ impl SliceExpr {
             }
         }
         match self {
-            SliceExpr::FrameShadowed { inner, .. } => take(inner, out),
+            SliceExpr::FrameShadowed(shadowed) => take(&mut shadowed.inner, out),
             SliceExpr::OptionalAnyChain { root } | SliceExpr::OptionalMember { root, .. } => {
                 take(root, out)
             }
@@ -1662,13 +1743,10 @@ pub enum SliceExpr {
     /// it found; the evaluator — which resolves through the one shared
     /// resolver — fails closed exactly when the owner scope would answer
     /// one of them, and otherwise evaluates the wrapped leaf unchanged.
-    FrameShadowed {
-        /// The leaf carrier the gate wrapped ([`SliceExpr::Type`] or
-        /// [`SliceCall::Symbolic`]).
-        inner: Box<SliceExpr>,
-        /// Frame-owned names the answer references, by name space.
-        shadowed: Arc<[FrameShadowedName]>,
-    },
+    ///
+    /// The record is sealed ([`FrameShadowedExpr`]): only the frame
+    /// operations that compute the verdict build it.
+    FrameShadowed(FrameShadowedExpr),
     /// A parameter reference, substituted by the evaluator.
     Param {
         binding: SkeletonBindingId,
@@ -2409,8 +2487,10 @@ pub enum SliceCall {
         /// polymorphic `this` is bound to.
         this: Option<SliceThis>,
     },
-    /// A call lowered to the symbolic `ReturnType<typeof …>` carrier.
-    Symbolic(TypeExpr, Option<FlowBindingRef>),
+    /// A call lowered to the symbolic `ReturnType<typeof …>` carrier. The
+    /// callee is sealed ([`SymbolicCallee`]): only
+    /// [`DefiningFrameGate::symbolic_call`] builds it.
+    Symbolic(SymbolicCallee),
     /// A call of a member read off a lowered receiver (`this.m()`): the
     /// evaluator projects `member` off the receiver's value and resolves
     /// the call over the member's signatures.
@@ -2551,12 +2631,6 @@ impl GatedType {
     #[must_use]
     pub fn shadowed(&self) -> &[FrameShadowedName] {
         &self.shadowed
-    }
-
-    /// A shared handle on the verdict, for a carrier that repeats it.
-    #[must_use]
-    pub fn shared_shadowed(&self) -> Arc<[FrameShadowedName]> {
-        Arc::clone(&self.shadowed)
     }
 
     /// The answer joined with `undefined` (an optional parameter under
@@ -2733,7 +2807,7 @@ impl SignatureScope<'_> {
 /// to the destructured element.
 ///
 /// Derived only from a skeleton ([`SignatureParameters::of`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureParameters(FxHashMap<Arc<str>, u32>);
 
 impl SignatureParameters {
@@ -3174,10 +3248,12 @@ pub struct DefiningFrameDiscovery {
     pub modelled_patterns: FxHashSet<SkeletonBindingId>,
     /// The retained source snapshot the frame was lowered from.
     pub snapshot: crate::source::snapshot::SnapshotKey,
-    /// The enclosing lexical chain at the function's position.
+    /// The enclosing lexical chain at the function's position. Not
+    /// checked against the entry's lexical parent: the chain is whatever
+    /// the source assembly was handed for this function.
     pub outer: CaptureScope,
     /// The function's own start offset: the anchor every frame span is
-    /// relative to.
+    /// relative to. Must equal the indexed entry's start.
     pub anchor: u32,
 }
 
@@ -3193,6 +3269,9 @@ pub enum DefiningFrameError {
     NoExactBody,
     /// A formal parameter names a binding the skeleton does not have.
     ParameterOutsideFrame,
+    /// The anchor is not the indexed function's start, so every frame
+    /// position would be rebased against the wrong origin.
+    ForeignAnchor,
 }
 
 /// A shared structural lexical frame. It contains no lowered annotation or
@@ -3217,6 +3296,9 @@ pub struct DefiningFrameGate {
     snapshot: crate::source::snapshot::SnapshotKey,
     outer: CaptureScope,
     anchor: u32,
+    /// The function's own end offset: a nested function lies in
+    /// `anchor..end`.
+    end: u32,
 }
 
 /// One formal-parameter binding of a frame: a plain parameter, or a
@@ -3727,18 +3809,6 @@ impl FrameAnswer {
         self.shadowed.is_empty()
     }
 
-    /// The answer type, dropping the verdict.
-    #[must_use]
-    pub fn into_ty(self) -> TypeExpr {
-        self.ty
-    }
-
-    /// The answer type and its verdict, taken apart.
-    #[must_use]
-    pub fn into_parts(self) -> (TypeExpr, Arc<[FrameShadowedName]>) {
-        (self.ty, self.shadowed)
-    }
-
     /// The answer as a gated type carrying the same verdict.
     #[must_use]
     pub fn into_gated(self) -> GatedType {
@@ -3804,6 +3874,9 @@ impl DefiningFrameGate {
         if bindings.function() != entry.key() {
             return Err(DefiningFrameError::ForeignBindings);
         }
+        if anchor != entry.span().start {
+            return Err(DefiningFrameError::ForeignAnchor);
+        }
         if !bindings.describes(&skeleton) {
             return Err(DefiningFrameError::ForeignSkeleton);
         }
@@ -3854,6 +3927,7 @@ impl DefiningFrameGate {
             snapshot,
             outer,
             anchor,
+            end: entry.span().end,
         }))
     }
 
@@ -3927,13 +4001,13 @@ impl DefiningFrameGate {
     /// The lexical context of a nested function authored at `child` (an
     /// absolute span) inside this frame: the chain with this frame at the
     /// innermost region containing the child, and the `this` the child
-    /// reads. `None` when `child` does not start inside this frame.
+    /// reads. `None` when `child` does not lie within this frame.
     pub fn nested_context(
         self: &Arc<Self>,
         child: verter_span::Span,
         this: Option<SliceThis>,
     ) -> Option<NestedFlowContext> {
-        if child.start < self.anchor {
+        if child.start < self.anchor || child.end > self.end {
             return None;
         }
         Some(NestedFlowContext {
@@ -4031,14 +4105,65 @@ impl DefiningFrameGate {
             ty: answer.ty,
             frame_root,
         });
-        if answer.shadowed.is_empty() {
-            leaf
-        } else {
-            SliceExpr::FrameShadowed {
-                inner: Box::new(leaf),
-                shadowed: answer.shadowed,
-            }
-        }
+        shadow_wrapped(leaf, answer.shadowed)
+    }
+
+    /// The symbolic `ReturnType<typeof …>` call of one body answer: the
+    /// callee with its frame root derived from the answer type and `root`,
+    /// wrapped in [`SliceExpr::FrameShadowed`] exactly when the answer's
+    /// verdict names frame-owned bindings.
+    #[must_use]
+    pub fn symbolic_call(
+        &self,
+        answer: FrameAnswer,
+        root: Option<LeafRootOccurrence<'_>>,
+        site: SliceCallSite,
+        arguments: SliceCallArguments,
+    ) -> SliceExpr {
+        let frame_root = self.value_root(&answer.ty, root);
+        let call = SliceExpr::Call(
+            SliceCall::Symbolic(SymbolicCallee {
+                ty: answer.ty,
+                frame_root,
+            }),
+            site,
+            arguments,
+        );
+        shadow_wrapped(call, answer.shadowed)
+    }
+
+    /// A `super.member()` call over the heritage expression's gated value
+    /// type, wrapped in [`SliceExpr::FrameShadowed`] (sharing the gated
+    /// type's verdict) exactly when that verdict names frame-owned bindings.
+    #[must_use]
+    pub fn heritage_call(
+        &self,
+        heritage: GatedType,
+        member: Arc<[Arc<str>]>,
+        static_side: bool,
+        this: Option<SliceThis>,
+        site: SliceCallSite,
+    ) -> SliceExpr {
+        let shadowed = Arc::clone(&heritage.shadowed);
+        let call = SliceExpr::Call(
+            SliceCall::OnHeritage {
+                heritage,
+                member,
+                static_side,
+                this,
+            },
+            site,
+            SliceCallArguments::none(),
+        );
+        shadow_wrapped(call, shadowed)
+    }
+
+    /// Gate a body answer again, as the type it now is, at `position` —
+    /// for a carrier whose answer was re-rooted after its verdict (a
+    /// namespace member read).
+    #[must_use]
+    pub fn regate(&self, answer: FrameAnswer, position: FrameSpan) -> GatedType {
+        self.gate(answer.ty, position, &[])
     }
 
     /// Whether every destructuring declaration of `binding`'s runtime

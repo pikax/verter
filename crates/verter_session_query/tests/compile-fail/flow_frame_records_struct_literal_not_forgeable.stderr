@@ -1,4 +1,4 @@
-error[E0451]: fields `skeleton`, `bindings`, `type_parameters`, `enclosing_type_parameters`, `parameters`, `parameter_names`, `modelled_patterns`, `body_hash`, `snapshot`, `outer` and `anchor` of struct `DefiningFrameGate` are private
+error[E0451]: fields `skeleton`, `bindings`, `type_parameters`, `enclosing_type_parameters`, `parameters`, `parameter_names`, `modelled_patterns`, `body_hash`, `snapshot`, `outer`, `anchor` and `end` of struct `DefiningFrameGate` are private
   --> tests/compile-fail/flow_frame_records_struct_literal_not_forgeable.rs:12:9
    |
 11 |     DefiningFrameGate {
@@ -6,7 +6,7 @@ error[E0451]: fields `skeleton`, `bindings`, `type_parameters`, `enclosing_type_
 12 |         skeleton: Arc::clone(gate.skeleton()),
    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
 13 |         ..gate.clone()
-   |           ^^^^^^^^^^^^ fields `bindings`, `type_parameters`, `enclosing_type_parameters`, `parameters`, `parameter_names`, `modelled_patterns`, `body_hash`, `snapshot`, `outer` and `anchor` are private
+   |           ^^^^^^^^^^^^ fields `bindings`, `type_parameters`, `enclosing_type_parameters`, `parameters`, `parameter_names`, `modelled_patterns`, `body_hash`, `snapshot`, `outer`, `anchor` and `end` are private
 
 error[E0451]: field `enclosing` of struct `CaptureScope` is private
   --> tests/compile-fail/flow_frame_records_struct_literal_not_forgeable.rs:19:9
