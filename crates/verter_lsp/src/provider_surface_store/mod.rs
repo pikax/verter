@@ -634,8 +634,10 @@ impl ProviderSurfaceStore {
         // payload — a second reservation for bytes the account is already
         // charging. The generation is still FRESH: basis identity is the
         // snapshot's, and only the content underneath is shared.
+        // An absent or `Closing` path simply means "nothing to reuse" — never a
+        // fallback that could vouch content.
         let reusable = self
-            .current_snapshot_for(&provider_path)
+            .current_snapshot(&provider_path)
             .filter(|current| {
                 current.kind == surface.kind
                     && *current.source_canonical == *surface.source_canonical
@@ -706,24 +708,6 @@ impl ProviderSurfaceStore {
         }
         drop(lifecycle);
         snapshot
-    }
-
-    /// The snapshot a `Current` path resolves to right now, by interned key.
-    ///
-    /// Only used to decide payload reuse, so an absent or `Closing` path simply
-    /// means "nothing to reuse" — never a fallback that could vouch content.
-    fn current_snapshot_for(
-        &self,
-        provider_path: &Arc<str>,
-    ) -> Option<Arc<ProviderSurfaceSnapshot>> {
-        let generation = match self.inner.lifecycle.read().paths.get(provider_path) {
-            Some(ProviderPathState::Current { generation }) => *generation,
-            _ => return None,
-        };
-        self.inner
-            .snapshots
-            .get(&(Arc::clone(provider_path), generation))
-            .map(|entry| Arc::clone(entry.value()))
     }
 
     /// Build the immutable payload for a surface whose content the store does not
@@ -947,16 +931,25 @@ impl ProviderSurfaceStore {
     /// The CURRENT active snapshot for a provider path, if one is synced (its
     /// lifecycle state is `Current`). A `Closing` or absent path resolves to
     /// `None`. Used to CAPTURE the in-flight pinned set.
+    ///
+    /// The generation is read and resolved to its snapshot under ONE lifecycle
+    /// read guard. [`Self::record`] drops the generation it displaces under the
+    /// lifecycle WRITE lock, so a reader that released the guard between the two
+    /// could find that generation already gone and answer "no current surface"
+    /// for a path that was `Current` at every instant — which every
+    /// byte-identical background re-sync of an open carrier would expose.
     #[must_use]
     pub fn current_snapshot(&self, provider_path: &str) -> Option<Arc<ProviderSurfaceSnapshot>> {
-        let generation = match self.inner.lifecycle.read().paths.get(provider_path) {
-            Some(ProviderPathState::Current { generation }) => *generation,
-            _ => return None,
+        let lifecycle = self.inner.lifecycle.read();
+        let (path, ProviderPathState::Current { generation }) =
+            lifecycle.paths.get_key_value(provider_path)?
+        else {
+            return None;
         };
         self.inner
             .snapshots
-            .get(&(Arc::from(provider_path), generation))
-            .map(|e| Arc::clone(e.value()))
+            .get(&(Arc::clone(path), *generation))
+            .map(|entry| Arc::clone(entry.value()))
     }
 
     /// Whether a previously-captured snapshot still agrees with the path's CURRENT

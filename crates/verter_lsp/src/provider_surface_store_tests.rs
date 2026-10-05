@@ -2346,3 +2346,66 @@ fn committed_ide_capture_drops_a_newly_recorded_but_uncommitted_surface() {
         "a newly-recorded-but-uncommitted IDE surface must NOT be capturable (fail closed)"
     );
 }
+
+/// A path that stays `Current` through byte-identical re-syncs always resolves to a
+/// current snapshot, and a capture taken before them stays honoured.
+///
+/// Every background re-sync of an unchanged open carrier records the same surface
+/// under a fresh generation and drops the displaced one. A reader that resolved the
+/// path's generation and then looked the snapshot up OUTSIDE the lifecycle guard
+/// could find that generation already dropped and answer "no current surface" for a
+/// path that was current at every instant — which drops a valid provider answer (a
+/// hover or definition vanishes) and refuses the request capture outright.
+#[test]
+fn current_path_resolves_through_concurrent_identical_resyncs() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+
+    let store = ProviderSurfaceStore::new();
+    let captured = store.record(record_surface("api same\n", "carrier same\n"));
+
+    const READERS: usize = 4;
+    const RESYNCS: usize = 50_000;
+
+    let stop = StdArc::new(AtomicBool::new(false));
+    let missing = StdArc::new(AtomicUsize::new(0));
+    let dishonoured = StdArc::new(AtomicUsize::new(0));
+
+    let mut readers = Vec::with_capacity(READERS);
+    for _ in 0..READERS {
+        let store = store.clone();
+        let captured = Arc::clone(&captured);
+        let stop = StdArc::clone(&stop);
+        let missing = StdArc::clone(&missing);
+        let dishonoured = StdArc::clone(&dishonoured);
+        readers.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if store.current_snapshot(VPATH).is_none() {
+                    missing.fetch_add(1, Ordering::Relaxed);
+                }
+                if !store.captured_snapshot_still_honored(&captured) {
+                    dishonoured.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }));
+    }
+
+    for _ in 0..RESYNCS {
+        store.record(record_surface("api same\n", "carrier same\n"));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for reader in readers {
+        reader.join().expect("reader thread panicked");
+    }
+
+    assert_eq!(
+        (
+            missing.load(Ordering::Relaxed),
+            dishonoured.load(Ordering::Relaxed)
+        ),
+        (0, 0),
+        "(missing current snapshots, dishonoured captures) for a path that was \
+         `Current` with byte-identical content at every instant"
+    );
+}
