@@ -1548,7 +1548,7 @@ fn a_request_builds_an_owners_import_route_witness_once() {
         let _ = host.owner_import_route_witness_for_tests(importer);
         scope.collected()
     };
-    let as_set = |facts: &[crate::resolver_core::FactVersionRef]| {
+    let as_set = |facts: &[verter_session_query::facts::fact_cache::FactVersionRef]| {
         facts.iter().cloned().collect::<rustc_hash::FxHashSet<_>>()
     };
     assert_eq!(
@@ -2257,7 +2257,7 @@ defineProps<Props>()
     assert!(
         view.derived_hash(
             "/src/types.ts",
-            crate::resolver_core::DerivedFactKind::Route
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route
         )
         .is_none(),
         "an unmaterialised tracked canonical must not gain a route digest \
@@ -6384,7 +6384,7 @@ const viaB: Wrapped<'b'> = null as never
         assert!(row.wrapper.inner_source.is_some());
         assert_eq!(
             row.wrapper.completeness,
-            verter_semantic::analysis::TemplateClassFactsCompleteness::Complete
+            verter_session_query::analysis::template_class_facts::TemplateClassFactsCompleteness::Complete
         );
     }
 }
@@ -7220,7 +7220,7 @@ const props = defineProps<{
         else {
             panic!("expected exact macro payload argument locator for {label}");
         };
-        let verter_semantic::analysis::TemplateClassSubject::Prop {
+        let verter_session_query::analysis::template_class_facts::TemplateClassSubject::Prop {
             payload: subject_payload,
             ..
         } = &row.subject
@@ -7815,7 +7815,7 @@ const variant: A = null as never
     let facts = template_class_facts_for(&host, canonical);
     assert_eq!(
         facts.completeness(),
-        verter_semantic::analysis::TemplateClassFactsCompleteness::ReturnOnly
+        verter_session_query::analysis::template_class_facts::TemplateClassFactsCompleteness::ReturnOnly
     );
     assert!(matches!(
         facts.rows()[0].domain,
@@ -9803,7 +9803,7 @@ fn persisted_raw_template(
     canonical: &str,
 ) -> Option<(
     Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
-    crate::fact_signature_helpers::ReadSetSignature,
+    verter_session_query::facts::fact_cache::ReadSetSignature,
 )> {
     host.derived_raw_cache().get(canonical).and_then(|derived| {
         derived.raw_template_analysis().map(|entry| {
@@ -9927,7 +9927,7 @@ fn lazy_template_lane_arm(
     prewarm_indexed: bool,
 ) -> (
     Vec<String>,
-    Option<crate::fact_signature_helpers::ReadSetSignature>,
+    Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
 ) {
     let host = make_host();
     if let Some((_, dep_path, dep_source)) = dependency {
@@ -9971,9 +9971,9 @@ fn lazy_template_lane_arm(
 /// `source_generation` stamp cannot see, so losing one is the only way a
 /// different observation granularity could actually weaken invalidation.
 fn cross_file_facts(
-    signature: &crate::fact_signature_helpers::ReadSetSignature,
+    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     owner: &str,
-) -> rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> {
+) -> rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef> {
     signature
         .facts
         .iter()
@@ -9985,14 +9985,14 @@ fn cross_file_facts(
 /// The owner-rooted `FileWholeHash` facts a signature recorded — the rail every
 /// entry must carry.
 fn owner_whole_hash_facts(
-    signature: &crate::fact_signature_helpers::ReadSetSignature,
+    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     owner: &str,
-) -> rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> {
+) -> rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef> {
     signature
         .facts
         .iter()
         .filter(|fact| {
-            matches!(fact, crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            matches!(fact, verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == owner)
         })
         .cloned()
@@ -14361,7 +14361,7 @@ export interface Props { label: string }
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/src/types.vue"
         )),
         "the direct-local proof must track the provider content hash",
@@ -14423,7 +14423,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/src/index.ts"
         )),
         "fast imported-root proof must track the provider file content hash",
@@ -14431,7 +14431,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::Parse(parse)
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/index.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
@@ -14440,7 +14440,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/src/target.ts"
         )),
         "fast imported-root proof must track the direct child file content hash",
@@ -14448,7 +14448,7 @@ fn direct_imported_type_root_fast_path_tracks_provider_route_and_target_whole_ha
     assert!(
         !facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::Parse(parse)
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/target.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
@@ -14505,7 +14505,7 @@ fn direct_imported_type_root_fast_path_resolves_cold_target_under_store_view() {
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/src/target.ts"
         )),
         "store-view fast path must still track the cold child file content hash",
@@ -14599,7 +14599,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/src/index.ts"
         )),
         "fast imported-root proof must track the provider file content hash",
@@ -14607,7 +14607,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::Parse(parse)
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/index.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
@@ -14616,7 +14616,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/src/target.ts"
         )),
         "fast imported-root proof must track the direct child file content hash",
@@ -14624,7 +14624,7 @@ fn imported_type_root_fast_path_follows_exported_local_import_without_child_rout
     assert!(
         !facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::Parse(parse)
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/target.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),
@@ -14696,7 +14696,7 @@ fn current_dependency_fact_versions_keeps_imported_barrel_route_facts_shallow() 
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::Parse(parse)
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/src/types/index.ts"
                     && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )),

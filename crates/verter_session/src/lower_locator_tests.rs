@@ -1260,9 +1260,10 @@ fn jsdoc_typedef_body_locator_lowers_through_the_shape_query() {
 #[test]
 fn broken_lease_lower_locator_suppresses_parent_admission() {
     use crate::locator_identity::{
-        semantic_space_for_locator_space, LocatorLoweringKey, ParseEnvHash, ResolveEnvHash,
+        semantic_space_for_locator_space, LocatorLoweringKey, ResolveEnvHash,
     };
     use crate::semantic_query::{QueryError, SemanticQueryKey};
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
 
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);

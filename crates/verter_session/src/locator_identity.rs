@@ -93,11 +93,11 @@ pub fn assert_r6_key_dimension<T: R6KeyDimension>() {}
 /// (the byte-provenance carried obligation, design §9.1).
 ///
 /// Also orders (`Ord`): the resolver-core fact rail sorts
-/// [`crate::resolver_core::FactVersionRef`] observations canonically,
+/// [`verter_session_query::facts::fact_cache::FactVersionRef`] observations canonically,
 /// and the `FileSourceEnv` arm carries this dimension. Ordering is the
 /// derived byte order of the private inner hash — opaque, stable, and
 /// exposes no constructor surface.
-pub use verter_workspace::ParseEnvHash;
+pub use verter_session_query::facts::fact_cache::ParseEnvHash;
 impl sealed::Sealed for ParseEnvHash {}
 impl R6KeyDimension for ParseEnvHash {}
 

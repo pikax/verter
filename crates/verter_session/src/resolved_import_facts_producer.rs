@@ -61,10 +61,10 @@
 use std::sync::Arc;
 
 use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::registry::{
     Fact, FactKey, InternedName, InternedSpecifier, SymbolSpace,
 };
-use verter_workspace::FactVersionRef;
 
 use crate::hash::hash_16;
 use crate::host_executor::HostSourceData;

@@ -27,12 +27,12 @@ use std::sync::Arc;
 use verter_language::{FileLanguage, FrameworkAdapterId, LanguageId, ScriptSourceType};
 
 use super::{compare_fact_refs, FactReadSet, FactReadSetFinalise, FACT_SIGNATURE_CAP};
-use crate::fact_cache::{
+use crate::facts::fact_cache::{
     AggregateGenerations, AggregatePopulation, AggregateStamp, CompactionDomain, DerivedFactKind,
     DomainGenerationFact, FactVersionRef, ParseEnvHash, ParseFactRef, ResolveImportsFactRef,
     RouteSurfaceFactRef, SessionOverlayFingerprint, ViewPopulation,
 };
-use verter_session_query::facts::registry::{
+use crate::facts::registry::{
     AugmentationTargetKindTag, FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
 };
 
@@ -45,11 +45,11 @@ fn test_parse_key(marker: u8) -> verter_language::ParseKey {
     .unwrap()
     .1
 }
-use crate::resolution_currency::{
+use crate::facts::resolution::{
     CanonicalResolutionId, RawSpecifier, ResolutionEntry, ResolutionFactKey, ResolutionFactRef,
     ResolutionFactVersion,
 };
-use verter_session_query::resolution::{
+use crate::resolution::{
     ResolutionPopulation, ResolvePhase, ResolveRequestKind, SessionFingerprint,
 };
 
@@ -889,7 +889,7 @@ fn compact_canonical(
 /// compile or panics rather than minting): drop the
 /// `basis.stamp_for(*domain).is_some()` filter from `compact_domains`'s
 /// `mint` chain, and change the `.expect(...)` in the mint loop to
-/// `.unwrap_or(crate::fact_cache::AggregateStamp::Generation(0))`. The
+/// `.unwrap_or(crate::facts::fact_cache::AggregateStamp::Generation(0))`. The
 /// negative half below then finds a minted aggregate and fails.
 #[test]
 fn a_domain_with_no_live_producer_never_mints_an_aggregate() {

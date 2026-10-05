@@ -38,15 +38,16 @@ use rustc_hash::FxHashMap;
 
 use super::admission::{
     CacheAdmission, CacheEntry, Candidate, DeferredVictims, FactCandidateDiscriminant,
-    PublishCoreOutcome, PublishOutcome, SignatureAdmission,
+    PublishCoreOutcome, PublishOutcome,
 };
 use super::node::{ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};
 use super::singleflight::InflightTable;
-use crate::fact_signature_helpers::ReadSetSignature;
 use crate::types::{
     CachedTsx, CachedVirtualFile, CompileSlot, DiagnosticsSnapshot, Hash16, ProfileState,
     VirtualNodeKind,
 };
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::SignatureAdmission;
 
 // ── Key shapes ────────────────────────────────────────────────────────
 

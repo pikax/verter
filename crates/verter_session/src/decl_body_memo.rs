@@ -89,9 +89,9 @@ pub use verter_session_query::resolution::{LoweredTypeDecl, LoweredValueDecl, Va
 pub(crate) struct IndexedFlowCallExpression {
     pub(crate) call: verter_type_expr::IndexedValueCall,
     pub(crate) argument_roots:
-        Box<[verter_semantic::analysis::type_eval_build::IndexedValueReadRoot]>,
+        Box<[verter_session_query::analysis::indexed_value::IndexedValueReadRoot]>,
     pub(crate) receiver_root:
-        Option<verter_semantic::analysis::type_eval_build::IndexedValueReadRoot>,
+        Option<verter_session_query::analysis::indexed_value::IndexedValueReadRoot>,
 }
 
 /// Lower one call, `new` or tagged template through `lower` while
@@ -108,11 +108,12 @@ fn observed_indexed_call(
     lower: impl FnOnce(
         &mut dyn FnMut(
             verter_semantic::analysis::type_eval_build::IndexedCallReadSite,
-            verter_semantic::analysis::type_eval_build::IndexedValueReadRoot,
+            verter_session_query::analysis::indexed_value::IndexedValueReadRoot,
         ),
     ) -> verter_type_expr::IndexedValueCall,
 ) -> Option<IndexedFlowCallExpression> {
-    use verter_semantic::analysis::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use verter_semantic::analysis::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     let mut roots: Vec<Option<IndexedValueReadRoot>> = (0..argument_count).map(|_| None).collect();
     let mut receiver_root = None;
     let mut invalid_observation = false;

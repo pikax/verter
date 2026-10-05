@@ -1294,7 +1294,8 @@ fn route_export_resolution_terminates_on_barrel_cycle() {
 /// an immutable tracked/untracked classification for its whole life.
 #[test]
 fn a_withdrawn_artifact_only_canonical_rejects_instead_of_accepting_a_stale_hash() {
-    use crate::resolver_core::{DerivedFactKind, FactVersionRef, StoreView};
+    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::fact_cache::{DerivedFactKind, FactVersionRef};
 
     let canonical = "/seeded/withdrawn.d.ts";
     let never_seen = "/seeded/never_seen.d.ts";

@@ -223,10 +223,9 @@ mod canary_warm_hit_zero_alloc {
 
     use std::hint::black_box;
 
-    use verter_session::resolver_core::{
-        FactVersionRef, ParseFactRef, PermissiveStoreView, ValidatedFactCache,
-    };
+    use verter_session::resolver_core::{PermissiveStoreView, ValidatedFactCache};
     use verter_session::semantic_query::HashValue;
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
     use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
     use super::alloc_count;
@@ -433,9 +432,9 @@ mod canary_signature_fingerprint_zero_alloc {
 
     use std::hint::black_box;
 
-    use verter_session::resolver_core::{
-        compute_signature_fingerprint_for_tests, DerivedFactKind, FactVersionRef, ParseFactRef,
-        ResolveImportsFactRef, RouteSurfaceFactRef,
+    use verter_session::resolver_core::compute_signature_fingerprint_for_tests;
+    use verter_session_query::facts::fact_cache::{
+        DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
     };
     use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 

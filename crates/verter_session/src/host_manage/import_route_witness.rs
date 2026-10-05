@@ -56,8 +56,8 @@
 
 use std::cell::{Cell, RefCell};
 
-use crate::resolver_core::FactVersionRef;
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 thread_local! {
     /// Number of [`ResolutionWitnessScope`] frames installed on this
@@ -362,7 +362,7 @@ impl VerterHost {
             return self.decline_import_route_witness();
         }
         let witness = self.observed_import_route_witness(canonical_id, specifiers)?;
-        if witness.len() > verter_workspace::FACT_SIGNATURE_CAP {
+        if witness.len() > verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
             // Overflow: the witness cannot represent the complete
             // observation set, so it is not rootable. Never represented
             // by a truncated or empty signature (`.DECISION.md` §3).

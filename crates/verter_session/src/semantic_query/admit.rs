@@ -40,8 +40,9 @@
 //! (The taint PRODUCERS that emit non-`Clean` taint are §18.4; the gate here
 //! is implemented and unit-tested.)
 
-use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::semantic_query::{BrokenInputClass, ResultTaint};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// The §18.2 cache-admission disposition for an error-tolerant result.
 ///
@@ -135,8 +136,8 @@ fn admit_decision_inner(taint: ResultTaint, sig: &ReadSetSignature) -> Admission
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef};
     use std::sync::Arc;
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
     use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
     fn sig_from(facts: Vec<FactVersionRef>) -> ReadSetSignature {

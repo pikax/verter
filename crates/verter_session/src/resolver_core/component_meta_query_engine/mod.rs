@@ -191,7 +191,7 @@ pub(crate) use crate::semantic_query::compat_spelling::{
 /// against, captured once at the value source. The self-root
 /// `FileWholeHash` and all three parse facts are pinned to that
 /// observed version — the helper never re-reads current content.
-/// Returns [`crate::cache_runtime::SignatureAdmission::NonCacheable`]
+/// Returns [`verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable`]
 /// (refuse shared-cache admission) when the observed version's
 /// parse-fact registry cannot be recovered.
 pub(crate) fn engine_fact_signature_for_exported_type(
@@ -199,7 +199,7 @@ pub(crate) fn engine_fact_signature_for_exported_type(
     canonical_id: &str,
     type_name: &str,
     observed_hash: crate::resolver_core::ResolverHash16,
-) -> crate::cache_runtime::SignatureAdmission {
+) -> verter_session_query::facts::fact_cache::SignatureAdmission {
     crate::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
         canonical_id,
@@ -336,7 +336,7 @@ pub(crate) struct ObservedPreparedTypeDecl {
 /// - `DepVersion::ProjectGeneration(observed)` — the materialiser
 ///   observed the project-wide resolver/config/lib generation, not
 ///   that file's content. It is rooted by a
-///   [`crate::resolver_core::FactVersionRef::ProjectGeneration`]
+///   [`verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration`]
 ///   carrying the OBSERVED generation: a project-shape change bumps
 ///   the counter and rejects the memo. A pure file-content edit does
 ///   not bump the generation, so this fact does not over-invalidate.
@@ -351,12 +351,13 @@ pub(crate) struct ObservedPreparedTypeDecl {
 ///   constructs the variant.
 pub(crate) fn engine_fact_signature_for_materialize_memo(
     observed_scope: &crate::resolver_core::MaterializeScopeObservation,
-    observed_scope_syntactic_export_set: crate::resolver_core::ParseFactRef,
+    observed_scope_syntactic_export_set: verter_session_query::facts::fact_cache::ParseFactRef,
     materialized_dep_signature: &crate::semantic_query::DepSignature,
-) -> crate::cache_runtime::SignatureAdmission {
-    use crate::cache_runtime::{NonAdmissionReason, SignatureAdmission};
-    use crate::resolver_core::FactVersionRef;
+) -> verter_session_query::facts::fact_cache::SignatureAdmission {
+    use crate::cache_runtime::NonAdmissionReason;
     use crate::semantic_query::DepVersion;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::SignatureAdmission;
 
     let scope_canonical_id = observed_scope.canonical_id.as_ref();
     let observed_scope_whole_hash = observed_scope.whole_hash();
@@ -423,9 +424,11 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
             }
         }
     }
-    SignatureAdmission::Cacheable(crate::fact_signature_helpers::ReadSetSignature::new(
-        std::sync::Arc::from(entries),
-    ))
+    SignatureAdmission::Cacheable(
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(std::sync::Arc::from(
+            entries,
+        )),
+    )
 }
 
 /// Build a two-canonical `DepSignature` (used for DB caches whose

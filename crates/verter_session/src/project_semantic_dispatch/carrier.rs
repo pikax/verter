@@ -1345,7 +1345,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut observed = observation.finish();
         if matches!(
             &finalise,
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         ) {
             observed.cache_suppress = true;
         }
@@ -1355,8 +1355,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // carrier can be rooted on, so both suppress.
         if matches!(
             finalise,
-            crate::resolver_core::FactReadSetFinalise::Overflow
-                | crate::resolver_core::FactReadSetFinalise::MutationUnstable
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+                | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable
         ) {
             observed.cache_suppress = true;
         }

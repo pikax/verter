@@ -183,7 +183,7 @@ fn memo_only_population_remains_empty() {
     assert_eq!(memo_only.bundle_memo().len_for_tests(), 1);
     assert_eq!(
         memo_only.completion_state_for_tests(),
-        verter_workspace::CompletionOverlayState::Empty,
+        verter_session_query::facts::fact_cache::CompletionOverlayState::Empty,
         "memo contents never affect fact validation and must not partition aggregate reuse"
     );
 }
@@ -539,7 +539,7 @@ fn unattributed_refusal_is_not_memoized() {
     let host = host_with_base_files();
     *host.materialize_seam_hook.lock() = Some(Arc::new(|| {
         crate::resolver_core::resolver_context::note_non_cacheable_propagation(
-            verter_workspace::NonCacheablePropagation::Transitive,
+            verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
         );
     }));
 

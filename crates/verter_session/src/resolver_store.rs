@@ -1123,7 +1123,7 @@ pub(crate) struct StoreViewSnapshot {
 /// `FileSourceEnv` validation branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEnvIdentity {
-    pub(crate) parse_env_hash: crate::locator_identity::ParseEnvHash,
+    pub(crate) parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
     pub(crate) parse_key: verter_language::ParseKey,
     pub(crate) file_language_id: verter_language::FileLanguage,
 }
@@ -1154,7 +1154,7 @@ impl SourceEnvIdentity {
         key: &crate::file_artifact_store::FileArtifactKey,
     ) -> Self {
         Self {
-            parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash(
+            parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
                 host.host_view_env_hashes_for(key.canonical.as_ref())
                     .parse_env_hash,
             ),
@@ -2094,7 +2094,7 @@ impl HostStoreView {
 
     /// Validate one domain's terminal aggregate against this view.
     ///
-    /// Exhaustive over [`verter_workspace::CompactionDomain`] — a new
+    /// Exhaustive over [`verter_session_query::facts::fact_cache::CompactionDomain`] — a new
     /// domain cannot compile without stating how this view validates it,
     /// which is the compile rail that stops a new domain from silently
     /// inheriting a permissive or a blanket-reject answer.
@@ -2119,11 +2119,13 @@ impl HostStoreView {
     /// stale serve.
     pub(crate) fn validates_domain_aggregate_in_population(
         &self,
-        aggregate: &verter_workspace::DomainGenerationFact,
-        fact: &crate::resolver_core::FactVersionRef,
-        view_population: verter_workspace::ViewPopulation,
+        aggregate: &verter_session_query::facts::fact_cache::DomainGenerationFact,
+        fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+        view_population: verter_session_query::facts::fact_cache::ViewPopulation,
     ) -> bool {
-        use verter_workspace::{AggregatePopulation, AggregateStamp, CompactionDomain};
+        use verter_session_query::facts::fact_cache::{
+            AggregatePopulation, AggregateStamp, CompactionDomain,
+        };
 
         // The single-producer domains all pin an exact counter. `None`
         // means this view has no live producer for the domain, which
@@ -2147,7 +2149,7 @@ impl HostStoreView {
             // serve base and session views alike.
             CompactionDomain::WorkspaceShape => {
                 aggregate.population
-                    == AggregatePopulation::View(verter_workspace::ViewPopulation::Base)
+                    == AggregatePopulation::View(verter_session_query::facts::fact_cache::ViewPopulation::Base)
                     && aggregate.stamp
                         == AggregateStamp::Generation(
                             self.snapshot.roots.project_env_root.project_generation,
@@ -2164,7 +2166,7 @@ impl HostStoreView {
                 .resolution_root
                 .as_ref()
                 .is_some_and(|world| {
-                    verter_workspace::FactVersionValidator::validates_fact_version(
+                    verter_session_query::facts::fact_cache::FactVersionValidator::validates_fact_version(
                         world.as_ref(),
                         fact,
                     )
@@ -2198,8 +2200,10 @@ impl HostStoreView {
     /// ONE derivation shared by producer and validator, for the same
     /// reason as its semantic-imports sibling: a stamp composed two ways
     /// is a stamp two sides can disagree about.
-    pub(crate) fn route_surface_stamp(&self) -> Option<verter_workspace::AggregateStamp> {
-        use verter_workspace::{AggregateStamp, RouteSurfaceStamp};
+    pub(crate) fn route_surface_stamp(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::AggregateStamp> {
+        use verter_session_query::facts::fact_cache::{AggregateStamp, RouteSurfaceStamp};
         Some(AggregateStamp::RouteSurface(RouteSurfaceStamp {
             route_surface: self.route_surface_generation?,
             content: self.content_generation,
@@ -2217,8 +2221,12 @@ impl HostStoreView {
     /// the whole point of the composite is that a witness pinning fewer
     /// dimensions than the store keys on is a stale serve, and a
     /// fabricated component would reintroduce exactly that.
-    pub(crate) fn semantic_imports_stamp(&self) -> Option<verter_workspace::AggregateStamp> {
-        use verter_workspace::{AggregateStamp, ResolutionRootsStamp, SemanticImportsStamp};
+    pub(crate) fn semantic_imports_stamp(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::AggregateStamp> {
+        use verter_session_query::facts::fact_cache::{
+            AggregateStamp, ResolutionRootsStamp, SemanticImportsStamp,
+        };
 
         let world = self.snapshot.roots.resolution_root.as_ref()?;
         let resolution = match world.own_resolution_stamp()? {
@@ -2259,14 +2267,18 @@ impl HostStoreView {
     /// re-roots whole hashes and parse facts while leaving the workspace
     /// content generation untouched, so an overlay-derived aggregate must
     /// never satisfy a base read.
-    pub(crate) fn view_population(&self) -> verter_workspace::ViewPopulation {
-        match verter_workspace::SessionOverlayFingerprint::new(
+    pub(crate) fn view_population(
+        &self,
+    ) -> verter_session_query::facts::fact_cache::ViewPopulation {
+        match verter_session_query::facts::fact_cache::SessionOverlayFingerprint::new(
             self.snapshot.session_overlay_fingerprint,
         ) {
             // A zero fingerprint is not a session identity — no overlays
             // installed IS the base view. The constructor owns that rule.
-            None => verter_workspace::ViewPopulation::Base,
-            Some(fingerprint) => verter_workspace::ViewPopulation::SessionOverlay(fingerprint),
+            None => verter_session_query::facts::fact_cache::ViewPopulation::Base,
+            Some(fingerprint) => {
+                verter_session_query::facts::fact_cache::ViewPopulation::SessionOverlay(fingerprint)
+            }
         }
     }
 
@@ -2468,18 +2480,20 @@ impl HostStoreView {
     pub(crate) fn derived_hash(
         &self,
         canonical_id: &str,
-        kind: crate::resolver_core::DerivedFactKind,
+        kind: verter_session_query::facts::fact_cache::DerivedFactKind,
     ) -> Option<Hash16> {
         let resolved = self.canonical_view(canonical_id);
         match kind {
-            crate::resolver_core::DerivedFactKind::DirectSource => resolved.whole_hash,
-            crate::resolver_core::DerivedFactKind::Route => resolved.route_hash,
+            verter_session_query::facts::fact_cache::DerivedFactKind::DirectSource => {
+                resolved.whole_hash
+            }
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route => resolved.route_hash,
         }
     }
 
     pub(crate) fn invalid_fact_details(
         &self,
-        facts: &[crate::resolver_core::FactVersionRef],
+        facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
         limit: usize,
     ) -> Vec<String> {
         facts
@@ -2489,22 +2503,26 @@ impl HostStoreView {
             .collect()
     }
 
-    fn describe_invalid_fact(&self, fact: &crate::resolver_core::FactVersionRef) -> Option<String> {
+    fn describe_invalid_fact(
+        &self,
+        fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+    ) -> Option<String> {
         match fact {
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => {
-                match self.whole_hash(canonical_id).as_ref() {
-                    Some(current) if current == hash => None,
-                    Some(current) => Some(format!(
-                        "FileWholeHash mismatch canonical={} expected={hash:?} actual={current:?}",
-                        canonical_id
-                    )),
-                    None => Some(format!(
-                        "FileWholeHash missing canonical={} expected={hash:?}",
-                        canonical_id
-                    )),
-                }
-            }
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id,
+                hash,
+            } => match self.whole_hash(canonical_id).as_ref() {
+                Some(current) if current == hash => None,
+                Some(current) => Some(format!(
+                    "FileWholeHash mismatch canonical={} expected={hash:?} actual={current:?}",
+                    canonical_id
+                )),
+                None => Some(format!(
+                    "FileWholeHash missing canonical={} expected={hash:?}",
+                    canonical_id
+                )),
+            },
+            verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
                 canonical_id,
                 kind,
                 hash,
@@ -2527,35 +2545,39 @@ impl HostStoreView {
             // there. `HostStoreView` does not observe them directly,
             // so the diagnostic shape is a generic "domain fact not
             // validated yet" string.
-            crate::resolver_core::FactVersionRef::Parse(p) => Some(format!(
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(p) => Some(format!(
                 "ParseFactRef canonical={} key={:?} lane={:?} expected={:?}",
                 p.canonical_id, p.key, p.lane, p.expected_hash
             )),
-            crate::resolver_core::FactVersionRef::ResolveImports(r) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(r) => {
                 Some(format!("ResolveImportsFactRef {r:?}"))
             }
-            crate::resolver_core::FactVersionRef::RouteSurface(r) => Some(format!(
-                "RouteSurfaceFactRef canonical={} key={:?} lane={:?} expected={:?}",
-                r.canonical_id, r.key, r.lane, r.expected_hash
-            )),
-            crate::resolver_core::FactVersionRef::ProgramAnalysis(fact) => match fact {
-                crate::resolver_core::ProgramAnalysisFactRef::FlowBody {
-                    function,
-                    flow_body_stable_hash,
-                } => {
-                    if crate::resolver_core::StoreView::validates_program_analysis_domain(
-                        self, fact,
-                    ) {
-                        None
-                    } else {
-                        Some(format!(
-                            "FlowBody invalid canonical={} hash={flow_body_stable_hash:?}",
-                            function.canonical_id
-                        ))
+            verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(r) => {
+                Some(format!(
+                    "RouteSurfaceFactRef canonical={} key={:?} lane={:?} expected={:?}",
+                    r.canonical_id, r.key, r.lane, r.expected_hash
+                ))
+            }
+            verter_session_query::facts::fact_cache::FactVersionRef::ProgramAnalysis(fact) => {
+                match fact {
+                    verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {
+                        function,
+                        flow_body_stable_hash,
+                    } => {
+                        if crate::resolver_core::StoreView::validates_program_analysis_domain(
+                            self, fact,
+                        ) {
+                            None
+                        } else {
+                            Some(format!(
+                                "FlowBody invalid canonical={} hash={flow_body_stable_hash:?}",
+                                function.canonical_id
+                            ))
+                        }
                     }
                 }
-            },
-            crate::resolver_core::FactVersionRef::FileSourceEnv {
+            }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
                 parse_key,
@@ -2584,7 +2606,9 @@ impl HostStoreView {
                     )),
                 }
             }
-            crate::resolver_core::FactVersionRef::ProjectGeneration { generation } => {
+            verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
+                generation,
+            } => {
                 let current = self.snapshot.roots.project_env_root.project_generation;
                 if current == *generation {
                     None
@@ -2594,7 +2618,9 @@ impl HostStoreView {
                     ))
                 }
             }
-            crate::resolver_core::FactVersionRef::DomainGeneration(aggregate) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::DomainGeneration(
+                aggregate,
+            ) => {
                 if crate::resolver_core::StoreView::validates(self, fact) {
                     None
                 } else {
@@ -2604,14 +2630,14 @@ impl HostStoreView {
                     ))
                 }
             }
-            crate::resolver_core::FactVersionRef::StrictSelfRootWorld(world) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::StrictSelfRootWorld(world) => {
                 if crate::resolver_core::StoreView::validates(self, fact) {
                     None
                 } else {
                     Some(format!("StrictSelfRootWorld rejected expected={world:?}"))
                 }
             }
-            crate::resolver_core::FactVersionRef::Receipt(receipt) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt) => {
                 let mut described = None;
                 receipt.all_leaves(|leaf| {
                     described = self.describe_invalid_fact(leaf);
@@ -2645,7 +2671,7 @@ impl HostStoreView {
     /// Resolution-currency arm of the resolve-imports domain (R26).
     ///
     /// The SINGLE body both resolve-imports entry points route a
-    /// [`crate::resolver_core::ResolveImportsFactRef::Resolution`] fact
+    /// [`verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution`] fact
     /// through. It compares the fact's observed
     /// `ResolutionFactVersion` against the version this view's CAPTURED
     /// resolution world reports for that key — the workspace-owned
@@ -2664,7 +2690,7 @@ impl HostStoreView {
     /// A view with NO captured world validates nothing on this arm.
     fn validates_resolution_fact(
         &self,
-        fact: &crate::resolver_core::ResolveImportsFactRef,
+        fact: &verter_session_query::facts::fact_cache::ResolveImportsFactRef,
     ) -> bool {
         match self.snapshot.roots.resolution_root.as_ref() {
             Some(world) => world.validates_resolve_imports_fact(fact),
@@ -2724,12 +2750,12 @@ impl HostStoreView {
 
     pub(crate) fn validates_resolve_imports_domain_for_content_hash(
         &self,
-        fact: &crate::resolver_core::ResolveImportsFactRef,
+        fact: &verter_session_query::facts::fact_cache::ResolveImportsFactRef,
         content_hash: Hash16,
     ) -> bool {
         use verter_session_query::facts::registry::FactLane;
         use verter_session_query::facts::FactKey;
-        let crate::resolver_core::ResolveImportsFactRef::Semantic {
+        let verter_session_query::facts::fact_cache::ResolveImportsFactRef::Semantic {
             canonical_id,
             key: fact_key,
             lane,
@@ -3021,18 +3047,22 @@ impl crate::resolver_core::StoreView for HostStoreView {
     /// environment participate. Semantic imports and route surface stay
     /// precise because their membership advances inside cold computes that
     /// populate them.
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
-        verter_workspace::AggregateBasisSeed::Vouched {
+    fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Vouched {
             view_population: Some(self.view_population()),
-            view_domains: verter_workspace::ViewAggregateDomains::CONTENT_SOURCE_ENV,
+            view_domains:
+                verter_session_query::facts::fact_cache::ViewAggregateDomains::CONTENT_SOURCE_ENV,
             semantic_imports: self.semantic_imports_stamp(),
             route_surface: self.route_surface_stamp(),
         }
     }
 
-    fn validates(&self, fact: &crate::resolver_core::FactVersionRef) -> bool {
+    fn validates(&self, fact: &verter_session_query::facts::fact_cache::FactVersionRef) -> bool {
         match fact {
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash } => {
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id,
+                hash,
+            } => {
                 // Session-tombstoned canonical: the file is DELETED in
                 // this session. A cross-file `FileWholeHash` dependency
                 // on a deleted file is invalid — reject before the lazy
@@ -3063,12 +3093,12 @@ impl crate::resolver_core::StoreView for HostStoreView {
                     None => true,
                 }
             }
-            crate::resolver_core::FactVersionRef::DerivedFactHash {
+            verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
                 canonical_id,
                 kind,
                 hash,
             } => match kind {
-                crate::resolver_core::DerivedFactKind::DirectSource => {
+                verter_session_query::facts::fact_cache::DerivedFactKind::DirectSource => {
                     // `DirectSource` is a content-hash alias for
                     // `FileWholeHash` (it reads the tracked whole hash) —
                     // apply the same tombstone rejection so the
@@ -3088,7 +3118,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
                         None => true,
                     }
                 }
-                crate::resolver_core::DerivedFactKind::Route => self
+                verter_session_query::facts::fact_cache::DerivedFactKind::Route => self
                     .canonical_view(canonical_id)
                     .route_hash
                     .is_some_and(|current| current == *hash),
@@ -3103,23 +3133,23 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // R26 per-domain variants — route to the per-domain
             // validators (which return `false` by trait default;
             // per-domain producers override).
-            crate::resolver_core::FactVersionRef::Parse(p) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(p) => {
                 crate::resolver_core::StoreView::validates_parse_domain(self, p)
             }
-            crate::resolver_core::FactVersionRef::ResolveImports(r) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(r) => {
                 crate::resolver_core::StoreView::validates_resolve_imports_domain(self, r)
             }
-            crate::resolver_core::FactVersionRef::RouteSurface(r) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(r) => {
                 crate::resolver_core::StoreView::validates_route_surface_domain(self, r)
             }
-            crate::resolver_core::FactVersionRef::ProgramAnalysis(fact) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::ProgramAnalysis(fact) => {
                 crate::resolver_core::StoreView::validates_program_analysis_domain(self, fact)
             }
             // Contributor source-env identity fact — routes to the
             // strict per-arm validator (differing / missing /
             // tombstoned / untracked identities all reject; no
             // untracked optimistic accept).
-            crate::resolver_core::FactVersionRef::FileSourceEnv {
+            verter_session_query::facts::fact_cache::FactVersionRef::FileSourceEnv {
                 canonical_id,
                 parse_env_hash,
                 parse_key,
@@ -3137,21 +3167,26 @@ impl crate::resolver_core::StoreView for HostStoreView {
             // still matches — a project-shape change (`tsconfig`,
             // path-alias, SDK, workspace-folder, project-graph) bumps
             // the counter and rejects the entry.
-            crate::resolver_core::FactVersionRef::ProjectGeneration { generation } => {
-                self.snapshot.roots.project_env_root.project_generation == *generation
-            }
+            verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
+                generation,
+            } => self.snapshot.roots.project_env_root.project_generation == *generation,
             // A whole domain's terminal aggregate, minted when that
             // domain's precise bucket outgrew its threshold.
             //
             // Exhaustive by domain, and every arm fails CLOSED: a domain
             // whose stamp this view cannot produce rejects rather than
             // accepting on a coincidence.
-            crate::resolver_core::FactVersionRef::DomainGeneration(aggregate) => self
-                .validates_domain_aggregate_in_population(aggregate, fact, self.view_population()),
-            crate::resolver_core::FactVersionRef::StrictSelfRootWorld(world) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::DomainGeneration(
+                aggregate,
+            ) => self.validates_domain_aggregate_in_population(
+                aggregate,
+                fact,
+                self.view_population(),
+            ),
+            verter_session_query::facts::fact_cache::FactVersionRef::StrictSelfRootWorld(world) => {
                 self.strict_self_root_world_identity() == Some(*world)
             }
-            crate::resolver_core::FactVersionRef::Receipt(receipt) => {
+            verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt) => {
                 receipt.all_leaves(|leaf| crate::resolver_core::StoreView::validates(self, leaf))
             }
         }
@@ -3168,7 +3203,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
     fn derived_hash_for(
         &self,
         canonical_id: &str,
-        kind: crate::resolver_core::DerivedFactKind,
+        kind: verter_session_query::facts::fact_cache::DerivedFactKind,
     ) -> Option<crate::resolver_core::ResolverHash16> {
         HostStoreView::derived_hash(self, canonical_id, kind)
     }
@@ -3199,7 +3234,9 @@ impl crate::resolver_core::StoreView for HostStoreView {
         }
     }
 
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         self.snapshot
             .roots
             .strict_self_root_world(self.view_population())
@@ -3228,7 +3265,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
     fn validates_file_source_env(
         &self,
         canonical_id: &str,
-        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
         parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
@@ -3262,7 +3299,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
     /// shape used for `FileWholeHash` untracked files: a path-precise
     /// `Member`/`MemberPresence` consumer expects the fact to BE in
     /// the registry it recorded, so absence is a discriminating miss.
-    fn validates_parse_domain(&self, fact: &crate::resolver_core::ParseFactRef) -> bool {
+    fn validates_parse_domain(
+        &self,
+        fact: &verter_session_query::facts::fact_cache::ParseFactRef,
+    ) -> bool {
         const ZERO_HASH: Hash16 = [0u8; 16];
         let resolved = self.canonical_view(fact.canonical_id.as_str());
         let facts = match resolved.file_facts.as_ref() {
@@ -3326,10 +3366,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
     ///   discriminator).
     fn validates_resolve_imports_domain(
         &self,
-        fact: &crate::resolver_core::ResolveImportsFactRef,
+        fact: &verter_session_query::facts::fact_cache::ResolveImportsFactRef,
     ) -> bool {
         const ZERO_HASH: Hash16 = [0u8; 16];
-        let crate::resolver_core::ResolveImportsFactRef::Semantic {
+        let verter_session_query::facts::fact_cache::ResolveImportsFactRef::Semantic {
             canonical_id,
             expected_hash,
             ..
@@ -3363,7 +3403,7 @@ impl crate::resolver_core::StoreView for HostStoreView {
     /// (R29 / G1 producer state).
     fn validates_route_surface_domain(
         &self,
-        fact: &crate::resolver_core::RouteSurfaceFactRef,
+        fact: &verter_session_query::facts::fact_cache::RouteSurfaceFactRef,
     ) -> bool {
         use verter_session_query::facts::FactKey;
         match &fact.key {
@@ -3469,10 +3509,10 @@ impl crate::resolver_core::StoreView for HostStoreView {
     /// artifact-missing canonicals and hash mismatches all fail closed.
     fn validates_program_analysis_domain(
         &self,
-        fact: &crate::resolver_core::ProgramAnalysisFactRef,
+        fact: &verter_session_query::facts::fact_cache::ProgramAnalysisFactRef,
     ) -> bool {
         match fact {
-            crate::resolver_core::ProgramAnalysisFactRef::FlowBody {
+            verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {
                 function,
                 flow_body_stable_hash,
             } => {
@@ -4478,7 +4518,7 @@ impl VerterHost {
     /// re-check, so it must cost nothing that scales: no store-view
     /// build, no overlay copy-on-write, no map walk. The view-derived
     /// half is captured ONCE as an
-    /// [`AggregateBasisSeed`](verter_workspace::AggregateBasisSeed) by
+    /// [`AggregateBasisSeed`](verter_session_query::facts::fact_cache::AggregateBasisSeed) by
     /// whoever installs the tracer.
     ///
     /// A clock that reports `None` is IN FLIGHT (an admission or an
@@ -4486,8 +4526,10 @@ impl VerterHost {
     /// domain — the fail-safe direction, and the same answer both reads
     /// get, so an in-flight clock never registers as spurious movement.
     #[must_use]
-    pub(crate) fn live_aggregate_counters(&self) -> verter_workspace::LiveAggregateCounters {
-        verter_workspace::LiveAggregateCounters {
+    pub(crate) fn live_aggregate_counters(
+        &self,
+    ) -> verter_session_query::facts::fact_cache::LiveAggregateCounters {
+        verter_session_query::facts::fact_cache::LiveAggregateCounters {
             content: self.ws().content_generation(),
             source_env: self.ws().source_env_generation(),
             workspace_shape: self.project_type_store.project_generation(),
@@ -5152,12 +5194,12 @@ pub struct AggregateClockReader {
     routes: crate::resolver_core::bracketed_generation::BracketedGenerationRead,
 }
 impl AggregateClockReader {
-    pub(crate) fn live(&self) -> verter_workspace::LiveAggregateCounters {
+    pub(crate) fn live(&self) -> verter_session_query::facts::fact_cache::LiveAggregateCounters {
         // Keep the original two workspace selections and read order. A workspace
         // can be replaced between them; each read observes the live slot.
         let content = { std::sync::Arc::clone(&self.workspace.read()) }.content_generation();
         let source_env = { std::sync::Arc::clone(&self.workspace.read()) }.source_env_generation();
-        verter_workspace::LiveAggregateCounters {
+        verter_session_query::facts::fact_cache::LiveAggregateCounters {
             content,
             source_env,
             workspace_shape: self.project.current(),

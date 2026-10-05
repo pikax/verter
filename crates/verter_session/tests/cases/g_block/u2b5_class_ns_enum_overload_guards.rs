@@ -17,7 +17,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use verter_session::for_tests::ReadSetSignature;
 use verter_session::semantic_query::{
     AmbientNamespaceContext, ClassSurfaceContext, ClassSurfaceSide, EnumContext,
     OverloadSetContext, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
@@ -25,6 +24,7 @@ use verter_session::semantic_query::{
     SemanticSymbolSpace, SignatureKind, ValueRootKey,
 };
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())

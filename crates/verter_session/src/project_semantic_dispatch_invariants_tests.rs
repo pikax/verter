@@ -1539,7 +1539,7 @@ fn relation_unknown_is_never_warm_admitted_and_decided_entries_replay() {
     // project generation so the warm read's generation gate passes.
     graph.insert_relation_payload_for_tests(
         seed_key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         graph.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
         host.project_type_store().current_project_generation(),
@@ -1676,7 +1676,7 @@ fn relation_memo_overflow_returns_result_without_admission() {
     // knob on drop (panic-safe) so the forced state never leaks past the test.
     let _overflow_guard = crate::for_tests::relation_force_overflow_observations_for_tests(
         &host,
-        crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
 
     let before = graph.relation_memo_count();
@@ -2715,8 +2715,7 @@ fn open_generic_expansion_no_longer_short_circuits_to_applied_stub() {
         .and_then(|p| p.parent())
         .expect("workspace parent")
         .to_path_buf();
-    let solve_path =
-        workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
+    let solve_path = workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — the applied-stub \
@@ -2750,8 +2749,7 @@ fn path_projection_through_open_applied_does_not_short_circuit_to_symbolic_index
         .and_then(|p| p.parent())
         .expect("workspace parent")
         .to_path_buf();
-    let solve_path =
-        workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
+    let solve_path = workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — the symbolic_indexed_access \
@@ -2787,8 +2785,7 @@ fn indexed_access_open_skips_counter_retired() {
         .and_then(|p| p.parent())
         .expect("workspace parent")
         .to_path_buf();
-    let audit_path =
-        workspace_root.join("crates/verter_session_query/src/type_solver/audit.rs");
+    let audit_path = workspace_root.join("crates/verter_session_query/src/type_solver/audit.rs");
     assert!(
         !audit_path.exists(),
         "type_solver/audit.rs must not exist; found at {}",
@@ -2807,8 +2804,7 @@ fn budget_domain_solver_resolve_steps_trips_cleanly() {
         .and_then(|p| p.parent())
         .expect("workspace parent")
         .to_path_buf();
-    let solve_path =
-        workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
+    let solve_path = workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — `SolveLimits::max_resolve_steps` \
@@ -2833,8 +2829,7 @@ fn budget_domain_solver_arena_nodes_trips_cleanly() {
         .and_then(|p| p.parent())
         .expect("workspace parent")
         .to_path_buf();
-    let solve_path =
-        workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
+    let solve_path = workspace_root.join("crates/verter_session_query/src/type_solver/solve.rs");
     assert!(
         !solve_path.exists(),
         "type_solver/solve.rs must not exist — `SolveLimits::max_arena_nodes` \
@@ -2968,7 +2963,7 @@ fn type_surface_db_identity_moved_to_semantic_graph_store_memo() {
     // self-version-rooted; a synthetic publish with no self-roots uses
     // an empty carrier + empty self-root set so the warm read validates
     // vacuously.
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::empty();
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::empty();
     let generation = host.project_type_store().current_project_generation();
     graph.insert_relation_payload_for_tests(
         key.clone(),

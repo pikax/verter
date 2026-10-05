@@ -12,7 +12,7 @@
 //! Bubble-up is the dual rule: when a cache cold-compute or warm-hit
 //! returns a value to its caller, the entry's fact signature merges
 //! into any active outer tracer via
-//! [`crate::resolver_core::FactReadSetCell::observe_borrowed_signature`].
+//! [`verter_session_query::facts::fact_read_set::FactReadSetCell::observe_borrowed_signature`].
 //! That keeps the outer compute's observation set complete even when
 //! inner reads come from cache.
 //!
@@ -71,17 +71,19 @@ use std::sync::Arc;
 
 use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
 
-use crate::cache_runtime::{NonAdmissionReason, SignatureAdmission};
-use crate::resolver_core::{
-    FactReadSet, FactReadSetFinalise, FactVersionRef, ParseFactRef, ResolverContext, StoreView,
-    FACT_SIGNATURE_CAP,
-};
+use crate::cache_runtime::NonAdmissionReason;
+use crate::resolver_core::{ResolverContext, StoreView};
 use crate::semantic_query::{DepSignature, DepVersion};
 use crate::types::Hash16;
+use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_session_query::facts::{
+    fact_cache::{FactVersionRef, ParseFactRef},
+    fact_read_set::{FactReadSet, FactReadSetFinalise, FACT_SIGNATURE_CAP},
+};
 
 /// Bracket one cold-compute closure with a push-style fact tracer.
 ///
-/// Installs a fresh [`crate::resolver_core::FactReadSetCell`] onto the
+/// Installs a fresh [`verter_session_query::facts::fact_read_set::FactReadSetCell`] onto the
 /// TLS tracer stack, runs `f`, pops the tracer, and finalises the
 /// observation set. On [`FactReadSetFinalise::Overflow`] emits a
 /// [`crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow`]
@@ -116,7 +118,7 @@ where
 /// finalise it, and report an overflow.
 fn finalise_compute_scope(
     source: &FactTracerBasisSource<'_>,
-    mut read_set: crate::resolver_core::FactReadSet,
+    mut read_set: verter_session_query::facts::fact_read_set::FactReadSet,
 ) -> FactReadSetFinalise {
     note_basis_recheck(source, &mut read_set);
     let finalise = read_set.finalise();
@@ -213,7 +215,7 @@ enum BasisAuthority<'h> {
 
 pub struct FactTracerBasisSource<'h> {
     authority: BasisAuthority<'h>,
-    seed: verter_workspace::AggregateBasisSeed,
+    seed: verter_session_query::facts::fact_cache::AggregateBasisSeed,
 }
 
 impl<'h> FactTracerBasisSource<'h> {
@@ -276,7 +278,7 @@ impl<'h> FactTracerBasisSource<'h> {
                 #[cfg(test)]
                 observations: &host.test_force.force_fact_tracer_overflow_observations,
             },
-            seed: verter_workspace::AggregateBasisSeed::Unvouched,
+            seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         }
     }
 
@@ -303,7 +305,7 @@ impl<'h> FactTracerBasisSource<'h> {
                 #[cfg(test)]
                 observations: &forcing.force_fact_tracer_overflow_observations,
             },
-            seed: verter_workspace::AggregateBasisSeed::Unvouched,
+            seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         }
     }
     fn record_signature_overflow(&self) {
@@ -344,7 +346,7 @@ impl<'h> FactTracerBasisSource<'h> {
     #[must_use]
     pub fn with_fact_tracer_cell<F, R>(&self, f: F) -> (R, FactReadSet)
     where
-        F: FnOnce(&crate::resolver_core::FactReadSetCell) -> R,
+        F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
     {
         crate::resolver_core::resolver_context::with_fact_tracer_cell(self.live_basis(), f)
     }
@@ -358,12 +360,19 @@ impl<'h> FactTracerBasisSource<'h> {
     /// absent on both sides and never registers as spurious movement,
     /// while a clock that becomes unreadable mid-scope correctly does.
     #[must_use]
-    pub(crate) fn live_basis(&self) -> verter_workspace::AggregateGenerations {
+    pub(crate) fn live_basis(
+        &self,
+    ) -> verter_session_query::facts::fact_cache::AggregateGenerations {
         match &self.authority {
             BasisAuthority::Bound { clocks, .. } => {
-                verter_workspace::AggregateGenerations::from_seed(&self.seed, &clocks.live())
+                verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
+                    &self.seed,
+                    &clocks.live(),
+                )
             }
-            BasisAuthority::Unbound { .. } => verter_workspace::AggregateGenerations::default(),
+            BasisAuthority::Unbound { .. } => {
+                verter_session_query::facts::fact_cache::AggregateGenerations::default()
+            }
         }
     }
 }
@@ -390,7 +399,7 @@ fn note_basis_recheck(source: &FactTracerBasisSource<'_>, read_set: &mut FactRea
 #[inline]
 fn note_basis_recheck_on_cell(
     source: &FactTracerBasisSource<'_>,
-    cell: &crate::resolver_core::FactReadSetCell,
+    cell: &verter_session_query::facts::fact_read_set::FactReadSetCell,
 ) {
     if !cell.has_aggregate_basis() {
         return;
@@ -609,7 +618,7 @@ pub(crate) use {named_cacheability_scope, named_fact_tracer};
 /// and receiving the borrow. The `cell` field stays private, so the token
 /// cannot be constructed by struct literal either.
 pub struct CacheabilityProbe<'t> {
-    cell: &'t crate::resolver_core::FactReadSetCell,
+    cell: &'t verter_session_query::facts::fact_read_set::FactReadSetCell,
     /// The scope's basis source, RETAINED so [`Self::non_cacheable`] can
     /// re-compose the live basis in `O(1)`. Held because this probe is an
     /// ADMISSION BOUNDARY in its own right — it can authorise a write
@@ -1403,7 +1412,7 @@ pub(crate) fn bound_completed_structural_carrier(
 ///   is valid but the path-precise signature is too large to admit
 ///   safely. Cache consumers route overflowed values through
 ///   `ComputeAdmission::ReturnOnly` (return without admitting).
-pub use verter_workspace::ReadSetSignature;
+pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 pub(crate) trait ReadSetSignatureExt {
     fn validate_with_self_roots(
@@ -1549,7 +1558,7 @@ impl ReadSetSignatureExt for ReadSetSignature {
     fn records_negative_resolution_fact(&self) -> bool {
         self.facts.iter().any(|fact| match fact {
             FactVersionRef::ResolveImports(
-                crate::resolver_core::ResolveImportsFactRef::Semantic {
+                verter_session_query::facts::fact_cache::ResolveImportsFactRef::Semantic {
                     key:
                         FactKey::ResolvedImportClause {
                             resolved_canonical, ..

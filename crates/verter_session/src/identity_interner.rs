@@ -19,7 +19,7 @@
 //!
 //! Bounding: the pool holds NO private byte quota. Every pooled entry's
 //! payload is reserved against the one shared
-//! [`SemanticRetentionAccount`](crate::semantic_retention_account::SemanticRetentionAccount),
+//! [`SemanticRetentionAccount`](verter_session_query::retention::SemanticRetentionAccount),
 //! so the pool's growth competes with every other host-owned store for
 //! the same ratified aggregate ceiling instead of carrying a parallel
 //! budget beside it.
@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::semantic_retention_account::{
+use verter_session_query::retention::{
     ChargeClass, RetentionAdmission, RetentionCharge, SemanticRetentionAccount,
 };
 
@@ -205,8 +205,8 @@ impl std::fmt::Debug for IdentityInterner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_retention_account::RetentionLimits;
     use std::sync::Arc;
+    use verter_session_query::retention::RetentionLimits;
 
     /// A private account with a tight ceiling, so a pressure test never
     /// perturbs (or is perturbed by) a concurrently-running test.
@@ -336,7 +336,7 @@ mod tests {
         fn witness(
             entries: &std::collections::HashMap<
                 Arc<str>,
-                crate::semantic_retention_account::RetentionCharge,
+                verter_session_query::retention::RetentionCharge,
                 std::collections::hash_map::RandomState,
             >,
         ) -> usize {

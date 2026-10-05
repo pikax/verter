@@ -288,7 +288,7 @@ pub trait RouteLookup {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     );
 
     fn resolve_named_type_export_target_shallow(
@@ -571,7 +571,7 @@ pub trait OwnedLowering {
         observed_hash: crate::types::Hash16,
         key: verter_session_query::facts::registry::FactKey,
         lane: verter_session_query::facts::registry::FactLane,
-    ) -> Option<super::ParseFactRef>;
+    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef>;
     fn indexed_flow_source(
         &self,
         canonical: &str,

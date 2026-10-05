@@ -528,10 +528,10 @@ fn member_shape_peek_or_compute(
             parse_fact,
             materialized_for_closure.dep_signature(),
         ) {
-            crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
                 Some((materialized_for_closure, sig.facts))
             }
-            crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+            verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => None,
         }
     });
             admitted.unwrap_or(materialized_with_gate_fence)
@@ -659,8 +659,8 @@ fn admit_member_shape_if_possible(
         parse_fact,
         value.dep_signature(),
     ) {
-        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
-        crate::cache_runtime::SignatureAdmission::NonCacheable(_) => return value,
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => sig.facts,
+        verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => return value,
     };
     owner_scope.admit_computed(key, value, fact_sig)
 }

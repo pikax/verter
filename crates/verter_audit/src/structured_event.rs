@@ -413,7 +413,7 @@ pub enum StructuredAuditEvent {
         /// attempted to admit.
         candidate_size: u32,
         /// Configured cap value at admission time. Today this
-        /// equals `verter_session::resolver_core::FACT_SIGNATURE_CAP`
+        /// equals `verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP`
         /// (1024); the field is recorded explicitly so the audit
         /// trail survives future cap tuning.
         cap: u32,

@@ -20,8 +20,8 @@ use std::cell::{Cell, RefCell};
 
 use smallvec::SmallVec;
 
-use crate::resolver_core::fact_read_set::NonCacheablePropagation;
-use crate::resolver_core::{FactReadSetCell, FactVersionRef};
+use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetCell};
 
 thread_local! {
     /// Per-thread tracer stack.
@@ -95,7 +95,12 @@ impl FactReadRecorder {
 /// [`mark_evidence`]); two of them, taken when a computation began and when
 /// it ended, bound what it observed.
 pub(crate) struct EvidenceMarks {
-    tracers: SmallVec<[(*const FactReadSetCell, verter_workspace::ObservationMark); 8]>,
+    tracers: SmallVec<
+        [(
+            *const FactReadSetCell,
+            verter_session_query::facts::fact_read_set::ObservationMark,
+        ); 8],
+    >,
     recorders: SmallVec<[(*const FactReadRecorder, usize); 4]>,
 }
 
@@ -332,7 +337,7 @@ pub(super) fn note_non_cacheable_read(propagation: NonCacheablePropagation) {
 #[cfg(test)]
 mod propagation_tests {
     use super::*;
-    use crate::resolver_core::fact_read_set::NonCacheablePropagation;
+    use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
 
     #[test]
     fn local_only_refusal_marks_only_the_owning_tracer() {

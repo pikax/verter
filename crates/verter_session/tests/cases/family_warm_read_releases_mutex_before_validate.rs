@@ -27,13 +27,12 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use verter_session::for_tests::{
-    ReadSetSignature, SemanticGraphStore, VALIDATE_RUNNING_PROBE_TEST_LOCK,
-};
+use verter_session::for_tests::{SemanticGraphStore, VALIDATE_RUNNING_PROBE_TEST_LOCK};
 use verter_session::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
 };
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// The warm-read fast path snapshots candidates under `entries`,
 /// releases the lock, and ONLY THEN calls `MemoEntry::validate` on each

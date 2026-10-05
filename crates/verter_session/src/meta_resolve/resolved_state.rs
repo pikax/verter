@@ -65,7 +65,7 @@ pub struct ResolvedComponentMetaState {
     /// Expanded types (populated in `Expanded` mode only).
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
     /// Semantic fact versions consumed while producing this resolved state.
-    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    pub fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     /// Non-semantic compute audit captured only when native audit is enabled.
     pub compute_audit: Option<ResolvedComponentMetaComputeAudit>,
     /// Surface-id sidecar. Populated only
@@ -123,7 +123,7 @@ impl ResolvedComponentMetaState {
     /// append in producer order with deterministic equality-based dedup.
     pub(crate) fn merge_extraction_fact_versions(
         &mut self,
-        extraction_facts: Option<&[crate::resolver_core::FactVersionRef]>,
+        extraction_facts: Option<&[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) -> bool {
         let Some(extraction_facts) = extraction_facts else {
             return false;

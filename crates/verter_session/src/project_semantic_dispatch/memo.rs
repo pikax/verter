@@ -6,14 +6,16 @@ use crate::cache_runtime::node::{lookup, ArtifactNode, ComputeCtx, QueryFlightKe
 use crate::cache_runtime::singleflight::InflightTable;
 use crate::cache_runtime::{CacheAdmission, CacheEntry, NonAdmissionReason};
 use crate::component_meta_caches::*;
-use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::FactValidation;
-use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration};
+use crate::resolver_core::ResolvedTypeDeclaration;
 use dashmap::DashMap;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 /// Selected output storage; there are no raw-resource accessors.
 pub(crate) struct SingleEntryAttachment<'a, K: Eq + std::hash::Hash + Clone, V> {
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
@@ -672,7 +674,7 @@ impl MemoPublish<'_, ImportedRegistryDb> {
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(entry) => {
                     CacheAdmission::Cacheable {
                         value: entry.value,
-                        signature: crate::fact_signature_helpers::ReadSetSignature::new(
+                        signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
                             Arc::clone(&entry.fact_dep_signature),
                         ),
                         self_root_canonicals: self_roots,
@@ -1293,10 +1295,12 @@ impl super::ProjectSemanticDispatch<'_> {
             // is present (file removed), record a sentinel zero hash so
             // the validator picks up the absence on the next read.
             let whole_hash = ir.as_ref().map(|ir| ir.whole_hash).unwrap_or_default();
-            ctx.observe(crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: decl_canonical_for_compute.as_ref().to_string(),
-                hash: whole_hash,
-            });
+            ctx.observe(
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: decl_canonical_for_compute.as_ref().to_string(),
+                    hash: whole_hash,
+                },
+            );
             // The "no override" determination is a structural query
             // into the interface members. For the producer's
             // substrate-correctness contract, the
@@ -1329,7 +1333,9 @@ impl super::ProjectSemanticDispatch<'_> {
         // shared no-override entry whose facts validate against the live
         // view. Decline to publish; the consumer takes the slow path.
         match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+                fact_dep_signature,
+            ) => {
                 if !no_override {
                     // The file declares `interface AppConfig` — we
                     // cannot prove "no override" without walking the
@@ -1344,7 +1350,7 @@ impl super::ProjectSemanticDispatch<'_> {
                     },
                 ))
             }
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
                 self.binding
                     .observers
                     .provenance
@@ -1352,7 +1358,7 @@ impl super::ProjectSemanticDispatch<'_> {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 None
             }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
                 self.binding
                     .observers
                     .provenance
@@ -1363,7 +1369,9 @@ impl super::ProjectSemanticDispatch<'_> {
             // Refuses like an overflow and is counted as neither: the
             // overflow counter is a SIZE observable and a stability refusal
             // must not inflate it.
-            crate::resolver_core::FactReadSetFinalise::MutationUnstable => None,
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+                None
+            }
         }
     }
 }
@@ -1428,7 +1436,11 @@ impl super::ProjectSemanticDispatch<'_> {
                     FactLane::Semantic,
                 ) {
                     Some(fact_ref) => {
-                        ctx.observe(crate::resolver_core::FactVersionRef::Parse(fact_ref));
+                        ctx.observe(
+                            verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+                                fact_ref,
+                            ),
+                        );
                     }
                     None => {
                         all_pinned = false;
@@ -1546,7 +1558,9 @@ impl super::ProjectSemanticDispatch<'_> {
         // store — the fresh artifact is returned without admission.
         let admissible = serve.store_published && all_pinned;
         match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) if admissible => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+                fact_dep_signature,
+            ) if admissible => {
                 let entry = Arc::new(BinderIdentityFactsEntry {
                     facts,
                     read_set_signature: ReadSetSignature::new(fact_dep_signature),
@@ -1554,15 +1568,15 @@ impl super::ProjectSemanticDispatch<'_> {
                 store.insert(key, Arc::clone(&entry));
                 Some(entry)
             }
-            crate::resolver_core::FactReadSetFinalise::Ok(fact_dep_signature) => {
-                Some(Arc::new(BinderIdentityFactsEntry {
-                    facts,
-                    read_set_signature: ReadSetSignature::new(fact_dep_signature),
-                }))
-            }
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
-            | crate::resolver_core::FactReadSetFinalise::Overflow
-            | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(
+                fact_dep_signature,
+            ) => Some(Arc::new(BinderIdentityFactsEntry {
+                facts,
+                read_set_signature: ReadSetSignature::new(fact_dep_signature),
+            })),
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
+            | verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+            | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
                 Some(Arc::new(BinderIdentityFactsEntry {
                     facts,
                     read_set_signature: ReadSetSignature::overflow(),
@@ -1624,7 +1638,7 @@ pub(crate) fn read_framework_surface<K, B, F>(
 where
     K: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
     B: Send + Sync + 'static,
-    F: FnOnce(&[crate::resolver_core::FactVersionRef]) -> bool,
+    F: FnOnce(&[verter_session_query::facts::fact_cache::FactVersionRef]) -> bool,
 {
     let candidate = store.candidate(key)?;
     if candidate.validated_at_generation != generation
@@ -1812,11 +1826,11 @@ impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentM
     where
         Compute: FnOnce() -> R,
         Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
-        P: crate::semantic_retention_account::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint,
     {
         let (value, read_set) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
-            verter_workspace::AggregateGenerations::from_seed(
-                &verter_workspace::AggregateBasisSeed::Unvouched,
+            verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
+                &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
                 &self.facts.aggregate_clock_reader().live(),
             ),
             |_cell| compute(),
@@ -1824,51 +1838,56 @@ impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentM
         let finalise = read_set.finalise();
         let mut admitted = None;
         match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => match decide(&value) {
-                ComponentMetaPublishDecision::Publish {
-                    key,
-                    owner_whole_hash,
-                    payload,
-                    validated_at_generation,
-                } => {
-                    let admitted_facts = crate::component_meta_result_db::strip_owner_route_fact(
-                        &key.owner_canonical,
-                        &facts,
-                    );
-                    let entry = Arc::new(ComponentMetaResultEntry {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
+                match decide(&value) {
+                    ComponentMetaPublishDecision::Publish {
+                        key,
+                        owner_whole_hash,
                         payload,
-                        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
-                            admitted_facts,
-                        ),
                         validated_at_generation,
-                    });
-                    // A retention refusal leaves `admitted` unset: the
-                    // caller keeps its complete value, and no evidence
-                    // carrier claims an entry the cache never stored.
-                    if self
-                        .db
-                        .publish_core(key.clone(), owner_whole_hash, entry.as_ref().clone())
-                    {
-                        admitted = Some(AdmittedComponentMetaResult {
-                            key,
-                            owner_whole_hash,
-                            entry,
+                    } => {
+                        let admitted_facts =
+                            crate::component_meta_result_db::strip_owner_route_fact(
+                                &key.owner_canonical,
+                                &facts,
+                            );
+                        let entry = Arc::new(ComponentMetaResultEntry {
+                            payload,
+                            read_set_signature:
+                                verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                                    admitted_facts,
+                                ),
+                            validated_at_generation,
                         });
+                        // A retention refusal leaves `admitted` unset: the
+                        // caller keeps its complete value, and no evidence
+                        // carrier claims an entry the cache never stored.
+                        if self.db.publish_core(
+                            key.clone(),
+                            owner_whole_hash,
+                            entry.as_ref().clone(),
+                        ) {
+                            admitted = Some(AdmittedComponentMetaResult {
+                                key,
+                                owner_whole_hash,
+                                entry,
+                            });
+                        }
                     }
+                    ComponentMetaPublishDecision::ReturnOnly(reason) => {
+                        crate::cache_runtime::admission::propagate_non_admission(reason);
+                        tracing::debug!(
+                            target: "verter::audit::record",
+                            file = %canonical,
+                            path = %path_label,
+                            reason = %reason,
+                            "skipping component-meta cache promotion: typed admission refusal",
+                        );
+                    }
+                    ComponentMetaPublishDecision::NoValue => {}
                 }
-                ComponentMetaPublishDecision::ReturnOnly(reason) => {
-                    crate::cache_runtime::admission::propagate_non_admission(reason);
-                    tracing::debug!(
-                        target: "verter::audit::record",
-                        file = %canonical,
-                        path = %path_label,
-                        reason = %reason,
-                        "skipping component-meta cache promotion: typed admission refusal",
-                    );
-                }
-                ComponentMetaPublishDecision::NoValue => {}
-            },
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => {
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
                 let reason = crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance;
                 crate::cache_runtime::admission::propagate_non_admission(reason);
                 tracing::debug!(
@@ -1878,7 +1897,7 @@ impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentM
                     "skipping component-meta cache promotion: cold compute consumed a non-cacheable read",
                 );
             }
-            crate::resolver_core::FactReadSetFinalise::Overflow => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
                 let reason = crate::cache_runtime::NonAdmissionReason::SignatureOverflow;
                 crate::cache_runtime::admission::propagate_non_admission(reason);
                 tracing::debug!(
@@ -1888,7 +1907,7 @@ impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentM
                     "skipping component-meta cache promotion: fact-signature overflowed cap",
                 );
             }
-            crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
                 let reason = crate::cache_runtime::NonAdmissionReason::MutationUnstable;
                 crate::cache_runtime::admission::propagate_non_admission(reason);
                 tracing::debug!(
@@ -1915,7 +1934,7 @@ impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentM
     where
         Compute: FnOnce() -> R,
         Decide: FnOnce(&R) -> ComponentMetaPublishDecision<P>,
-        P: crate::semantic_retention_account::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint,
     {
         self.compute_and_admit_with_entry(canonical, path_label, compute, decide)
             .0

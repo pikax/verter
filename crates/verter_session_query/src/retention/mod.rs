@@ -70,6 +70,8 @@
 //! decides whether the process may retain the entry at all, so an
 //! imprecise estimate costs hit rate, never correctness.
 
+pub mod resolution_charge;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -707,16 +709,16 @@ impl Drop for RetentionCharge {
 /// it: each overlay-lane answer and each interned overlay value version is
 /// a [`ChargeClass::Retained`] charge, refused under pressure like any
 /// other warm cache entry (the workspace then serves the answer uncached).
-pub(crate) struct ResolutionRetention(pub(crate) Arc<SemanticRetentionAccount>);
+pub struct ResolutionRetention(pub Arc<SemanticRetentionAccount>);
 
-impl verter_workspace::ResolutionRetentionAccount for ResolutionRetention {
+impl crate::retention::resolution_charge::ResolutionRetentionAccount for ResolutionRetention {
     fn reserve_retained(
         &self,
         bytes: usize,
-    ) -> Option<verter_workspace::ResolutionRetentionCharge> {
+    ) -> Option<crate::retention::resolution_charge::ResolutionRetentionCharge> {
         self.0
             .reserve(ChargeClass::Retained, bytes)
             .admitted()
-            .map(verter_workspace::ResolutionRetentionCharge::new)
+            .map(crate::retention::resolution_charge::ResolutionRetentionCharge::new)
     }
 }

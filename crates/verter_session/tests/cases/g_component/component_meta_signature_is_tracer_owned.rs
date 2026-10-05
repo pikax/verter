@@ -33,8 +33,11 @@
 
 use std::sync::Arc;
 
-use verter_session::resolver_core::{DerivedFactKind, FactReadSetFinalise, FactVersionRef};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::{
+    fact_cache::{DerivedFactKind, FactVersionRef},
+    fact_read_set::FactReadSetFinalise,
+};
 
 fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))

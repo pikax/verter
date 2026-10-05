@@ -35,7 +35,7 @@ use rustc_hash::FxHashMap;
 use super::SemanticGraphStore;
 use crate::semantic_query::semantic_context::SemanticUnionMembersKey;
 use crate::semantic_query::SemanticNodeId;
-use crate::semantic_retention_account::{ChargeClass, RetentionAdmission, RetentionCharge};
+use verter_session_query::retention::{ChargeClass, RetentionAdmission, RetentionCharge};
 
 /// The most union views one store keeps: the bound its semantic memo keeps
 /// on its families.
@@ -197,7 +197,7 @@ mod tests {
     use crate::semantic_query::semantic_context::SemanticContext;
     use crate::semantic_query::stable_key::semantic_union_members;
     use crate::semantic_query::{LiteralValue, SemanticNodeData, SemanticNodeId};
-    use crate::semantic_retention_account::{RetentionLimits, SemanticRetentionAccount};
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
 
     /// The most views the store may keep: the bound its memo keeps on its
     /// families.

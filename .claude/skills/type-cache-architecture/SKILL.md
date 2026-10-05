@@ -103,7 +103,7 @@ the cache-runtime overhaul and any feature admitting cache entries.
 
 ## Aggregate retention account
 
-`crates/verter_session/src/semantic_retention_account.rs` owns
+`crates/verter_session_query/src/retention/mod.rs` owns
 `SemanticRetentionAccount` — the single process-local byte account every
 host-owned semantic store charges. One account per PROCESS (not per
 project): `ProjectTypeStore::retention_account()` hands back

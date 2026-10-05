@@ -335,7 +335,7 @@ fn cold_seed_context_fails_warm_probes_closed() {
         .shallow_file_state(&canonical)
         .expect("decl.ts must have shallow state")
         .whole_hash;
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: canonical.clone(),
         hash: whole_hash,
     };
@@ -495,7 +495,7 @@ fn session_cold_seed_context_fails_warm_probes_closed() {
         .shallow_file_state(&canonical)
         .expect("decl.ts must have shallow state")
         .whole_hash;
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: canonical.clone(),
         hash: whole_hash,
     };
@@ -591,7 +591,7 @@ fn view_bound_cold_seed_currentness_comes_from_its_own_read() {
         .shallow_file_state(&canonical)
         .expect("decl.ts must have shallow state")
         .whole_hash;
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: canonical.clone(),
         hash: whole_hash,
     };
@@ -714,7 +714,7 @@ fn fallthrough_cold_compute_node_cache_validation_fails_closed_under_churn() {
         .shallow_file_state(&canonical)
         .expect("decl.ts must have shallow state")
         .whole_hash;
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: canonical.clone(),
         hash: whole_hash,
     };

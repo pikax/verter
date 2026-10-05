@@ -295,7 +295,7 @@ impl SemanticGraphStore {
     pub fn insert_relation_payload_for_tests(
         &self,
         key: crate::semantic_query::RelateMemoKey,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
+        carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         payload: crate::semantic_query::RelationPayload,
         validated_at_generation: u64,
@@ -323,7 +323,7 @@ impl SemanticGraphStore {
         &self,
         host: &crate::VerterHost,
         key: crate::semantic_query::RelateMemoKey,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
+        carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         payload: crate::semantic_query::RelationPayload,
         validated_at_generation: u64,

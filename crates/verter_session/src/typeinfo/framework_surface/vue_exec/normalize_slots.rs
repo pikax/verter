@@ -606,10 +606,10 @@ mod raise_miss_normalization_tests {
 
         let member = raise_miss_member();
 
-        let (binding, facts) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                slot_binding_field(dispatch, &member, "item", None)
-            });
+        let (binding, facts) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || slot_binding_field(dispatch, &member, "item", None),
+        );
 
         assert!(
             binding.type_annotation.is_none(),
@@ -622,7 +622,7 @@ mod raise_miss_normalization_tests {
         assert!(
             matches!(
                 facts.finalise(),
-                crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
             ),
             "a raise miss must finalise NON-CACHEABLE so the torn result is never admitted warm"
         );

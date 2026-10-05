@@ -13,8 +13,8 @@ use verter_session::for_tests::{
     install_fact_tracer_for_tests, observe_fan_out_borrowed_for_tests,
     read_signature_overflow_at_install,
 };
-use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use verter_session::VerterHost;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 
 fn sig_fact(n: u32) -> FactVersionRef {
     FactVersionRef::FileWholeHash {

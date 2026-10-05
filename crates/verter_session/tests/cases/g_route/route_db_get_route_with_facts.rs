@@ -1,7 +1,8 @@
 //! RED test: `RouteDb::get_route_with_facts` returns `(Arc<RouteResult>, Arc<[FactVersionRef]>)`
 //! on a warm hit and `None` on a cold miss.
 
-use verter_session::resolver_core::{FactVersionRef, PermissiveStoreView, RouteDb, RouteResult};
+use verter_session::resolver_core::{PermissiveStoreView, RouteDb, RouteResult};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
     verter_session::resolver_core::RouteNameKey::new(

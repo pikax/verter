@@ -11,9 +11,8 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use rustc_hash::FxHashMap;
-use verter_session::resolver_core::{
-    BarrelRouteSurface, FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView,
-};
+use verter_session::resolver_core::{BarrelRouteSurface, PermissiveStoreView, StoreView};
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
 use verter_session_query::facts::{FactKey, FactLane};
 

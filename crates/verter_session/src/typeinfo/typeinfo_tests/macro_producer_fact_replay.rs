@@ -69,10 +69,10 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use crate::typeinfo::vue_macro_codegen::{MacroFactFootprint, VueMacroCodegenDemand};
 use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
 use crate::VerterHost;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 
 const INNER: &str = "/proj/inner.ts";
 const PROPS: &str = "/proj/props.ts";
@@ -276,8 +276,9 @@ fn both_flight_arms_replay_the_producer_footprint() {
     /// observation set. `FactReadSet` is `!Send`, so the seal happens on the
     /// producing thread and only the `Arc`-backed finalise crosses back.
     fn traced_produce(host: &VerterHost) -> FactReadSetFinalise {
-        let ((), read_set) =
-            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+        let ((), read_set) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || {
                 crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
                     let _ = host.produce_vue_macro_codegen_with_ctx(
                         ctx,
@@ -285,7 +286,8 @@ fn both_flight_arms_replay_the_producer_footprint() {
                         VueMacroCodegenDemand::Runtime,
                     );
                 });
-            });
+            },
+        );
         read_set.finalise()
     }
 
@@ -416,10 +418,10 @@ fn factless_footprints_refuse_rooting_instead_of_replaying_nothing() {
             canonicals.is_empty(),
             "the {arm} arm exposes no transitive canonicals: {canonicals:?}"
         );
-        let ((), read_set) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                footprint.replay()
-            });
+        let ((), read_set) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || footprint.replay(),
+        );
         let refused = read_set.non_cacheable_read_observed();
         let sealed_empty = matches!(
             read_set.finalise(),
@@ -455,21 +457,25 @@ fn cancelled_producer_handoff_refuses_the_consumer_rooting() {
         crate::request_context::RequestContext::new(9101, Arc::from(OWNER), false, None);
     cancelled.cancel();
 
-    let ((output, uncancelled_refused), read_set) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+    let ((output, uncancelled_refused), read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
             // Control FIRST, inside the same tracer: an ordinary complete handoff
             // must NOT refuse, so the refusal asserted below is attributable to the
             // cancelled handoff rather than to anything the fixture reads.
             let uncancelled_refused = {
-                let ((), probe) =
-                    host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                let ((), probe) = host.with_fact_tracer(
+                    verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                    || {
                         let _ = produce_runtime(&host);
-                    });
+                    },
+                );
                 probe.non_cacheable_read_observed()
             };
             let _guard = crate::request_context::RequestContextGuard::install(cancelled);
             (try_produce_runtime(&host), uncancelled_refused)
-        });
+        },
+    );
 
     assert!(
         !uncancelled_refused,
@@ -507,10 +513,10 @@ fn non_cacheable_footprint_replays_facts_and_the_refusal() {
         "a non-cacheable set keeps its own typed arm: {footprint:?}"
     );
 
-    let ((), read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            footprint.replay()
-        });
+    let ((), read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || footprint.replay(),
+    );
     assert!(
         read_set.non_cacheable_read_observed(),
         "the producer's refusal must reach the consuming thread"
@@ -541,10 +547,10 @@ fn rooted_footprint_replays_facts_without_refusing() {
     assert_eq!(canonicals, vec![PROPS.to_string()]);
     assert!(matches!(footprint, MacroFactFootprint::Rooted(_)));
 
-    let ((), read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            footprint.replay()
-        });
+    let ((), read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || footprint.replay(),
+    );
     assert!(
         !read_set.non_cacheable_read_observed(),
         "a publishable producer footprint must not taint its consumer"

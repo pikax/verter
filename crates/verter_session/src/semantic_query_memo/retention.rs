@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::semantic_retention_account::{
+use verter_session_query::retention::{
     ChargeClass, RetainedFootprint, RetentionAdmission, RetentionCharge, RetentionRefusal,
     SemanticRetentionAccount, StoreAccount,
 };

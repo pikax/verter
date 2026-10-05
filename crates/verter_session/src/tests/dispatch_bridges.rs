@@ -10,8 +10,8 @@
 //! The module is gated `cfg(any(test, feature = "test-support"))` at its
 //! `lib.rs` declaration site, so release builds never include it.
 
-use crate::resolver_core::FactVersionRef;
 use crate::semantic_query::DepSignature;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// Convert a dispatch signature through the production bridge.
 pub fn dispatch_dep_signature_facts_for_tests(sig: &DepSignature) -> Vec<FactVersionRef> {

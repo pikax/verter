@@ -58,9 +58,7 @@ fn record_surface_for(index: usize, revision: usize) -> RecordSurface {
 
 /// A private account, so retention assertions read only THIS test's activity.
 fn private_account() -> Arc<SemanticRetentionAccount> {
-    SemanticRetentionAccount::new(
-        verter_session::semantic_retention_account::RetentionLimits::defaults(),
-    )
+    SemanticRetentionAccount::new(verter_session_query::retention::RetentionLimits::defaults())
 }
 
 /// Open, edit a few times, then close one document — one editing cycle.

@@ -162,11 +162,12 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         resolved_name: &str,
     ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
         let serve = self.ctx.ensure_indexed_ready_serve(canonical_source)?;
-        self.ctx
-            .observe(crate::resolver_core::FactVersionRef::FileWholeHash {
+        self.ctx.observe(
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_source.to_owned(),
                 hash: serve.indexed.whole_hash,
-            });
+            },
+        );
         // Record the declaration file before the symbol lookup so a genuine
         // miss is invalidated when a later edit adds the requested symbol.
         let header = serve
@@ -615,7 +616,7 @@ impl crate::resolver_core::ComponentMetaResolverHost
         &self,
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
-    ) -> Vec<crate::resolver_core::FactVersionRef> {
+    ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
         self.host
             .current_dependency_fact_versions(canonical, tracked_deps)
     }
@@ -802,10 +803,12 @@ pub(crate) fn read_full_source(
     // version tear-free, `ensure_indexed_ready_serve` is overlay-aware and
     // propagates a fenced serve as non-cacheable through the active tracer.
     let serve = ctx.ensure_indexed_ready_serve(canonical_source)?;
-    ctx.observe(crate::resolver_core::FactVersionRef::FileWholeHash {
-        canonical_id: canonical_source.to_owned(),
-        hash: serve.indexed.whole_hash,
-    });
+    ctx.observe(
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: canonical_source.to_owned(),
+            hash: serve.indexed.whole_hash,
+        },
+    );
     Some(serve.indexed.raw_source.to_string())
 }
 
@@ -992,10 +995,12 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // Classify the parser-authored paths against the exact request-bound
     // shallow state. No lowered-TypeExpr dependency re-walk is permitted.
     let serve = ctx.ensure_indexed_ready_serve(canonical_source)?;
-    ctx.observe(crate::resolver_core::FactVersionRef::FileWholeHash {
-        canonical_id: canonical_source.to_owned(),
-        hash: serve.indexed.whole_hash,
-    });
+    ctx.observe(
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: canonical_source.to_owned(),
+            hash: serve.indexed.whole_hash,
+        },
+    );
     let shallow = &serve.indexed.shallow_state;
     let classified = shallow.classify_dependency_paths(
         verter_type_expr::TopLevelOwnerId::ordinary_file(),

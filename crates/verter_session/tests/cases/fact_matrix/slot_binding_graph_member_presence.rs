@@ -9,8 +9,8 @@
 #![cfg(test)]
 
 use verter_session::for_tests::install_fact_tracer_for_tests;
-use verter_session::resolver_core::FactReadSetFinalise;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_session_query::facts::registry::{InternedName, SymbolSpace};
 use verter_session_query::facts::{FactKey, FactLane};
 
@@ -18,8 +18,8 @@ use verter_session_query::facts::{FactKey, FactLane};
 fn slot_binding_graph_signature_carries_member_presence() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
-    let presence_fact = verter_session::resolver_core::FactVersionRef::Parse(
-        verter_session::resolver_core::ParseFactRef {
+    let presence_fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+        verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: "/src/slots.ts".to_owned(),
             key: FactKey::MemberPresence {
                 exporter: InternedName::from("Slots"),

@@ -20,9 +20,9 @@ use rustc_hash::FxHashMap;
 use crate::resolved_import_facts::{
     ResolvedImportFacts, ResolvedImportFactsKey, RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
-use crate::resolver_core::FactVersionRef;
 use crate::types::{DependencyResolution, FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -230,7 +230,7 @@ fn clearing_the_store_advances_the_domain_generation() {
 /// plus an extra for the eviction.
 #[test]
 fn eviction_rides_the_insertion_that_causes_it_rather_than_advancing_separately() {
-    use verter_workspace::CANDIDATE_CAP;
+    use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
     let host = seeded_host();
     let db = host.project_type_store().resolved_import_facts();

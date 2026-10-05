@@ -1141,10 +1141,10 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
                     use crate::request_context::{RequestContext, RequestContextGuard};
                     let rctx = RequestContext::new(1, Arc::from(owner), false, None);
                     let _req_guard = RequestContextGuard::install(rctx);
-                    let (result, read_set) = host
-                        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                            host.ensure_indexed_ready(owner)
-                        });
+                    let (result, read_set) = host.with_fact_tracer(
+                        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                        || host.ensure_indexed_ready(owner),
+                    );
                     let non_cacheable = read_set.non_cacheable_read_observed();
                     let result_is_partial =
                         crate::request_context::current_request_result_is_partial();
@@ -1232,10 +1232,10 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
     // Negative control: a clean (published) serve marks NO non-cacheability.
     *host.materialize_seam_hook.lock() = None;
     *host.flight_retry_seam_hook.lock() = None;
-    let (clean, clean_read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.ensure_indexed_ready(owner)
-        });
+    let (clean, clean_read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.ensure_indexed_ready(owner),
+    );
     assert!(clean.is_some(), "the clean re-run must serve");
     assert!(
         !clean_read_set.non_cacheable_read_observed(),
@@ -1738,8 +1738,10 @@ fn route_fact_capture_is_side_effect_free() {
 
     // 1. NEVER-MATERIALISED canonical: capture observes nothing, builds
     //    nothing.
-    let captured =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    let captured = host.current_derived_fact_hash(
+        owner,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert!(
         captured.is_none(),
         "a never-materialised canonical has no Route fact (FileWholeHash \
@@ -1760,8 +1762,10 @@ fn route_fact_capture_is_side_effect_free() {
     moved_env[0] = moved_env[0].wrapping_add(1);
     *host.parse_env_override.lock() = Some(moved_env);
     host.provenance().reset();
-    let stale_capture =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    let stale_capture = host.current_derived_fact_hash(
+        owner,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert!(
         stale_capture.is_none(),
         "a stale surface's capture must decline (None), never refresh it",
@@ -1783,8 +1787,11 @@ fn route_fact_capture_is_side_effect_free() {
     );
     host.provenance().reset();
     assert!(
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route)
-            .is_some(),
+        host.current_derived_fact_hash(
+            owner,
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route
+        )
+        .is_some(),
         "a route mutation does not stale a PARSE artifact — its Route \
          digest keeps answering",
     );
@@ -1798,8 +1805,10 @@ fn route_fact_capture_is_side_effect_free() {
         "import type { P } from './dep';\nexport type Owner = { p: P };\n",
     );
     host.provenance().reset();
-    let content_stale_capture =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    let content_stale_capture = host.current_derived_fact_hash(
+        owner,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert!(
         content_stale_capture.is_none(),
         "a content-stale candidate's capture must decline (None), never \
@@ -1813,8 +1822,10 @@ fn route_fact_capture_is_side_effect_free() {
         .ensure_indexed_ready(owner)
         .expect("owner must re-materialise");
     host.provenance().reset();
-    let current_capture =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    let current_capture = host.current_derived_fact_hash(
+        owner,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert_eq!(
         current_capture,
         current.route_surface_hash(),
@@ -1844,12 +1855,14 @@ fn route_fact_producer_matches_validator_snapshot() {
 
     let view = host.resolver_store_view_read().into_owned_view();
     for canonical in [barrel, leaf] {
-        let producer =
-            host.current_derived_fact_hash(canonical, crate::resolver_core::DerivedFactKind::Route);
+        let producer = host.current_derived_fact_hash(
+            canonical,
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+        );
         let validator = crate::resolver_core::StoreView::derived_hash_for(
             &view,
             canonical,
-            crate::resolver_core::DerivedFactKind::Route,
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route,
         );
         // Both files were materialised by the resolve and carry a
         // resolvable surface, so the Route fact MUST exist on both
@@ -1895,8 +1908,10 @@ fn route_fact_none_for_non_route_resolvable_current_surface() {
         "precondition: the fixture surface must not be route-resolvable",
     );
 
-    let producer =
-        host.current_derived_fact_hash(plain, crate::resolver_core::DerivedFactKind::Route);
+    let producer = host.current_derived_fact_hash(
+        plain,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert!(
         producer.is_none(),
         "producer: no Route fact for a non-route-resolvable surface",
@@ -1912,7 +1927,7 @@ fn route_fact_none_for_non_route_resolvable_current_surface() {
     let validator = crate::resolver_core::StoreView::derived_hash_for(
         &view,
         plain,
-        crate::resolver_core::DerivedFactKind::Route,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
     );
     assert!(
         validator.is_none(),
@@ -1942,8 +1957,10 @@ fn route_fact_capture_declines_for_never_materialised_canonical() {
         "precondition: the canonical has never been materialised",
     );
 
-    let captured =
-        host.current_derived_fact_hash(never, crate::resolver_core::DerivedFactKind::Route);
+    let captured = host.current_derived_fact_hash(
+        never,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert_eq!(
         captured, None,
         "fact capture must record NO Route fact for a never-materialised \
@@ -4068,7 +4085,7 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     );
     let suppression_raised = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let (route, facts) = entry.expect("the route must resolve through the later wildcard");
     assert!(
@@ -4121,7 +4138,7 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
     );
     let suppression_raised = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let (route, facts) = entry.expect("the route must resolve through the later wildcard");
     assert!(
@@ -4195,7 +4212,7 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     );
     let suppression_raised = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let surface = surface.expect("the unrooted build still serves its caller the surface");
     assert_eq!(
@@ -4253,7 +4270,7 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     );
     let suppression_raised = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let surface = surface.expect("the rooted build serves the surface");
     assert!(
@@ -4270,7 +4287,7 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     assert!(
         surface.read_set_signature.facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                 if inner.resolution_fact().is_some()
         )),
         "the skipped specifier is rooted on the owner's resolution \

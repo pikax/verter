@@ -298,7 +298,7 @@ fn print_counters(label: &str, c: &Counters, per: usize) {
 
 #[cfg(feature = "currency_probe")]
 fn print_probe(per: usize) {
-    let snap = verter_workspace::currency_probe::snapshot();
+    let snap = verter_session_query::currency_probe::snapshot();
     if snap.is_empty() {
         return;
     }
@@ -335,7 +335,7 @@ fn print_probe(_per: usize) {}
 
 #[cfg(feature = "currency_probe")]
 fn reset_probe() {
-    verter_workspace::currency_probe::reset();
+    verter_session_query::currency_probe::reset();
 }
 
 #[cfg(not(feature = "currency_probe"))]

@@ -1086,7 +1086,7 @@ pub struct ProjectTypeStore {
     /// three loaded projects admits against one ceiling rather than
     /// three. A test may inject a private account to drive pressure
     /// deterministically without perturbing concurrent tests.
-    retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     /// Gate that defers close-time payload releases until no computation is
     /// in flight (see [`semantic_activity`]).
     activity_gate: semantic_activity::SemanticActivityGate,
@@ -1113,7 +1113,7 @@ impl ProjectTypeStore {
     pub fn new() -> Self {
         Self::build(
             None,
-            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+            verter_session_query::retention::SemanticRetentionAccount::process_local(),
         )
     }
 
@@ -1124,7 +1124,7 @@ impl ProjectTypeStore {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_retention_account(
-        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self::build(None, retention_account)
     }
@@ -1133,7 +1133,7 @@ impl ProjectTypeStore {
     #[must_use]
     pub fn retention_account(
         &self,
-    ) -> &Arc<crate::semantic_retention_account::SemanticRetentionAccount> {
+    ) -> &Arc<verter_session_query::retention::SemanticRetentionAccount> {
         &self.retention_account
     }
 
@@ -1148,13 +1148,13 @@ impl ProjectTypeStore {
     pub fn with_provenance(provenance: Arc<crate::types::MetaProvenance>) -> Self {
         Self::build(
             Some(provenance),
-            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+            verter_session_query::retention::SemanticRetentionAccount::process_local(),
         )
     }
 
     fn build(
         provenance: Option<Arc<crate::types::MetaProvenance>>,
-        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         let counters = ProjectTypeStoreCounters::default();
         // Each backing DB holds the same `Arc<AtomicU64>` counters as
@@ -2303,7 +2303,8 @@ mod tests {
                 owner_canonical: Arc::from("/w/o.vue"),
                 owner_whole_hash: hash,
                 bindings: Arc::new(rustc_hash::FxHashMap::default()),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                read_set_signature:
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                 validated_at_generation: 0,
             }),
         );
@@ -2336,7 +2337,8 @@ mod tests {
                     canonical_id: Arc::from("/w/o.vue"),
                     whole_hash: hash,
                 }),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                read_set_signature:
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                 validated_at_generation: 0,
             },
         );

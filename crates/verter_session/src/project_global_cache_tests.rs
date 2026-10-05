@@ -664,7 +664,7 @@ fn owner_import_surface_picks_up_barrel_retargeting() {
 /// against a stale cached surface.
 #[test]
 fn owner_import_surface_fact_signature_includes_barrel_route() {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
     upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './a'");
@@ -725,7 +725,7 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
 /// without `evict_canonical`.
 #[test]
 fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
     upsert_ts(&host, "/w/b.ts", "export type Foo = { b: number }");

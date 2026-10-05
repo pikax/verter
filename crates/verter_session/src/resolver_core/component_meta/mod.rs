@@ -7,8 +7,9 @@ use verter_session_query::analysis::types::{
 };
 
 use crate::resolver_core::{
-    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedTypeDeclaration,
+    resolve_type_declaration, DeclarationMetadataResolver, ResolvedTypeDeclaration,
 };
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 mod cold_resolver;
 mod direct_macro;

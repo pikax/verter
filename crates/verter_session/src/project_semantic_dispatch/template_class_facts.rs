@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
 use verter_compiler::compile::template_data::RawTemplateData;
-use verter_semantic::analysis::{
+use verter_session_query::analysis::template_class_facts::{
     TemplateClassFactsCompleteness, TemplateClassSemanticFactRow, TemplateClassSemanticFacts,
     TemplateClassSubject,
 };
@@ -23,13 +23,14 @@ use super::reactive_wrapper::{wrapper_candidate_for_route, WrapperCandidate};
 use super::semantic_source::{SourceRaiseContext, SourceRaiseOutcome};
 use super::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
 use super::ProjectSemanticDispatch;
-use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::{FactReadSetFinalise, RequestBoundResolverContext, ResolverContext};
+use crate::resolver_core::{RequestBoundResolverContext, ResolverContext};
 use crate::resolver_store::ColdSeedHostStoreView;
 use crate::semantic_query::{
     LiteralValue, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ScopeId,
     SemanticNodeData, SemanticNodeId, ValueRootKey,
 };
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
 pub(crate) type SessionTemplateClassSemanticFacts = TemplateClassSemanticFacts<ReadSetSignature>;
 
@@ -243,7 +244,7 @@ pub(crate) fn complete_dependency_signature(
 /// content hash is a complete validity oracle for the signature, i.e.
 /// when every fact in it is attributable to the owner.
 pub(crate) fn owner_only_publication_safe(facts: &SessionTemplateClassSemanticFacts) -> bool {
-    use verter_workspace::FactAttribution;
+    use verter_session_query::facts::fact_cache::FactAttribution;
     facts.completeness() == TemplateClassFactsCompleteness::Complete
         && facts
             .dependency_signature()
@@ -308,7 +309,7 @@ fn select_requested_subjects(
     script: TemplateClassScriptInputs<'_>,
 ) -> Vec<RequestedSubject> {
     let props_root: Option<Arc<str>> =
-        verter_semantic::analysis::props_root_binding(script.macros).map(Arc::from);
+        verter_session_query::analysis::macros::props_root_binding(script.macros).map(Arc::from);
     let mut result = Vec::new();
     let mut seen = FxHashSet::default();
 
@@ -635,7 +636,7 @@ fn classify_node(
                     return TemplateClassSemanticFactRow {
                         subject,
                         domain: inner_domain.clone(),
-                        wrapper: verter_semantic::analysis::ReactiveWrapperProof {
+                        wrapper: verter_session_query::analysis::template_class_facts::ReactiveWrapperProof {
                             role: candidate.role.clone(),
                             symbol: Some(symbol),
                             import_provenance: Some(candidate.provenance.clone()),
@@ -659,7 +660,7 @@ fn classify_node(
     TemplateClassSemanticFactRow {
         subject,
         domain,
-        wrapper: verter_semantic::analysis::ReactiveWrapperProof {
+        wrapper: verter_session_query::analysis::template_class_facts::ReactiveWrapperProof {
             role: ReactiveWrapperRole::None,
             symbol: None,
             import_provenance: None,
@@ -821,7 +822,7 @@ fn unresolved_row(
     TemplateClassSemanticFactRow {
         subject,
         domain: domain.clone(),
-        wrapper: verter_semantic::analysis::ReactiveWrapperProof {
+        wrapper: verter_session_query::analysis::template_class_facts::ReactiveWrapperProof {
             role: ReactiveWrapperRole::Unresolved {
                 reason: wrapper_reason,
             },
@@ -1190,7 +1191,7 @@ mod tests {
 #[cfg(test)]
 mod attribution_tests {
     use super::*;
-    use verter_workspace::{
+    use verter_session_query::facts::fact_cache::{
         AggregatePopulation, AggregateStamp, CompactionDomain, DomainGenerationFact,
         FactVersionRef, ViewPopulation,
     };

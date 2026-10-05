@@ -14,7 +14,7 @@
 #![cfg(test)]
 
 use serial_test::serial;
-use verter_session::for_tests::ReadSetSignature;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// Discriminator — `execute_read_cold_build_persists_traced_facts`.
 ///
@@ -116,11 +116,12 @@ fn execute_read_cold_build_persists_traced_facts() {
 #[serial(fact_counter_provenance)]
 fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     use std::sync::Arc;
-    use verter_session::for_tests::{ReadSetSignature, SemanticGraphStore};
-    use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
+    use verter_session::for_tests::SemanticGraphStore;
     use verter_session::semantic_query::{
         PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
     };
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 
     let store = SemanticGraphStore::new();
 
@@ -310,7 +311,7 @@ fn cooperative_return_only_not_shared_to_joiners() {
 #[serial(fact_counter_provenance)]
 fn read_set_signature_carrier_canonical_ids_covers_fact_rail() {
     use std::sync::Arc;
-    use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 
     let facts: Arc<[FactVersionRef]> = Arc::from(vec![
         FactVersionRef::FileWholeHash {

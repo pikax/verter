@@ -25,7 +25,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 
 use super::admission::{
-    CacheAdmission, CacheEntry, Candidate, DeferredVictims, PublishCoreOutcome, SignatureAdmission,
+    CacheAdmission, CacheEntry, Candidate, DeferredVictims, PublishCoreOutcome,
 };
 use super::lookup_publish::cooperative_admit_with_lookup_publish;
 use super::singleflight::{
@@ -33,7 +33,9 @@ use super::singleflight::{
 };
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::FactValidation;
-use crate::resolver_core::{FactReadSetFinalise, StoreViewCompatToken};
+use crate::resolver_core::StoreViewCompatToken;
+use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
 /// Per-compute context threaded into a node's `compute` / `validate`.
 ///
@@ -309,7 +311,7 @@ pub(crate) trait QueryNode {
         &self,
         key: &Self::Key,
         value: &Self::Value,
-        signature: &crate::fact_signature_helpers::ReadSetSignature,
+        signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
         validated_at_generation: u64,
     ) -> Self::Discriminant;
 

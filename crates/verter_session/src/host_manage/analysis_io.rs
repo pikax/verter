@@ -755,7 +755,7 @@ impl VerterHost {
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<FileAnalysisSnapshot> {
-        verter_workspace::probe_scope!(GET_ANALYSIS);
+        verter_session_query::probe_scope!(GET_ANALYSIS);
         self.provenance
             .get_analysis_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1498,7 +1498,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         indexed: &Arc<crate::project_type_store::IndexedReady>,
-    ) -> Option<crate::resolver_core::ParseFactRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
         if !indexed.shallow_state.has_resolvable_surface() {
             return None;
         }
@@ -1509,7 +1509,7 @@ impl VerterHost {
         let fact = artifacts
             .facts
             .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
-        Some(crate::resolver_core::ParseFactRef {
+        Some(verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: canonical.to_string(),
             key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
             lane: verter_session_query::facts::FactLane::Semantic,
@@ -1939,7 +1939,7 @@ impl VerterHost {
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
-        verter_workspace::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
+        verter_session_query::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
         // Establish the owner's canonical post-parse artifact FIRST. The
         // snapshot being enriched here is the owner's, and its authored
         // import inventory is that artifact's shallow surface — so the

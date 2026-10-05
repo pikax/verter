@@ -202,9 +202,13 @@ fn host_with_source() -> VerterHost {
 /// name the DEAD file — the seventh deep-work class. A non-cacheable or
 /// overflowed tracer is a fixture fault, never a zero.
 fn dead_file_fact_reads<R>(host: &VerterHost, f: impl FnOnce() -> R) -> (R, usize) {
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
-    let (value, read_set) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, f);
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
+    let (value, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        f,
+    );
     let facts = match read_set.finalise() {
         FactReadSetFinalise::Ok(facts) => facts,
         FactReadSetFinalise::NonCacheable(reason) => {

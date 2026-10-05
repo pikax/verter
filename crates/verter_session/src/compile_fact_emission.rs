@@ -5,8 +5,8 @@
 //! installed by `VerterHost::with_fact_tracer`. Producers wire one
 //! call to [`observe_compile_tier_dependencies`] around the
 //! `compile_entry` invocation; the producer finalises the tracer
-//! through [`crate::cache_runtime::SignatureAdmission::from_finalise`]
-//! and stores the `Cacheable` arm's [`crate::fact_signature_helpers::ReadSetSignature`]
+//! through [`verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise`]
+//! and stores the `Cacheable` arm's [`verter_session_query::facts::fact_cache::ReadSetSignature`]
 //! as the `fact_dep_signature` of the new [`crate::types::CompileSlot`].
 //! An overflowed tracer routes the freshly computed virtual file
 //! back to the caller without admitting a slot.
@@ -74,9 +74,9 @@ use verter_session_query::facts::registry::{
 };
 use verter_session_query::facts::FactLane;
 
-use crate::resolver_core::{FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
 use crate::types::{ExternalSourceRequest, Hash16};
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
 
 /// Observe the compile-tier fact-dependency set for a single SFC
 /// cold compute and route every observation through the active

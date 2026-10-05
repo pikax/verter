@@ -10,8 +10,8 @@ use verter_type_expr::locators::{
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::locator_identity::{
-    semantic_space_for_locator_space, LibEnvHash, LocatorLoweringKey, ParseEnvHash,
-    ProjectIdentityDim, ResolveEnvHash, SlotEnvIdentity, TypeEnvHash,
+    semantic_space_for_locator_space, LibEnvHash, LocatorLoweringKey, ProjectIdentityDim,
+    ResolveEnvHash, SlotEnvIdentity, TypeEnvHash,
 };
 use crate::project_semantic_dispatch::raise::{
     dispatch_cold_for, dispatch_warm_for, enable_dispatch_trace_for_test, DISPATCH_TRACE,
@@ -30,6 +30,7 @@ use crate::semantic_query::{
 };
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{CompileErrorPolicy, FileLanguage, VerterHost};
+use verter_session_query::facts::fact_cache::ParseEnvHash;
 
 use super::{BuildLocalTaintGuard, ProjectSemanticDispatch, SemanticOperandAuthority};
 
@@ -1460,7 +1461,7 @@ fn partial_and_signature_overflow_discovered_during_force_never_warm() {
             host.test_force
                 .force_fact_tracer_overflow_observations
                 .store(
-                    crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+                    verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
                     Ordering::Relaxed,
                 );
         } else {
@@ -3936,8 +3937,8 @@ fn a_cold_import_sibling_contributes_no_dispatches_or_facts_to_a_residual_path_f
             fact.canonical_id() != Some(IMPORT_DEP)
                 || matches!(
                     fact,
-                    crate::resolver_core::FactVersionRef::FileWholeHash { .. }
-                        | crate::resolver_core::FactVersionRef::Parse(_)
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { .. }
+                        | verter_session_query::facts::fact_cache::FactVersionRef::Parse(_)
                 )
         }),
         "only the shallow import-edge facts (whole-hash, parse route) may be \

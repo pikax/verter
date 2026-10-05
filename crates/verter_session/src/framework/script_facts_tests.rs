@@ -5,8 +5,9 @@
 //! fact-signature overflow).
 
 use super::*;
-use crate::cache_runtime::SignatureAdmission;
-use crate::resolver_core::{FactVersionRef, PermissiveStoreView, StoreView, StoreViewCompatToken};
+use crate::resolver_core::{PermissiveStoreView, StoreView, StoreViewCompatToken};
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::fact_cache::SignatureAdmission;
 
 /// This module's tests belong here, not to any evidence suite's floor.
 ///
@@ -198,8 +199,9 @@ fn overflowed_admission_never_warms_the_store_return_only() {
     let key = resolved_fact_key("/a.ts");
     // An overflowed (NonCacheable) admission: the value is returned to the
     // caller but the store is NOT warmed (the no-poison invariant).
-    let admission =
-        SignatureAdmission::from_finalise(crate::resolver_core::FactReadSetFinalise::Overflow);
+    let admission = SignatureAdmission::from_finalise(
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow,
+    );
     let stored = store.publish_if_cacheable(
         key.clone(),
         ExactScriptFacts::new(fixture_payload()),
@@ -488,7 +490,7 @@ fn fixture_provider_resolves_validates_and_caches_end_to_end() {
     let has_import_route_fact = stored.read_set_signature.facts.iter().any(|f| {
         matches!(
             f,
-            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                 if inner.resolution_fact().is_some()
         )
     });
@@ -615,7 +617,7 @@ fn fenced_import_serve_refuses_script_facts_publication() {
 fn import_route_tracer_overflow_refuses_script_facts_publication() {
     use std::sync::atomic::Ordering;
 
-    let over_cap = crate::resolver_core::FACT_SIGNATURE_CAP + 1;
+    let over_cap = verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1;
     let registration = fixtures::import_gated_capability_free_fixture_registration();
 
     // Control — with no knob armed the fixture PUBLISHES, so the refusal below
@@ -729,7 +731,7 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
 /// observations, so the facts entry PUBLISHES).
 #[test]
 fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
-    let over_cap = crate::resolver_core::FACT_SIGNATURE_CAP + 1;
+    let over_cap = verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1;
     let registration = fixtures::import_gated_capability_free_fixture_registration();
     let host = host_with_files();
 

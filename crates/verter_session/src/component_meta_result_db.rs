@@ -27,7 +27,7 @@
 //!   session.
 //! - **Candidate payload:** an immutable `Arc` payload — the native
 //!   component-meta result and any strictly projected derivatives — plus
-//!   the exact [`crate::fact_signature_helpers::ReadSetSignature`] the
+//!   the exact [`verter_session_query::facts::fact_cache::ReadSetSignature`] the
 //!   build observed. Lookups revalidate that signature against the live
 //!   host.
 //! - **`options_fingerprint` is a stable `Hash16`** produced from a
@@ -108,7 +108,7 @@ pub struct ComponentMetaResultKey {
 /// version; production reads use the selected `MemoRead` capability.
 pub struct ComponentMetaResultEntry<P> {
     pub payload: Arc<P>,
-    pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
     pub validated_at_generation: u64,
 }
 
@@ -133,7 +133,7 @@ mod footprint {
     pub(super) const FACT_BYTES: usize = 64;
 }
 
-impl crate::semantic_retention_account::RetainedFootprint for CachedComponentMetaResult {
+impl verter_session_query::retention::RetainedFootprint for CachedComponentMetaResult {
     fn retained_footprint_bytes(&self) -> usize {
         let analysis = &self.analysis;
         let surfaces = analysis.props.len()
@@ -162,14 +162,14 @@ impl crate::semantic_retention_account::RetainedFootprint for CachedComponentMet
     }
 }
 
-impl<P> crate::semantic_retention_account::RetainedFootprint for ComponentMetaResultEntry<P>
+impl<P> verter_session_query::retention::RetainedFootprint for ComponentMetaResultEntry<P>
 where
-    P: crate::semantic_retention_account::RetainedFootprint,
+    P: verter_session_query::retention::RetainedFootprint,
 {
     fn retained_footprint_bytes(&self) -> usize {
         self.payload.retained_footprint_bytes()
             + self.read_set_signature.facts.len() * footprint::FACT_BYTES
-            + crate::semantic_retention_account::ENTRY_OVERHEAD_BYTES
+            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
     }
 }
 
@@ -236,16 +236,16 @@ impl<P> ComponentMetaPublishDecision<P> {
 /// whole-hash root remain part of the validating evidence.
 pub(crate) fn strip_owner_route_fact(
     owner_canonical: &str,
-    facts: &[crate::resolver_core::FactVersionRef],
-) -> Arc<[crate::resolver_core::FactVersionRef]> {
+    facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+) -> Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> {
     facts
         .iter()
         .filter(|fact| {
             !matches!(
                 fact,
-                crate::resolver_core::FactVersionRef::DerivedFactHash {
+                verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
                     canonical_id,
-                    kind: crate::resolver_core::DerivedFactKind::Route,
+                    kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                     ..
                 } if canonical_id == owner_canonical
             )
@@ -289,7 +289,7 @@ pub struct ResolutionTemplate {
         Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
     pub resolved_type_registry_meta: Vec<crate::meta_resolve::ResolvedTypeRegistryMeta>,
     pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
-    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    pub fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     pub surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
     /// Per-result completeness preserved across the template round-trip.
@@ -421,12 +421,12 @@ pub struct ComponentMetaResultDb<P> {
     /// The aggregate retained-byte account this cache admits against.
     ///
     /// There is no account-less result cache: the field carries a
-    /// [`StoreAccount`](crate::semantic_retention_account::StoreAccount),
+    /// [`StoreAccount`](verter_session_query::retention::StoreAccount),
     /// whose `Default` is the ONE process-local account. A Db built
     /// outside a [`crate::project_type_store::ProjectTypeStore`] therefore
     /// admits against the same ceiling rather than retaining entries that
     /// consume no aggregate headroom.
-    retention_account: crate::semantic_retention_account::StoreAccount,
+    retention_account: verter_session_query::retention::StoreAccount,
 }
 
 impl<P> ComponentMetaResultDb<P> {
@@ -479,7 +479,7 @@ impl<P> ComponentMetaResultDb<P> {
             live_counter,
             stale_sweeps,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-            crate::semantic_retention_account::StoreAccount::default(),
+            verter_session_query::retention::StoreAccount::default(),
         )
     }
 
@@ -489,13 +489,13 @@ impl<P> ComponentMetaResultDb<P> {
     pub(crate) fn with_counters_and_account(
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
-        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self::with_counters_and_schema_version(
             live_counter,
             stale_sweeps,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
-            crate::semantic_retention_account::StoreAccount::new(retention_account),
+            verter_session_query::retention::StoreAccount::new(retention_account),
         )
     }
 
@@ -504,7 +504,7 @@ impl<P> ComponentMetaResultDb<P> {
     #[must_use]
     pub(crate) fn retention_account(
         &self,
-    ) -> &Arc<crate::semantic_retention_account::SemanticRetentionAccount> {
+    ) -> &Arc<verter_session_query::retention::SemanticRetentionAccount> {
         self.retention_account.get()
     }
 
@@ -514,7 +514,7 @@ impl<P> ComponentMetaResultDb<P> {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn with_account_for_test(
-        retention_account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self::with_counters_and_account(
             Arc::new(AtomicU64::new(0)),
@@ -531,7 +531,7 @@ impl<P> ComponentMetaResultDb<P> {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU64::new(0)),
             schema_version,
-            crate::semantic_retention_account::StoreAccount::default(),
+            verter_session_query::retention::StoreAccount::default(),
         )
     }
 
@@ -539,7 +539,7 @@ impl<P> ComponentMetaResultDb<P> {
         live_counter: Arc<AtomicU64>,
         stale_sweeps: Arc<AtomicU64>,
         schema_version: u32,
-        retention_account: crate::semantic_retention_account::StoreAccount,
+        retention_account: verter_session_query::retention::StoreAccount,
     ) -> Self {
         Self {
             inner: BoundedCandidateMap::with_caps(
@@ -651,18 +651,18 @@ impl<P> ComponentMetaResultDb<P> {
         entry: ComponentMetaResultEntry<P>,
     ) -> bool
     where
-        P: crate::semantic_retention_account::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint,
     {
         let bytes = {
-            use crate::semantic_retention_account::RetainedFootprint as _;
+            use verter_session_query::retention::RetainedFootprint as _;
             entry.retained_footprint_bytes()
         };
         let charge = match self.retention_account().reserve(
-            crate::semantic_retention_account::ChargeClass::Retained,
+            verter_session_query::retention::ChargeClass::Retained,
             bytes,
         ) {
-            crate::semantic_retention_account::RetentionAdmission::Admitted(charge) => charge,
-            crate::semantic_retention_account::RetentionAdmission::Refused(refusal) => {
+            verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
+            verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
                 crate::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),
                 );
@@ -698,7 +698,7 @@ impl<P> ComponentMetaResultDb<P> {
         owner_whole_hash: Hash16,
         entry: ComponentMetaResultEntry<P>,
     ) where
-        P: crate::semantic_retention_account::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint,
     {
         self.publish_core(key, owner_whole_hash, entry);
     }
@@ -783,11 +783,11 @@ impl<P> ComponentMetaResultDb<P> {
         key: ComponentMetaResultKey,
         payload: P,
     ) where
-        P: crate::semantic_retention_account::RetainedFootprint,
+        P: verter_session_query::retention::RetainedFootprint,
     {
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(payload),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             validated_at_generation: 0,
         };
         self.insert(key, [0u8; 16], entry);
@@ -1000,8 +1000,8 @@ mod tests {
         );
     }
 
-    fn empty_sig() -> crate::fact_signature_helpers::ReadSetSignature {
-        crate::fact_signature_helpers::ReadSetSignature::empty()
+    fn empty_sig() -> verter_session_query::facts::fact_cache::ReadSetSignature {
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty()
     }
 
     /// Build a slot key with zero env axes — the substrate-level DB unit
@@ -1027,7 +1027,7 @@ mod tests {
         let db: ComponentMetaResultDb<u32> = ComponentMetaResultDb::new();
         let key = mk_result_key("/w/owner.vue", [0u8; 16]);
         let owner_hash = [7u8; 16];
-        let owner_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+        let owner_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/w/owner.vue".to_string(),
             hash: owner_hash,
         };
@@ -1080,7 +1080,7 @@ mod tests {
     fn insert_and_get_roundtrip() {
         #[derive(Clone, PartialEq, Eq, Debug)]
         struct MockPayload(u32);
-        impl crate::semantic_retention_account::RetainedFootprint for MockPayload {
+        impl verter_session_query::retention::RetainedFootprint for MockPayload {
             fn retained_footprint_bytes(&self) -> usize {
                 std::mem::size_of::<Self>()
             }
@@ -1089,12 +1089,14 @@ mod tests {
         let key = mk_result_key("/w/Accordion.vue", [9u8; 16]);
         let entry = ComponentMetaResultEntry {
             payload: Arc::new(MockPayload(42)),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
-                vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: "/w/Accordion.vue".to_string(),
-                    hash: [1u8; 16],
-                }],
-            )),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                Arc::from(vec![
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                        canonical_id: "/w/Accordion.vue".to_string(),
+                        hash: [1u8; 16],
+                    },
+                ]),
+            ),
             validated_at_generation: 0,
         };
         db.insert(key.clone(), [1u8; 16], entry);

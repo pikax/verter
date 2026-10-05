@@ -32,8 +32,9 @@
 use std::sync::Arc;
 use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_session::meta::MetaProject;
-use verter_session::resolver_core::{FactVersionRef, PermissiveStoreView, RouteDb, RouteResult};
+use verter_session::resolver_core::{PermissiveStoreView, RouteDb, RouteResult};
 use verter_session::{AnalysisLevel, HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
 fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {

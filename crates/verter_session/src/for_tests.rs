@@ -73,7 +73,7 @@ pub use crate::semantic_query_memo::{
 /// tests construct `ReadSetSignature` directly when seeding
 /// fixtures into `ComponentMetaResultEntry` / `OwnerImportSurface` /
 /// `MemoEntry`.
-pub use crate::fact_signature_helpers::ReadSetSignature;
+pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// Re-export the cooperative-admission outcome enum so integration
 /// tests in `crates/verter_session/tests/*.rs` can name the type
@@ -88,7 +88,9 @@ pub use crate::cache_runtime::singleflight::ComputeAdmission;
 /// fan-out delivers observations into all nested tracer scopes without
 /// going through `FactReadSetCell::observe` directly (which only writes
 /// to the cell it's called on, not the full stack).
-pub fn observe_fan_out_borrowed_for_tests(sig: &[crate::resolver_core::FactVersionRef]) {
+pub fn observe_fan_out_borrowed_for_tests(
+    sig: &[verter_session_query::facts::fact_cache::FactVersionRef],
+) {
     crate::resolver_core::resolver_context::observe_fan_out_borrowed(sig);
 }
 
@@ -100,7 +102,10 @@ pub fn observe_fan_out_borrowed_for_tests(sig: &[crate::resolver_core::FactVersi
 pub fn install_fact_tracer_for_tests<F, R>(
     host: &crate::VerterHost,
     f: F,
-) -> (R, crate::resolver_core::FactReadSetFinalise)
+) -> (
+    R,
+    verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+)
 where
     F: FnOnce() -> R,
 {
@@ -138,7 +143,7 @@ where
 /// Re-export for integration tests verifying the bridge conversion.
 pub fn dep_signature_to_fact_signature_for_tests(
     sig: &crate::semantic_query::DepSignature,
-) -> Vec<crate::resolver_core::FactVersionRef> {
+) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
     crate::fact_signature_helpers::dep_signature_to_fact_signature(sig)
 }
 
@@ -310,7 +315,7 @@ pub fn workspace_semantic_transitive_deps_for_tests(
 /// discriminate the cold-publish → warm-hit path-precise survival
 /// contract.
 pub fn dispatch_inject_parse_fact_for_tests(
-    fact: crate::resolver_core::FactVersionRef,
+    fact: verter_session_query::facts::fact_cache::FactVersionRef,
 ) -> crate::project_semantic_dispatch::DispatchInjectParseFactGuard {
     crate::project_semantic_dispatch::DispatchInjectParseFactGuard::arm(fact)
 }
@@ -573,7 +578,7 @@ pub fn binder_identity_facts_get_or_compute_for_tests(
 pub fn component_meta_result_signature_for_owner(
     host: &crate::VerterHost,
     owner_canonical: &str,
-) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
     let whole_hash = host
         .ensure_indexed_ready(owner_canonical)
         .map(|ir| ir.whole_hash)?;
@@ -603,10 +608,11 @@ pub fn component_meta_result_signature_for_owner(
 pub fn component_meta_cold_traced_read_set_for_tests(
     host: &crate::VerterHost,
     owner_canonical: &str,
-) -> Option<crate::resolver_core::FactReadSetFinalise> {
+) -> Option<verter_session_query::facts::fact_read_set::FactReadSetFinalise> {
     let canonical = host.resolve_alias_or_canonical(owner_canonical);
-    let (resolved_opt, read_set) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+    let (resolved_opt, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
             crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
                 host.resolve_component_meta(
                     canonical.as_str(),
@@ -623,7 +629,8 @@ pub fn component_meta_cold_traced_read_set_for_tests(
                     );
                 })
             })
-        });
+        },
+    );
     resolved_opt?;
     Some(read_set.finalise())
 }

@@ -540,7 +540,7 @@ impl<
         observed_hash: crate::types::Hash16,
         key: verter_session_query::facts::registry::FactKey,
         lane: verter_session_query::facts::registry::FactLane,
-    ) -> Option<super::ParseFactRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
         let normalized = self.normalized_analysis_canonical(canonical);
         let identity = self.artifact_key_for_current_content(canonical)?;
         if identity.content_hash != observed_hash {
@@ -548,7 +548,7 @@ impl<
         }
         let expected_hash =
             self.observed_fact_hash(&normalized, observed_hash, &identity, &key, lane)?;
-        Some(super::ParseFactRef {
+        Some(verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: canonical.to_owned(),
             key,
             lane,

@@ -25,10 +25,12 @@
 //!   directly by running the cold compute path twice and observing
 //!   that both runs return the same value.
 
-use verter_session::resolver_core::{
-    FactVersionRef, ParseFactRef, ValidatedFactCache, FACT_SIGNATURE_CAP,
-};
+use verter_session::resolver_core::ValidatedFactCache;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::{
+    fact_cache::{FactVersionRef, ParseFactRef},
+    fact_read_set::FACT_SIGNATURE_CAP,
+};
 use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 fn fake_fact(name: &str) -> FactVersionRef {

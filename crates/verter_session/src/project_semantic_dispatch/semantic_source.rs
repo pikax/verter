@@ -1245,10 +1245,10 @@ impl ProjectSemanticDispatch<'_> {
                 parse_fact,
                 reduced_for_closure.dep_signature(),
             ) {
-                crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
                     Some((reduced_for_closure, sig.facts))
                 }
-                crate::cache_runtime::SignatureAdmission::NonCacheable(_) => None,
+                verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => None,
             }
         });
                 Some(HotTypeRef::new(node))

@@ -43,11 +43,11 @@ impl VerterHost {
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical: &str,
-        facts: &mut Vec<crate::resolver_core::FactVersionRef>,
-        seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
+        facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+        seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
         if let Some(hash) = ctx.authoritative_current_content_hash(canonical) {
-            let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical.to_string(),
                 hash,
             };
@@ -61,9 +61,9 @@ impl VerterHost {
             .filter(|indexed| indexed.shallow_state.has_resolvable_surface())
             .and_then(|indexed| indexed.route_surface_hash())
         {
-            let fact = crate::resolver_core::FactVersionRef::DerivedFactHash {
+            let fact = verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
                 canonical_id: canonical.to_string(),
-                kind: crate::resolver_core::DerivedFactKind::Route,
+                kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                 hash,
             };
             if seen.insert(fact.clone()) {
@@ -606,7 +606,7 @@ impl VerterHost {
         requested_name: &str,
     ) -> Option<(
         crate::resolver_core::RouteResult,
-        Vec<crate::resolver_core::FactVersionRef>,
+        Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     )> {
         self.with_base_resolver_context(|ctx| {
             self.build_named_type_export_route_entry_with_context(
@@ -624,7 +624,7 @@ impl VerterHost {
         requested_name: &str,
     ) -> Option<(
         crate::resolver_core::RouteResult,
-        Vec<crate::resolver_core::FactVersionRef>,
+        Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     )> {
         let mut active = rustc_hash::FxHashSet::default();
         let mut touched_canonical_ids = rustc_hash::FxHashSet::default();

@@ -124,7 +124,7 @@ fn unrootable_route_walk_marks_the_enclosing_traced_compute() {
     );
     let non_cacheable = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     assert!(
@@ -150,7 +150,7 @@ fn unrootable_imported_root_walk_marks_the_enclosing_traced_compute() {
     );
     let non_cacheable = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     assert!(
@@ -185,7 +185,7 @@ fn rootable_route_walk_leaves_the_enclosing_traced_compute_clean() {
     );
     let non_cacheable = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     assert_eq!(

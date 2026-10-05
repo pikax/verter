@@ -16,7 +16,8 @@ use verter_type_expr::{
     PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypePublication,
 };
 
-use crate::resolver_core::{FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity};
+use crate::resolver_core::{FallthroughNodeKey, FallthroughOverrideIdentity};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// One intrinsic member on a native-root fallthrough surface: member identity
 /// (`name`, `kind`) plus its type carried as [`IntrinsicMemberTypeSource`].
@@ -1755,7 +1756,7 @@ mod tests {
         accepted_props: Vec<AcceptedPropAnalysis>,
         accepted_events: Vec<AcceptedEventAnalysis>,
         fallthrough_surface: FallthroughSurface,
-        fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+        fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     }
 
     #[test]
@@ -1797,7 +1798,7 @@ mod tests {
             &self.fallthrough_surface
         }
 
-        fn fact_versions(&self) -> &[crate::resolver_core::FactVersionRef] {
+        fn fact_versions(&self) -> &[verter_session_query::facts::fact_cache::FactVersionRef] {
             &self.fact_versions
         }
     }
@@ -1836,11 +1837,13 @@ mod tests {
         fn current_dependency_fact_versions(
             &self,
             canonical_id: &str,
-        ) -> Vec<crate::resolver_core::FactVersionRef> {
-            vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.to_string(),
-                hash: [1; 16],
-            }]
+        ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+            vec![
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: canonical_id.to_string(),
+                    hash: [1; 16],
+                },
+            ]
         }
 
         fn resolve_child_fallthrough(
@@ -2272,10 +2275,12 @@ mod tests {
                         status: BranchStatus::Resolved,
                     }],
                 },
-                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: "/Child.vue".to_string(),
-                    hash: [2; 16],
-                }],
+                fact_versions: vec![
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                        canonical_id: "/Child.vue".to_string(),
+                        hash: [2; 16],
+                    },
+                ],
             },
         );
 
@@ -2370,10 +2375,12 @@ mod tests {
                         status: BranchStatus::Resolved,
                     }],
                 },
-                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: "/Child.svelte".to_string(),
-                    hash: [2; 16],
-                }],
+                fact_versions: vec![
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                        canonical_id: "/Child.svelte".to_string(),
+                        hash: [2; 16],
+                    },
+                ],
             },
         );
 
@@ -2961,7 +2968,7 @@ mod tests {
                 fallthrough_surface: FallthroughSurface::None {
                     reason: verter_semantic::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
                 },
-                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                fact_versions: vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id: "/Child.vue".to_string(),
                     hash: [3; 16],
                 }],

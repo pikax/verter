@@ -141,7 +141,8 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
                 },
                 diagnostics: Default::default(),
                 last_access_tick: 0,
-                fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                fact_dep_signature:
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             },
         );
     }

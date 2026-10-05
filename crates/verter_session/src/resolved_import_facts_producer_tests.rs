@@ -54,9 +54,9 @@ use rustc_hash::FxHashMap;
 use crate::resolved_import_facts::{
     ResolvedImportFacts, ResolvedImportFactsKey, RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
-use crate::resolver_core::FactVersionRef;
 use crate::types::{DependencyResolution, FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))

@@ -365,12 +365,12 @@ pub struct SemanticGraphStore {
     /// publishes charges.
     ///
     /// There is no account-less memo store: the field carries a
-    /// [`StoreAccount`](crate::semantic_retention_account::StoreAccount),
+    /// [`StoreAccount`](verter_session_query::retention::StoreAccount),
     /// whose `Default` is the ONE process-local account. A store built by
     /// `Default` / [`Self::new`] therefore charges the same ceiling a
     /// host-built store does, instead of retaining candidates that consume
     /// no aggregate headroom.
-    retention_account: crate::semantic_retention_account::StoreAccount,
+    retention_account: verter_session_query::retention::StoreAccount,
     /// Per-store test trigger for the cold-abort sweep path. When a test
     /// sets this (via [`Self::test_force_cold_abort_sweep`]), the
     /// cold-winner re-check in [`Self::warm_publish_one`] marks its own
@@ -712,7 +712,7 @@ pub struct SemanticGraphStore {
 /// must inherit from this exact publication.
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedMemoCandidate {
-    pub(crate) read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub(crate) read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
     pub(crate) self_root_canonicals: Arc<[Arc<str>]>,
     pub(crate) validated_at_generation: u64,
     pub(crate) admission_seq: u64,
@@ -729,7 +729,8 @@ pub(crate) struct PublishedMemoCandidate {
 /// and the value can be carried but never fabricated.
 #[derive(Debug, Clone)]
 pub(crate) struct SemanticOperandEvidence {
-    pub(in crate::semantic_query_memo) read_set: crate::fact_signature_helpers::ReadSetSignature,
+    pub(in crate::semantic_query_memo) read_set:
+        verter_session_query::facts::fact_cache::ReadSetSignature,
     pub(in crate::semantic_query_memo) self_roots: Arc<[ObservedGraphSelfRoot]>,
     pub(in crate::semantic_query_memo) dep_signatures: Arc<[DepSignature]>,
 }
@@ -741,7 +742,7 @@ impl SemanticOperandEvidence {
     /// so no consumer outside the forcing boundary can fabricate an
     /// evidence set and hand it to a mint.
     pub(crate) fn seal(
-        read_set: crate::fact_signature_helpers::ReadSetSignature,
+        read_set: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_roots: Arc<[ObservedGraphSelfRoot]>,
         dep_signatures: Arc<[DepSignature]>,
         _authority: &crate::project_semantic_dispatch::SemanticOperandAuthority,
@@ -753,7 +754,7 @@ impl SemanticOperandEvidence {
         }
     }
 
-    pub(crate) fn read_set(&self) -> &crate::fact_signature_helpers::ReadSetSignature {
+    pub(crate) fn read_set(&self) -> &verter_session_query::facts::fact_cache::ReadSetSignature {
         &self.read_set
     }
 
@@ -779,18 +780,17 @@ impl SemanticOperandEvidence {
 /// maps the overflow flag to the typed `SignatureOverflow` refusal
 /// instead of the blander incomplete one.
 fn semantic_operand_evidence(
-    read_set: &crate::fact_signature_helpers::ReadSetSignature,
+    read_set: &verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: &[Arc<str>],
     dep_signature: &DepSignature,
 ) -> Option<crate::semantic_query::operand::SemanticOperandEvidence> {
     let mut self_roots = Vec::with_capacity(self_root_canonicals.len());
     for canonical in self_root_canonicals {
         let found = read_set.facts.iter().find_map(|fact| match fact {
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, hash }
-                if canonical_id == canonical.as_ref() =>
-            {
-                Some((Arc::clone(canonical), *hash))
-            }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id,
+                hash,
+            } if canonical_id == canonical.as_ref() => Some((Arc::clone(canonical), *hash)),
             _ => None,
         });
         match found {
@@ -829,7 +829,7 @@ type CanonicalToEntries =
 /// The `ReadSetSignature.facts` rail an entry registered under a
 /// canonical in [`CanonicalToEntries`] — the diagnostic stamp + the
 /// `Arc::ptr_eq` fast-path discriminant for the invalidation drain.
-type RegisteredFacts = Arc<[crate::resolver_core::FactVersionRef]>;
+type RegisteredFacts = Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>;
 
 impl std::fmt::Debug for SemanticGraphStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1210,7 +1210,7 @@ impl SemanticGraphStore {
             // `invalidate_canonical(C)` still drains B+C).
             let mut evicted_entries: Vec<(
                 (FamilyKey, ModeSlot, u64),
-                crate::fact_signature_helpers::ReadSetSignature,
+                verter_session_query::facts::fact_cache::ReadSetSignature,
                 DepSignature,
             )> = Vec::new();
             for ((family, slot, _seq), registered_facts) in &drained {
@@ -1832,7 +1832,7 @@ impl SemanticGraphStore {
 
     /// Carrier-aware warm read that validates BEFORE bubbling. Returns
     /// the cached value only when the entry's
-    /// [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+    /// [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
     /// validates against the live store view; otherwise `None`. On
     /// validation failure the bubble channel is NOT exercised — a
     /// stale entry must not pollute an outer tracer with observations
@@ -1909,7 +1909,9 @@ impl SemanticGraphStore {
         operand_evidence: Option<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
-        deferred_carrier: Option<&mut Option<crate::fact_signature_helpers::ReadSetSignature>>,
+        deferred_carrier: Option<
+            &mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+        >,
         record_miss: bool,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         // Snapshot the candidate list under the lock, then validate
@@ -2251,7 +2253,7 @@ impl SemanticGraphStore {
         prepared: &PreparedKeyHandle,
         result: &QueryResult<SemanticQueryValue>,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
-        read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+        read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         satisfied_projection: &MaterializedSet,
@@ -2473,7 +2475,7 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::ResolverContext,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
         dispatch_dep_signature: DepSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         satisfied_projection: MaterializedSet,
@@ -2662,7 +2664,7 @@ impl SemanticGraphStore {
 /// otherwise creates.
 pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 
-/// Build the [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+/// Build the [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
 /// carrier for a [`SemanticGraphStore`] query-identity memo entry —
 /// **provenance-pure**.
 ///
@@ -2713,12 +2715,12 @@ pub(crate) type ObservedGraphSelfRoot = (Arc<str>, crate::types::Hash16);
 pub(crate) fn semantic_graph_read_set_signature(
     view: &dyn crate::resolver_core::StoreView,
     observed_self_roots: &[ObservedGraphSelfRoot],
-    traced_facts: &[crate::resolver_core::FactVersionRef],
+    traced_facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
 ) -> Result<
     crate::fact_signature_helpers::StructuralCarrierReadSet,
     crate::cache_runtime::NonAdmissionReason,
 > {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     // Collapse the observed self-roots into a per-canonical hash map;
     // a conflicting hash for the same canonical is a torn observation.

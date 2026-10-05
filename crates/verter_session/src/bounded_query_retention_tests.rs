@@ -7,7 +7,7 @@
 
 use super::*;
 
-use crate::semantic_retention_account::{RetentionLimits, SemanticRetentionAccount};
+use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
 
 /// A granted zero-byte reservation for the substrate tests.
 ///
@@ -17,7 +17,7 @@ use crate::semantic_retention_account::{RetentionLimits, SemanticRetentionAccoun
 /// never perturbs the process-local account other suites assert on, and
 /// it is zero-byte so no test depends on a byte figure this module does
 /// not own.
-fn substrate_charge() -> crate::semantic_retention_account::RetentionCharge {
+fn substrate_charge() -> verter_session_query::retention::RetentionCharge {
     thread_local! {
         static ACCOUNT: std::sync::Arc<SemanticRetentionAccount> =
             SemanticRetentionAccount::new(RetentionLimits::defaults());

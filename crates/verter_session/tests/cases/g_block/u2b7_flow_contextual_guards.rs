@@ -17,7 +17,6 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::ReadSetSignature;
 use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
 use verter_session::semantic_query::{
     ContextualTypingKey, FlowNarrowingKey, PrimitiveKind, ProgramAnalysisContext, ProgramPointId,
@@ -25,6 +24,7 @@ use verter_session::semantic_query::{
     SemanticQueryKeyTag, SemanticQueryValueTag, SubstitutionCanonicalHash,
 };
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())

@@ -68,11 +68,12 @@ use crate::fact_signature_helpers::empty_fact_signature;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{
-    FactVersionRef, MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration,
-    ResolverContext, StoreView,
+    MaterializeScopeObservation, ResolvedDeclarationKind, ResolvedTypeDeclaration, ResolverContext,
+    StoreView,
 };
 use crate::semantic_query::ProjectionMode;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// A self-root `FileWholeHash` byte pattern for a planted (untracked)
 /// entry. Distinct from any real content hash.
@@ -465,7 +466,7 @@ fn observed_scope_export_set(
     ctx: &dyn ResolverContext,
     scope: &str,
     observed_whole_hash: [u8; 16],
-) -> crate::resolver_core::ParseFactRef {
+) -> verter_session_query::facts::fact_cache::ParseFactRef {
     crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
         ctx,
         scope,
@@ -1632,7 +1633,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
 
 /// `MaterializeMemoDb`'s producer roots a dependency the materialiser
 /// observed as `DepVersion::ProjectGeneration` by a
-/// [`crate::resolver_core::FactVersionRef::ProjectGeneration`] carrying
+/// [`verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration`] carrying
 /// the OBSERVED generation — NOT by a `FileWholeHash`.
 ///
 /// A `ProjectGeneration` dependency means the materialised value
@@ -4318,7 +4319,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     };
     let entry = ComponentMetaResultEntry {
         payload: Arc::new(cached),
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         validated_at_generation: gen0,
     };
     store
@@ -4424,7 +4425,7 @@ fn relation_memo_get_relation_payload_rejects_entry_from_superseded_generation()
     let gen0 = host.project_type_store().current_project_generation();
     store.insert_relation_payload_for_tests(
         key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from([
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
             FactVersionRef::ProjectGeneration { generation: gen0 },
         ])),
         Arc::from(Vec::<Arc<str>>::new()),
@@ -5148,7 +5149,7 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
         host.test_force
             .force_fact_tracer_overflow_observations
             .store(
-                crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+                verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
                 Ordering::Relaxed,
             );
         let after = drive(&host, scope);
@@ -5499,10 +5500,10 @@ mod fenced_gate_arm_admission_tests {
             .test_force
             .force_indexed_ready_serve_fence_for_tests
             .store(true, Ordering::Relaxed);
-        let (fenced_after, read_set) = fenced
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                drive_member_seam(&fenced, fenced_scope, fenced_node)
-            });
+        let (fenced_after, read_set) = fenced.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || drive_member_seam(&fenced, fenced_scope, fenced_node),
+        );
         fenced
             .test_force
             .force_indexed_ready_serve_fence_for_tests
@@ -5823,20 +5824,21 @@ fn owner_resolution_set_published_only_by_owner_import_surface_db() {
         .expect("owner IndexedReady materialises")
         .whole_hash;
 
-    let owner_set_facts = |signature: &crate::fact_signature_helpers::ReadSetSignature| {
-        signature
+    let owner_set_facts =
+        |signature: &verter_session_query::facts::fact_cache::ReadSetSignature| {
+            signature
             .facts
             .iter()
             .filter(|fact| {
                 matches!(
                     fact,
-                    verter_workspace::FactVersionRef::ResolveImports(
-                        verter_workspace::ResolveImportsFactRef::Resolution(fact),
+                    verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                        verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(fact),
                     ) if fact.is_owner_resolution_set()
                 )
             })
             .count()
-    };
+        };
 
     // Real resolution work through the shared engine, with no owner
     // surface in play, must mint no owner-scoped node — otherwise the
@@ -5853,8 +5855,8 @@ fn owner_resolution_set_published_only_by_owner_import_surface_db() {
             .iter()
             .filter(|fact| matches!(
                 fact,
-                verter_workspace::FactVersionRef::ResolveImports(
-                    verter_workspace::ResolveImportsFactRef::Resolution(fact),
+                verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                    verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(fact),
                 ) if fact.is_owner_resolution_set()
             ))
             .count(),

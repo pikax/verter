@@ -332,7 +332,7 @@ pub struct QueryBuildOutput<T = SemanticNodeId> {
     /// `Box`ed so the in-line `None` case (the raw build-closure
     /// output, on every recursion frame of a deep type resolution)
     /// costs one pointer rather than an inline `ReadSetSignature`.
-    pub graph_carrier: Option<Box<crate::fact_signature_helpers::ReadSetSignature>>,
+    pub graph_carrier: Option<Box<verter_session_query::facts::fact_cache::ReadSetSignature>>,
     /// The self-root canonicals recorded on the published
     /// [`crate::semantic_query_memo::MemoEntry`] so a warm read
     /// validates each one's self-root `FileWholeHash` strictly. Derived

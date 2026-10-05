@@ -190,7 +190,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     // any inner cache's independent admission policy.
     crate::host_test_force::arm_fact_tracer_overflow_once(
         crate::host_test_force::TracerScope::ComponentMetaRequest,
-        crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
     let first = run_component_meta_request(
         &request_host,
@@ -976,7 +976,7 @@ fn shape_value_and_fact_sig_for_scope(
     result_is_partial: bool,
 ) -> (
     crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
-    Arc<[crate::resolver_core::FactVersionRef]>,
+    Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
 ) {
     use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
     // Force the scope's `IndexedReady` artifact to materialise so the
@@ -1003,8 +1003,8 @@ fn shape_value_and_fact_sig_for_scope(
         parse_fact,
         value.dep_signature(),
     ) {
-        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
-        crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => sig.facts,
+        verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(reason) => {
             panic!("fixture invariant: signature must build for a real scope, got {reason:?}")
         }
     };
@@ -1345,8 +1345,10 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         .expect("fixture invariant: the owner has an observable content version");
     let facts =
         match engine_fact_signature_for_exported_type(ctx, "/m6_refusal.ts", "Probe", observed) {
-            crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
-            crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                sig.facts
+            }
+            verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(reason) => {
                 panic!("fixture invariant: a real exported type must root, got {reason:?}")
             }
         };
@@ -1679,7 +1681,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
 
     let (value_a, sig_a) = shape_value_and_fact_sig_for_scope(ctx, "/rel_a.ts", false);
     let (value_b, sig_b) = shape_value_and_fact_sig_for_scope(ctx, "/rel_b.ts", false);
-    let sig_b_and_a: Arc<[crate::resolver_core::FactVersionRef]> = Arc::from(
+    let sig_b_and_a: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> = Arc::from(
         sig_b
             .iter()
             .chain(sig_a.iter())

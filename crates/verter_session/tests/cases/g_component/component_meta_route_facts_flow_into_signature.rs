@@ -33,8 +33,8 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
-use verter_session::resolver_core::{DerivedFactKind, FactVersionRef};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::{DerivedFactKind, FactVersionRef};
 use verter_session_query::facts::FactKey;
 
 fn build_host() -> Arc<VerterHost> {

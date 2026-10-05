@@ -6,17 +6,15 @@
 
 use std::sync::Arc;
 
-use crate::fact_read_set::FactReadSetFinalise;
-use crate::resolution_currency::ResolutionFactKey;
+use crate::facts::fact_read_set::FactReadSetFinalise;
 #[cfg(test)]
-use verter_session_query::facts::registry::FactLane;
+use crate::facts::registry::FactLane;
+use crate::facts::resolution::ResolutionFactKey;
 #[cfg(test)]
-use verter_session_query::resolution::ResolutionPopulation;
+use crate::resolution::ResolutionPopulation;
 
-pub use verter_session_query::facts::receipt::{
-    drop_subsumed_receipts, ReceiptWalk, ResultReceipt,
-};
-pub use verter_session_query::facts::version::{
+pub use crate::facts::receipt::{drop_subsumed_receipts, ReceiptWalk, ResultReceipt};
+pub use crate::facts::version::{
     compaction_domain, AggregatePopulation, AggregateStamp, CompactionDomain,
     CompletionOverlayState, DerivedFactKind, DomainGenerationFact, FactAttribution, FactHash16,
     FactVersionRef, OverlayId, ParseEnvHash, ParseFactRef, ProgramAnalysisFactRef,
@@ -88,7 +86,7 @@ impl AggregateGenerations {
     /// Whether a scope holding this basis could MINT `domain`'s terminal
     /// aggregate.
     ///
-    /// The SAME two conditions [`compact_domains`](crate::fact_read_set)
+    /// The SAME two conditions [`compact_domains`](crate::facts::fact_read_set)
     /// applies — a live stamp AND a population for the bucket — read
     /// without a fact in hand. Sharing one predicate is the point: a
     /// domain this basis cannot mint for is one whose precise facts stay
@@ -615,10 +613,10 @@ impl ReadSetSignature {
     }
 
     #[must_use]
-    pub(crate) fn resolution_fact_version(
+    pub fn resolution_fact_version(
         &self,
         key: &ResolutionFactKey,
-    ) -> Option<crate::resolution_currency::ResolutionFactVersion> {
+    ) -> Option<crate::facts::resolution::ResolutionFactVersion> {
         let mut found = None;
         self.all_leaves(|fact| {
             if let FactVersionRef::ResolveImports(fact) = fact {
@@ -678,11 +676,11 @@ impl SignatureAdmission {
 #[cfg(test)]
 mod compaction_domain_tests {
     use super::*;
-    use crate::resolution_currency::{
+    use crate::facts::registry::{FactKey, SymbolSpace};
+    use crate::facts::resolution::{
         CanonicalResolutionId, ResolutionFactKey, ResolutionFactVersion,
     };
-    use verter_session_query::facts::registry::{FactKey, SymbolSpace};
-    use verter_session_query::resolution::ResolutionWorldId;
+    use crate::resolution::ResolutionWorldId;
 
     fn ts_language() -> verter_language::FileLanguage {
         verter_language::LanguageRegistry::global()
@@ -725,7 +723,7 @@ mod compaction_domain_tests {
 
     fn resolution_fact() -> FactVersionRef {
         FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(
-            crate::resolution_currency::ResolutionFactRef {
+            crate::facts::resolution::ResolutionFactRef {
                 key: ResolutionFactKey::PathProbe {
                     canonical: CanonicalResolutionId::new("/p/a.ts"),
                     population: ResolutionPopulation::Base,
@@ -867,7 +865,7 @@ mod compaction_domain_tests {
 #[cfg(test)]
 mod aggregate_basis_seed_tests {
     use super::*;
-    use verter_session_query::resolution::ResolutionWorldId;
+    use crate::resolution::ResolutionWorldId;
 
     /// Captured components deliberately differ from every live counter,
     /// so a composition that sourced a component from the wrong half is

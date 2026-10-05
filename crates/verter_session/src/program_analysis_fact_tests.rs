@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::{FactVersionRef, ProgramAnalysisFactRef, StoreView};
+use crate::resolver_core::StoreView;
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ProgramAnalysisFactRef};
 
 const FLOW_SOURCE: &str = "export function alpha(n: number) {\n\
      \x20 if (n <= 0) return 0;\n\
@@ -41,7 +42,7 @@ fn alpha_fact_at(
     overload_ordinal: u32,
 ) -> FactVersionRef {
     FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
-        function: crate::resolver_core::ProgramAnalysisFunctionRef {
+        function: verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
             canonical_id: Arc::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             merged_symbol_name: Arc::from("alpha"),

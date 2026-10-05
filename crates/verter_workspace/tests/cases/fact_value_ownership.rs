@@ -13,8 +13,8 @@ fn assert_same_nominal_type<Semantic: 'static, Workspace: 'static>() {
 
 #[test]
 fn fact_version_value_graph_is_semantic_owned_and_workspace_reexported() {
+    use verter_session_query::facts::fact_cache as workspace;
     use verter_session_query::facts::version as semantic;
-    use verter_workspace::fact_cache as workspace;
 
     assert_same_nominal_type::<semantic::FactHash16, workspace::FactHash16>();
     assert_same_nominal_type::<semantic::CompactionDomain, workspace::CompactionDomain>();

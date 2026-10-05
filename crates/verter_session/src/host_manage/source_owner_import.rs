@@ -126,21 +126,23 @@ impl<'a> OwnerImportRequestDriver<'a> {
             .owner_import_surface_fact_tracer_installs
             .fetch_add(1, Ordering::Relaxed);
 
-        let rebind = |surface: Arc<OwnerImportSurface>,
-                      facts: Arc<[crate::resolver_core::FactVersionRef]>| {
-            Arc::new(OwnerImportSurface {
-                owner_canonical: Arc::clone(&surface.owner_canonical),
-                owner_whole_hash: surface.owner_whole_hash,
-                bindings: Arc::clone(&surface.bindings),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
-                validated_at_generation: surface.validated_at_generation,
-            })
-        };
+        let rebind =
+            |surface: Arc<OwnerImportSurface>,
+             facts: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>| {
+                Arc::new(OwnerImportSurface {
+                    owner_canonical: Arc::clone(&surface.owner_canonical),
+                    owner_whole_hash: surface.owner_whole_hash,
+                    bindings: Arc::clone(&surface.bindings),
+                    read_set_signature:
+                        verter_session_query::facts::fact_cache::ReadSetSignature::new(facts),
+                    validated_at_generation: surface.validated_at_generation,
+                })
+            };
 
         match (decision, finalise) {
             (
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(surface),
-                crate::resolver_core::FactReadSetFinalise::Ok(facts),
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts),
             ) => {
                 let surface = rebind(surface, facts);
                 let generation_current = surface.validated_at_generation
@@ -165,7 +167,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
             }
             (
                 crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly { value, reason },
-                crate::resolver_core::FactReadSetFinalise::Ok(facts),
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts),
             ) => {
                 crate::cache_runtime::admission::propagate_non_admission(reason);
                 Some(rebind(value, facts))
@@ -176,7 +178,9 @@ impl<'a> OwnerImportRequestDriver<'a> {
                     value: surface,
                     ..
                 },
-                crate::resolver_core::FactReadSetFinalise::NonCacheable(facts),
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+                    facts,
+                ),
             ) => {
                 host.provenance
                     .owner_import_surface_fenced_serve_refusals
@@ -192,7 +196,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
                     value: surface,
                     ..
                 },
-                crate::resolver_core::FactReadSetFinalise::Overflow,
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow,
             ) => {
                 host.provenance
                     .owner_import_surface_overflow_refusals
@@ -208,7 +212,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
                     value: surface,
                     ..
                 },
-                crate::resolver_core::FactReadSetFinalise::MutationUnstable,
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable,
             ) => {
                 // Same refusal as the overflow arm above, attributed
                 // truthfully: a compaction domain moved mid-scope, which

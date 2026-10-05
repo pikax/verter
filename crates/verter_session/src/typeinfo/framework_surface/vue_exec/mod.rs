@@ -1121,7 +1121,7 @@ pub(crate) fn vue_macro_dtos_with_ctx(
     );
     let non_cacheable_read_observed = matches!(
         &finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     // This surface's OWN completeness — folded from the cold compute's
@@ -1147,10 +1147,14 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         // caching a partial would launder a warm complete replay (re-running
         // the budget-constrained owner against warm per-arm memos no longer
         // re-trips the fuse).
-        crate::resolver_core::FactReadSetFinalise::Ok(facts) if !completeness.is_partial() => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
+            if !completeness.is_partial() =>
+        {
             let entry = StoredSurfaceDto {
                 dto_bundle: Arc::new(dtos),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                    facts,
+                ),
                 validated_at_generation: generation,
             };
             MacroDtosRead {
@@ -1161,14 +1165,16 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         // Genuine partial (`Ok` finalise but partial completeness): valid
         // bundle, refused store admission. A repeat request recomputes against
         // the fresh budget.
-        crate::resolver_core::FactReadSetFinalise::Ok(_) => MacroDtosRead {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(_) => MacroDtosRead {
             dtos: Arc::new(dtos),
             completeness,
         },
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => MacroDtosRead {
-            dtos: Arc::new(dtos),
-            completeness,
-        },
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+            MacroDtosRead {
+                dtos: Arc::new(dtos),
+                completeness,
+            }
+        }
         // Tracer overflowed: the DTOs are valid but cannot be admitted safely
         // (the observation set was truncated). Return the freshly-computed
         // bundle WITHOUT caching — a repeat request recomputes, never serves an
@@ -1176,11 +1182,13 @@ pub(crate) fn vue_macro_dtos_with_ctx(
         // Neither an over-cap nor a mutation-unstable scope yields a
         // signature the bundle can be admitted under; both serve the DTOs
         // and publish nothing.
-        crate::resolver_core::FactReadSetFinalise::Overflow
-        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => MacroDtosRead {
-            dtos: Arc::new(dtos),
-            completeness,
-        },
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            MacroDtosRead {
+                dtos: Arc::new(dtos),
+                completeness,
+            }
+        }
     }
 }
 
@@ -1486,11 +1494,11 @@ mod partial_admission_tests {
     use super::*;
     use crate::project_semantic_dispatch::output_materialization::OutputProjector;
     use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
-    use crate::resolver_core::FactReadSetFinalise;
     use crate::semantic_query::{
         PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
     };
     use crate::VerterHost;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
     fn surface_with_broken_member(value: SemanticNodeId) -> SurfaceView {
         crate::semantic_query::surface_view! {
@@ -1534,13 +1542,15 @@ mod partial_admission_tests {
         let broken_obj =
             graph.intern_node(SemanticNodeData::Object(surface_with_broken_member(absent)));
         let _scope = ColdComputeCompletenessScope::enter();
-        let (_tree, facts) =
-            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+        let (_tree, facts) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || {
                 let sealed = cap
                     .materialize_output_type_expr(broken_obj)
                     .expect("the object raises (degraded member)");
                 sealed.into_type_expr(&cap)
-            });
+            },
+        );
         assert!(
             matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),
             "a degraded output must finalise NON-CACHEABLE (OutputMaterializationLoss)"
@@ -1558,10 +1568,10 @@ mod partial_admission_tests {
             )),
         ));
         let _scope = ColdComputeCompletenessScope::enter();
-        let (_raised, facts) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                cap.materialize_output_type_expr(union_absent)
-            });
+        let (_raised, facts) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || cap.materialize_output_type_expr(union_absent),
+        );
         assert!(_raised.is_none(), "the composite fold fails");
         assert!(
             matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),

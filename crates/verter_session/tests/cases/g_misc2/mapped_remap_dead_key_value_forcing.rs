@@ -61,13 +61,13 @@
 
 use std::sync::Arc;
 
-use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use verter_session::semantic_query::{
     IndexKey, PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
 use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::FactKey;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 use verter_type_expr::TypeExpr;
 
 /// A WIDE source (six keys) behind a `Computed` mapper whose value body

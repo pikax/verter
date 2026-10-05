@@ -5,9 +5,8 @@
 //! non-empty signature. A custom always-rejecting view must return `false` on
 //! the first non-matching fact.
 
-use verter_session::resolver_core::{
-    FactVersionRef, PermissiveStoreView, StoreView, StoreViewCompatToken,
-};
+use verter_session::resolver_core::{PermissiveStoreView, StoreView, StoreViewCompatToken};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn test_fact(n: u8) -> FactVersionRef {
     FactVersionRef::FileWholeHash {

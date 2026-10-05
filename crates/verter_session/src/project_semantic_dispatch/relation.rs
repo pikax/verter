@@ -2474,7 +2474,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         if force_n > 0 {
             for n in 0..force_n {
                 crate::resolver_core::resolver_context::observe_fan_out(
-                    crate::resolver_core::FactVersionRef::FileWholeHash {
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                         canonical_id: format!("__relation_force_overflow_{n}.ts"),
                         hash: [(n & 0xff) as u8; 16],
                     },

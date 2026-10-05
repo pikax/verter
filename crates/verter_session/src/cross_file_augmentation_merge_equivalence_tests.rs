@@ -497,19 +497,22 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     use rustc_hash::FxHashMap;
 
     use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef, StoreView};
+    use crate::resolver_core::StoreView;
     use crate::resolver_store::{HostStoreView, SourceEnvIdentity};
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
 
     let host = make_host();
     upsert_augmentation_fixture(&host);
 
     // Cold resolve of the augmented base decl under a fact tracer: the
     // parent fold must record the contributor source-env observation.
-    let (resolved, read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-        });
+    let (resolved, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
+    );
     let node = resolved.expect("augmented Foo must resolve");
     match node_data(&host, node).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => {
@@ -633,13 +636,15 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
 /// isolation; this one drives it through the end-to-end warm-read rail.
 #[test]
 fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
-    use crate::locator_identity::ParseEnvHash;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
     use crate::resolver_store::SourceEnvIdentity;
     use crate::semantic_query::{
         ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
+    };
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
 
     let host = make_host();
@@ -647,10 +652,10 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
 
     // Recording half: the cold production resolve records ONE
     // FileSourceEnv observation for the folded contributor.
-    let (resolved, read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-        });
+    let (resolved, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
+    );
     resolved.expect("augmented Foo must resolve");
     let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
         panic!("the traced resolve must seal a fact signature (no overflow)");
@@ -757,7 +762,9 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
 #[test]
 fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
     use crate::file_artifact_store::FileArtifactKey;
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
 
     let host = make_host();
     upsert_ts(
@@ -778,10 +785,10 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
          declare module './types' { interface Foo { fromWest: boolean } }\n",
     );
 
-    let (resolved, read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-        });
+    let (resolved, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
+    );
     let node = resolved.expect("the doubly-augmented Foo must resolve");
 
     // Both augmenters genuinely CONTRIBUTED (so both were version-rooted by
@@ -1455,7 +1462,7 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
         );
         let outer_non_cacheable = matches!(
             finalise,
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
         (
             read.cache_suppress,
@@ -1667,7 +1674,9 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     use crate::file_artifact_store::{
         compute_augmenter_set_fingerprint, AugmentationTargetKind, AugmenterEntry, FileArtifactKey,
     };
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
 
     let host = make_host();
     // NO augmenter anywhere in the workspace — the augmentation index for
@@ -1678,10 +1687,10 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
         "export interface Foo { base: string }\n",
     );
 
-    let (resolved, read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-        });
+    let (resolved, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
+    );
     let node = resolved.expect("the un-augmented Foo must resolve");
     let projected = host
         .project_node_to_type_expr_for_test(node)

@@ -19,8 +19,8 @@
 
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::FactVersionRef;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// Refusal classification for a non-cacheable admission. Re-exported
 /// from the audit leaf crate ([`verter_audit::NonAdmissionReason`]) so
@@ -39,8 +39,8 @@ pub(crate) use verter_audit::NonAdmissionReason;
 #[inline]
 pub(crate) fn non_admission_propagation(
     reason: NonAdmissionReason,
-) -> crate::resolver_core::fact_read_set::NonCacheablePropagation {
-    use crate::resolver_core::fact_read_set::NonCacheablePropagation;
+) -> verter_session_query::facts::fact_read_set::NonCacheablePropagation {
+    use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
 
     match reason {
         // A retention refusal declines to STORE a value that is complete
@@ -84,7 +84,9 @@ pub(crate) fn non_admission_propagation(
 #[inline]
 pub(crate) fn propagate_non_admission(reason: NonAdmissionReason) {
     let propagation = non_admission_propagation(reason);
-    if propagation == crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive {
+    if propagation
+        == verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive
+    {
         crate::resolver_core::resolver_context::note_non_cacheable_propagation(propagation);
     }
 }
@@ -132,24 +134,6 @@ pub(crate) fn propagate_non_admission(reason: NonAdmissionReason) {
 pub(crate) fn refuse_result_cache_admission_if_partial(value_is_partial: bool) -> bool {
     value_is_partial
 }
-
-/// Outcome of finalising a fact-read tracer, before the cached value is
-/// constructed.
-///
-/// A cold compute installs a tracer, walks its dependency graph, and
-/// finalises the tracer into a [`FactReadSetFinalise`]. This type lifts
-/// that raw result into the admission vocabulary: an `Ok` signature is
-/// [`SignatureAdmission::Cacheable`]; intrinsic non-cacheability and
-/// overflow are [`SignatureAdmission::NonCacheable`] with their
-/// corresponding typed reason.
-///
-/// `allow(dead_code)`: the query-identity cache families that finalise
-/// signatures through this surface land alongside it; the variants and
-/// methods are constructed and read by the `cache_runtime` tests
-/// (`signature_admission_from_ok_finalise_is_cacheable`,
-/// `signature_admission_from_overflow_finalise_is_non_cacheable`), so the
-/// allow only covers the not-yet-wired production constructor.
-pub(crate) use verter_workspace::SignatureAdmission;
 
 /// Node-facing cold-compute outcome.
 ///

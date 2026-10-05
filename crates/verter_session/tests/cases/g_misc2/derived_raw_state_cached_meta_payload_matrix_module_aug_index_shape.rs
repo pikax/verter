@@ -13,9 +13,8 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use verter_session::resolver_core::{
-    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, StoreView,
-};
+use verter_session::resolver_core::{PermissiveStoreView, StoreView};
+use verter_session_query::facts::fact_cache::{FactVersionRef, RouteSurfaceFactRef};
 use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
 use verter_session_query::facts::{FactKey, FactLane};
 

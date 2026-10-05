@@ -10,7 +10,7 @@ use super::*;
 #[cfg(test)]
 mod read_set_signature_unit_tests {
     use super::*;
-    use crate::resolver_core::DerivedFactKind;
+    use verter_session_query::facts::fact_cache::DerivedFactKind;
 
     fn fact_filewhole(canon: &str, byte: u8) -> FactVersionRef {
         FactVersionRef::FileWholeHash {
@@ -88,18 +88,22 @@ mod read_set_signature_unit_tests {
             fact_filewhole("/wholehash.ts", 1),
             fact_derived("/derived.ts", 2),
             fact_parse("/parse.ts", 3),
-            FactVersionRef::ResolveImports(crate::resolver_core::ResolveImportsFactRef::Semantic {
-                canonical_id: "/resolve.ts".to_string(),
-                key: FactKey::SyntacticExportSet,
-                lane: FactLane::Semantic,
-                expected_hash: [0u8; 16],
-            }),
-            FactVersionRef::RouteSurface(crate::resolver_core::RouteSurfaceFactRef {
-                canonical_id: "/route.ts".to_string(),
-                key: FactKey::SyntacticExportSet,
-                lane: FactLane::Semantic,
-                expected_hash: [0u8; 16],
-            }),
+            FactVersionRef::ResolveImports(
+                verter_session_query::facts::fact_cache::ResolveImportsFactRef::Semantic {
+                    canonical_id: "/resolve.ts".to_string(),
+                    key: FactKey::SyntacticExportSet,
+                    lane: FactLane::Semantic,
+                    expected_hash: [0u8; 16],
+                },
+            ),
+            FactVersionRef::RouteSurface(
+                verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
+                    canonical_id: "/route.ts".to_string(),
+                    key: FactKey::SyntacticExportSet,
+                    lane: FactLane::Semantic,
+                    expected_hash: [0u8; 16],
+                },
+            ),
         ]);
         let sig = ReadSetSignature::new(facts);
         let canons: Vec<String> = sig
@@ -172,10 +176,10 @@ mod read_set_signature_unit_tests {
 mod file_source_env_observation_tests {
     use super::*;
     use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
-    use crate::resolver_core::FactReadSetFinalise;
     use crate::{HostConfig, VerterHost};
     use std::sync::Arc as StdArc;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
     /// The reverse index registers a `(canonical → entry)` mapping for
     /// every canonical the fact rail names — a `FileSourceEnv`
@@ -221,10 +225,10 @@ mod file_source_env_observation_tests {
             "the planted key env must differ from the live env so the assertions \
              below discriminate live sourcing from a key copy"
         );
-        let (returned, read_set) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                observe_file_source_env_from_artifact_key(&host, Some(&key))
-            });
+        let (returned, read_set) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || observe_file_source_env_from_artifact_key(&host, Some(&key)),
+        );
         let expected = FactVersionRef::FileSourceEnv {
             canonical_id: "/dep.ts".to_string(),
             parse_env_hash: live_parse_env,
@@ -260,10 +264,10 @@ mod file_source_env_observation_tests {
     #[test]
     fn observe_file_source_env_without_exact_key_returns_none_and_records_nothing() {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let (returned, read_set) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                observe_file_source_env_from_artifact_key(&host, None)
-            });
+        let (returned, read_set) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || observe_file_source_env_from_artifact_key(&host, None),
+        );
         assert!(
             returned.is_none(),
             "an unobservable source-env identity must surface as None, never a default"

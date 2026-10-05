@@ -32,8 +32,8 @@ pub struct ComponentApiProjectionWitness {
     owner_whole_hash: verter_session_query::analysis::types::Hash16,
     result_key: crate::component_meta_result_db::ComponentMetaResultKey,
     producer_project_generation: u64,
-    admitted_read_set: crate::fact_signature_helpers::ReadSetSignature,
-    output_read_set: crate::fact_signature_helpers::ReadSetSignature,
+    admitted_read_set: verter_session_query::facts::fact_cache::ReadSetSignature,
+    output_read_set: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 impl std::fmt::Debug for ComponentApiProjectionWitness {
@@ -126,14 +126,14 @@ impl ComponentApiProjectionWitness {
         augmenter_canonical: &str,
     ) -> ((bool, bool), (bool, bool)) {
         fn observes(
-            signature: &crate::fact_signature_helpers::ReadSetSignature,
+            signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
             target_canonical: &str,
             augmenter_canonical: &str,
         ) -> (bool, bool) {
             let shape = signature.facts.iter().any(|fact| {
                 matches!(
                     fact,
-                    crate::resolver_core::FactVersionRef::RouteSurface(route)
+                    verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(route)
                         if matches!(
                             &route.key,
                             verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
@@ -147,7 +147,7 @@ impl ComponentApiProjectionWitness {
             let contributor = signature.facts.iter().any(|fact| {
                 matches!(
                     fact,
-                    crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                         if canonical_id == augmenter_canonical
                 )
             });

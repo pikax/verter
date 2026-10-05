@@ -358,7 +358,7 @@ fn a_point_miss_rejects_and_enumerates_nothing() {
     assert!(
         !StoreView::validates_parse_domain(
             &view,
-            &crate::resolver_core::ParseFactRef {
+            &verter_session_query::facts::fact_cache::ParseFactRef {
                 canonical_id: ABSENT.to_string(),
                 key: FactKey::MemberPresence {
                     exporter: InternedName::from("Missing"),

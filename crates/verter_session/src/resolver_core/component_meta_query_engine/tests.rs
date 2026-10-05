@@ -2848,7 +2848,7 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
         host.test_force
             .force_fact_tracer_overflow_observations
             .store(
-                crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+                verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
                 Ordering::Relaxed,
             );
         let resolvable = engine.can_resolve_registry_symbol(

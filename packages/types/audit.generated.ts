@@ -906,7 +906,7 @@ export type ExactnessTag = "ExactResolved" | "ExactSymbolic" | "UnresolvedGeneri
  * per fact-key kind without owning string data.
  *
  * Mirror of the structural-kind enumeration in
- * `verter_semantic::facts::registry::FactKey`. Only the parse-domain
+ * `verter_session_query::facts::registry::FactKey`. Only the parse-domain
  * kinds are mirrored — resolve-imports and route-surface domain
  * facts use the parallel `ResolvedImportFacts` / `RouteDb`
  * admission paths and emit their own typed events.
@@ -915,7 +915,7 @@ export type FactKeyKindTag = "Export" | "ExportAlias" | "SyntacticExportSet" | "
 
 /**
  * Which lane (`Semantic` or `Display`) a fact carries. Audit-side
- * mirror of `verter_semantic::facts::registry::FactLane`.
+ * mirror of `verter_session_query::facts::registry::FactLane`.
  *
  * `Copy` + `Hash` + `Eq` for emission aggregation. Producers
  * translate the session-side enum to this tag at emission time so
@@ -2811,7 +2811,7 @@ canonical_id: string, } } | { "FactSignatureOverflow": {
 candidate_size: number,
 /**
  * Configured cap value at admission time. Today this
- * equals `verter_session::resolver_core::FACT_SIGNATURE_CAP`
+ * equals `verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP`
  * (1024); the field is recorded explicitly so the audit
  * trail survives future cap tuning.
  */

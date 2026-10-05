@@ -12,9 +12,8 @@
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
-use verter_session::resolver_core::{
-    FactVersionRef, StoreView, StoreViewCompatToken, ValidatedFactCache,
-};
+use verter_session::resolver_core::{StoreView, StoreViewCompatToken, ValidatedFactCache};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 #[derive(Debug)]
 struct TestView {

@@ -9,10 +9,10 @@
 use super::*;
 use crate::cache_runtime::admission::{Candidate, FactCandidateDiscriminant};
 use crate::cache_runtime::node::QUERY_SLOT_CANDIDATE_CAP;
-use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::FactVersionRef;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// Build a `ReadSetSignature` over one `FileWholeHash` fact for
 /// `canonical`. The hash byte distinguishes distinct content versions.

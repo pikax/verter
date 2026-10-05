@@ -43,8 +43,9 @@ use std::sync::Arc;
 use verter_session_query::facts::registry::{FactKey, SymbolSpace};
 
 use crate::file_artifact_store::FileArtifactKey;
-use crate::resolver_core::{FactVersionRef, ResolverContext};
+use crate::resolver_core::ResolverContext;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// Doctored content hash no real content ever produces. A planted
 /// stale artifact carries this so a content-pinned read is trivially

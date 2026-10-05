@@ -55,7 +55,7 @@ pub(super) fn register_reverse_index(
     canonical_to_entries: &CanonicalToEntries,
     family: &FamilyKey,
     populated_slots: &[ModeSlot],
-    read_set_signature: &crate::fact_signature_helpers::ReadSetSignature,
+    read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     dispatch_dep_signature: &DepSignature,
     admission_seq: u64,
 ) {

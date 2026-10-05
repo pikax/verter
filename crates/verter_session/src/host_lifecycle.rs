@@ -44,7 +44,7 @@ impl VerterHost {
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
         workspace.install_resolution_retention(Arc::new(
-            crate::semantic_retention_account::ResolutionRetention(Arc::clone(
+            verter_session_query::retention::ResolutionRetention(Arc::clone(
                 self.project_type_store.retention_account(),
             )),
         ));
@@ -684,7 +684,7 @@ impl VerterHost {
     /// the authoritative content-change pipeline (`host.upsert`) runs —
     /// `notify_upsert` is the overlay-signal hook only.
     pub fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
-        verter_workspace::probe_scope!(NOTIFY_UPSERT);
+        verter_session_query::probe_scope!(NOTIFY_UPSERT);
         self.ws().notify_upsert(canonical_id, source);
         self.evict_artifact_only_canonical(canonical_id);
     }

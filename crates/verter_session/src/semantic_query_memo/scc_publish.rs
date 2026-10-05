@@ -187,7 +187,7 @@ impl SemanticGraphStore {
         &self,
         ctx: Option<&dyn crate::resolver_core::ResolverContext>,
         required_root: &SccRootWitness,
-        carrier: &crate::fact_signature_helpers::ReadSetSignature,
+        carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         validated_at_generation: u64,
         relation_members: Vec<PendingRelationMember>,
@@ -466,10 +466,10 @@ impl SemanticGraphStore {
     /// no eviction planning.
     pub(super) fn stage_entry(
         &self,
-        retention_charge: Option<Arc<crate::semantic_retention_account::RetentionCharge>>,
+        retention_charge: Option<Arc<verter_session_query::retention::RetentionCharge>>,
         value: SemanticQueryValue,
         satisfied_projection: MaterializedSet,
-        carrier: &crate::fact_signature_helpers::ReadSetSignature,
+        carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
         dispatch_dep_signature: &DepSignature,
         validated_at_generation: u64,
@@ -498,10 +498,10 @@ impl SemanticGraphStore {
         &self,
         members: &[&MemoEntry],
     ) -> Result<
-        crate::semantic_retention_account::RetentionCharge,
-        crate::semantic_retention_account::RetentionRefusal,
+        verter_session_query::retention::RetentionCharge,
+        verter_session_query::retention::RetentionRefusal,
     > {
-        use crate::semantic_retention_account::{ChargeClass, RetentionAdmission};
+        use verter_session_query::retention::{ChargeClass, RetentionAdmission};
         let account = self.retention_account();
         // The published root already owns the SCC carrier and self-root
         // allocations. The member batch therefore reserves only each
@@ -577,7 +577,7 @@ impl SemanticGraphStore {
         family: &FamilyKey,
         entry: MemoEntry,
         eviction: family::EvictionVictim,
-        carrier: &crate::fact_signature_helpers::ReadSetSignature,
+        carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
         dispatch_dep_signature: &DepSignature,
         admission_seq: u64,
     ) -> NewlyKeyedFamily {
@@ -626,7 +626,7 @@ impl SemanticGraphStore {
         family: FamilyKey,
         value: SemanticQueryValue,
         satisfied_projection: MaterializedSet,
-        carrier: crate::fact_signature_helpers::ReadSetSignature,
+        carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         validated_at_generation: u64,
     ) {

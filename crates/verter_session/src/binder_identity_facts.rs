@@ -52,12 +52,12 @@
 
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::ReadSetSignature;
 use crate::project_type_store::IndexedReady;
 use crate::semantic_query::{BinderScopeId, DeclarationSlotSeed, SemanticSymbolSpace};
 use dashmap::DashMap;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::declarations::{AugmentationScopeKind, ValueDeclKind};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 // ===========================================================================
 // Artifact payload (scope tree + declaration-slot seeds + provenance)
@@ -826,13 +826,15 @@ pub(crate) mod tests {
             std::sync::Arc::ptr_eq(&cold, &hit),
             "the second produce must be a WARM hit (same admitted entry)"
         );
-        let crate::resolver_core::FactReadSetFinalise::Ok(outer_facts) = finalise else {
+        let verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(outer_facts) =
+            finalise
+        else {
             panic!("outer tracer must finalise Ok — the warm hit bubbled its read-set");
         };
         assert!(
             outer_facts.iter().any(|fact| matches!(
                 fact,
-                crate::resolver_core::FactVersionRef::Parse(parse_fact)
+                verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact)
                     if matches!(parse_fact.key, verter_session_query::facts::FactKey::SyntacticExportSet)
             )),
             "the outer read-set must contain the bubbled SyntacticExportSet binder fact. \
@@ -841,7 +843,7 @@ pub(crate) mod tests {
         assert!(
             outer_facts.iter().any(|fact| matches!(
                 fact,
-                crate::resolver_core::FactVersionRef::Parse(parse_fact)
+                verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact)
                     if matches!(parse_fact.key, verter_session_query::facts::FactKey::DeclContributionOrder { .. })
             )),
             "the outer read-set must contain the bubbled DeclContributionOrder binder fact. \

@@ -19,7 +19,7 @@ use crate::semantic_query::{
     RelateMemoKey, RelationContext, RelationOutcome, ResolvedDeclSlotIdentity,
     ReturnProjectionDemand, SemanticNodeData,
 };
-use crate::semantic_retention_account::{
+use verter_session_query::retention::{
     ChargeClass, RetainedFootprint, RetentionLimits, SemanticRetentionAccount,
 };
 
@@ -27,7 +27,7 @@ use crate::semantic_retention_account::{
 fn seed_root(store: &SemanticGraphStore, key: &RelateMemoKey) -> SccRootWitness {
     store.insert_relation_payload_for_tests(
         key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(RelationOutcome::Assignable),
         0,
@@ -192,9 +192,9 @@ fn pending_flow_members(
 
 #[test]
 fn scc_member_reservation_excludes_the_roots_shared_carrier() {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         FactVersionRef::FileWholeHash {
             canonical_id: "/ws/scc-accounting.ts".to_string(),
             hash: [7; 16],
@@ -278,7 +278,7 @@ fn run_batch(cap: usize, member_order: &[usize], flow_members: usize) -> (bool, 
     let published = store.publish_scc_members_fenced(
         None,
         &witness,
-        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         &Arc::from(Vec::<Arc<str>>::new()),
         0,
         pending,
@@ -541,7 +541,7 @@ fn scc_batch_refuses_whole_on_a_proof_key_mismatch() {
         let published = store.publish_scc_members_fenced(
             None,
             &witness,
-            &crate::fact_signature_helpers::ReadSetSignature::empty(),
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             &Arc::from(Vec::<Arc<str>>::new()),
             0,
             pending,
@@ -663,14 +663,14 @@ fn run_exact_fit_pressure_batch(
                     None,
                 ))),
                 flow_whole_return_projection(),
-                crate::fact_signature_helpers::ReadSetSignature::empty(),
+                verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                 Arc::from(Vec::<Arc<str>>::new()),
                 0,
             );
         } else {
             store.insert_relation_payload_for_tests(
                 keys[1].clone(),
-                crate::fact_signature_helpers::ReadSetSignature::empty(),
+                verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
                 Arc::from(Vec::<Arc<str>>::new()),
                 store.relation_payload_for_tests(RelationOutcome::Assignable),
                 0,
@@ -683,7 +683,7 @@ fn run_exact_fit_pressure_batch(
     for filler in &keys[filler_start..] {
         store.insert_relation_payload_for_tests(
             filler.clone(),
-            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             Arc::from(Vec::<Arc<str>>::new()),
             store.relation_payload_for_tests(RelationOutcome::NotAssignable),
             0,
@@ -714,7 +714,7 @@ fn run_exact_fit_pressure_batch(
         store.publish_scc_members_fenced(
             None,
             &witness,
-            &crate::fact_signature_helpers::ReadSetSignature::empty(),
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             &Arc::from(Vec::<Arc<str>>::new()),
             0,
             pending,
@@ -857,9 +857,9 @@ fn scc_batch_evicts_unrelated_families_before_its_own_component() {
 /// stays green under that mutation.
 #[test]
 fn scc_batch_plans_member_eviction_invalid_first_against_the_callers_view() {
-    use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::resolver_core::FactVersionRef;
     use crate::types::{HostConfig, UpsertRequest};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
 
     let host = crate::VerterHost::new_standalone(HostConfig::default());
     let dep = "/ws/scc-eviction-dep.ts";

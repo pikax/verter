@@ -18,8 +18,8 @@
 #![cfg(test)]
 
 use verter_session::for_tests::install_fact_tracer_for_tests;
-use verter_session::resolver_core::FactReadSetFinalise;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
 use verter_session_query::facts::{FactKey, FactLane};
 
@@ -27,8 +27,8 @@ use verter_session_query::facts::{FactKey, FactLane};
 fn slot_binding_graph_fact_tracer_carries_import_ref() {
     let host = VerterHost::new_standalone(HostConfig::default());
 
-    let import_ref_fact = verter_session::resolver_core::FactVersionRef::Parse(
-        verter_session::resolver_core::ParseFactRef {
+    let import_ref_fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+        verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: "/src/Comp.vue".to_owned(),
             key: FactKey::ImportRef {
                 specifier: InternedSpecifier::from("./slots"),

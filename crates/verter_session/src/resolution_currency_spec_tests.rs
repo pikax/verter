@@ -12,12 +12,14 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::cache_runtime::{CacheAdmission, NonAdmissionReason, SignatureAdmission};
-use crate::fact_signature_helpers::ReadSetSignature;
+use crate::cache_runtime::{CacheAdmission, NonAdmissionReason};
 use crate::resolved_import_facts::{ResolvedImportFacts, ResolvedImportFactsKey};
-use crate::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, ResolveImportsFactRef, ValidatedFactCache,
-    FACT_SIGNATURE_CAP,
+use crate::resolver_core::ValidatedFactCache;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_session_query::facts::{
+    fact_cache::{FactVersionRef, ResolveImportsFactRef},
+    fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

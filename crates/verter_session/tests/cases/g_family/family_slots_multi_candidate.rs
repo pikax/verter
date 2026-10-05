@@ -21,13 +21,13 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::ReadSetSignature;
-use verter_session::resolver_core::FactVersionRef;
 use verter_session::semantic_query::{
     DepSignature, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())

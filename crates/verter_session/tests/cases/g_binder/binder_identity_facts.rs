@@ -28,13 +28,13 @@ use verter_session::binder_identity_facts::{
     negative_lookup_admission, BinderIdentityFacts, BinderIdentityFactsEntry,
 };
 use verter_session::for_tests::binder_identity_facts_get_or_compute_for_tests;
-use verter_session::resolver_core::FactVersionRef;
 use verter_session::semantic_query::admit::Admission;
 use verter_session::semantic_query::{
     BinderScopeId, BinderScopeKind, DeclarationSlotSeed, ResolvedDeclSlotIdentity, ScopeId,
     SemanticQueryKey, SemanticSymbolSpace,
 };
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_type_expr::TopLevelOwnerId;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 

@@ -5704,8 +5704,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             AugmentationTargetKind::GlobalAugmentation => String::new(),
         };
         crate::resolver_core::resolver_context::observe_fan_out(
-            crate::resolver_core::FactVersionRef::RouteSurface(
-                crate::resolver_core::RouteSurfaceFactRef {
+            verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
+                verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
                     canonical_id: shape_attribution.clone(),
                     key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
                         &target,
@@ -5728,8 +5728,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 .contributor_answer(&target, decl_name, allow_automatic_libs, None);
         let population_hit = population_answer.contributors;
         crate::resolver_core::resolver_context::observe_fan_out(
-            crate::resolver_core::FactVersionRef::RouteSurface(
-                crate::resolver_core::RouteSurfaceFactRef {
+            verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
+                verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
                     canonical_id: shape_attribution.clone(),
                     key: crate::global_contributors::population_contributor_fact_key(
                         &target, decl_name,
@@ -6328,7 +6328,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // source-env-observed by construction.
         for root in &contributor_roots {
             crate::resolver_core::resolver_context::observe_fan_out(
-                crate::resolver_core::FactVersionRef::FileWholeHash {
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id: root.canonical.as_ref().to_owned(),
                     hash: root.whole_hash,
                 },
@@ -6481,8 +6481,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
     ) -> Vec<AmbientModuleBlock> {
         let (_, augmenter_set) = self.ctx.augmentation_index(target.clone());
         crate::resolver_core::resolver_context::observe_fan_out(
-            crate::resolver_core::FactVersionRef::RouteSurface(
-                crate::resolver_core::RouteSurfaceFactRef {
+            verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
+                verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
                     canonical_id: attribution.to_owned(),
                     key: crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
                         &target,
@@ -6693,8 +6693,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let target = AugmentationTargetKind::GlobalAugmentation;
         let answer = self.ctx.global_contributor_answer(name, space);
         crate::resolver_core::resolver_context::observe_fan_out(
-            crate::resolver_core::FactVersionRef::RouteSurface(
-                crate::resolver_core::RouteSurfaceFactRef {
+            verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
+                verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
                     canonical_id: String::new(),
                     key: crate::global_contributors::population_contributor_fact_key(&target, name),
                     lane: verter_session_query::facts::FactLane::Semantic,

@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
-use verter_session::for_tests::ReadSetSignature;
-use verter_session::resolver_core::{FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView};
+use verter_session::resolver_core::{PermissiveStoreView, StoreView};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 use verter_session_query::facts::registry::{InternedName, SymbolSpace};
 use verter_session_query::facts::{FactKey, FactLane};
 

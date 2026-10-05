@@ -48,8 +48,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use verter_session::resolver_core::{FactVersionRef, PermissiveStoreView, RouteDb, RouteResult};
+use verter_session::resolver_core::{PermissiveStoreView, RouteDb, RouteResult};
 use verter_session::VerterHost;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
     verter_session::resolver_core::RouteNameKey::new(

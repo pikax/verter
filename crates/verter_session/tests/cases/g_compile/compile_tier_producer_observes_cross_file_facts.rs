@@ -22,12 +22,12 @@
 //! `/src/types.ts`. This WOULD FAIL against a tree where the prefetch
 //! is removed.
 
-use verter_session::resolver_core::{FactVersionRef, ParseFactRef};
-use verter_session::ReadSetSignature;
 use verter_session::{
     CompileCacheMode, CompileErrorPolicy, CompileProfile, FileLanguage, HostConfig, UpsertRequest,
     VerterHost, VirtualNodeKind, VirtualQuery,
 };
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 use verter_session_query::facts::registry::FactKey;
 
 fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {

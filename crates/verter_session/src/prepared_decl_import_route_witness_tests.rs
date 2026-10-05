@@ -42,8 +42,9 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::{FactVersionRef, StoreView};
+use crate::resolver_core::StoreView;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn upsert(host: &VerterHost, path: &str, source: &str) {
     let _ = host

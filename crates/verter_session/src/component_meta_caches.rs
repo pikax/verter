@@ -82,11 +82,12 @@ use verter_type_expr::TypeExpr;
 use crate::cache_runtime::admission::{CacheEntry, NonAdmissionReason};
 use crate::cache_runtime::node::QueryFlightKey;
 use crate::cache_runtime::singleflight::InflightTable;
-#[cfg(any(test, feature = "test-support"))]
-use crate::fact_signature_helpers::ReadSetSignature;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
 use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
-use crate::resolver_core::{FactVersionRef, ResolvedTypeDeclaration};
+use crate::resolver_core::ResolvedTypeDeclaration;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+#[cfg(any(test, feature = "test-support"))]
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 // `ProjectionMode` is referenced only by the mode-only key constructors and
 // the schema-probe helpers, all gated `cfg(any(test, feature = "test-support"))`;
 // gate the import to match so release does not see it unused.
@@ -297,7 +298,7 @@ impl ImportedRegistryDb {
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_for_test(&self, key: ImportedRegistryKey, entry: Arc<ImportedRegistryEntry>) {
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
-        let signature = crate::fact_signature_helpers::ReadSetSignature::new(Arc::clone(
+        let signature = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
             &entry.fact_dep_signature,
         ));
         self.store.insert_for_test(

@@ -662,13 +662,14 @@ impl VerterHost {
         // Child / dep `Route` facts DO round-trip, so they are kept.
         // Empty signatures and an absent tracer stack are both a
         // no-op.
-        let cross_file_fallthrough_facts: Vec<crate::resolver_core::FactVersionRef> =
-            resolved_surface
-                .fact_versions
-                .iter()
-                .filter(|fact| fact.canonical_id() != Some(canonical_id))
-                .cloned()
-                .collect();
+        let cross_file_fallthrough_facts: Vec<
+            verter_session_query::facts::fact_cache::FactVersionRef,
+        > = resolved_surface
+            .fact_versions
+            .iter()
+            .filter(|fact| fact.canonical_id() != Some(canonical_id))
+            .cloned()
+            .collect();
         crate::fact_signature_helpers::observe_fact_signature(&cross_file_fallthrough_facts);
 
         Some(crate::types::FallthroughResolution {
@@ -1510,7 +1511,7 @@ impl VerterHost {
                 // R3/R26/R28: lift the resolution's observed fact set
                 // into an `Arc<[FactVersionRef]>` so warm-hit reads
                 // clone a cheap handle.
-                let fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
+                let fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> =
                     Arc::from(resolution.fact_versions.clone().into_boxed_slice());
                 // Fan-out to outer active tracers so the mirrored
                 // fallthrough entry participates in transitive
@@ -1524,11 +1525,12 @@ impl VerterHost {
                 // `mirror_cached_resolved_meta_arc`). The stored
                 // `CachedFallthroughEntry` keeps the FULL set for its
                 // own warm validation. Empty signatures are a no-op.
-                let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = fact_versions
-                    .iter()
-                    .filter(|fact| fact.canonical_id() != Some(canonical_id))
-                    .cloned()
-                    .collect();
+                let cross_file_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
+                    fact_versions
+                        .iter()
+                        .filter(|fact| fact.canonical_id() != Some(canonical_id))
+                        .cloned()
+                        .collect();
                 crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
                 let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
                 derived_ref.value_mut().cached_fallthrough =

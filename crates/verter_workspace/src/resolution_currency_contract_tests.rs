@@ -392,7 +392,9 @@ fn directory_enumeration_inside_probe_enters_the_transaction_signature() {
     reader.insert("/p/dep.ts", "export const value = 1");
 
     let outcome = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
-    let crate::SignatureAdmission::Cacheable(_) = &outcome.admission else {
+    let verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_) =
+        &outcome.admission
+    else {
         panic!("a fully tracked resolver read must remain cacheable");
     };
     let directory_fact = ResolutionFactKey::DirectoryMembers {
@@ -747,13 +749,17 @@ fn resolution_outcome_uses_the_shared_resolve_imports_signature_rail() {
     reader.insert("/p/dep.ts", "export const value = 1");
 
     let outcome = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
-    let crate::SignatureAdmission::Cacheable(signature) = &outcome.admission else {
+    let verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(signature) =
+        &outcome.admission
+    else {
         panic!("a fully tracked resolution must produce the shared cacheable admission");
     };
     assert!(!signature.facts.is_empty());
     assert!(signature.facts.iter().all(|fact| matches!(
         fact,
-        crate::FactVersionRef::ResolveImports(crate::ResolveImportsFactRef::Resolution(_))
+        verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+            verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(_)
+        )
     )));
 
     // Mutation recipe: reintroduce a resolution-only signature/admission carrier
@@ -870,7 +876,7 @@ fn every_closed_resolution_fact_family_has_a_live_mutation_rail() {
     );
     assert!(matches!(
         outcome.admission,
-        crate::SignatureAdmission::Cacheable(_)
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
     ));
     let decision_key = engine
         .cached_resolution_query_for_test("/p/main.ts", "./dep", CONTEXT, resolve_population)
@@ -2105,22 +2111,28 @@ fn decision_node(
         .map(ResolutionFactKey::decision)
 }
 
-fn resolution_facts(signature: &crate::ReadSetSignature) -> Vec<ResolutionFactKey> {
+fn resolution_facts(
+    signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+) -> Vec<ResolutionFactKey> {
     signature
         .facts
         .iter()
         .filter_map(|fact| match fact {
-            crate::FactVersionRef::ResolveImports(crate::ResolveImportsFactRef::Resolution(
-                fact,
-            )) => Some(fact.key.clone()),
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(fact),
+            ) => Some(fact.key.clone()),
             _ => None,
         })
         .collect()
 }
 
-fn cacheable_signature(outcome: &crate::ResolutionOutcome) -> crate::ReadSetSignature {
+fn cacheable_signature(
+    outcome: &crate::ResolutionOutcome,
+) -> verter_session_query::facts::fact_cache::ReadSetSignature {
     match &outcome.admission {
-        crate::SignatureAdmission::Cacheable(signature) => signature.clone(),
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(signature) => {
+            signature.clone()
+        }
         other => panic!("expected a cacheable resolution, got {other:?}"),
     }
 }
@@ -2213,7 +2225,7 @@ fn resolution_decision_records_only_direct_dependencies() {
     let cold = engine.resolve_import_outcome(&reader, "/p/main.ts", "./dep", CONTEXT);
     assert!(matches!(
         cold.admission,
-        crate::SignatureAdmission::Cacheable(_)
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
     ));
     let node = decision_node(&engine, "/p/main.ts", "./dep", base).expect("published decision");
 
@@ -2424,7 +2436,7 @@ fn resolution_decision_overlay_never_validates_as_base() {
     );
     assert!(matches!(
         session_outcome.admission,
-        crate::SignatureAdmission::Cacheable(_)
+        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
     ));
 
     let session_node = decision_node(engine, "/p/main.ts", "./dep", population)
@@ -3193,7 +3205,7 @@ fn owner_set_key(owner: &str, population: ResolutionPopulation) -> ResolutionFac
 fn owner_set_fact(
     workspace: &crate::memory::MemoryWorkspace,
     owner: &str,
-) -> Option<crate::FactVersionRef> {
+) -> Option<verter_session_query::facts::fact_cache::FactVersionRef> {
     WorkspaceAccess::publish_owner_resolution_set(workspace, owner)
 }
 
@@ -3262,7 +3274,7 @@ fn owner_resolution_set_advances_with_any_child_decision() {
     resolve_in(&workspace, owner, "./dep");
     resolve_in(&workspace, owner, "./other");
     let fact = owner_set_fact(&workspace, owner).expect("published owner set");
-    let witness = crate::ReadSetSignature::new(Arc::from([fact]));
+    let witness = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([fact]));
     assert!(witness.validates(
         engine
             .capture_published_resolution_world(population)
@@ -3301,7 +3313,7 @@ fn owner_resolution_set_unchanged_for_unrelated_decision() {
 
     resolve_in(&workspace, owner, "./dep");
     let fact = owner_set_fact(&workspace, owner).expect("published owner set");
-    let witness = crate::ReadSetSignature::new(Arc::from([fact]));
+    let witness = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([fact]));
 
     // A second owner, in its own directory, with its own decision.
     workspace.inject_file("/q/far.ts".to_string(), Arc::from("export const far = 1"));

@@ -741,7 +741,9 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Engine retain no such state and ignore it.
     fn install_resolution_retention(
         &self,
-        _account: std::sync::Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+        _account: std::sync::Arc<
+            dyn verter_session_query::retention::resolution_charge::ResolutionRetentionAccount,
+        >,
     ) {
     }
 
@@ -863,7 +865,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
     fn publish_owner_resolution_set(
         &self,
         _owner_canonical: &str,
-    ) -> Option<crate::fact_cache::FactVersionRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::FactVersionRef> {
         None
     }
 

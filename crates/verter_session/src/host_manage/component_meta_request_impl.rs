@@ -48,27 +48,27 @@ pub(crate) fn next_component_meta_audit_request_id() -> u64 {
 /// cache signature.
 fn component_meta_outcome_from_tracer(
     mut value: Option<ResolvedComponentMetaState>,
-    finalise: crate::resolver_core::FactReadSetFinalise,
+    finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
 ) -> ComponentMetaComputeOutcome<ResolvedComponentMetaState> {
     let cache_refusal = match finalise {
-        crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
             if let Some(resolved) = value.as_mut() {
                 resolved.fact_versions = facts.to_vec();
             }
             None
         }
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(facts) => {
             if let Some(resolved) = value.as_mut() {
                 resolved.fact_versions = facts.to_vec();
             }
-            Some(crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive)
+            Some(verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive)
         }
         // Both size and STABILITY refusals propagate transitively: the
         // value is served, nothing is published, and every enclosing
         // scope inherits the refusal.
-        crate::resolver_core::FactReadSetFinalise::Overflow
-        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
-            Some(crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+            Some(verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive)
         }
     };
     ComponentMetaComputeOutcome {
@@ -100,7 +100,7 @@ fn observe_component_meta_owner_whole_hash(
         return None;
     };
     crate::resolver_core::resolver_context::observe_fan_out(
-        crate::resolver_core::FactVersionRef::FileWholeHash {
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: canonical.to_string(),
             hash: whole_hash,
         },

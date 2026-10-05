@@ -64,8 +64,9 @@ use verter_type_expr::{FunctionExpr, LiteralValue, MappedModifier, ObjectMember,
 use super::{empty_signature, map_primitive_name, ProjectSemanticDispatch};
 use crate::decl_body_memo::DerefedBodyShape;
 use crate::locator_identity::{
-    semantic_space_for_locator_space, LocatorLoweringKey, ParseEnvHash, ResolveEnvHash,
+    semantic_space_for_locator_space, LocatorLoweringKey, ResolveEnvHash,
 };
+use verter_session_query::facts::fact_cache::ParseEnvHash;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::locators::{TypeParamBoundPosition, TypeParamVisibility};
 

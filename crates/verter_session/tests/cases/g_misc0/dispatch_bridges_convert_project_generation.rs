@@ -21,8 +21,8 @@
 use std::sync::Arc;
 
 use verter_session::for_tests::dispatch_dep_signature_facts_for_tests;
-use verter_session::resolver_core::FactVersionRef;
 use verter_session::semantic_query::{DepSignature, DepVersion};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn make_dep_sig(entries: Vec<(&str, DepVersion)>) -> DepSignature {
     Arc::from(

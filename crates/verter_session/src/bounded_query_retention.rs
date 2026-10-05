@@ -76,7 +76,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::semantic_retention_account::RetentionCharge;
+use verter_session_query::retention::RetentionCharge;
 
 /// Process-wide monotonic allocator for candidate / entry insertion
 /// sequence numbers. The sequence number is the FIFO eviction order and

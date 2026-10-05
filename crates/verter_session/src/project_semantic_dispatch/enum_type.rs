@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::enum_constant::{
+use verter_session_query::enum_constant::{
     evaluate_enum_constant, global_number_spelling, EnumConstant,
 };
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
@@ -446,7 +446,7 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         evaluation: &mut EnumEvaluation,
         key: &EnumMemberKey,
-    ) -> Option<verter_semantic::analysis::decl_headers::EnumMemberPosition> {
+    ) -> Option<verter_session_query::declarations::headers::EnumMemberPosition> {
         let slot = *evaluation.enums.get(&key.0)?.positions.get(&key.1)?;
         if !evaluation.header_positions.contains_key(&key.0) {
             let positions = self.enum_header_positions(&key.0, &evaluation.enums[&key.0].members);
@@ -467,7 +467,7 @@ impl ProjectSemanticDispatch<'_> {
         &self,
         decl: &DeclIdentity,
         members: &[EnumMemberEntry],
-    ) -> Option<Arc<[verter_semantic::analysis::decl_headers::EnumMemberPosition]>> {
+    ) -> Option<Arc<[verter_session_query::declarations::headers::EnumMemberPosition]>> {
         let indexed = self
             .ctx
             .ensure_indexed_ready_serve(decl.canonical_id.as_ref())?
@@ -873,7 +873,7 @@ struct EnumEvaluation {
     /// file's header when a reference first needs one.
     header_positions: rustc_hash::FxHashMap<
         DeclIdentity,
-        Option<Arc<[verter_semantic::analysis::decl_headers::EnumMemberPosition]>>,
+        Option<Arc<[verter_session_query::declarations::headers::EnumMemberPosition]>>,
     >,
 }
 

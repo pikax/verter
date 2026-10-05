@@ -68,7 +68,7 @@ pub(crate) enum Recursion {
 pub(crate) struct ReadCapture<'a> {
     publication: Option<&'a mut Option<PublishedMemoCandidate>>,
     evidence: Option<&'a mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
-    carrier: Option<&'a mut Option<crate::fact_signature_helpers::ReadSetSignature>>,
+    carrier: Option<&'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
 }
 
 impl<'a> ReadCapture<'a> {
@@ -99,7 +99,7 @@ impl<'a> ReadCapture<'a> {
     /// result arrives replays the carrier into its own tracer when it
     /// resumes.
     pub(crate) fn deferring_carrier(
-        slot: &'a mut Option<crate::fact_signature_helpers::ReadSetSignature>,
+        slot: &'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
     ) -> Self {
         Self {
             publication: None,
@@ -113,14 +113,17 @@ impl<'a> ReadCapture<'a> {
         &mut self,
     ) -> (
         Option<&mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
-        Option<&mut Option<crate::fact_signature_helpers::ReadSetSignature>>,
+        Option<&mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
     ) {
         (self.evidence.as_deref_mut(), self.carrier.as_deref_mut())
     }
 
     /// Deliver the answering result's carrier: into the deferred slot, or
     /// into the tracers active now.
-    fn deliver_carrier(&mut self, carrier: &crate::fact_signature_helpers::ReadSetSignature) {
+    fn deliver_carrier(
+        &mut self,
+        carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    ) {
         match self.carrier.as_deref_mut() {
             Some(slot) => *slot = Some(carrier.clone()),
             None => carrier.bubble_via_tls(),
@@ -206,7 +209,7 @@ pub(crate) struct SettledProducer<'s> {
     result: QueryResult<SemanticQueryValue>,
     dep_signature: DepSignature,
     walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
-    carrier: crate::fact_signature_helpers::ReadSetSignature,
+    carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: Arc<[Arc<str>]>,
     satisfied_projection: MaterializedSet,
     pending_prefix_backfills: Vec<crate::project_semantic_dispatch::walk::PrefixBackfill>,
@@ -720,7 +723,7 @@ impl<'s> ProducerLease<'s> {
         // or not the result is admitted.
         let carrier = match graph_carrier {
             Some(boxed) => *boxed,
-            None => crate::fact_signature_helpers::ReadSetSignature::new(
+            None => verter_session_query::facts::fact_cache::ReadSetSignature::new(
                 crate::fact_signature_helpers::empty_fact_signature(),
             ),
         };

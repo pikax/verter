@@ -8,7 +8,8 @@ use crate::resolver_core::{
 /// complete and returnable, but cannot be published or retained.
 pub(crate) struct ComponentMetaComputeOutcome<R> {
     pub(crate) value: Option<R>,
-    pub(crate) cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
+    pub(crate) cache_refusal:
+        Option<verter_session_query::facts::fact_read_set::NonCacheablePropagation>,
 }
 
 pub(crate) struct ComponentMetaCacheLookup<R, P> {
@@ -27,7 +28,7 @@ impl<R> ComponentMetaComputeOutcome<R> {
         Self {
             value,
             cache_refusal: non_cacheable.then_some(
-                crate::resolver_core::fact_read_set::NonCacheablePropagation::Transitive,
+                verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
             ),
         }
     }
@@ -173,7 +174,7 @@ struct ComponentMetaRequestExecutor<'a, H: ComponentMetaRequestHost> {
     snapshot_view_current: bool,
     captured_inputs: Option<H::CapturedInputs>,
     last_completeness: crate::semantic_query::ResultCompleteness,
-    last_cache_refusal: Option<crate::resolver_core::fact_read_set::NonCacheablePropagation>,
+    last_cache_refusal: Option<verter_session_query::facts::fact_read_set::NonCacheablePropagation>,
     last_admission: Option<H::AdmissionProof>,
     max_attempts: usize,
 }
@@ -411,7 +412,7 @@ where
 
     fn capture_cache_refusal(
         &self,
-    ) -> Option<crate::resolver_core::fact_read_set::NonCacheablePropagation> {
+    ) -> Option<verter_session_query::facts::fact_read_set::NonCacheablePropagation> {
         self.last_cache_refusal
     }
 
@@ -483,7 +484,10 @@ mod tests {
             }
         }
 
-        fn validates(&self, _fact: &crate::resolver_core::FactVersionRef) -> bool {
+        fn validates(
+            &self,
+            _fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+        ) -> bool {
             false
         }
     }

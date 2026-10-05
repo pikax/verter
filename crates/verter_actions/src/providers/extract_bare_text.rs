@@ -285,7 +285,7 @@ fn find_props_accessor(script: &ScriptAnalysisSnapshot) -> Option<PropsInfo> {
 
     let primary = with_defaults.or(define_props)?;
 
-    if let Some(name) = verter_semantic::analysis::props_root_binding(&script.macros) {
+    if let Some(name) = verter_session_query::analysis::macros::props_root_binding(&script.macros) {
         Some(PropsInfo {
             accessor_name: name.to_string(),
             needs_wrapping: false,

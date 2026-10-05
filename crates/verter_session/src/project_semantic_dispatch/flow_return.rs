@@ -53,12 +53,12 @@ use super::ProjectSemanticDispatch;
 use crate::flow_completion_inventory::{
     BodyCompletionObservations, CompletionConstruction, CompletionDischarge, NormalCompletion,
 };
-use crate::resolver_core::{FactVersionRef, ProgramAnalysisFactRef};
 use crate::semantic_query::{
     FlowReturnDegradation, FlowReturnFailure, FlowReturnKey, FlowReturnResult, FlowReturnStep,
     FlowReturnUnsupported, PartialReasonSet, PrimitiveKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
 };
+use verter_session_query::facts::fact_cache::{FactVersionRef, ProgramAnalysisFactRef};
 use verter_session_query::flow::{
     binding::{FlowBindingMap, FlowBindingRef as FlowProductSubject},
     skeleton::{FunctionBodySkeleton, SkeletonBindingId},
@@ -15989,9 +15989,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// when its queried subject is the same as an ordinary operand read.
     fn indexed_argument_binding(
         &self,
-        root: verter_semantic::analysis::type_eval_build::IndexedValueReadRoot,
+        root: verter_session_query::analysis::indexed_value::IndexedValueReadRoot,
     ) -> FlowIndexedArgumentBinding {
-        use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot;
+        use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
         use verter_session_query::flow::{binding::FlowBindingOccurrence, frame_span::FrameSpan};
         let occurrence = match root {
             IndexedValueReadRoot::NonBinding => {

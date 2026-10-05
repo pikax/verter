@@ -52,7 +52,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::resolver_core::FactVersionRef;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// Returns `true` if `fact` references `canonical_id` (as a
 /// `FileWholeHash`, `DerivedFactHash`, `FileSourceEnv`, or one of the
@@ -80,9 +80,10 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
             canonical_id: c, ..
         } => c.as_str() == canonical_id,
         FactVersionRef::ProgramAnalysis(fact) => match fact {
-            crate::resolver_core::ProgramAnalysisFactRef::FlowBody { function, .. } => {
-                function.canonical_id.as_ref() == canonical_id
-            }
+            verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {
+                function,
+                ..
+            } => function.canonical_id.as_ref() == canonical_id,
         },
         // None is file-scoped: each is a whole-project scalar, a
         // whole-domain aggregate, or a strict self-root world witness —
@@ -174,7 +175,7 @@ impl AppConfigNoOverrideProofDb {
     /// `install_fact_tracer` scope finalised successfully.
     ///
     /// `fact_dep_signature` MUST be the
-    /// [`crate::resolver_core::FactReadSetFinalise::Ok`] payload
+    /// [`verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok`] payload
     /// produced by the producer's tracer. Legacy `DepSignature`
     /// derivation is no longer performed at publish time — the
     /// producer is the single authority for the entry's

@@ -1471,7 +1471,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
             crate::semantic_query::InstantiateContext::file_backed(
                 prc,
                 env.resolve_env_hash,
-                crate::locator_identity::ParseEnvHash::from_env_hash(env.parse_env_hash),
+                verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
+                    env.parse_env_hash,
+                ),
                 BodySourceWitness::mint_for_dispatch_factory(),
             )
         }
@@ -2137,7 +2139,7 @@ pub(crate) static DISPATCH_TEST_INJECT_PARSE_FACT_ARMED: std::sync::atomic::Atom
 
 #[doc(hidden)]
 pub(crate) static DISPATCH_TEST_INJECT_PARSE_FACT: std::sync::Mutex<
-    Option<crate::resolver_core::FactVersionRef>,
+    Option<verter_session_query::facts::fact_cache::FactVersionRef>,
 > = std::sync::Mutex::new(None);
 
 /// Observe the injected `Parse(...)` fact onto every active tracer
@@ -2170,7 +2172,7 @@ impl DispatchInjectParseFactGuard {
     /// `fact`. The next cold build observes `fact` onto every active
     /// tracer before the inner build runs. The returned guard clears
     /// the slot on drop.
-    pub fn arm(fact: crate::resolver_core::FactVersionRef) -> Self {
+    pub fn arm(fact: verter_session_query::facts::fact_cache::FactVersionRef) -> Self {
         {
             let mut slot = DISPATCH_TEST_INJECT_PARSE_FACT.lock().unwrap();
             *slot = Some(fact);
@@ -2402,27 +2404,29 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 },
             );
         let prelude = match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => CarrierNormalizationPrelude {
-                facts: Some(facts),
-                // A FENCED (ReturnOnly) `IndexedReady` serve observed while
-                // resolving the carrier head means the rewrite's value basis came
-                // from a served-without-publication artifact — refuse warm
-                // admission of any enclosing entry that rode this rewrite.
-                cache_suppress: false,
-                partial_reasons,
-            },
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
                 CarrierNormalizationPrelude {
                     facts: Some(facts),
-                    cache_suppress: true,
+                    // A FENCED (ReturnOnly) `IndexedReady` serve observed while
+                    // resolving the carrier head means the rewrite's value basis came
+                    // from a served-without-publication artifact — refuse warm
+                    // admission of any enclosing entry that rode this rewrite.
+                    cache_suppress: false,
                     partial_reasons,
                 }
             }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+                facts,
+            ) => CarrierNormalizationPrelude {
+                facts: Some(facts),
+                cache_suppress: true,
+                partial_reasons,
+            },
             // An overflowed OR mutation-unstable prelude yields no fact
             // list the rewrite can be soundly rooted on, so both suppress
             // caching (the value still flows; the memo refuses).
-            crate::resolver_core::FactReadSetFinalise::Overflow
-            | crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+            | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
                 CarrierNormalizationPrelude {
                     facts: None,
                     cache_suppress: true,
@@ -2556,7 +2560,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         &self,
         mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>,
         build_local: BuildLocalTaint,
-        finalise: crate::resolver_core::FactReadSetFinalise,
+        finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
         carrier_prelude: &CarrierNormalizationPrelude,
         evidence_target_key: Option<&SemanticQueryKey>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
@@ -2585,7 +2589,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         // flows to the caller; the memo refuses admission.
         output.cache_suppress |= matches!(
             &finalise,
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
         let provenance = &self.binding.observers.provenance;
         provenance
@@ -3506,7 +3510,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// self-version-rooted one.
 ///
 /// On `FactReadSetFinalise::Ok` it builds the published memo entry's
-/// completed [`crate::fact_signature_helpers::ReadSetSignature`] carrier
+/// completed [`verter_session_query::facts::fact_cache::ReadSetSignature`] carrier
 /// from the build's `observed_self_roots` and the traced fact set via
 /// [`crate::semantic_query_memo::semantic_graph_read_set_signature`],
 /// and records the deduplicated self-root canonical set. A `None`
@@ -3529,7 +3533,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// fenced-serve prelude) forces the entry out of the memo.
 #[derive(Clone)]
 struct CarrierNormalizationPrelude {
-    facts: Option<Arc<[crate::resolver_core::FactVersionRef]>>,
+    facts: Option<Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>>,
     cache_suppress: bool,
     partial_reasons: crate::semantic_query::PartialReasonSet,
 }
@@ -3566,7 +3570,7 @@ impl CarrierNormalizationPrelude {
 fn finalise_traced_build_output<T>(
     ctx: &dyn crate::resolver_core::ResolverContext,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
-    finalise: crate::resolver_core::FactReadSetFinalise,
+    finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
     provenance: &crate::types::MetaProvenance,
     carrier_prelude: &CarrierNormalizationPrelude,
     // Gates the `ShallowDiagnostic::SignatureOverflow` walker diagnostic
@@ -3594,12 +3598,14 @@ fn finalise_traced_build_output<T>(
     output.cache_suppress |= carrier_prelude.cache_suppress();
     let finalise_is_non_cacheable = matches!(
         &finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     output.cache_suppress |= finalise_is_non_cacheable;
     match finalise {
-        crate::resolver_core::FactReadSetFinalise::Ok(traced_facts)
-        | crate::resolver_core::FactReadSetFinalise::NonCacheable(traced_facts) => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(traced_facts)
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+            traced_facts,
+        ) => {
             // Fold the build's `dep_signature` fence into the traced
             // fact set BEFORE building the carrier. The published
             // `ReadSetSignature` is the SOLE cache-validity rail
@@ -3625,15 +3631,16 @@ fn finalise_traced_build_output<T>(
             // any of them misses the warm read — without them a memoized resolved
             // key could be admitted whose rewrite depended on untracked indexed /
             // augmentation state (cache poisoning).
-            let prelude_facts: &[crate::resolver_core::FactVersionRef] =
+            let prelude_facts: &[verter_session_query::facts::fact_cache::FactVersionRef] =
                 carrier_prelude.facts.as_deref().unwrap_or(&[]);
-            let merged_facts: Vec<crate::resolver_core::FactVersionRef> =
+            let merged_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
                 if fence_facts.is_empty() && prelude_facts.is_empty() {
                     traced_facts.iter().cloned().collect()
                 } else {
-                    let mut merged: Vec<crate::resolver_core::FactVersionRef> = Vec::with_capacity(
-                        traced_facts.len() + fence_facts.len() + prelude_facts.len(),
-                    );
+                    let mut merged: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
+                        Vec::with_capacity(
+                            traced_facts.len() + fence_facts.len() + prelude_facts.len(),
+                        );
                     merged.extend(traced_facts.iter().cloned());
                     for fact in fence_facts.into_iter().chain(prelude_facts.iter().cloned()) {
                         if !merged.iter().any(|existing| existing == &fact) {
@@ -3646,7 +3653,8 @@ fn finalise_traced_build_output<T>(
                 ctx.complete_graph_signature(&output.observed_self_roots, &merged_facts);
             match completed {
                 Ok((facts, self_root_canonicals)) => {
-                    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(facts);
+                    let carrier =
+                        verter_session_query::facts::fact_cache::ReadSetSignature::new(facts);
                     // §18.2 fact-rooted admission: a sound self-version-rooted
                     // carrier is the FIRST gate (a torn / unrootable self-root
                     // already routed to the `None` arm below, and an overflowed
@@ -3706,15 +3714,15 @@ fn finalise_traced_build_output<T>(
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     } else {
                         output.graph_carrier = Some(Box::new(
-                            crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
-                                merged_facts.into_boxed_slice(),
-                            )),
+                            verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                                Arc::from(merged_facts.into_boxed_slice()),
+                            ),
                         ));
                     }
                 }
             }
         }
-        crate::resolver_core::FactReadSetFinalise::Overflow => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
             if operand_force_active {
                 output.walker_diagnostics.push(
                     crate::project_semantic_dispatch::walk::ShallowDiagnostic::SignatureOverflow,
@@ -3731,7 +3739,7 @@ fn finalise_traced_build_output<T>(
         }
         // Same suppression, and deliberately NOT counted as an overflow:
         // the refusal is about a domain that moved, not about size.
-        crate::resolver_core::FactReadSetFinalise::MutationUnstable => {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
             output.cache_suppress = true;
         }
     }

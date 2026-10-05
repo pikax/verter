@@ -2,7 +2,7 @@
 //! query-node memo.
 //!
 //! Every `SemanticGraphStore` query-node memo entry is
-//! self-version-rooted: its [`crate::fact_signature_helpers::ReadSetSignature`]
+//! self-version-rooted: its [`verter_session_query::facts::fact_cache::ReadSetSignature`]
 //! carrier leads with a `FileWholeHash` fact for each canonical the
 //! cold build's value depends on for its own identity (the keyed
 //! canonical for `ResolveDecl` / `TypeOf` / `Instantiate` /
@@ -43,17 +43,19 @@ use std::sync::Arc;
 
 use verter_session_query::facts::{FactKey, FactLane};
 
-use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt};
-use crate::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, ResolverContext, StoreView, StoreViewCompatToken,
-    FACT_SIGNATURE_CAP,
-};
+use crate::fact_signature_helpers::ReadSetSignatureExt;
+use crate::resolver_core::{ResolverContext, StoreView, StoreViewCompatToken};
 use crate::semantic_query::{
     DepSignature, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey,
 };
 use crate::semantic_query_memo::{semantic_graph_read_set_signature, SemanticGraphStore};
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::{
+    fact_cache::FactVersionRef,
+    fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
+};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -64,19 +66,19 @@ fn host() -> VerterHost {
 }
 
 pub(crate) struct StrictWorldTestView {
-    pub(crate) world: verter_workspace::StrictSelfRootWorld,
+    pub(crate) world: verter_session_query::facts::fact_cache::StrictSelfRootWorld,
     pub(crate) rejected_root: Option<Arc<str>>,
 }
 
 impl Default for StrictWorldTestView {
     fn default() -> Self {
         Self {
-            world: verter_workspace::StrictSelfRootWorld {
+            world: verter_session_query::facts::fact_cache::StrictSelfRootWorld {
                 authority_id: 1,
                 authority_generation: 7,
                 source_epoch: 11,
                 artifact_epoch: 13,
-                population: verter_workspace::ViewPopulation::Base,
+                population: verter_session_query::facts::fact_cache::ViewPopulation::Base,
             },
             rejected_root: None,
         }
@@ -103,7 +105,9 @@ impl StoreView for StrictWorldTestView {
         self.rejected_root.as_deref() != Some(canonical_id)
     }
 
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         Some(self.world)
     }
 
@@ -115,13 +119,15 @@ impl StoreView for StrictWorldTestView {
 pub(crate) fn exact_cap_terminal_witness_facts() -> Vec<FactVersionRef> {
     (0..FACT_SIGNATURE_CAP)
         .map(|generation| {
-            FactVersionRef::StrictSelfRootWorld(verter_workspace::StrictSelfRootWorld {
-                authority_id: 1,
-                authority_generation: generation as u64,
-                source_epoch: 1,
-                artifact_epoch: 1,
-                population: verter_workspace::ViewPopulation::Base,
-            })
+            FactVersionRef::StrictSelfRootWorld(
+                verter_session_query::facts::fact_cache::StrictSelfRootWorld {
+                    authority_id: 1,
+                    authority_generation: generation as u64,
+                    source_epoch: 1,
+                    artifact_epoch: 1,
+                    population: verter_session_query::facts::fact_cache::ViewPopulation::Base,
+                },
+            )
         })
         .collect()
 }
@@ -472,12 +478,14 @@ fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
 #[test]
 fn read_set_signature_merges_traced_cross_file_facts() {
     let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
-    let traced = vec![FactVersionRef::Parse(crate::resolver_core::ParseFactRef {
-        canonical_id: "/w/dep.ts".to_string(),
-        key: FactKey::SyntacticExportSet,
-        lane: FactLane::Semantic,
-        expected_hash: [0x44; 16],
-    })];
+    let traced = vec![FactVersionRef::Parse(
+        verter_session_query::facts::fact_cache::ParseFactRef {
+            canonical_id: "/w/dep.ts".to_string(),
+            key: FactKey::SyntacticExportSet,
+            lane: FactLane::Semantic,
+            expected_hash: [0x44; 16],
+        },
+    )];
     let carrier =
         semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
             .expect("carrier builds");
@@ -583,9 +591,10 @@ fn strict_world_witness_discriminates_without_a_precise_root_list() {
     assert!(view.validates_fact_signature(&carrier.facts));
 
     let other = StrictWorldTestView {
-        world: verter_workspace::StrictSelfRootWorld {
-            population: verter_workspace::ViewPopulation::SessionOverlay(
-                verter_workspace::SessionOverlayFingerprint::new(99).unwrap(),
+        world: verter_session_query::facts::fact_cache::StrictSelfRootWorld {
+            population: verter_session_query::facts::fact_cache::ViewPopulation::SessionOverlay(
+                verter_session_query::facts::fact_cache::SessionOverlayFingerprint::new(99)
+                    .unwrap(),
             ),
             ..view.world
         },
@@ -601,12 +610,12 @@ fn strict_world_witness_discriminates_without_a_precise_root_list() {
 fn generic_content_aggregate_is_not_a_strict_self_root_witness() {
     let content_aggregate =
         ReadSetSignature::new(Arc::from(vec![FactVersionRef::DomainGeneration(
-            verter_workspace::DomainGenerationFact {
-                domain: verter_workspace::CompactionDomain::Content,
-                population: verter_workspace::AggregatePopulation::View(
-                    verter_workspace::ViewPopulation::Base,
+            verter_session_query::facts::fact_cache::DomainGenerationFact {
+                domain: verter_session_query::facts::fact_cache::CompactionDomain::Content,
+                population: verter_session_query::facts::fact_cache::AggregatePopulation::View(
+                    verter_session_query::facts::fact_cache::ViewPopulation::Base,
                 ),
-                stamp: verter_workspace::AggregateStamp::Generation(1),
+                stamp: verter_session_query::facts::fact_cache::AggregateStamp::Generation(1),
             },
         )]));
     assert!(
@@ -2246,29 +2255,30 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     // `Parse(SyntacticExportSet)` fact pinned to `parse_fact`. This is
     // the carrier shape a cold build produces when its tracer observed a
     // syntactic-export-set parse fact for the keyed canonical.
-    let publish_entry = |graph: &SemanticGraphStore,
-                         root_hash: [u8; 16],
-                         parse_fact: &crate::resolver_core::ParseFactRef| {
-        let node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
-        ));
-        let carrier = ReadSetSignature::new(Arc::from(vec![
-            FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
-                hash: root_hash,
-            },
-            FactVersionRef::Parse(parse_fact.clone()),
-        ]));
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
-        let published = graph.publish_with_carrier_for_tests(
-            key.clone(),
-            QueryResult::Value(node),
-            carrier,
-            self_roots,
-        );
-        assert!(published > 0, "fixture invariant: the warm entry publishes");
-        node
-    };
+    let publish_entry =
+        |graph: &SemanticGraphStore,
+         root_hash: [u8; 16],
+         parse_fact: &verter_session_query::facts::fact_cache::ParseFactRef| {
+            let node = graph.intern_node(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::String,
+            ));
+            let carrier = ReadSetSignature::new(Arc::from(vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.to_string(),
+                    hash: root_hash,
+                },
+                FactVersionRef::Parse(parse_fact.clone()),
+            ]));
+            let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
+            let published = graph.publish_with_carrier_for_tests(
+                key.clone(),
+                QueryResult::Value(node),
+                carrier,
+                self_roots,
+            );
+            assert!(published > 0, "fixture invariant: the warm entry publishes");
+            node
+        };
 
     let drive = |graph: &SemanticGraphStore, ctx: &dyn ResolverContext| {
         let mut cold_ran = false;
@@ -2328,7 +2338,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         // Self-root on the current overlay hash, but the Parse fact
         // carries the BASE version's SyntacticExportSet hash — a
         // genuine superseded-version mismatch.
-        let stale_parse_fact = crate::resolver_core::ParseFactRef {
+        let stale_parse_fact = verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: canonical.to_string(),
             key: FactKey::SyntacticExportSet,
             lane: FactLane::Semantic,

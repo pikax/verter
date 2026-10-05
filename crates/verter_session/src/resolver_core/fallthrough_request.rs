@@ -539,7 +539,10 @@ mod tests {
             }
         }
 
-        fn validates(&self, _fact: &crate::resolver_core::FactVersionRef) -> bool {
+        fn validates(
+            &self,
+            _fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+        ) -> bool {
             false
         }
     }

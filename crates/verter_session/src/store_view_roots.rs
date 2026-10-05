@@ -636,8 +636,8 @@ impl StoreViewRoots {
     /// exhausted, or the workspace exposes no authority producer.
     pub(crate) fn strict_self_root_world(
         &self,
-        population: verter_workspace::ViewPopulation,
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+        population: verter_session_query::facts::fact_cache::ViewPopulation,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         let source_root = self.source_root()?;
         let artifact_root = self.artifact_root()?;
         let workspace = self.workspace.as_ref()?;
@@ -648,13 +648,15 @@ impl StoreViewRoots {
         {
             return None;
         }
-        Some(verter_workspace::StrictSelfRootWorld {
-            authority_id: workspace.strict_self_root_authority_id()?,
-            authority_generation: captured,
-            source_epoch: source_root.epoch(),
-            artifact_epoch: artifact_root.epoch(),
-            population,
-        })
+        Some(
+            verter_session_query::facts::fact_cache::StrictSelfRootWorld {
+                authority_id: workspace.strict_self_root_authority_id()?,
+                authority_generation: captured,
+                source_epoch: source_root.epoch(),
+                artifact_epoch: artifact_root.epoch(),
+                population,
+            },
+        )
     }
 
     /// Whether `canonical` has a versioned authority suitable for collapsing
@@ -785,9 +787,10 @@ impl StoreViewRoots {
             // dimension and must never seed the base identity.
             if key.is_base() && view.source_env.is_none() {
                 view.source_env = Some(SourceEnvIdentity {
-                    parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash(
-                        parse_env_hash,
-                    ),
+                    parse_env_hash:
+                        verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
+                            parse_env_hash,
+                        ),
                     parse_key: key.parse_key.clone(),
                     file_language_id: key.file_language_id.clone(),
                 });

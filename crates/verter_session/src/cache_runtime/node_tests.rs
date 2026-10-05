@@ -13,13 +13,13 @@
 use super::*;
 use crate::cache_runtime::admission::{FactCandidateDiscriminant, NonAdmissionReason};
 use crate::cache_runtime::candidate_store::ReverseIndexedCandidateStore;
-use crate::fact_signature_helpers::ReadSetSignature;
 use crate::resolver_core::ResolverContext;
-use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 
 /// `CacheAdmission::Cacheable` holds the caller-visible value UNWRAPPED.
 ///
@@ -699,7 +699,7 @@ fn return_only_carries_every_typed_reason_by_value() {
 #[test]
 fn non_admission_reasons_have_explicit_propagation_policy() {
     use crate::cache_runtime::admission::non_admission_propagation;
-    use crate::resolver_core::fact_read_set::NonCacheablePropagation;
+    use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
 
     assert_eq!(
         non_admission_propagation(NonAdmissionReason::IntrinsicNonCacheable),

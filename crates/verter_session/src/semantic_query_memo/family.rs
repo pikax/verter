@@ -11,7 +11,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::semantic_query::demand::{
     cached_satisfies, Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
 };
@@ -20,6 +20,7 @@ use crate::semantic_query::{
     PropertyKey, QueryResult, ReductionDemand, ResolveDeclKey, SemanticNodeId, SemanticQueryKey,
     SemanticQueryValue, VueHeritagePolicy,
 };
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 #[derive(Clone)]
 pub(super) struct MemoEntry {
@@ -92,7 +93,7 @@ pub(super) struct MemoEntry {
     /// drops, which is the moment they are actually free.
     ///
     /// `None` for a fixture store that owns no account.
-    pub(super) retention_charge: Option<Arc<crate::semantic_retention_account::RetentionCharge>>,
+    pub(super) retention_charge: Option<Arc<verter_session_query::retention::RetentionCharge>>,
     /// LRU eviction-recency metadata for the multi-candidate slot
     /// vector — NOT a semantic-validity oracle. Validity is decided
     /// exclusively by `read_set_signature.validate_with_self_roots`
@@ -137,11 +138,11 @@ impl MemoEntry {
             + self.dispatch_dep_signature.len() * FACT_BYTES
             + self.walker_diagnostics.len() * DIAGNOSTIC_BYTES
             + self.satisfied_projection.points().len() * POINT_BYTES
-            + crate::semantic_retention_account::ENTRY_OVERHEAD_BYTES
+            + verter_session_query::retention::ENTRY_OVERHEAD_BYTES
     }
 }
 
-impl crate::semantic_retention_account::RetainedFootprint for MemoEntry {
+impl verter_session_query::retention::RetainedFootprint for MemoEntry {
     /// Estimated resident bytes for one memo candidate.
     ///
     /// Counted from the candidate's own carriers — its validity rail,
@@ -2513,45 +2514,53 @@ pub(super) fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoi
     MaterializedPoint::new(point_for_slot(slot, &path))
 }
 
-/// Returns true iff any [`crate::resolver_core::FactVersionRef`] in
+/// Returns true iff any [`verter_session_query::facts::fact_cache::FactVersionRef`] in
 /// `facts` carries `canonical_id` as its referenced canonical. Used by
 /// `invalidate_canonical` to discriminate entries whose path-precise
 /// fact signature references `canonical_id`. The reverse index
 /// registers under every canonical the fact rail names, so this
 /// predicate is the fact-rail membership check the drain falls back to.
 pub(super) fn carrier_facts_reference_canonical(
-    facts: &[crate::resolver_core::FactVersionRef],
+    facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
     canonical_id: &str,
 ) -> bool {
     facts.iter().any(|fact| match fact {
-        crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: c, ..
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: c,
+            ..
         } => c.as_str() == canonical_id,
-        crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: c, ..
+        verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
+            canonical_id: c,
+            ..
         } => c.as_str() == canonical_id,
-        crate::resolver_core::FactVersionRef::Parse(p) => p.canonical_id.as_str() == canonical_id,
-        crate::resolver_core::FactVersionRef::ResolveImports(r) => {
+        verter_session_query::facts::fact_cache::FactVersionRef::Parse(p) => {
+            p.canonical_id.as_str() == canonical_id
+        }
+        verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(r) => {
             r.canonical_id() == Some(canonical_id)
         }
-        crate::resolver_core::FactVersionRef::RouteSurface(r) => {
+        verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(r) => {
             r.canonical_id.as_str() == canonical_id
         }
-        crate::resolver_core::FactVersionRef::FileSourceEnv {
-            canonical_id: c, ..
+        verter_session_query::facts::fact_cache::FactVersionRef::FileSourceEnv {
+            canonical_id: c,
+            ..
         } => c.as_str() == canonical_id,
-        crate::resolver_core::FactVersionRef::ProgramAnalysis(fact) => match fact {
-            crate::resolver_core::ProgramAnalysisFactRef::FlowBody { function, .. } => {
-                function.canonical_id.as_ref() == canonical_id
+        verter_session_query::facts::fact_cache::FactVersionRef::ProgramAnalysis(fact) => {
+            match fact {
+                verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {
+                    function,
+                    ..
+                } => function.canonical_id.as_ref() == canonical_id,
             }
-        },
+        }
         // Not file-scoped — whole-project scalars reference no canonical.
-        crate::resolver_core::FactVersionRef::ProjectGeneration { .. }
-        | crate::resolver_core::FactVersionRef::DomainGeneration(_)
-        | crate::resolver_core::FactVersionRef::StrictSelfRootWorld(_) => false,
+        verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration { .. }
+        | verter_session_query::facts::fact_cache::FactVersionRef::DomainGeneration(_)
+        | verter_session_query::facts::fact_cache::FactVersionRef::StrictSelfRootWorld(_) => false,
         // A consumed result's receipt references every canonical its
         // evidence reaches.
-        crate::resolver_core::FactVersionRef::Receipt(receipt) => {
+        verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt) => {
             receipt.references_canonical(canonical_id)
         }
     })

@@ -49,8 +49,9 @@ pub use verter_type_expr::LiteralValue;
 
 // Reuse the existing structured failure shape from the resolver — there is no
 // second failure-domain type in this rewrite.
-pub use crate::locator_identity::{ParseEnvHash, SlotEnvIdentity};
+pub use crate::locator_identity::SlotEnvIdentity;
 pub use crate::resolver_core::shallow_file_state::BudgetExceededFailure;
+pub use verter_session_query::facts::fact_cache::ParseEnvHash;
 
 /// The `ProjectionDemand × EvalPolicy` lattice algebra (Deliverable #3 of
 /// `.claude/skills/type-resolution/SKILL.md`). The five [`ProjectionMode`]
@@ -132,7 +133,7 @@ pub mod operand;
 
 /// The §18.2 cache-admission decision for an error-tolerant semantic result:
 /// [`admit_decision`](admit::admit_decision) maps a result's
-/// [`ResultTaint`] + its [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+/// [`ResultTaint`] + its [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
 /// to [`Warm`](admit::Admission::Warm) / [`ReturnOnly`](admit::Admission::ReturnOnly),
 /// gating `Warm` on the presence of the rooting FACT — never on the taint
 /// enum class as a proxy.
@@ -1652,8 +1653,10 @@ impl FlowFunctionSlotIdentity {
     /// dropped here (validation compares against the env-free live
     /// `FunctionProgramIndex`).
     #[must_use]
-    pub fn program_analysis_ref(&self) -> crate::resolver_core::ProgramAnalysisFunctionRef {
-        crate::resolver_core::ProgramAnalysisFunctionRef {
+    pub fn program_analysis_ref(
+        &self,
+    ) -> verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
+        verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
             canonical_id: Arc::clone(&self.declaration_slot.defining_canonical),
             owner: self.declaration_slot.owner,
             merged_symbol_name: Arc::clone(&self.declaration_slot.merged_symbol_name),

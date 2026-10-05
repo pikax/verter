@@ -14,6 +14,8 @@ pub mod boundary;
 pub mod component;
 pub mod corender;
 pub mod css;
+pub mod fact_cache;
+pub mod fact_read_set;
 pub mod hashing;
 pub mod reactivity;
 pub mod receipt;

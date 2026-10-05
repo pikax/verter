@@ -2263,7 +2263,7 @@ fn chain_evidence(
     levels: usize,
 ) -> (
     Outcome,
-    crate::fact_signature_helpers::ReadSetSignature,
+    verter_session_query::facts::fact_cache::ReadSetSignature,
     Vec<crate::resolver_core::resolver_context::RecordedFactReads>,
 ) {
     let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
@@ -2297,9 +2297,11 @@ fn chain_evidence(
 #[track_caller]
 fn replayed_receipt(
     reads: &crate::resolver_core::resolver_context::RecordedFactReads,
-) -> verter_workspace::ResultReceipt {
+) -> verter_session_query::facts::fact_cache::ResultReceipt {
     match reads.facts.as_ref() {
-        [crate::resolver_core::FactVersionRef::Receipt(receipt)] => receipt.clone(),
+        [verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt)] => {
+            receipt.clone()
+        }
         other => panic!("a completed result replays exactly its receipt, got {other:?}"),
     }
 }
@@ -2331,7 +2333,7 @@ fn a_chains_evidence_grows_linearly_in_its_length() {
             assert!(
                 receipt.facts().iter().any(|fact| matches!(
                     fact,
-                    crate::resolver_core::FactVersionRef::Receipt(child) if child == below
+                    verter_session_query::facts::fact_cache::FactVersionRef::Receipt(child) if child == below
                 )),
                 "p{level}'s evidence holds p{}'s receipt",
                 level - 1
@@ -2350,7 +2352,7 @@ fn a_chains_evidence_grows_linearly_in_its_length() {
         assert!(
             signature.facts.iter().any(|fact| matches!(
                 fact,
-                crate::resolver_core::FactVersionRef::Receipt(receipt) if receipt == top
+                verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt) if receipt == top
             )),
             "the witness's signature holds the top callee's receipt: {:?}",
             signature.facts

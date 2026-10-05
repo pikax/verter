@@ -2491,7 +2491,7 @@ fn retained_function_requests_reject_stale_pins_and_use_owned_inventory() {
 
 #[test]
 fn retained_call_arguments_carry_exact_identifier_occurrences() {
-    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot::{
         Identifier, NonBinding,
     };
     let source = "function f(value, rest, receiver) { receiver.method((value), ...rest, value as string, 1); }";
@@ -2529,7 +2529,7 @@ fn retained_call_arguments_carry_exact_identifier_occurrences() {
 
 #[test]
 fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
-    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot::{
         Identifier, NonBinding,
     };
     let source="function f(receiver:{method():string}){((receiver as {method():string}) satisfies {method():string}).method();(receiver as {method():string}).method();}";
@@ -2561,7 +2561,7 @@ fn retained_wrapped_receiver_uses_the_indexed_value_disposition() {
 
 #[test]
 fn retained_call_type_query_keeps_its_distinct_source_origin() {
-    use verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::{
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot::{
         Identifier, NonBinding, SourceTypeQuery,
     };
 

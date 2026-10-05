@@ -514,7 +514,7 @@ fn resolve_with_hard_budget(corpus_root: &Path, basename: &str) -> ComponentOutc
 /// never admitted as a complete result.
 #[test]
 fn gate4_masking_case_is_unreachable_on_the_typed_rail() {
-    use verter_session::resolver_core::FactReadSetFinalise;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
     let project =
         verter_session::meta::MetaProject::new(VerterHost::new_standalone(HostConfig::default()));

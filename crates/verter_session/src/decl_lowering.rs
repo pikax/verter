@@ -11,7 +11,7 @@
 //!
 //! Retained snapshots are PINNED BYTES against the process-local
 //! aggregate retention account
-//! ([`SemanticRetentionAccount`](crate::semantic_retention_account::SemanticRetentionAccount)):
+//! ([`SemanticRetentionAccount`](verter_session_query::retention::SemanticRetentionAccount)):
 //! the charge is created by the acquisition that actually PARSED and is
 //! dropped when the last lease for that key releases, so the account's
 //! pinned total tracks exactly the snapshots the process is holding —
@@ -179,7 +179,7 @@ struct ShardEntry {
     /// charging per lease would multiply one arena by its lease count.
     /// The entry is removed at refcount zero, which drops the charge at
     /// exactly the moment the arena is freed.
-    _pin: crate::semantic_retention_account::RetentionCharge,
+    _pin: verter_session_query::retention::RetentionCharge,
 }
 
 impl SnapshotShard {
@@ -194,7 +194,7 @@ impl SnapshotShard {
     /// whether this acquisition had to parse, and the parse's stack refusal.
     fn acquire(
         &mut self,
-        account: &Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
         key: &SnapshotKey,
         source: &Arc<str>,
         source_type: oxc_span::SourceType,
@@ -213,7 +213,7 @@ impl SnapshotShard {
         // cost more than the accounting is worth. See
         // `PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE` for the factor.
         let pin = account.pin(
-            source.len() * crate::semantic_retention_account::PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE,
+            source.len() * verter_session_query::retention::PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE,
         );
         self.entries.insert(
             key.clone(),
@@ -567,7 +567,7 @@ pub(crate) struct DeclLoweringService {
     /// snapshots pin against. Production uses the process-local account;
     /// a test may inject a private one so pin accounting is observable
     /// without racing another test's snapshots.
-    account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     /// Number of [`SnapshotLease`]s currently alive across every shard —
     /// the object-lifetime figure a retention measurement reads alongside
     /// the byte account. A lease is counted when [`Self::acquire_lease`]
@@ -617,7 +617,7 @@ impl DeclLoweringService {
         Self::new_with_account(
             lazy,
             worker_count,
-            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+            verter_session_query::retention::SemanticRetentionAccount::process_local(),
         )
     }
 
@@ -627,7 +627,7 @@ impl DeclLoweringService {
     pub(crate) fn new_with_account(
         lazy: bool,
         worker_count: usize,
-        account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         assert!(
             worker_count > 0,
@@ -658,7 +658,7 @@ impl DeclLoweringService {
         Self::new_with_account(
             _lazy,
             _worker_count,
-            crate::semantic_retention_account::SemanticRetentionAccount::process_local(),
+            verter_session_query::retention::SemanticRetentionAccount::process_local(),
         )
     }
 
@@ -668,7 +668,7 @@ impl DeclLoweringService {
     pub(crate) fn new_with_account(
         _lazy: bool,
         _worker_count: usize,
-        account: Arc<crate::semantic_retention_account::SemanticRetentionAccount>,
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self {
             account,

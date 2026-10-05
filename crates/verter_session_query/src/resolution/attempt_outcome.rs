@@ -96,7 +96,7 @@ pub enum InputKey {
 ///
 /// Exact structured tuple, deliberately NOT folded into a scalar
 /// fingerprint — mirrors the existing `AggregateStamp` precedent (exact
-/// tuples over digests, `verter_workspace::fact_cache::AggregateStamp`).
+/// tuples over digests, `crate::facts::fact_cache::AggregateStamp`).
 /// `workspace_authority` is required because `ResolutionWorldId`'s counter
 /// restarts at `1` per `Engine` — root ids are unique WITHIN one engine,
 /// not globally. `base` is the exact base-world root id; `session` is

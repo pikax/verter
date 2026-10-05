@@ -22,7 +22,7 @@ fn seed_relation_scc_root(
     );
     store.insert_relation_payload_for_tests(
         root_key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
         validated_at_generation,
@@ -986,8 +986,8 @@ fn warm_publish_one_inserts_warm_map_and_registers_reverse_index() {
     // The carrier's fact rail names the test canonical via a
     // `FileWholeHash` fact — `register_reverse_index` registers under
     // every canonical `read_set_signature.canonical_ids()` yields.
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-        crate::resolver_core::FactVersionRef::FileWholeHash {
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/w/helper_test.ts".to_string(),
             hash: [7u8; 16],
         },
@@ -1524,7 +1524,7 @@ pub(crate) fn cache_satisfaction_is_materialized_point_not_nominal_demand() {
     let populated = store.publish_with_materialized_set_for_tests(
         key_expanded.clone(),
         QueryResult::Value(value),
-        crate::fact_signature_helpers::ReadSetSignature::new(
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(
             crate::fact_signature_helpers::empty_fact_signature(),
         ),
         Arc::from([]),
@@ -1684,7 +1684,7 @@ fn warm_publish_one_debug_asserts_against_sub_slot_mode_terminal() {
     let walker_diagnostics: std::sync::Arc<
         [crate::project_semantic_dispatch::walk::ShallowDiagnostic],
     > = std::sync::Arc::from([]);
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
         crate::fact_signature_helpers::empty_fact_signature(),
     );
     let inflight = Arc::new(FlightCell::new());
@@ -2337,7 +2337,7 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
             result,
             crate::semantic_query::RelationContext::default(),
         ),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         0,
@@ -2414,7 +2414,7 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     // Cold insert → warm hit on the SAME full identity (no recompute).
     store.insert_relation_payload_for_tests(
         key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         gen0,
@@ -2436,7 +2436,7 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     // discriminant ⇒ in-place replace, never a second candidate.
     store.insert_relation_payload_for_tests(
         key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         gen0,
@@ -2476,7 +2476,7 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     let gen0 = host.project_type_store().current_project_generation();
     store.insert_relation_payload_for_tests(
         key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
         gen0,
@@ -2608,7 +2608,7 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
 #[test]
 fn relation_modeless_probe_rejects_entry_after_generation_bump() {
     use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     let host = ctx_host();
     let ctx: &dyn crate::resolver_core::ResolverContext = &host;
@@ -2623,7 +2623,7 @@ fn relation_modeless_probe_rejects_entry_after_generation_bump() {
         crate::semantic_query::RelationContext::default(),
     );
     let gen0 = host.project_type_store().current_project_generation();
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         FactVersionRef::ProjectGeneration { generation: gen0 },
     ]));
     store.insert_relation_payload_for_tests(
@@ -2662,12 +2662,13 @@ fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
     let gen0 = host.project_type_store().current_project_generation();
 
     let touched = "/w/relation_touched.ts";
-    let touched_carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-        crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: touched.to_string(),
-            hash: [0xAB; 16],
-        },
-    ]));
+    let touched_carrier =
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: touched.to_string(),
+                hash: [0xAB; 16],
+            },
+        ]));
     let touched_key = crate::semantic_query::RelateMemoKey::assignable(
         source,
         target,
@@ -2689,7 +2690,7 @@ fn relation_family_entries_drain_via_reverse_index_on_invalidate_canonical() {
     );
     store.insert_relation_payload_for_tests(
         untouched_key,
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         gen0,
@@ -2834,7 +2835,7 @@ fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
         store.publish_scc_members_fenced(
             Some(&host),
             &root_witness,
-            &crate::fact_signature_helpers::ReadSetSignature::empty(),
+            &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             &Arc::from(Vec::<Arc<str>>::new()),
             generation,
             vec![crate::semantic_query_memo::PendingRelationMember {
@@ -2891,11 +2892,13 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
         target,
         crate::semantic_query::RelationContext::default(),
     );
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
-        vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: canonical.to_string(),
-            hash: whole_hash,
-        }]
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
+        vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: canonical.to_string(),
+                hash: whole_hash,
+            },
+        ]
         .into_boxed_slice(),
     ));
     let roots = Arc::from(vec![Arc::clone(&canonical)].into_boxed_slice());
@@ -2994,16 +2997,17 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
         "fixture: the Relate family cap is the floor cap 4",
     );
 
-    let valid_carrier = crate::fact_signature_helpers::ReadSetSignature::empty();
+    let valid_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::empty();
     let valid_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
     // The invalid candidate: self-rooted on a canonical the live store
     // view never tracked — strict self-root validation always fails.
-    let invalid_carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-        crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/w/relation_never_tracked.ts".to_string(),
-            hash: [0xCD; 16],
-        },
-    ]));
+    let invalid_carrier =
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/w/relation_never_tracked.ts".to_string(),
+                hash: [0xCD; 16],
+            },
+        ]));
     let invalid_roots: Arc<[Arc<str>]> =
         Arc::from(vec![Arc::<str>::from("/w/relation_never_tracked.ts")]);
 
@@ -3088,7 +3092,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     );
     store.insert_relation_payload_for_tests(
         admit_key.clone(),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
         store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::NotAssignable),
         gen0,
@@ -3137,7 +3141,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let published = store.publish_scc_members_fenced(
         None,
         &root_witness,
-        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         &Arc::from(Vec::<Arc<str>>::new()),
         gen0,
         vec![crate::semantic_query_memo::PendingRelationMember {
@@ -3159,7 +3163,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let published = store.publish_scc_members_fenced(
         None,
         &root_witness,
-        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         &Arc::from(Vec::<Arc<str>>::new()),
         gen0,
         vec![crate::semantic_query_memo::PendingRelationMember {
@@ -3205,7 +3209,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let flight_published = store.publish_scc_members_fenced(
         Some(&host),
         &root_witness,
-        &crate::fact_signature_helpers::ReadSetSignature::empty(),
+        &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         &Arc::from(Vec::<Arc<str>>::new()),
         gen0,
         vec![crate::semantic_query_memo::PendingRelationMember {
@@ -3784,7 +3788,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         &host,
         aborted_key.clone(),
         QueryResult::Value(node),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::new()),
         Arc::from([]),
         crate::semantic_query::demand::MaterializedSet::single(
@@ -3814,7 +3818,7 @@ fn warm_publish_one_if_absent_skips_publish_when_parent_inflight_aborted() {
         &host,
         healthy_key.clone(),
         QueryResult::Value(node),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from(Vec::new()),
         Arc::from([]),
         crate::semantic_query::demand::MaterializedSet::single(
@@ -3990,7 +3994,7 @@ fn invalidate_all_clears_memo_budget_under_entries_lock() {
             name: Arc::from("Seed"),
         }),
         QueryResult::Value(node),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::from([]),
     );
     assert_eq!(store.memo_family_count_for_test(), 1, "seeded one family");
@@ -4077,7 +4081,7 @@ fn warm_publish_records_memo_budget_under_entries_lock() {
                 name: Arc::from("Pub"),
             }),
             QueryResult::Value(node),
-            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             Arc::from([]),
         )
     });
@@ -4113,9 +4117,12 @@ fn warm_publish_records_memo_budget_under_entries_lock() {
 /// `publish_with_carrier_for_tests` registers a `canonical_to_entries`
 /// reverse-index entry under that canonical. `hash` keeps each
 /// carrier's `FileWholeHash` distinct.
-fn carrier_naming(canonical: &str, hash: u8) -> crate::fact_signature_helpers::ReadSetSignature {
-    crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-        crate::resolver_core::FactVersionRef::FileWholeHash {
+fn carrier_naming(
+    canonical: &str,
+    hash: u8,
+) -> verter_session_query::facts::fact_cache::ReadSetSignature {
+    verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: canonical.to_string(),
             hash: [hash; 16],
         },
@@ -4409,8 +4416,8 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
 /// cooperative-admission caches.
 #[test]
 fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
-    use crate::resolver_core::FactVersionRef;
     use crate::semantic_query::DepVersion;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     // Cap of 2: the third distinct family evicts the first (FIFO).
     let store = Arc::new(SemanticGraphStore::new_with_memo_budget_for_test(2));
@@ -4432,12 +4439,13 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
         scope: scope("/w/a.ts"),
         name: Arc::from("A"),
     });
-    let carrier_a = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-        FactVersionRef::FileWholeHash {
-            canonical_id: "/w/a.ts".to_string(),
-            hash: [1u8; 16],
-        },
-    ]));
+    let carrier_a =
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/w/a.ts".to_string(),
+                hash: [1u8; 16],
+            },
+        ]));
     store.publish_with_carrier_and_dispatch_for_tests(
         key_a,
         QueryResult::Value(node_a),
@@ -4453,12 +4461,13 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
         scope: scope("/w/b.ts"),
         name: Arc::from("B"),
     });
-    let carrier_b = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-        FactVersionRef::FileWholeHash {
-            canonical_id: "/w/b.ts".to_string(),
-            hash: [2u8; 16],
-        },
-    ]));
+    let carrier_b =
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/w/b.ts".to_string(),
+                hash: [2u8; 16],
+            },
+        ]));
     store.publish_with_carrier_for_tests(
         key_b,
         QueryResult::Value(node_b),
@@ -4500,12 +4509,13 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
         scope: scope("/w/c.ts"),
         name: Arc::from("C"),
     });
-    let carrier_c = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-        FactVersionRef::FileWholeHash {
-            canonical_id: "/w/c.ts".to_string(),
-            hash: [3u8; 16],
-        },
-    ]));
+    let carrier_c =
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: "/w/c.ts".to_string(),
+                hash: [3u8; 16],
+            },
+        ]));
     let populated = store.publish_with_carrier_for_tests(
         key_c,
         QueryResult::Value(node_c),
@@ -6603,8 +6613,8 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
 fn prefix_backfill_carries_traced_facts() {
     let host = ctx_host();
     use crate::project_semantic_dispatch::walk::{PrefixBackfill, QueryBuildOutput};
-    use crate::resolver_core::{FactVersionRef, ParseFactRef};
     use crate::semantic_query::PathSegment;
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
 
     let store = SemanticGraphStore::new();
     let base = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -6667,8 +6677,9 @@ fn prefix_backfill_carries_traced_facts() {
     // `dep_signature`. A test calling `execute_cooperative` directly
     // does not go through the dispatch's `traced_build` wrapper, so it
     // builds `graph_carrier` itself here.
-    let parent_carrier =
-        crate::fact_signature_helpers::ReadSetSignature::new(Arc::clone(&parent_traced_facts));
+    let parent_carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+        Arc::clone(&parent_traced_facts),
+    );
     let _ = store.execute_cooperative(
         &host,
         parent_key.clone(),
@@ -6939,9 +6950,11 @@ fn inflight_aborted_retry_attributes_to_per_request_context() {
 /// the winner's fact.
 #[test]
 fn joiner_outer_tracer_contains_winner_carrier_fact() {
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
     use std::sync::mpsc;
     use std::thread;
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
 
     let store = Arc::new(SemanticGraphStore::new());
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
@@ -6982,10 +6995,9 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
                 // `execute_cooperative` caller builds `graph_carrier`
                 // itself (the dispatch's `traced_build` wrapper is not
                 // in scope here).
-                let carrier =
-                    crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-                        winner_fact_for_build.clone(),
-                    ]));
+                let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                    Arc::from(vec![winner_fact_for_build.clone()]),
+                );
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
@@ -7116,10 +7128,12 @@ fn joiner_outer_tracer_contains_winner_carrier_fact() {
 /// carrier could ONLY validate vacuously is force-forked.
 #[test]
 fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
     use crate::UpsertRequest;
     use std::sync::mpsc;
     use std::thread;
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
 
     // A real keyed file gives the carrier a tracked self-root the
     // follower's view can strictly validate — the winner therefore
@@ -7189,10 +7203,9 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
                 // build is suppressed for a non-self-root reason (an
                 // unvalidatable legacy dep) yet the self-root
                 // observation is intact.
-                let carrier =
-                    crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-                        winner_fact_for_build.clone(),
-                    ]));
+                let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                    Arc::from(vec![winner_fact_for_build.clone()]),
+                );
                 crate::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(id),
                     dep_signature: Arc::from(Vec::new().into_boxed_slice()),
@@ -7373,8 +7386,7 @@ fn execute_cooperative_batch_one_batch_entry_n_keys_k_admissions() {
 ///   OWN recompute node.
 #[test]
 fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
-    use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::resolver_core::{FactVersionRef, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
     use crate::session_view::OverlaidViewRef;
     use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
@@ -7382,6 +7394,8 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
 
     let keyed_canonical = "/p2_1/keyed.ts";
     let host = ctx_host();
@@ -7596,12 +7610,12 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
 /// NOT run and the follower returns the winner's node.
 #[test]
 fn same_view_joiner_still_coalesces_onto_winner() {
-    use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::resolver_core::FactVersionRef;
     use crate::UpsertRequest;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
 
     let keyed_canonical = "/p2_1_same/keyed.ts";
     let host = ctx_host();
@@ -8041,8 +8055,7 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
 ///   closure runs (`follower_cold_ran == true`).
 #[test]
 fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
-    use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::resolver_core::{FactVersionRef, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
     use crate::session_view::OverlaidViewRef;
     use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
@@ -8050,6 +8063,8 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
 
     let keyed_canonical = "/p2_8_unrootable/keyed.ts";
     let host = ctx_host();
@@ -8331,8 +8346,7 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
 ///   OWN recomputed non-Miss `Value`.
 #[test]
 fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
-    use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::resolver_core::{FactVersionRef, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
     use crate::session_view::OverlaidViewRef;
     use crate::UpsertRequest;
     use rustc_hash::FxHashMap;
@@ -8340,6 +8354,8 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
 
     let keyed_canonical = "/p2_9_nonsuppressed_miss/keyed.ts";
     let host = ctx_host();
@@ -8612,12 +8628,13 @@ fn budget_eviction_prunes_empty_canonical_to_entries_shards() {
             name: Arc::from(format!("Decl{i}")),
         });
         let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-        let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
-            crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: format!("/w/dist{i}.ts"),
-                hash: [1u8; 16],
-            },
-        ]));
+        let carrier =
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: format!("/w/dist{i}.ts"),
+                    hash: [1u8; 16],
+                },
+            ]));
         store.publish_with_carrier_for_tests(key, QueryResult::Value(id), carrier, Arc::from([]));
     }
 
@@ -8681,17 +8698,19 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
     let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Carrier fact rail names two canonicals — the entry registers a
     // reverse-index shard under each.
-    let two_canonical_facts: Arc<[crate::resolver_core::FactVersionRef]> = Arc::from(vec![
-        crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/w/a.ts".to_string(),
-            hash: [1u8; 16],
-        },
-        crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/w/b.ts".to_string(),
-            hash: [1u8; 16],
-        },
-    ]);
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(two_canonical_facts);
+    let two_canonical_facts: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> =
+        Arc::from(vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/w/a.ts".to_string(),
+                hash: [1u8; 16],
+            },
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/w/b.ts".to_string(),
+                hash: [1u8; 16],
+            },
+        ]);
+    let carrier =
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(two_canonical_facts);
     store.publish_with_carrier_for_tests(key, QueryResult::Value(id), carrier, Arc::from([]));
     assert_eq!(store.canonical_to_entries_shard_count_for_test(), 2);
 
@@ -9210,9 +9229,10 @@ mod env_scoped_key_identity_guards {
     #[test]
     fn authored_instantiate_does_not_alias_declaration_family() {
         use crate::locator_identity::{
-            LibEnvHash, ParseEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
+            LibEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
         };
         use crate::semantic_query::operand::SemanticOperandForceProjection;
+        use verter_session_query::facts::fact_cache::ParseEnvHash;
         use verter_type_expr::locators::{
             AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
         };
@@ -10005,12 +10025,12 @@ mod env_scoped_key_identity_guards {
 /// instantiation (R21).
 mod instantiate_body_source_family_identity {
     use super::super::family::{family_and_slot, FamilyKey};
-    use crate::locator_identity::ParseEnvHash;
     use crate::semantic_query::{
         InstantiateBodySource, InstantiateContext, ProjectionMode, ProjectionReductionContext,
         ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
     };
     use std::sync::Arc;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_type_expr::TopLevelOwnerId;
 
     fn empty_args() -> Arc<[SemanticNodeId]> {
@@ -10178,9 +10198,10 @@ mod instantiate_body_source_family_identity {
 /// so the family lives in the `Single` slot.
 mod lower_locator_family_identity {
     use super::super::family::{family_and_slot, FamilyKey, ModeSlot};
-    use crate::locator_identity::{LocatorLoweringKey, ParseEnvHash, ResolveEnvHash};
+    use crate::locator_identity::{LocatorLoweringKey, ResolveEnvHash};
     use crate::semantic_query::{ResolvedDeclSlotIdentity, SemanticQueryKey};
     use std::sync::Arc;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_type_expr::locators::{
         AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
     };
@@ -10268,15 +10289,19 @@ mod lower_locator_family_identity {
 /// evicting the contributor reaches the entry.
 #[test]
 fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
-    let facts = [crate::resolver_core::FactVersionRef::FileSourceEnv {
-        canonical_id: "/contrib.d.ts".to_string(),
-        parse_env_hash: crate::locator_identity::ParseEnvHash::from_env_hash([3u8; 16]),
-        parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/contrib.d.ts", 2),
-        file_language_id:
-            crate::file_artifact_store::FileArtifactKey::synthetic_file_language_for_test(
-                "/contrib.d.ts",
+    let facts = [
+        verter_session_query::facts::fact_cache::FactVersionRef::FileSourceEnv {
+            canonical_id: "/contrib.d.ts".to_string(),
+            parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
+                [3u8; 16],
             ),
-    }];
+            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/contrib.d.ts", 2),
+            file_language_id:
+                crate::file_artifact_store::FileArtifactKey::synthetic_file_language_for_test(
+                    "/contrib.d.ts",
+                ),
+        },
+    ];
     assert!(
         carrier_facts_reference_canonical(&facts, "/contrib.d.ts"),
         "a FileSourceEnv fact must register its contributor canonical for the drain"
@@ -10293,14 +10318,16 @@ fn carrier_facts_reference_canonical_matches_file_source_env_contributor() {
 /// top, and a file no level names does not.
 #[test]
 fn carrier_facts_reference_a_canonical_deep_in_a_receipt_chain() {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
     let whole = |canonical: String| FactVersionRef::FileWholeHash {
         canonical_id: canonical,
         hash: [7u8; 16],
     };
-    let mut receipt = verter_workspace::ResultReceipt::new(vec![whole("/deep/0.ts".into())]);
+    let mut receipt = verter_session_query::facts::fact_cache::ResultReceipt::new(vec![whole(
+        "/deep/0.ts".into(),
+    )]);
     for level in 1..1_024 {
-        receipt = verter_workspace::ResultReceipt::new(vec![
+        receipt = verter_session_query::facts::fact_cache::ResultReceipt::new(vec![
             FactVersionRef::Receipt(receipt),
             whole(format!("/deep/{level}.ts")),
         ]);
@@ -10566,7 +10593,7 @@ mod prepared_identity_bijection {
 
     use super::super::family::{family_and_slot, requested_point_for_key};
     use super::super::prepared::PreparedKeyHandle;
-    use crate::locator_identity::{LocatorLoweringKey, ParseEnvHash, ResolveEnvHash};
+    use crate::locator_identity::{LocatorLoweringKey, ResolveEnvHash};
     use crate::project_semantic_dispatch::BodySourceWitness;
     use crate::semantic_query::{
         ApparentTypeContext, BroadRuntimeContext, ClassSurfaceContext, ClassSurfaceSide,
@@ -10580,6 +10607,7 @@ mod prepared_identity_bijection {
         SurfaceProvenanceContext, TemplateLiteralReduceContext, TypeOfContext, ValueRootKey,
         ValueRootSlotIdentity,
     };
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_type_expr::locators::{
         AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
     };
@@ -11328,12 +11356,12 @@ mod prepared_identity_bijection {
 /// the typed `SignatureOverflow` refusal instead of the blander one.
 #[test]
 fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     let dep = empty_signature();
     let root_owner: Arc<str> = Arc::from("/w/owner.ts");
     let root_producer: Arc<str> = Arc::from("/w/producer.ts");
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
         vec![
             FactVersionRef::FileWholeHash {
                 canonical_id: root_owner.as_ref().to_string(),
@@ -11375,7 +11403,7 @@ fn operand_evidence_refuses_a_root_without_its_whole_hash_fact() {
     // An overflowed carrier keeps its (shrunk) evidence: the overflow
     // flag — not this reconstruction — is the typed refusal the force
     // reads.
-    let overflow = crate::fact_signature_helpers::ReadSetSignature::overflow();
+    let overflow = verter_session_query::facts::fact_cache::ReadSetSignature::overflow();
     let evidence = semantic_operand_evidence(&overflow, &[Arc::clone(&root_producer)], &dep)
         .expect("an overflowed carrier keeps its partial evidence");
     assert!(evidence.self_roots().is_empty());
@@ -11814,7 +11842,7 @@ fn warm_read_refuses_a_candidate_whose_result_was_released() {
     store.publish_with_carrier_for_tests(
         stale_key.clone(),
         QueryResult::Value(a_obj),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         Arc::clone(&no_roots),
     );
     assert!(
@@ -11830,7 +11858,7 @@ fn warm_read_refuses_a_candidate_whose_result_was_released() {
     store.publish_with_carrier_for_tests(
         live_key.clone(),
         QueryResult::Value(shared),
-        crate::fact_signature_helpers::ReadSetSignature::empty(),
+        verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         no_roots,
     );
     assert!(
@@ -11933,11 +11961,11 @@ fn release_canonical_leaves_an_unrelated_inflight_build_and_its_publish_alone() 
 /// `memo_entry_counts_by_family` reported `ResolveDecl` at 4 instead of 1.
 #[test]
 fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
-    use crate::resolver_core::FactVersionRef;
-    use verter_session_query::resolution::{ResolutionPopulation, ResolutionWorldId};
-    use verter_workspace::{
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::{
         AggregatePopulation, AggregateStamp, CompactionDomain, DomainGenerationFact,
     };
+    use verter_session_query::resolution::{ResolutionPopulation, ResolutionWorldId};
 
     let store = SemanticGraphStore::new();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -11964,7 +11992,7 @@ fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
     );
 
     let aggregate_only = || {
-        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
             FactVersionRef::DomainGeneration(DomainGenerationFact {
                 domain: CompactionDomain::Resolution,
                 population: AggregatePopulation::Resolution(ResolutionPopulation::Base),
@@ -12349,9 +12377,10 @@ mod release_embedded_node_family_tests {
 
     fn authored_key(live: SemanticNodeId, projection_node: SemanticNodeId) -> SemanticQueryKey {
         use crate::locator_identity::{
-            LibEnvHash, ParseEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
+            LibEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
         };
         use crate::semantic_query::operand::SemanticOperandForceProjection;
+        use verter_session_query::facts::fact_cache::ParseEnvHash;
         use verter_type_expr::locators::{
             AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
         };

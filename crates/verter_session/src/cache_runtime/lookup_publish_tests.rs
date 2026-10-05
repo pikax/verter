@@ -16,12 +16,12 @@ use crate::cache_runtime::admission::{Candidate, FactCandidateDiscriminant};
 use crate::cache_runtime::candidate_store::ReverseIndexedCandidateStore;
 use crate::cache_runtime::singleflight::{ComputeAdmission, InflightTable};
 use crate::cache_runtime::NonAdmissionReason;
-use crate::fact_signature_helpers::ReadSetSignature;
-use crate::resolver_core::FactVersionRef;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 // ---------------------------------------------------------------------------
 // Basic three-way contract — `Victims = ()`, no fence, no real store.

@@ -46,7 +46,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use verter_workspace::NonCacheablePropagation;
+use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
 
 use super::resolver_context::NonCacheableReadReason;
 

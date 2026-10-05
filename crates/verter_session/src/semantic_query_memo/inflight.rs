@@ -48,7 +48,8 @@ pub(super) struct InflightState {
     /// (`cache_suppress`) — joiners then have no carrier to bubble.
     /// `Box`ed to match `QueryBuildOutput::graph_carrier` and keep the
     /// in-flight state compact.
-    pub(super) graph_carrier: Option<Box<crate::fact_signature_helpers::ReadSetSignature>>,
+    pub(super) graph_carrier:
+        Option<Box<verter_session_query::facts::fact_cache::ReadSetSignature>>,
     /// The winner build's **self-root canonicals** — the keyed (or
     /// file-derived input) canonical(s) the winner's value depends on
     /// for its own identity. Set by the winner alongside `completed`
@@ -62,7 +63,7 @@ pub(super) struct InflightState {
     /// interchangeable — each must validate against its own content
     /// identity. Before a follower bubbles + returns the winner's
     /// carrier it validates `graph_carrier` against the FOLLOWER's
-    /// `ctx` via [`crate::fact_signature_helpers::ReadSetSignature::validate_with_self_roots`],
+    /// `ctx` via [`verter_session_query::facts::fact_cache::ReadSetSignature::validate_with_self_roots`],
     /// passing this set as the strict self-root canonicals — the same
     /// validation a warm hit (`MemoEntry::validate`) performs. If the
     /// winner's carrier validates under the follower's view the

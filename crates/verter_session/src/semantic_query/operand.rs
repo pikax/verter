@@ -26,10 +26,9 @@ use verter_type_expr::locators::{
 use verter_type_expr::TopLevelOwnerId;
 
 use super::{IndexKey, PathSegment, ProjectionReductionContext, PropertyKey, SemanticNodeId};
-use crate::locator_identity::{
-    LibEnvHash, ParseEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash,
-};
+use crate::locator_identity::{LibEnvHash, ProjectIdentityDim, ResolveEnvHash, TypeEnvHash};
 use crate::project_semantic_dispatch::SemanticOperandAuthority;
+use verter_session_query::facts::fact_cache::ParseEnvHash;
 
 /// Typed refusal while sealing an operand.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -701,12 +701,12 @@ fn the_revision_gate_refuses_facts_stamped_with_another_revision() {
     let revision_b: verter_session_query::analysis::types::Hash16 = [2; 16];
 
     let facts: crate::project_semantic_dispatch::template_class_facts::SessionTemplateClassSemanticFacts =
-        verter_semantic::analysis::TemplateClassSemanticFacts::new(
+        verter_session_query::analysis::template_class_facts::TemplateClassSemanticFacts::new(
             std::sync::Arc::from(CANONICAL),
             revision_a,
             std::sync::Arc::from([]),
-            std::sync::Arc::from([verter_semantic::analysis::TemplateClassSemanticFactRow {
-                subject: verter_semantic::analysis::TemplateClassSubject::Binding {
+            std::sync::Arc::from([verter_session_query::analysis::template_class_facts::TemplateClassSemanticFactRow {
+                subject: verter_session_query::analysis::template_class_facts::TemplateClassSubject::Binding {
                     label: std::sync::Arc::from("variant"),
                     declaration: verter_type_expr::DeclBindingKey::new(
                         verter_type_expr::TopLevelOwnerId::instance(0),
@@ -716,18 +716,18 @@ fn the_revision_gate_refuses_facts_stamped_with_another_revision() {
                 domain: verter_type_expr::ClosedLiteralDomain::Strings(std::sync::Arc::from([
                     std::sync::Arc::from("primary"),
                 ])),
-                wrapper: verter_semantic::analysis::ReactiveWrapperProof {
+                wrapper: verter_session_query::analysis::template_class_facts::ReactiveWrapperProof {
                     role: verter_type_expr::ReactiveWrapperRole::None,
                     symbol: None,
                     import_provenance: None,
                     inner_source: None,
                     inner_domain: verter_type_expr::ClosedLiteralDomain::NotClosed,
                     completeness:
-                        verter_semantic::analysis::TemplateClassFactsCompleteness::Complete,
+                        verter_session_query::analysis::template_class_facts::TemplateClassFactsCompleteness::Complete,
                 },
             }]),
-            verter_semantic::analysis::TemplateClassFactsCompleteness::Complete,
-            crate::fact_signature_helpers::ReadSetSignature::new(std::sync::Arc::from([])),
+            verter_session_query::analysis::template_class_facts::TemplateClassFactsCompleteness::Complete,
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(std::sync::Arc::from([])),
         );
 
     let raw = RawTemplateData {

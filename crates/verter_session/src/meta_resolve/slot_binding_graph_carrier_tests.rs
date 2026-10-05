@@ -97,14 +97,14 @@ fn accumulate_carrier_deps_descends_carrier_args() {
             },
         );
         let facts = match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => facts,
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => facts,
             other => panic!("carrier dependency tracing must be cacheable: {other:?}"),
         };
 
         let saw_dep = facts.iter().any(|f| {
             matches!(
                 f,
-                crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                     if canonical_id == "/dep.ts"
             )
         });

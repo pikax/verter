@@ -33,9 +33,7 @@ use crate::locator_identity::BroadRuntimeSubjectLocator;
 use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::meta_resolve::projectors::{build_owner_decl_identity, resolve_macro_payload};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, ResolverContext, StoreViewCompatToken,
-};
+use crate::resolver_core::{ResolverContext, StoreViewCompatToken};
 use crate::semantic_query::{
     BroadRuntimeKind, ExecutionAbort, PartialReasonSet, PathSegment, ProjectionMode,
     ProjectionReductionContext, QueryResult, ResolveDeclKey, ResultCompleteness, ScopeId,
@@ -50,6 +48,7 @@ use verter_scheduler::dag::PinId;
 use verter_scheduler::scheduler::{ScopedCacheNodeError, ScopedCacheNodeRequest};
 use verter_scheduler::stage::Priority;
 use verter_semantic::type_info::{MacroSemanticLane, ObservedMacroSurface, ObservedSurfaceMember};
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 
 mod runtime;
 mod tsc_projection;
@@ -345,8 +344,8 @@ impl MacroFactFootprint {
     /// Every arm is handled explicitly — a factless arm must taint, because a
     /// consumer that roots on nothing serves stale results forever.
     pub(crate) fn replay(&self) {
-        use crate::resolver_core::fact_read_set::NonCacheablePropagation;
         use crate::resolver_core::resolver_context;
+        use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
         match self {
             Self::Rooted(facts) => resolver_context::observe_fan_out_borrowed(facts),
             Self::RootedNonCacheable(facts) => {

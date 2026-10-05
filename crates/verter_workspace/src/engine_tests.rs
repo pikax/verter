@@ -193,12 +193,12 @@ fn concurrent_readers_racing_extension_change_observe_only_published_values() {
 // keep validating for the life of the process.
 // ---------------------------------------------------------------------------
 
-use crate::fact_cache::{
+use crate::memory::{MemoryOptions, MemoryWorkspace};
+use crate::resolution_currency::ResolutionEvidenceSource;
+use verter_session_query::facts::fact_cache::{
     AggregatePopulation, AggregateStamp, CompactionDomain, DomainGenerationFact, FactVersionRef,
     ReadSetSignature, ResolveImportsFactRef,
 };
-use crate::memory::{MemoryOptions, MemoryWorkspace};
-use crate::resolution_currency::ResolutionEvidenceSource;
 use verter_session_query::resolution::{
     ResolutionContext, ResolutionPopulation, ResolutionWorldId, ResolvePhase, ResolveRequestKind,
 };
@@ -235,7 +235,9 @@ fn dag_rooted_unenumerable_resolution_witness(workspace: &MemoryWorkspace) -> Re
         kind: ResolveRequestKind::TypeImport,
     };
     let outcome = WorkspaceRead::resolve_import_outcome(workspace, "/p/owner.ts", "./dep", CONTEXT);
-    let crate::SignatureAdmission::Cacheable(signature) = outcome.admission else {
+    let verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(signature) =
+        outcome.admission
+    else {
         panic!("fixture invariant: the live resolution must admit its Decision witness")
     };
     let resolution_facts: Vec<_> = signature

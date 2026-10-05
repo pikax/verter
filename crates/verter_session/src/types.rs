@@ -3503,7 +3503,7 @@ pub(crate) struct CompileSlot {
     /// admitted state: the warm-hit oracle validates vacuously and
     /// falls back to the existing `semantic_hash`/override-hash
     /// pre-filter.
-    pub(crate) fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub(crate) fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,
@@ -3731,7 +3731,7 @@ pub(crate) struct RawTemplateAnalysisEntry {
     /// Exact semantic dependency read set for the dynamic-class projection.
     /// Readers validate this against a proven-current store view before
     /// serving the profileless slot.
-    pub(crate) template_class_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub(crate) template_class_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 /// A persist site's by-value admission statement for the
@@ -3774,7 +3774,8 @@ pub(crate) struct RawTemplateSlotAdmission {
     pub(crate) default_extraction: bool,
     /// Complete dependency signature of the template-class semantic facts.
     /// `None` means the fact set was ReturnOnly/partial and declines.
-    pub(crate) template_class_signature: Option<crate::fact_signature_helpers::ReadSetSignature>,
+    pub(crate) template_class_signature:
+        Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
 }
 
 impl RawTemplateSlotAdmission {
@@ -4008,7 +4009,7 @@ pub(crate) struct ResolvedComponentMetaCacheEntry {
     /// publish time. Stored as `Arc<[FactVersionRef]>` so warm-hit
     /// validation clones the handle without copying the slice
     /// (R3/R26/R28 fact-validation substrate).
-    pub fact_versions: Arc<[crate::resolver_core::FactVersionRef]>,
+    pub fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     pub state: Arc<crate::meta_resolve::ResolvedComponentMetaState>,
 }
 
@@ -4018,7 +4019,7 @@ pub(crate) struct CachedFallthroughEntry {
     /// publish time. Stored as `Arc<[FactVersionRef]>` so warm-hit
     /// validation clones the handle without copying the slice
     /// (R3/R26/R28 fact-validation substrate).
-    pub fact_versions: Arc<[crate::resolver_core::FactVersionRef]>,
+    pub fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     pub generic_root_propagation: bool,
     pub resolution: Arc<FallthroughResolution>,
 }
@@ -4030,7 +4031,7 @@ pub(crate) struct CachedMetaPayload {
     /// publish time. Stored as `Arc<[FactVersionRef]>` so warm-hit
     /// validation clones the handle without copying the slice
     /// (R3/R26/R28 fact-validation substrate).
-    pub fact_versions: Arc<[crate::resolver_core::FactVersionRef]>,
+    pub fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     pub payload: Vec<u8>,
     /// `project_generation` captured at publish — the value-side
     /// generation backstop, the same discipline as the typed result
@@ -4846,7 +4847,7 @@ pub struct FallthroughResolution {
     /// Branch-structured inherited surface.
     pub fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface,
     /// Semantic fact versions consumed while producing this resolution.
-    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    pub fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
 }
 
 /// Serializable point-in-time snapshot of [`MetaProvenance`] counters.

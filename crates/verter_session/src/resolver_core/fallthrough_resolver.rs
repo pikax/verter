@@ -8,12 +8,13 @@
 use std::sync::Arc;
 
 use crate::resolver_core::{
-    FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity, ResolverContext,
-    ResolverCounters, ResolverDiagnostic, StoreView, ValidatedFactCache,
+    FallthroughNodeKey, FallthroughOverrideIdentity, ResolverContext, ResolverCounters,
+    ResolverDiagnostic, StoreView, ValidatedFactCache,
 };
 use verter_semantic::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedSurfaceCompleteness, FallthroughSurface,
 };
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 #[derive(Debug, Clone)]
 pub enum FallthroughNodeValue {
@@ -206,7 +207,8 @@ struct NodeResidency {
 struct KeptNode {
     seq: u64,
     charges: smallvec::SmallVec<
-        [crate::semantic_retention_account::RetentionCharge; crate::resolver_core::CANDIDATE_CAP],
+        [verter_session_query::retention::RetentionCharge;
+            verter_session_query::facts::fact_cache::CANDIDATE_CAP],
     >,
 }
 
@@ -244,7 +246,7 @@ impl NodeResidency {
 /// after it was last admitted (oldest first); the reader retires a superseded
 /// intrinsic surface. An edit does not retire a key: the edited component's
 /// next resolution admits a fresh candidate beside the stale ones, at most
-/// [`crate::resolver_core::CANDIDATE_CAP`] per key.
+/// [`verter_session_query::facts::fact_cache::CANDIDATE_CAP`] per key.
 ///
 /// **Accounting.** Every candidate holds a `Retained` charge on the process's
 /// retention account for its bytes; a candidate the account refuses is served
@@ -253,7 +255,7 @@ impl NodeResidency {
 pub struct FallthroughResolverState {
     cache: ValidatedFactCache<FallthroughNodeKey, FallthroughNodeResult>,
     residency: parking_lot::Mutex<NodeResidency>,
-    retention_account: crate::semantic_retention_account::StoreAccount,
+    retention_account: verter_session_query::retention::StoreAccount,
     counters: Arc<ResolverCounters>,
 }
 
@@ -262,7 +264,7 @@ impl FallthroughResolverState {
         Self {
             cache: ValidatedFactCache::default(),
             residency: parking_lot::Mutex::new(NodeResidency::default()),
-            retention_account: crate::semantic_retention_account::StoreAccount::default(),
+            retention_account: verter_session_query::retention::StoreAccount::default(),
             counters,
         }
     }
@@ -487,7 +489,7 @@ impl FallthroughResolverState {
             .retention_account
             .get()
             .reserve(
-                crate::semantic_retention_account::ChargeClass::Retained,
+                verter_session_query::retention::ChargeClass::Retained,
                 result.retained_bytes(&key),
             )
             .admitted()
@@ -509,7 +511,7 @@ impl FallthroughResolverState {
                     let over = kept
                         .charges
                         .len()
-                        .saturating_sub(crate::resolver_core::CANDIDATE_CAP);
+                        .saturating_sub(verter_session_query::facts::fact_cache::CANDIDATE_CAP);
                     evicted.extend(kept.charges.drain(..over));
                 }
                 None => {

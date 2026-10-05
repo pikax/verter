@@ -2713,7 +2713,7 @@ impl VerterHost {
         canonical: &str,
         mode: ProjectionMode,
         state: &ResolvedComponentMetaState,
-        fact_versions: &[crate::resolver_core::FactVersionRef],
+        fact_versions: &[verter_session_query::facts::fact_cache::FactVersionRef],
     ) -> Option<crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof> {
         self.store_cached_resolved_meta_for_view_fingerprint(
             canonical,
@@ -2730,7 +2730,7 @@ impl VerterHost {
         canonical: &str,
         mode: ProjectionMode,
         state: &ResolvedComponentMetaState,
-        fact_versions: &[crate::resolver_core::FactVersionRef],
+        fact_versions: &[verter_session_query::facts::fact_cache::FactVersionRef],
         view_fingerprint: u64,
     ) -> Option<crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof> {
         if state.completeness.is_partial() {
@@ -2807,7 +2807,7 @@ impl VerterHost {
         mode: ProjectionMode,
         view_fingerprint: u64,
         resolved: &mut ResolvedComponentMetaState,
-        extraction_facts: Option<&[crate::resolver_core::FactVersionRef]>,
+        extraction_facts: Option<&[verter_session_query::facts::fact_cache::FactVersionRef]>,
         admission: Option<
             &crate::host_manage::component_meta_request_impl::ResolvedMetaAdmissionProof,
         >,
@@ -2899,7 +2899,7 @@ impl VerterHost {
         view_fingerprint: u64,
         state: Option<(
             Arc<ResolvedComponentMetaState>,
-            Vec<crate::resolver_core::FactVersionRef>,
+            Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
         )>,
         mirror: Option<crate::types::ResolvedComponentMetaCacheEntry>,
     ) -> Option<crate::resolver_core::ValidatedFactAdmission<ResolvedComponentMetaState>> {
@@ -2944,7 +2944,7 @@ impl VerterHost {
         // R3/R26/R28: capture the resolved state's observed fact set
         // as an `Arc<[FactVersionRef]>` so the wrapper's warm-hit
         // validator can clone the handle without copying the slice.
-        let full_fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
+        let full_fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> =
             Arc::from(state.fact_versions.clone().into_boxed_slice());
         // Fan-out to any active outer fact-tracer scope so transitive
         // CROSS-FILE observations bubble through the mirror site. The
@@ -2960,11 +2960,12 @@ impl VerterHost {
         // The mirror can also retain explicit compatibility-only owner Route
         // observations; excluding owner-scoped mirror facts keeps that noise
         // out of the outer tracer while cross-file dependencies still fan out.
-        let cross_file_facts: Vec<crate::resolver_core::FactVersionRef> = full_fact_versions
-            .iter()
-            .filter(|fact| fact.canonical_id() != Some(canonical))
-            .cloned()
-            .collect();
+        let cross_file_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
+            full_fact_versions
+                .iter()
+                .filter(|fact| fact.canonical_id() != Some(canonical))
+                .cloned()
+                .collect();
         crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
         // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
         // fact from the STORED signature, mirroring the validated cache
@@ -3085,14 +3086,14 @@ impl VerterHost {
     pub(crate) fn store_meta_payload(
         &self,
         canonical: &str,
-        fact_versions: &[crate::resolver_core::FactVersionRef],
+        fact_versions: &[verter_session_query::facts::fact_cache::FactVersionRef],
         payload: Vec<u8>,
         validated_at_generation: u64,
     ) {
         // R3/R26/R28: stash the observed fact signature as an
         // `Arc<[FactVersionRef]>` so warm-hit validation clones a
         // cheap handle.
-        let fact_versions: Arc<[crate::resolver_core::FactVersionRef]> =
+        let fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> =
             Arc::from(fact_versions.to_vec().into_boxed_slice());
         // Fan-out to outer active tracers so the encoded-payload
         // mirror participates in transitive fact bubbling. Empty
@@ -3116,7 +3117,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
-    ) -> Vec<crate::resolver_core::FactVersionRef> {
+    ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
         let mut facts = Vec::new();
         let mut seen = rustc_hash::FxHashSet::default();
 
@@ -3131,7 +3132,7 @@ impl VerterHost {
     #[cfg(test)]
     pub(crate) fn fact_versions_match(
         &self,
-        fact_versions: &[crate::resolver_core::FactVersionRef],
+        fact_versions: &[verter_session_query::facts::fact_cache::FactVersionRef],
     ) -> bool {
         // Test-only warm-validation helper: validate against a
         // proven-`CurrentHostStoreView`. A known-stale (`ReturnOnly`) read
@@ -3147,14 +3148,15 @@ impl VerterHost {
     pub(crate) fn append_dependency_fact_versions(
         &self,
         canonical: &str,
-        facts: &mut Vec<crate::resolver_core::FactVersionRef>,
-        seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
+        facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+        seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
         if let Some(hash) = self.current_or_read_whole_hash(canonical) {
-            let file_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
-                hash,
-            };
+            let file_fact =
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.to_string(),
+                    hash,
+                };
             if seen.insert(file_fact.clone()) {
                 facts.push(file_fact);
             }
@@ -3164,7 +3166,8 @@ impl VerterHost {
             if let Some(parse_fact) =
                 self.syntactic_route_interface_fact_for_indexed(canonical, &artifacts.indexed)
             {
-                let fact = crate::resolver_core::FactVersionRef::Parse(parse_fact);
+                let fact =
+                    verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);
                 if seen.insert(fact.clone()) {
                     facts.push(fact);
                 }
@@ -3198,13 +3201,13 @@ impl VerterHost {
     pub(crate) fn current_derived_fact_hash(
         &self,
         canonical_id: &str,
-        kind: crate::resolver_core::DerivedFactKind,
+        kind: verter_session_query::facts::fact_cache::DerivedFactKind,
     ) -> Option<Hash16> {
         match kind {
-            crate::resolver_core::DerivedFactKind::DirectSource => {
+            verter_session_query::facts::fact_cache::DerivedFactKind::DirectSource => {
                 self.current_or_read_whole_hash(canonical_id)
             }
-            crate::resolver_core::DerivedFactKind::Route => {
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route => {
                 let indexed = self.observe_content_pinned_indexed(canonical_id)?;
                 if !self.indexed_surface_is_current(canonical_id, &indexed) {
                     return None;

@@ -22,6 +22,8 @@
 //! merge-aware carriers ([`TypeDeclBody`], the merged enum accessors) compose
 //! per-contributor locators/facts — they never evaluate a body here.
 
+pub mod headers;
+
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;

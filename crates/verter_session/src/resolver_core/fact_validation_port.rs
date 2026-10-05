@@ -2,11 +2,12 @@
 //! the view nor the canonical-completion overlay can escape to a caller.
 
 use super::resolver_context::{RequestBoundAdapter, RequestBoundLifecycle};
-use super::{
-    DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
-    ResolverHash16, RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
-};
+use super::{ResolverHash16, StoreView, StoreViewCompatToken};
 use std::collections::BTreeSet;
+use verter_session_query::facts::fact_cache::{
+    DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
+    RouteSurfaceFactRef,
+};
 
 pub trait FactValidation {
     fn current_external_supersession_fingerprint(&self) -> u64;
@@ -57,7 +58,7 @@ pub trait FactValidation {
     /// `fact_dep_signature` directly.
     #[inline]
     #[allow(dead_code)]
-    fn observe(&self, fact: crate::resolver_core::FactVersionRef) {
+    fn observe(&self, fact: verter_session_query::facts::fact_cache::FactVersionRef) {
         super::fact_tracer_tls::observe_fan_out(fact);
     }
 
@@ -69,7 +70,10 @@ pub trait FactValidation {
     /// without re-walking them.
     #[inline]
     #[allow(dead_code)]
-    fn observe_borrowed_signature(&self, sig: &[crate::resolver_core::FactVersionRef]) {
+    fn observe_borrowed_signature(
+        &self,
+        sig: &[verter_session_query::facts::fact_cache::FactVersionRef],
+    ) {
         super::fact_tracer_tls::observe_fan_out_borrowed(sig);
     }
     fn compat_token(&self) -> StoreViewCompatToken;
@@ -81,21 +85,23 @@ pub trait FactValidation {
     fn validates_file_source_env(
         &self,
         canonical_id: &str,
-        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
         parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool;
     fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool;
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld>;
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld>;
     fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool;
     fn mint_strict_self_root_world(
         &self,
         roots: &[(&str, ResolverHash16)],
-    ) -> Option<verter_workspace::StrictSelfRootWorld>;
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld>;
     fn tracks_file(&self, canonical_id: &str) -> bool;
     fn derived_hash_for(&self, canonical_id: &str, kind: DerivedFactKind)
         -> Option<ResolverHash16>;
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed;
+    fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed;
     fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool;
     fn validate_fact_signature(
         &self,
@@ -201,7 +207,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn validates_file_source_env(
         &self,
         canonical_id: &str,
-        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
         parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
@@ -217,7 +223,9 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
             .request_view()
             .validates_self_root_whole_hash(canonical_id, hash)
     }
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         self.0.request_view().strict_self_root_world_identity()
     }
     fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
@@ -228,7 +236,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn mint_strict_self_root_world(
         &self,
         roots: &[(&str, ResolverHash16)],
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         self.0.request_view().mint_strict_self_root_world(roots)
     }
     fn tracks_file(&self, canonical_id: &str) -> bool {
@@ -241,7 +249,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     ) -> Option<ResolverHash16> {
         self.0.request_view().derived_hash_for(canonical_id, kind)
     }
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+    fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
         self.0.request_view().aggregate_basis_seed()
     }
     fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
@@ -315,7 +323,7 @@ impl StoreView for FactValidationView<'_> {
     fn validates_file_source_env(
         &self,
         canonical_id: &str,
-        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
         parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
@@ -329,7 +337,9 @@ impl StoreView for FactValidationView<'_> {
     fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
         self.port.validates_self_root_whole_hash(canonical_id, hash)
     }
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         self.port.strict_self_root_world_identity()
     }
     fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
@@ -338,7 +348,7 @@ impl StoreView for FactValidationView<'_> {
     fn mint_strict_self_root_world(
         &self,
         roots: &[(&str, ResolverHash16)],
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         self.port.mint_strict_self_root_world(roots)
     }
     fn tracks_file(&self, canonical_id: &str) -> bool {
@@ -351,7 +361,7 @@ impl StoreView for FactValidationView<'_> {
     ) -> Option<ResolverHash16> {
         self.port.derived_hash_for(canonical_id, kind)
     }
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+    fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
         self.port.aggregate_basis_seed()
     }
     fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {

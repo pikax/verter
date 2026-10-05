@@ -270,7 +270,8 @@ fn production_validator_accepts_a_fact_for_a_non_default_project_owner() {
         FactKey, FactLane, InternedName, InternedSpecifier,
     };
 
-    use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef, StoreView};
+    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     configure_two_projects(&host);

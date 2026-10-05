@@ -160,7 +160,7 @@ pub(crate) struct ComponentMetaOutputPublicationEvidence {
     pub(crate) final_result: crate::component_meta_result_db::AdmittedComponentMetaResult<
         crate::component_meta_result_db::CachedComponentMetaResult,
     >,
-    pub(crate) output_read_set: crate::fact_signature_helpers::ReadSetSignature,
+    pub(crate) output_read_set: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 /// Materialized component-meta output plus optional cache-publication
@@ -172,15 +172,15 @@ pub(crate) struct ComponentMetaOutputWithPublicationEvidence {
 }
 
 fn finalized_output_signature(
-    read_set: crate::resolver_core::FactReadSetFinalise,
-) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+    read_set: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
     match read_set {
-        crate::resolver_core::FactReadSetFinalise::Ok(facts) => {
-            Some(crate::fact_signature_helpers::ReadSetSignature::new(facts))
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => {
+            Some(verter_session_query::facts::fact_cache::ReadSetSignature::new(facts))
         }
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
-        | crate::resolver_core::FactReadSetFinalise::Overflow
-        | crate::resolver_core::FactReadSetFinalise::MutationUnstable => None,
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow
+        | verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => None,
     }
 }
 
@@ -223,16 +223,16 @@ fn finalized_output_signature(
 /// the same owner.
 pub(crate) fn strip_owner_route_fact(
     owner_canonical: &str,
-    facts: &[crate::resolver_core::FactVersionRef],
-) -> Arc<[crate::resolver_core::FactVersionRef]> {
-    let filtered: Vec<crate::resolver_core::FactVersionRef> = facts
+    facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+) -> Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> {
+    let filtered: Vec<verter_session_query::facts::fact_cache::FactVersionRef> = facts
         .iter()
         .filter(|fact| {
             !matches!(
                 fact,
-                crate::resolver_core::FactVersionRef::DerivedFactHash {
+                verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
                     canonical_id,
-                    kind: crate::resolver_core::DerivedFactKind::Route,
+                    kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                     ..
                 } if canonical_id == owner_canonical
             )

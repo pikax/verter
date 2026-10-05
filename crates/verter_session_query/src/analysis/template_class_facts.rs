@@ -1,11 +1,8 @@
-//! Revision-stamped semantic facts for dynamic template-class subjects.
-//!
-//! This artifact is intentionally demand-shaped: it contains only bindings and
-//! prop members selected from one `RawTemplateData` value by the session. It
-//! stores no `TypeExpr`, semantic graph handle, or display string authority.
+//! Template class semantic fact rows: the subjects, wrapper proofs and completeness the
+//! template class producer records and the engine consumes.
 
+use crate::analysis::types::Hash16;
 use std::sync::Arc;
-
 use verter_no_typeexpr::NoTypeExpr;
 use verter_type_expr::facts::SemanticTypeSource;
 use verter_type_expr::locators::MacroPayloadLocator;
@@ -13,8 +10,6 @@ use verter_type_expr::{
     ClosedLiteralDomain, DeclBindingKey, ReactiveWrapperImportProvenance, ReactiveWrapperRole,
     ResolvedSymbolIdentity, TypeExprScope,
 };
-
-use verter_session_query::analysis::types::Hash16;
 
 /// Exact identity of a requested dynamic-class subject.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, NoTypeExpr)]
@@ -159,6 +154,10 @@ impl<S> TemplateClassSemanticFacts<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use verter_type_expr::ClosedLiteralDomain;
+    use verter_type_expr::DeclBindingKey;
+    use verter_type_expr::ReactiveWrapperRole;
     use verter_type_expr::{
         ClosedLiteralDomainUnresolvedReason, ReactiveWrapperUnresolvedReason, ResolutionExactness,
         TopLevelOwnerId,

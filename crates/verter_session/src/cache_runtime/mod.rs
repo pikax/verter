@@ -72,10 +72,12 @@ pub(crate) use world_snapshot::{
 pub(crate) use admission::{
     refuse_result_cache_admission_if_partial, CacheAdmission, CacheEntry, Candidate,
     DeferredVictims, FactCandidateDiscriminant, NonAdmissionReason, PublishCoreOutcome,
-    PublishOutcome, SignatureAdmission,
+    PublishOutcome,
 };
 #[allow(unused_imports)]
 pub(crate) use node::{lookup, query, ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};
+#[allow(unused_imports)]
+pub(crate) use verter_session_query::facts::fact_cache::SignatureAdmission;
 
 // The shared reverse-indexed multi-candidate store the query-identity
 // caches with a per-canonical reverse index route through (imported

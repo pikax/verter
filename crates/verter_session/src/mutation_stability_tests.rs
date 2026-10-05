@@ -35,9 +35,9 @@ use crate::fact_signature_helpers::{
 };
 use crate::resolved_import_facts::{ResolvedImportFacts, ResolvedImportFactsKey};
 use crate::resolver_core::with_bare_host_ctx_for_test;
-use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 
 fn host_with_a_file() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -475,7 +475,7 @@ fn an_unbound_scope_reads_no_store_view_either() {
 /// test fails while the mintable Content movement control stays green.
 #[test]
 fn movement_outside_the_scopes_domain_participation_leaves_it_admissible() {
-    use verter_workspace::CompactionDomain;
+    use verter_session_query::facts::fact_cache::CompactionDomain;
 
     let host = host_with_a_file();
 

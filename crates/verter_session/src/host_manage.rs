@@ -536,7 +536,7 @@ impl FallthroughResolutionView for crate::types::FallthroughResolution {
         &self.fallthrough_surface
     }
 
-    fn fact_versions(&self) -> &[crate::resolver_core::FactVersionRef] {
+    fn fact_versions(&self) -> &[verter_session_query::facts::fact_cache::FactVersionRef] {
         &self.fact_versions
     }
 }
@@ -952,7 +952,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     fn current_dependency_fact_versions(
         &self,
         canonical_id: &str,
-    ) -> Vec<crate::resolver_core::FactVersionRef> {
+    ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
         self.host
             .current_dependency_fact_versions(canonical_id, &std::collections::BTreeSet::new())
     }

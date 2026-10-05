@@ -27,11 +27,14 @@
 extern crate verter_debug_assert;
 
 pub mod analysis;
+pub mod currency_probe;
 pub mod declarations;
+pub mod enum_constant;
 pub mod facts;
 pub mod flow;
 pub mod function_program;
 pub mod resolution;
+pub mod retention;
 pub mod type_solver;
 
 use verter_type_expr::locators::{AuthoredBodyLocator, TypeParamVisibility};

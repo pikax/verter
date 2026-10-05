@@ -350,9 +350,10 @@ impl MetaSession {
         // misses the warm payload read. A signature overflow refuses payload
         // admission (ReturnOnly) — the payload is still returned.
         let output_facts_admissible = match output_read_set.finalise() {
-            crate::resolver_core::FactReadSetFinalise::Ok(output_facts) => {
-                let mut seen: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
-                    facts.iter().cloned().collect();
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(output_facts) => {
+                let mut seen: rustc_hash::FxHashSet<
+                    verter_session_query::facts::fact_cache::FactVersionRef,
+                > = facts.iter().cloned().collect();
                 for fact in output_facts.iter() {
                     if seen.insert(fact.clone()) {
                         facts.push(fact.clone());
@@ -360,12 +361,16 @@ impl MetaSession {
                 }
                 true
             }
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_) => false,
-            crate::resolver_core::FactReadSetFinalise::Overflow => false,
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+                false
+            }
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => false,
             // A compaction domain moved mid-scope: the observation set
             // cannot be merged into the output signature, so the output
             // facts are inadmissible exactly as an overflow's are.
-            crate::resolver_core::FactReadSetFinalise::MutationUnstable => false,
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+                false
+            }
         };
         // Conjunctive rails: the token fence (external supersession /
         // currentness) AND the output-materialization non-cacheability rail

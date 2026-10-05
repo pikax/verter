@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use super::producer::{Claim, Joined, ReadCapture, Recursion};
 use super::*;
-use crate::resolver_core::FactVersionRef;
 use crate::semantic_query::{PrimitiveKind, ResolveDeclKey, ScopeId};
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_type_expr::TopLevelOwnerId;
 
 const KEYED: &str = "/producer/keyed.ts";
@@ -54,7 +54,7 @@ fn keyed_output(
     hash: [u8; 16],
 ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
     let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let carrier = crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(vec![
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         FactVersionRef::FileWholeHash {
             canonical_id: KEYED.to_string(),
             hash,

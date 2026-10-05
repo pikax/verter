@@ -37,10 +37,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use verter_session::for_tests::install_fact_tracer_for_tests;
-use verter_session::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, PermissiveStoreView, RouteDb, RouteResult,
-};
+use verter_session::resolver_core::{PermissiveStoreView, RouteDb, RouteResult};
 use verter_session::VerterHost;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 
 fn make_host() -> VerterHost {
     VerterHost::new_standalone(Default::default())

@@ -289,16 +289,16 @@ fn slot_retains_at_most_the_shared_candidate_cap() {
             "each retarget must serve its own exact target"
         );
         assert!(
-            slot_len(&engine) <= crate::CANDIDATE_CAP,
+            slot_len(&engine) <= verter_session_query::facts::fact_cache::CANDIDATE_CAP,
             "the slot must never exceed the shared per-slot candidate cap \
              ({}); got {}",
-            crate::CANDIDATE_CAP,
+            verter_session_query::facts::fact_cache::CANDIDATE_CAP,
             slot_len(&engine)
         );
     }
     assert_eq!(
         slot_len(&engine),
-        crate::CANDIDATE_CAP,
+        verter_session_query::facts::fact_cache::CANDIDATE_CAP,
         "six admissions must leave the slot saturated at the cap, not below it"
     );
 }

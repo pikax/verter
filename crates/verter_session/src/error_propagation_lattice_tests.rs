@@ -8,15 +8,15 @@
 
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::ReadSetSignature;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef};
 use crate::semantic_query::admit::{admit_decision, Admission};
 use crate::semantic_query::{
     BrokenInputClass, IndexKey, PathSegment, PrimitiveKind, QueryError, QueryResult,
     RelationResult, ResultTaint, SemanticNodeData, SemanticNodeId,
 };
 use crate::{CompileErrorPolicy, HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
 use verter_session_query::facts::registry::{
     FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
 };

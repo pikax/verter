@@ -31,11 +31,10 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::{
-    CanonicalCompletionOverlay, DerivedFactKind, RequestStoreView, StoreView,
-};
+use crate::resolver_core::{CanonicalCompletionOverlay, RequestStoreView, StoreView};
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::DerivedFactKind;
 
 fn small_host_with_one_component() -> (VerterHost, String) {
     let host = VerterHost::new_standalone(HostConfig::default());

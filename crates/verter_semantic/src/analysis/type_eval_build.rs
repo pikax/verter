@@ -5,6 +5,7 @@
 //! facts + locators minted from those parts (the transient typed IR is
 //! discarded; bodies are lowered again on demand through the shared
 //! resolver's body service).
+use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
 
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
@@ -68,19 +69,6 @@ mod shallow;
 pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
 };
-
-/// Exact source authority for an indexed value's whole binding input.
-/// Spans use the input AST's coordinate system; composite values have no root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexedValueReadRoot {
-    /// No whole identifier read supplied this result. This does not certify
-    /// that names inside a composite or asserted type are free/module names.
-    NonBinding,
-    Identifier(verter_span::Span),
-    /// The result is an authored whole `typeof name` type query. This is
-    /// lexical type authority, never an operand read or freshness signal.
-    SourceTypeQuery(verter_span::Span),
-}
 
 /// One direct input of an indexed call, excluding inputs of nested calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3413,8 +3401,9 @@ fn collect_enum(
     out: &mut LoweredStatementParts,
 ) {
     use crate::analysis::enum_constant::{
-        enum_constant_expr, enum_first_member_expr, enum_increment_expr, evaluate_enum_constant,
+        enum_constant_expr, enum_first_member_expr, enum_increment_expr,
     };
+    use verter_session_query::enum_constant::evaluate_enum_constant;
     let enum_name = decl.id.name.as_str();
     let ambient = ambient || decl.declare;
     // Where each member name is first declared in this body: a reference
@@ -3554,7 +3543,7 @@ fn own_references_read<'m>(
     declared: &rustc_hash::FxHashMap<String, usize>,
     earlier: impl Fn(&str) -> Option<&'m EnumMemberValue>,
 ) -> OwnReferences {
-    use crate::analysis::enum_constant::EnumConstant;
+    use verter_session_query::enum_constant::EnumConstant;
     use verter_type_expr::facts::{EnumConstantExpr, EnumConstantStep, EnumScalar};
     let literal = |constant: EnumConstant| match constant.to_scalar() {
         EnumScalar::Number(text) => EnumConstantStep::Number(text),

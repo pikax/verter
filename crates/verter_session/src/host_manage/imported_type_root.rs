@@ -102,7 +102,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
             ctx,
@@ -133,7 +133,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         // Test-only convenience: seed the resolve-and-cache method with a
         // cold-seed view (either `StoreViewRead` arm). The production
@@ -170,7 +170,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
             ctx,
@@ -190,7 +190,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
 

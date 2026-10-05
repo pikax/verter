@@ -21,6 +21,9 @@
 //! - independently of authority, each map is bounded: a per-key item cap
 //!   and a key cap, oldest key evicted first. Evicting a live entry only
 //!   forces a recompute.
+use verter_session_query::retention::resolution_charge::{
+    ResolutionRetentionAccount, ResolutionRetentionCharge,
+};
 
 use std::collections::VecDeque;
 use std::hash::Hash;
@@ -34,39 +37,6 @@ use smallvec::SmallVec;
 // ─────────────────────────────────────────────────────────────────────────
 // The retention-account seam
 // ─────────────────────────────────────────────────────────────────────────
-
-/// The host's aggregate retention account, as the workspace sees it.
-///
-/// Dependency-neutral: the host adapts its own account to this, so the
-/// workspace charges resident resolution state to the same ceiling every
-/// other host store charges, without depending on the host.
-pub trait ResolutionRetentionAccount: Send + Sync {
-    /// Reserve `bytes` for a retained, evictable entry. `None` refuses the
-    /// reservation: the caller serves its value without retaining it.
-    fn reserve_retained(&self, bytes: usize) -> Option<ResolutionRetentionCharge>;
-}
-
-/// One admitted reservation. Dropping it releases the bytes — once — which
-/// is why an entry keeps its charge beside its payload.
-pub struct ResolutionRetentionCharge {
-    _charge: Box<dyn std::any::Any + Send + Sync>,
-}
-
-impl ResolutionRetentionCharge {
-    /// Wrap the host account's own RAII charge.
-    #[must_use]
-    pub fn new(charge: impl std::any::Any + Send + Sync) -> Self {
-        Self {
-            _charge: Box::new(charge),
-        }
-    }
-}
-
-impl std::fmt::Debug for ResolutionRetentionCharge {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ResolutionRetentionCharge")
-    }
-}
 
 /// The Engine's installed account, if any. A workspace with no host behind
 /// it has no account: its entries are bounded but not charged.

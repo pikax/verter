@@ -2533,9 +2533,9 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
     use crate::project_semantic_dispatch::output_materialization::OutputProjector;
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
-    use crate::resolver_core::FactReadSetFinalise;
     use crate::semantic_query::{PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember};
     use std::sync::Arc;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = std::sync::Arc::clone(host.project_type_store().semantic_graph());
@@ -2573,13 +2573,15 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
         },
     ));
     let _scope = ColdComputeCompletenessScope::enter();
-    let (_raised, facts) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+    let (_raised, facts) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
             let sealed = cap
                 .materialize_output_type_expr(broken_obj)
                 .expect("the object raises (degraded member)");
             sealed.into_type_expr(&cap)
-        });
+        },
+    );
     assert!(
         matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),
         "a degraded output must finalise NON-CACHEABLE (OutputMaterializationLoss)"
@@ -2597,10 +2599,10 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
         )),
     ));
     let _scope = ColdComputeCompletenessScope::enter();
-    let (_raised, facts) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            cap.materialize_output_type_expr(union_absent)
-        });
+    let (_raised, facts) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || cap.materialize_output_type_expr(union_absent),
+    );
     assert!(_raised.is_none(), "the composite fold fails");
     assert!(
         matches!(facts.finalise(), FactReadSetFinalise::NonCacheable(_)),

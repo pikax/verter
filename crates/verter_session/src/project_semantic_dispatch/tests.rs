@@ -1387,12 +1387,12 @@ fn scc_root_and_members_share_complete_self_root_union_and_invalidation() {
     );
     let facts: Vec<_> = roots
         .iter()
-        .map(
-            |(canonical_id, hash)| crate::resolver_core::FactVersionRef::FileWholeHash {
+        .map(|(canonical_id, hash)| {
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.to_string(),
                 hash: *hash,
-            },
-        )
+            }
+        })
         .collect();
     let canonicals: Arc<[Arc<str>]> = Arc::from(
         roots
@@ -1401,8 +1401,9 @@ fn scc_root_and_members_share_complete_self_root_union_and_invalidation() {
             .collect::<Vec<_>>()
             .into_boxed_slice(),
     );
-    let carrier =
-        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from(facts.into_boxed_slice()));
+    let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(
+        facts.into_boxed_slice(),
+    ));
     let generation = host.project_type_store().current_project_generation();
     for key in [&root_key, &member_key] {
         graph.insert_relation_payload_for_tests(
@@ -1466,7 +1467,7 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_publication() 
         let sibling_generation = exact_root.validated_at_generation.saturating_add(1);
         graph.insert_relation_payload_for_tests(
             root_key.clone(),
-            crate::fact_signature_helpers::ReadSetSignature::empty(),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
             graph.relation_payload_for_tests(RelationOutcome::NotAssignable),
             sibling_generation,
@@ -1603,8 +1604,8 @@ fn scc_member_drain_keeps_the_exact_root_candidate_across_sibling_warm_promotion
         // relation carriers always fold the dispatch ProjectGeneration
         // fence, so the empty-signature form is unrepresentative. The
         // sibling entry validates only in the warm reader's generation.
-        crate::fact_signature_helpers::ReadSetSignature::new(Arc::from([
-            crate::resolver_core::FactVersionRef::ProjectGeneration {
+        verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
+            verter_session_query::facts::fact_cache::FactVersionRef::ProjectGeneration {
                 generation: sibling_generation,
             },
         ])),
@@ -2316,7 +2317,7 @@ fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
     let completed = finalise_traced_build_output(
         &host,
         output,
-        crate::resolver_core::FactReadSetFinalise::Ok(Arc::from(traced)),
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(traced)),
         &host.provenance,
         &CarrierNormalizationPrelude::none(),
         false,
@@ -6441,8 +6442,8 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
 
 #[test]
 fn distributed_conditional_dependencies_follow_member_selections() {
-    use crate::resolver_core::FactVersionRef;
     use crate::semantic_query::LiteralValue;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     for case in ["true", "false", "mixed", "open"] {
         let host = host();
@@ -22573,7 +22574,7 @@ fn resolve_macro_payload_stale_real_file_owner_does_not_warm_publish() {
 /// self-root, so no such fact appears.
 #[test]
 fn resolve_macro_payload_non_file_owner_has_no_filewholehash_self_root() {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -30699,8 +30700,8 @@ fn single_segment_import_type_direct_serve_fence_refuses_evaluate_deferred_memo(
 /// real-file parse-derived input, so the parse env is family identity).
 #[test]
 fn instantiate_context_for_maps_body_source_by_canonical() {
-    use crate::locator_identity::ParseEnvHash;
     use crate::semantic_query::InstantiateBodySource;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
 
     let host = host();
     upsert_ts(&host, "/w/body_source.ts", "export type A = { x: string }");

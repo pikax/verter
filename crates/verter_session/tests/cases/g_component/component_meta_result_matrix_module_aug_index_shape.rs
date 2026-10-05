@@ -10,9 +10,8 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
-use verter_session::resolver_core::{
-    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, StoreView,
-};
+use verter_session::resolver_core::{PermissiveStoreView, StoreView};
+use verter_session_query::facts::fact_cache::{FactVersionRef, RouteSurfaceFactRef};
 use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
 use verter_session_query::facts::{FactKey, FactLane};
 
@@ -57,9 +56,9 @@ fn component_meta_result_signature_carries_module_aug_index_shape() {
 
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
-        read_set_signature: verter_session::for_tests::ReadSetSignature::new(Arc::clone(
-            &signature,
-        )),
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            Arc::clone(&signature),
+        ),
         validated_at_generation: 0,
     };
     assert!(

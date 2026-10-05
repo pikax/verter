@@ -256,7 +256,7 @@ impl VerterHost {
     fn attribute_prepared_decl_bundle_rejection(
         view: &dyn crate::resolver_core::StoreView,
         canonical_id: &str,
-        rejected_fact: Option<&crate::resolver_core::FactVersionRef>,
+        rejected_fact: Option<&verter_session_query::facts::fact_cache::FactVersionRef>,
         candidate_count: usize,
     ) {
         let Some(obs) = verter_audit::current_observer() else {
@@ -266,7 +266,7 @@ impl VerterHost {
             None if candidate_count == 0 => {
                 verter_audit::AuditEvent::PreparedDeclBundleRejectEntryMissing
             }
-            Some(crate::resolver_core::FactVersionRef::FileWholeHash {
+            Some(verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: fact_canonical,
                 ..
             }) if fact_canonical == canonical_id => {
@@ -276,7 +276,7 @@ impl VerterHost {
                     verter_audit::AuditEvent::PreparedDeclBundleRejectSelfRootUntracked
                 }
             }
-            Some(crate::resolver_core::FactVersionRef::ResolveImports(fact))
+            Some(verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(fact))
                 if fact.resolution_fact().is_some() =>
             {
                 // The owner's import-route resolution witness moved: the
@@ -1178,10 +1178,12 @@ impl VerterHost {
         // here, exactly as the sibling `resolved_import_facts_witness`
         // and `framework::script_facts` producers do.
         let import_route_witness = self.owner_import_route_witness(canonical_id);
-        let mut facts = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: canonical_id.to_string(),
-            hash: state.whole_hash,
-        }];
+        let mut facts = vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: canonical_id.to_string(),
+                hash: state.whole_hash,
+            },
+        ];
         if let Some(witness) = import_route_witness.clone() {
             facts.extend(witness);
         }
@@ -1377,10 +1379,12 @@ impl VerterHost {
         // this rail exists to provide.
         let import_route_witness = self.owner_import_route_witness(canonical_id);
         let whole_hash = facts.whole_hash;
-        let mut fact_versions = vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: canonical_id.to_string(),
-            hash: whole_hash,
-        }];
+        let mut fact_versions = vec![
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: canonical_id.to_string(),
+                hash: whole_hash,
+            },
+        ];
         if let Some(witness) = import_route_witness.clone() {
             fact_versions.extend(witness);
         }
@@ -2055,7 +2059,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> Option<IndexedReadyServe> {
-        verter_workspace::probe_scope!(ENSURE_INDEXED_READY);
+        verter_session_query::probe_scope!(ENSURE_INDEXED_READY);
         verter_audit::attribute_scope!(IndexedReadyBuild);
         let serve = self.ensure_indexed_ready_serve_uninstrumented(canonical_id, None);
         // Test-only deterministic fenced-serve override: convert a would-be
@@ -2109,7 +2113,9 @@ impl VerterHost {
                             &serve.indexed,
                         ) {
                             crate::resolver_core::resolver_context::observe_fan_out(
-                                crate::resolver_core::FactVersionRef::Parse(fact),
+                                verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+                                    fact,
+                                ),
                             );
                         }
                     }
@@ -2206,7 +2212,7 @@ impl VerterHost {
         let materialize = || -> Option<crate::project_type_store::IndexedFlightOutcome> {
             #[cfg(test)]
             let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.instance_id);
-            verter_workspace::probe_scope!(ENSURE_INDEXED_COLD);
+            verter_session_query::probe_scope!(ENSURE_INDEXED_COLD);
             self.provenance
                 .indexed_ready_materializes
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2807,8 +2813,8 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         known_shallow: Option<&crate::resolver_core::ShallowFileState>,
-        facts: &mut Vec<crate::resolver_core::FactVersionRef>,
-        seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
+        facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+        seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
         // Ambient-view-first hash chain. `current_or_read_whole_hash`
         // already does `ensure_loaded` on view-miss inside a request, so the
@@ -2819,7 +2825,7 @@ impl VerterHost {
             .current_or_read_whole_hash(canonical_id)
             .or_else(|| known_shallow.map(|state| state.whole_hash));
         if let Some(hash) = whole_hash {
-            let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.to_string(),
                 hash,
             };
@@ -2838,7 +2844,7 @@ impl VerterHost {
         if let Some(parse_fact) = indexed.and_then(|indexed| {
             self.syntactic_route_interface_fact_for_indexed(canonical_id, indexed)
         }) {
-            let fact = crate::resolver_core::FactVersionRef::Parse(parse_fact);
+            let fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {
                 facts.push(fact);
             }
@@ -2850,14 +2856,14 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
         known_shallow: Option<&crate::resolver_core::shallow_file_state::ShallowInputRecord>,
-        facts: &mut Vec<crate::resolver_core::FactVersionRef>,
-        seen: &mut rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef>,
+        facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+        seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
     ) {
         let whole_hash = ctx
             .authoritative_current_content_hash(canonical_id)
             .or_else(|| known_shallow.map(|state| state.whole_hash));
         if let Some(hash) = whole_hash {
-            let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+            let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.to_string(),
                 hash,
             };
@@ -2876,7 +2882,7 @@ impl VerterHost {
         if let Some(parse_fact) = indexed.and_then(|indexed| {
             self.syntactic_route_interface_fact_for_indexed_with_context(ctx, canonical_id, indexed)
         }) {
-            let fact = crate::resolver_core::FactVersionRef::Parse(parse_fact);
+            let fact = verter_session_query::facts::fact_cache::FactVersionRef::Parse(parse_fact);
             if seen.insert(fact.clone()) {
                 facts.push(fact);
             }
@@ -2888,7 +2894,7 @@ impl VerterHost {
         ctx: &dyn crate::resolver_core::ResolverContext,
         canonical_id: &str,
         indexed: &Arc<crate::resolver_core::request_inputs::IndexedInputRecord>,
-    ) -> Option<crate::resolver_core::ParseFactRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
         if !indexed.shallow_state.has_resolvable_surface() {
             return None;
         }
@@ -2900,7 +2906,7 @@ impl VerterHost {
         let fact = artifacts
             .facts
             .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
-        Some(crate::resolver_core::ParseFactRef {
+        Some(verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: canonical_id.to_string(),
             key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
             lane: verter_session_query::facts::FactLane::Semantic,
@@ -2916,7 +2922,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> Option<(
         (String, verter_type_expr::TopLevelOwnerId, String),
-        Vec<crate::resolver_core::FactVersionRef>,
+        Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     )> {
         // A published source snapshot already owns the parser-produced local
         // export surface and the exact owner-qualified declaration headers.
@@ -2963,7 +2969,7 @@ impl VerterHost {
                     if !ambiguous_owner {
                         if let Some(owner) = exact_owner {
                             let mut facts =
-                                vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                                vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                                     canonical_id: dep_canonical.to_string(),
                                     hash: source_data.parse.whole_hash,
                                 }];
@@ -3003,7 +3009,7 @@ impl VerterHost {
                                             &indexed,
                                         )
                                     {
-                                        facts.push(crate::resolver_core::FactVersionRef::Parse(
+                                        facts.push(verter_session_query::facts::fact_cache::FactVersionRef::Parse(
                                             parse_fact,
                                         ));
                                     }
@@ -3110,7 +3116,7 @@ impl VerterHost {
             &mut facts,
             &mut seen,
         );
-        let target_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+        let target_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: normalized_target.clone(),
             hash: target_hash,
         };
@@ -3239,8 +3245,8 @@ impl VerterHost {
             // into the surface's `fact_dep_signature` so dependent caches
             // detect intermediate barrel changes via fact-validation
             // alone (no eager invalidation required).
-            let mut chain_facts: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
-            let mut seen_facts: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
+            let mut chain_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> = Vec::new();
+            let mut seen_facts: rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef> =
                 rustc_hash::FxHashSet::default();
             // The resolution witness of every direct import the build
             // SKIPPED because it did not resolve. A skipped import is
@@ -3249,7 +3255,7 @@ impl VerterHost {
             // skipped it (below), so it goes stale the moment the missing
             // target appears. `unrootable_skip` records a skip whose
             // resolution left no witness to root on.
-            let mut skipped_witness: Vec<crate::resolver_core::FactVersionRef> = Vec::new();
+            let mut skipped_witness: Vec<verter_session_query::facts::fact_cache::FactVersionRef> = Vec::new();
             let mut skipped_any = false;
             let mut unrootable_skip = false;
             // ReturnOnly never publishes — fenced-walk signal. A
@@ -3278,7 +3284,7 @@ impl VerterHost {
                         .resolve_type_dependency_canonical(owner_canonical, &target.source_specifier);
                     (publication, scope.collected())
                 };
-                let mut skip = |witness: &[crate::resolver_core::FactVersionRef]| {
+                let mut skip = |witness: &[verter_session_query::facts::fact_cache::FactVersionRef]| {
                     skipped_any = true;
                     unrootable_skip |= witness.is_empty();
                     skipped_witness.extend_from_slice(witness);

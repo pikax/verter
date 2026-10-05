@@ -88,7 +88,7 @@ pub struct MaterializeScopeObservation {
     /// `None` when the observed version's parse-fact registry is not
     /// recoverable — the publish site then refuses shared-cache
     /// admission while still returning the freshly-computed value.
-    pub syntactic_export_set: Option<crate::resolver_core::ParseFactRef>,
+    pub syntactic_export_set: Option<verter_session_query::facts::fact_cache::ParseFactRef>,
 }
 
 impl MaterializeScopeObservation {
@@ -471,7 +471,7 @@ impl RouteLookup for crate::VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
         crate::VerterHost::resolve_imported_type_root_with_facts_with_store_view(
@@ -618,7 +618,7 @@ impl ExecutionSubmission for crate::VerterHost {
 /// that must deliver a single observation to all nested tracer scopes.
 /// No-op when the stack is empty.
 #[inline]
-pub(crate) fn observe_fan_out(fact: crate::resolver_core::FactVersionRef) {
+pub(crate) fn observe_fan_out(fact: verter_session_query::facts::fact_cache::FactVersionRef) {
     fact_tracer_tls::observe_fan_out(fact);
 }
 
@@ -1047,7 +1047,7 @@ where
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[crate::resolver_core::FactVersionRef]>,
+        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) {
         self.0
             .host()
@@ -1206,7 +1206,9 @@ where
 /// `bubble_fact_signature_via_tls` and other warm-hit bubble-up paths.
 /// No-op when the stack is empty or `sig` is empty.
 #[inline]
-pub(crate) fn observe_fan_out_borrowed(sig: &[crate::resolver_core::FactVersionRef]) {
+pub(crate) fn observe_fan_out_borrowed(
+    sig: &[verter_session_query::facts::fact_cache::FactVersionRef],
+) {
     fact_tracer_tls::observe_fan_out_borrowed(sig);
 }
 
@@ -1227,7 +1229,7 @@ pub(crate) fn fact_tracer_installed() -> bool {
 pub(crate) struct RecordedFactReads {
     /// Every distinct fact fanned out while the computation ran: its own
     /// reads, and the receipt of each completed result it consumed.
-    pub(crate) facts: std::sync::Arc<[crate::resolver_core::FactVersionRef]>,
+    pub(crate) facts: std::sync::Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     /// Whether any non-cacheable read was marked, local-only included.
     pub(crate) non_cacheable: bool,
 }
@@ -1253,9 +1255,9 @@ pub(crate) fn complete_with_receipt(
     start: &EvidenceMarks,
     end: &EvidenceMarks,
     reads: &RecordedFactReads,
-) -> crate::resolver_core::FactVersionRef {
-    let receipt = crate::resolver_core::FactVersionRef::Receipt(
-        verter_workspace::ResultReceipt::new(reads.facts.to_vec()),
+) -> verter_session_query::facts::fact_cache::FactVersionRef {
+    let receipt = verter_session_query::facts::fact_cache::FactVersionRef::Receipt(
+        verter_session_query::facts::fact_cache::ResultReceipt::new(reads.facts.to_vec()),
     );
     fact_tracer_tls::collapse_evidence(start, end, &receipt);
     receipt
@@ -1332,7 +1334,9 @@ impl NonCacheableReadReason {
     /// declining retention in one cache family, so every current read class
     /// propagates through all enclosing cold-compute scopes.
     #[inline]
-    pub(crate) fn propagation(self) -> super::fact_read_set::NonCacheablePropagation {
+    pub(crate) fn propagation(
+        self,
+    ) -> verter_session_query::facts::fact_read_set::NonCacheablePropagation {
         match self {
             Self::FencedServe
             | Self::LeaseMiss
@@ -1341,7 +1345,7 @@ impl NonCacheableReadReason {
             | Self::InferenceBudgetExceeded
             | Self::PreparationFailure
             | Self::OutputMaterializationLoss => {
-                super::fact_read_set::NonCacheablePropagation::Transitive
+                verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive
             }
         }
     }
@@ -1422,7 +1426,7 @@ pub(crate) fn note_non_cacheable_read_fan_out(reason: NonCacheableReadReason) {
 /// so their closed reason enum selects the propagation policy.
 #[inline]
 pub(crate) fn note_non_cacheable_propagation(
-    propagation: super::fact_read_set::NonCacheablePropagation,
+    propagation: verter_session_query::facts::fact_read_set::NonCacheablePropagation,
 ) {
     fact_tracer_tls::note_non_cacheable_read(propagation);
 }
@@ -1475,12 +1479,14 @@ impl Drop for TracerScope {
 /// ([`Self::install`]), and yields its read set once, when the compute
 /// completes.
 pub(crate) struct OwnedFactTracer {
-    cell: Box<crate::resolver_core::FactReadSetCell>,
+    cell: Box<verter_session_query::facts::fact_read_set::FactReadSetCell>,
 }
 
 impl OwnedFactTracer {
-    pub(crate) fn new(basis: verter_workspace::AggregateGenerations) -> Self {
-        let cell = Box::new(crate::resolver_core::FactReadSetCell::new());
+    pub(crate) fn new(
+        basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    ) -> Self {
+        let cell = Box::new(verter_session_query::facts::fact_read_set::FactReadSetCell::new());
         cell.set_aggregate_basis(basis);
         Self { cell }
     }
@@ -1493,7 +1499,7 @@ impl OwnedFactTracer {
         }
     }
 
-    pub(crate) fn into_read_set(self) -> crate::resolver_core::FactReadSet {
+    pub(crate) fn into_read_set(self) -> verter_session_query::facts::fact_read_set::FactReadSet {
         (*self.cell).into_inner()
     }
 }
@@ -1512,13 +1518,13 @@ impl Drop for OwnedTracerScope<'_> {
 
 /// Install a request-owned basis without granting host access to the compute.
 pub(crate) fn with_fact_tracer_cell<F, R>(
-    basis: verter_workspace::AggregateGenerations,
+    basis: verter_session_query::facts::fact_cache::AggregateGenerations,
     f: F,
-) -> (R, crate::resolver_core::FactReadSet)
+) -> (R, verter_session_query::facts::fact_read_set::FactReadSet)
 where
-    F: FnOnce(&crate::resolver_core::FactReadSetCell) -> R,
+    F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
 {
-    let cell = crate::resolver_core::FactReadSetCell::new();
+    let cell = verter_session_query::facts::fact_read_set::FactReadSetCell::new();
     cell.set_aggregate_basis(basis);
     // Push onto the tracer stack. The RAII guard pops on drop
     // (including on panic unwind) so no dangling pointer remains.
@@ -1557,9 +1563,9 @@ impl crate::VerterHost {
     #[must_use]
     pub fn with_fact_tracer<F, R>(
         &self,
-        seed: verter_workspace::AggregateBasisSeed,
+        seed: verter_session_query::facts::fact_cache::AggregateBasisSeed,
         f: F,
-    ) -> (R, crate::resolver_core::FactReadSet)
+    ) -> (R, verter_session_query::facts::fact_read_set::FactReadSet)
     where
         F: FnOnce() -> R,
     {
@@ -1567,7 +1573,7 @@ impl crate::VerterHost {
     }
 
     /// [`Self::with_fact_tracer`], handing the traced closure a borrow of
-    /// the scope's own [`crate::resolver_core::FactReadSetCell`].
+    /// the scope's own [`verter_session_query::facts::fact_read_set::FactReadSetCell`].
     ///
     /// The cell accumulates monotonically, so a closure holding it can read
     /// the scope's verdict-so-far MID-SCOPE — the seam
@@ -1590,14 +1596,14 @@ impl crate::VerterHost {
     #[must_use]
     pub fn with_fact_tracer_cell<F, R>(
         &self,
-        seed: verter_workspace::AggregateBasisSeed,
+        seed: verter_session_query::facts::fact_cache::AggregateBasisSeed,
         f: F,
-    ) -> (R, crate::resolver_core::FactReadSet)
+    ) -> (R, verter_session_query::facts::fact_read_set::FactReadSet)
     where
-        F: FnOnce(&crate::resolver_core::FactReadSetCell) -> R,
+        F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
     {
         self::with_fact_tracer_cell(
-            verter_workspace::AggregateGenerations::from_seed(
+            verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
                 &seed,
                 &self.live_aggregate_counters(),
             ),
@@ -1616,7 +1622,9 @@ impl crate::VerterHost {
     /// without depending on the sealed trait.
     #[inline]
     #[must_use]
-    pub fn current_fact_tracer(&self) -> Option<&crate::resolver_core::FactReadSetCell> {
+    pub fn current_fact_tracer(
+        &self,
+    ) -> Option<&verter_session_query::facts::fact_read_set::FactReadSetCell> {
         fact_tracer_tls::current_tracer()
     }
 }

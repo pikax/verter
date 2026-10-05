@@ -445,7 +445,8 @@ pub(crate) struct ComponentMetaExtractOutcome {
     /// The fallthrough resolution's fact versions. Both the analysis and
     /// payload extraction entries publish this call-owned dependency lane so
     /// their caller can merge it into the resolved-state signature.
-    pub(crate) fallthrough_fact_versions: Option<Vec<crate::resolver_core::FactVersionRef>>,
+    pub(crate) fallthrough_fact_versions:
+        Option<Vec<verter_session_query::facts::fact_cache::FactVersionRef>>,
     /// The COMPUTE completeness observed across the WHOLE extract body — the
     /// macro-DTO read, projection, policy, and the folded fallthrough compute.
     /// `Partial` whenever any of those tripped a budget / fuse / fatal read.

@@ -406,12 +406,13 @@ fn formula_with_key(value: SemanticNodeId) -> crate::semantic_query::ObjectProje
 
 #[test]
 fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validation() {
-    use crate::fact_signature_helpers::ReadSetSignature;
-    use crate::resolver_core::{FactVersionRef, SessionResolverContext};
+    use crate::resolver_core::SessionResolverContext;
     use crate::session_view::OverlaidViewRef;
     use rustc_hash::FxHashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
 
     let keyed_canonical = "/p10/keyed.ts";
     let host = host();

@@ -563,7 +563,7 @@ impl FilesystemWorkspace {
             &dyn Fn() -> bool,
         ) -> Option<T>,
     ) -> Option<T> {
-        crate::probe_scope!(RECORD_EDGES_FROZEN);
+        verter_session_query::probe_scope!(RECORD_EDGES_FROZEN);
         let published = self.load_published()?;
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
@@ -604,7 +604,7 @@ impl FilesystemWorkspace {
         &self,
         records: &[(String, Vec<crate::types::ParsedEdge>)],
     ) -> Option<()> {
-        crate::probe_scope!(RECORD_EDGES_FROZEN);
+        verter_session_query::probe_scope!(RECORD_EDGES_FROZEN);
         if records.is_empty() {
             return Some(());
         }
@@ -2242,7 +2242,9 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     fn install_resolution_retention(
         &self,
-        account: Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+        account: Arc<
+            dyn verter_session_query::retention::resolution_charge::ResolutionRetentionAccount,
+        >,
     ) {
         self.engine.install_resolution_retention(account);
     }
@@ -2258,7 +2260,7 @@ impl crate::traits::WorkspaceAccess for FilesystemWorkspace {
     fn publish_owner_resolution_set(
         &self,
         owner_canonical: &str,
-    ) -> Option<crate::fact_cache::FactVersionRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::FactVersionRef> {
         self.engine.publish_owner_resolution_set(
             owner_canonical,
             crate::traits::WorkspaceRead::resolution_population(self),

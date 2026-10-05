@@ -32,7 +32,7 @@ use crate::types::{ExactResolution, ExactResolutionResult, VfsProvenance};
 use crate::workspace_snapshot::{
     OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
-use crate::{SignatureAdmission, CANDIDATE_CAP};
+use verter_session_query::facts::fact_cache::{SignatureAdmission, CANDIDATE_CAP};
 use verter_session_query::resolution::{
     IdeProjectConfig, ResolutionPopulation, ResolutionWorldId, ResolvePhase, ResolveRequestKind,
     ResolveResult, SessionFingerprint,
@@ -122,7 +122,7 @@ type OverlayLane =
 struct LazyResolutionCacheEntry {
     result: Option<ResolveResult>,
     query: ResolutionQueryKey,
-    signature: crate::ReadSetSignature,
+    signature: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 impl LazyResolutionCacheEntry {
@@ -131,8 +131,8 @@ impl LazyResolutionCacheEntry {
         let result = self.result.as_ref().map_or(0, |result| {
             result.source_id.len() + result.provider_id.len() + result.provider_specifier.len()
         });
-        let facts =
-            self.signature.facts.len() * (std::mem::size_of::<crate::FactVersionRef>() + 64);
+        let facts = self.signature.facts.len()
+            * (std::mem::size_of::<verter_session_query::facts::fact_cache::FactVersionRef>() + 64);
         std::mem::size_of::<Self>()
             + std::mem::size_of::<LazyResolutionCacheKey>()
             + key.importer_id.len()
@@ -230,13 +230,13 @@ struct FlightDelivery {
 /// `(importer, specifier, phase, kind, population)` coexist as distinct
 /// candidates whose value-side `ReadSetSignature`s distinguish the
 /// resolution inputs they observed. Retention is the shared per-slot
-/// [`crate::CANDIDATE_CAP`] with FIFO eviction — the same policy the
+/// [`verter_session_query::facts::fact_cache::CANDIDATE_CAP`] with FIFO eviction — the same policy the
 /// session `ValidatedFactCache` slot applies — so a retarget never
 /// silently discards the witness of the candidate it superseded.
 type LazyResolutionCandidates = SmallVec<[LazyResolutionCacheEntry; CANDIDATE_CAP]>;
 
 /// Push `candidate` onto a slot, evicting oldest-first at
-/// [`crate::CANDIDATE_CAP`]. Mirrors the session `ValidatedFactCache`
+/// [`verter_session_query::facts::fact_cache::CANDIDATE_CAP`]. Mirrors the session `ValidatedFactCache`
 /// admission policy exactly: append, then drain the front until the
 /// slot is at the cap.
 ///
@@ -1361,7 +1361,7 @@ impl Engine {
         fingerprint: SessionFingerprint,
         mutation: impl FnOnce(&ResolutionWorldRoot, &mut ResolutionSessionRoot) -> (R, bool),
     ) -> R {
-        crate::probe_scope!(MUTATE_RESOLUTION_SESS);
+        verter_session_query::probe_scope!(MUTATE_RESOLUTION_SESS);
         let domain = self.session_resolution_domain(fingerprint);
         let _base_read_fence = self.resolution_world_write.lock();
         let base = self.resolution_world.load_full();
@@ -1559,7 +1559,7 @@ impl Engine {
         &self,
         owner_canonical: &str,
         population: ResolutionPopulation,
-    ) -> Option<crate::FactVersionRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::FactVersionRef> {
         let node = ResolutionFactKey::owner_resolution_set(
             CanonicalResolutionId::new(verter_session_query::resolution::normalize_canonical_id(
                 owner_canonical,
@@ -1632,11 +1632,13 @@ impl Engine {
             return None;
         }
         let version = world.fact_version(&node);
-        Some(crate::FactVersionRef::ResolveImports(
-            crate::ResolveImportsFactRef::Resolution(
-                crate::resolution_currency::ResolutionFactRef::new(node, version),
+        Some(
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(
+                    crate::resolution_currency::ResolutionFactRef::new(node, version),
+                ),
             ),
-        ))
+        )
     }
 
     fn replace_world_exact_resolutions(
@@ -2115,7 +2117,7 @@ impl Engine {
         canonical_id: &str,
         mutation: impl FnOnce() -> (R, bool),
     ) -> R {
-        crate::probe_scope!(MUTATE_OVERLAY_UPSERT);
+        verter_session_query::probe_scope!(MUTATE_OVERLAY_UPSERT);
         let _strict_transition = self.strict_self_root_transition();
         let fingerprint = self.default_resolution_session;
         self.mutate_resolution_session(fingerprint, |base, session| {
@@ -2145,7 +2147,7 @@ impl Engine {
         if records.is_empty() {
             return;
         }
-        crate::probe_scope!(MUTATE_OVERLAY_UPSERT);
+        verter_session_query::probe_scope!(MUTATE_OVERLAY_UPSERT);
         let _strict_transition = self.strict_self_root_transition();
         let fingerprint = self.default_resolution_session;
         self.mutate_resolution_session(fingerprint, |base, session| {
@@ -2565,7 +2567,7 @@ impl Engine {
     pub(crate) fn captured_resolution_stamp_for_test(
         &self,
         population: ResolutionPopulation,
-    ) -> Option<crate::AggregateStamp> {
+    ) -> Option<verter_session_query::facts::fact_cache::AggregateStamp> {
         self.capture_resolution_world(population)
             .and_then(|captured| captured.world.resolution_stamp(population))
     }
@@ -2592,7 +2594,7 @@ impl Engine {
     }
 
     /// Number of candidates currently retained in one resolution slot.
-    /// Bounded by [`crate::CANDIDATE_CAP`].
+    /// Bounded by [`verter_session_query::facts::fact_cache::CANDIDATE_CAP`].
     #[cfg(test)]
     pub(crate) fn lazy_resolution_slot_len_for_test(
         &self,
@@ -2672,7 +2674,9 @@ impl Engine {
     /// retain to it, and retain nothing it refuses.
     pub(crate) fn install_resolution_retention(
         &self,
-        account: Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+        account: Arc<
+            dyn verter_session_query::retention::resolution_charge::ResolutionRetentionAccount,
+        >,
     ) {
         self.retention.install(account);
     }
@@ -3252,7 +3256,7 @@ impl Engine {
     /// never re-read.
     fn witness_evidence_is_unenumerable(
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
-        signature: &crate::ReadSetSignature,
+        signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) -> bool {
         use crate::resolution_currency::ResolutionEvidenceSource;
         matches!(evidence, ResolutionEvidenceSource::Uncovered(_))
@@ -3264,7 +3268,7 @@ impl Engine {
         reader: &dyn crate::traits::WorkspaceRead,
         evidence: crate::resolution_currency::ResolutionEvidenceSource<'_>,
         request_overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
-        signature: &crate::ReadSetSignature,
+        signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) -> bool {
         use crate::resolution_currency::ResolutionEvidenceSource;
         // Fail closed: a caller that declared no live source re-observes
@@ -3608,7 +3612,7 @@ impl Engine {
             overlay: request_overlay,
             cancelled,
         } = operation;
-        crate::probe_scope!(RESOLVE_IN_PUBLISHED);
+        verter_session_query::probe_scope!(RESOLVE_IN_PUBLISHED);
         let overlay_reader;
         let reader: &dyn crate::traits::WorkspaceRead = match request_overlay {
             Some(overlay) => {
@@ -3630,11 +3634,11 @@ impl Engine {
         // across retries and settled (completed or abandoned) on return.
         let mut flight_lease = None;
         loop {
-            crate::probe_scope!(RESOLVE_ATTEMPT);
+            verter_session_query::probe_scope!(RESOLVE_ATTEMPT);
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::AttemptStart);
             let mut captured = {
-                crate::probe_scope!(RESOLVE_CAPTURE_WORLD);
+                verter_session_query::probe_scope!(RESOLVE_CAPTURE_WORLD);
                 self.capture_stable_resolution_world(population)
             };
             // A request overlay answers from its own effective world: every
@@ -3684,7 +3688,7 @@ impl Engine {
             // overlay's effective world — every fact it observed, negative
             // probes included, still holds with the overlay in place.
             let candidates: SmallVec<[(ResolutionLane, LazyResolutionCacheEntry); 8]> = {
-                crate::probe_scope!(RESOLVE_CANDIDATE_READ);
+                verter_session_query::probe_scope!(RESOLVE_CANDIDATE_READ);
                 let mut candidates: SmallVec<[(ResolutionLane, LazyResolutionCacheEntry); 8]> =
                     self.lazy_resolution_cache
                         .read()
@@ -3710,7 +3714,7 @@ impl Engine {
             // rejected.
             let mut rejected_exact_targets = Vec::new();
             {
-                crate::probe_scope!(RESOLVE_SCREEN_EXACT);
+                verter_session_query::probe_scope!(RESOLVE_SCREEN_EXACT);
                 for (_, candidate) in candidates.iter() {
                     let candidate_exact_version =
                         candidate.signature.resolution_fact_version(&exact_fact);
@@ -3731,7 +3735,7 @@ impl Engine {
             // the miss. The hook fires after the observation but before the
             // attempt can select a resolver or admit.
             let exact = {
-                crate::probe_scope!(RESOLVE_EXACT_LOOKUP);
+                verter_session_query::probe_scope!(RESOLVE_EXACT_LOOKUP);
                 captured
                     .world
                     .base
@@ -3745,7 +3749,7 @@ impl Engine {
             let context_fact = ResolutionFactKey::context_importer(importer_id, population);
             transaction.lock().observe(context_fact);
             let selected_context = {
-                crate::probe_scope!(RESOLVE_CONTEXT_SELECT);
+                verter_session_query::probe_scope!(RESOLVE_CONTEXT_SELECT);
                 match selected_context_for_path(captured.world.base.as_ref(), importer_id) {
                     Ok(context) => Some(context),
                     Err(_) => {
@@ -3766,7 +3770,7 @@ impl Engine {
             // captured root is superseded — retry against the new world.
             let mut refreshed = false;
             {
-                crate::probe_scope!(RESOLVE_REFRESH_EVID);
+                verter_session_query::probe_scope!(RESOLVE_REFRESH_EVID);
                 for (_, entry) in candidates.iter() {
                     refreshed |= self.refresh_resolution_evidence(
                         reader,
@@ -3800,7 +3804,7 @@ impl Engine {
             // exact or resolver-derived — republishes through the same slot.
             let reusable_for_this_view = |entry: &LazyResolutionCacheEntry| {
                 let candidate_context = {
-                    crate::probe_scope!(RESOLVE_REUSE_CTX);
+                    verter_session_query::probe_scope!(RESOLVE_REUSE_CTX);
                     Self::complete_provider_context(
                         captured.world.base.as_ref(),
                         selected_context.clone(),
@@ -3813,7 +3817,7 @@ impl Engine {
                     return false;
                 };
                 let query_matches = {
-                    crate::probe_scope!(RESOLVE_REUSE_QUERY);
+                    verter_session_query::probe_scope!(RESOLVE_REUSE_QUERY);
                     let query = ResolutionQueryKey::importer(
                         importer_id,
                         specifier,
@@ -3826,7 +3830,7 @@ impl Engine {
                 if !query_matches {
                     return false;
                 }
-                crate::probe_scope!(RESOLVE_REUSE_VALIDATE);
+                verter_session_query::probe_scope!(RESOLVE_REUSE_VALIDATE);
                 // A witness the declared evidence source cannot
                 // re-observe is not a witness this attempt may stand
                 // on. See `witness_evidence_is_unenumerable`.
@@ -3834,7 +3838,7 @@ impl Engine {
                     && !Self::witness_evidence_is_unenumerable(evidence, &entry.signature)
             };
             let mut reusable: Option<(ResolutionLane, LazyResolutionCacheEntry)> = {
-                crate::probe_scope!(RESOLVE_REUSE_FIND);
+                verter_session_query::probe_scope!(RESOLVE_REUSE_FIND);
                 candidates
                     .iter()
                     .find(|(_, entry)| reusable_for_this_view(entry))
@@ -3938,7 +3942,7 @@ impl Engine {
                             })
                     })
                 } else {
-                    crate::probe_scope!(RESOLVE_TRACKED);
+                    verter_session_query::probe_scope!(RESOLVE_TRACKED);
                     let tracked = TransactionReader::new(reader, &transaction);
                     let capability = TrackedResolutionCapability::new();
                     let driven = captured
@@ -4032,7 +4036,7 @@ impl Engine {
                 resolution_test_hooks::ResolutionPhase::PublicationGateWait,
             );
             let (_publication, _session_publication) = {
-                crate::probe_scope!(RESOLVE_PUBLISH_LOCK);
+                verter_session_query::probe_scope!(RESOLVE_PUBLISH_LOCK);
                 (
                     self.resolution_world_write.lock(),
                     session_domain.as_ref().map(|domain| domain.write.lock()),
@@ -4093,7 +4097,7 @@ impl Engine {
             let direct_edges = transaction.direct_edges();
             let observed_values = transaction.take_observed_values();
             let mut admission = {
-                crate::probe_scope!(RESOLVE_TXN_FINISH);
+                verter_session_query::probe_scope!(RESOLVE_TXN_FINISH);
                 transaction.finish()
             };
             if matches!(
@@ -4109,7 +4113,7 @@ impl Engine {
                 && !overlay_lane
                 && matches!(&admission, SignatureAdmission::Cacheable(_))
                 && {
-                    crate::probe_scope!(RESOLVE_FOLD_EVIDENCE);
+                    verter_session_query::probe_scope!(RESOLVE_FOLD_EVIDENCE);
                     self.fold_observed_base_evidence(
                         Self::held_session_of(&captured),
                         observed_values,
@@ -4162,7 +4166,7 @@ impl Engine {
                 if let (Some(signature), Some(query), Some(overlay)) =
                     (cacheable_signature, query.clone(), request_overlay)
                 {
-                    crate::probe_scope!(RESOLVE_ADMIT);
+                    verter_session_query::probe_scope!(RESOLVE_ADMIT);
                     let entry = LazyResolutionCacheEntry {
                         result: result.clone(),
                         query,
@@ -4183,7 +4187,7 @@ impl Engine {
                 }
             } else if publish_candidate {
                 if let (Some(signature), Some(query)) = (cacheable_signature, query.clone()) {
-                    crate::probe_scope!(RESOLVE_ADMIT);
+                    verter_session_query::probe_scope!(RESOLVE_ADMIT);
                     let entry = LazyResolutionCacheEntry {
                         result: result.clone(),
                         query: query.clone(),
@@ -4249,9 +4253,9 @@ impl Engine {
                     let node = ResolutionFactKey::decision(query);
                     let version = captured.world.fact_version(&node);
                     admission =
-                        SignatureAdmission::Cacheable(crate::ReadSetSignature::new(Arc::from([
-                            crate::FactVersionRef::ResolveImports(
-                                crate::ResolveImportsFactRef::Resolution(
+                        SignatureAdmission::Cacheable(verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([
+                            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                                verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(
                                     crate::resolution_currency::ResolutionFactRef {
                                         key: node,
                                         version,
@@ -4865,7 +4869,7 @@ impl Engine {
         input_ledgers: &mut [crate::resolver::InputResolutionLedger],
         final_validate: &dyn Fn() -> bool,
     ) -> bool {
-        crate::probe_scope!(RECORD_PARSED_EDGES);
+        verter_session_query::probe_scope!(RECORD_PARSED_EDGES);
         assert_eq!(
             records.len(),
             input_ledgers.len(),
@@ -4955,7 +4959,7 @@ impl Engine {
         input_ledger: &mut crate::resolver::InputResolutionLedger,
         final_validate: &dyn Fn() -> bool,
     ) -> bool {
-        crate::probe_scope!(RECORD_PARSED_EDGES);
+        verter_session_query::probe_scope!(RECORD_PARSED_EDGES);
         loop {
             let population = reader.resolution_population();
             let captured = self.capture_stable_resolution_world(population);

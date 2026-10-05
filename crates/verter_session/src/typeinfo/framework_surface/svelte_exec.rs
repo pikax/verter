@@ -183,7 +183,7 @@ pub(crate) fn resolve_svelte_surface(
     };
     let non_cacheable_read_observed = matches!(
         &finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     // ReturnOnly never publishes — a surface resolved from a served-without-
@@ -197,10 +197,13 @@ pub(crate) fn resolve_svelte_surface(
     // non-overflowed observation set (the no-poison invariant). `Missing` /
     // `Partial` / `Unsupported` flow through without warming.
     if let ResolvedOutcome::Resolved(dtos) = &outcome {
-        if let crate::resolver_core::FactReadSetFinalise::Ok(facts) = finalise {
+        if let verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) = finalise
+        {
             let entry = StoredSurfaceDto {
                 dto_bundle: Arc::clone(dtos),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                    facts,
+                ),
                 validated_at_generation: generation,
             };
             return ResolvedOutcome::Resolved(Arc::clone(
@@ -1256,7 +1259,7 @@ fn resolve_legacy_slot_inventory(ctx: &dyn ResolverContext, owner: &str) -> Reso
     // Root the cached slot bundle to the owner's CONTENT so a content edit to the
     // `.svelte` misses the warm SLOTS entry.
     crate::resolver_core::resolver_context::observe_fan_out(
-        crate::resolver_core::FactVersionRef::FileWholeHash {
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: owner.to_string(),
             hash: indexed.whole_hash,
         },

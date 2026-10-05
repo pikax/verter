@@ -47,14 +47,15 @@ pub use verter_semantic::analysis::framework_facts::{
     ScriptFactPartialReason, ScriptFactUnavailableReason,
 };
 
-use crate::cache_runtime::SignatureAdmission;
 use crate::fact_signature_helpers::{
-    named_cacheability_scope, named_fact_tracer, ReadSetSignature, ReadSetSignatureExt as _,
+    named_cacheability_scope, named_fact_tracer, ReadSetSignatureExt as _,
 };
 use crate::framework::registry::FrameworkRegistration;
 use crate::resolver_core::{ResolverContext, StoreView};
 use crate::types::Hash16;
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::SignatureAdmission;
 
 /// Producer-minted exact script facts.
 ///
@@ -1145,7 +1146,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             // Observe the owner's whole hash + every resolved import contributor so
             // a content edit to any of them misses the warm entry.
             crate::resolver_core::resolver_context::observe_fan_out(
-                crate::resolver_core::FactVersionRef::FileWholeHash {
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id: canonical.to_string(),
                     hash: whole_hash,
                 },
@@ -1159,7 +1160,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                 if let Some(import_canonical) = &target.resolved_canonical {
                     if let Some(h) = host.get_whole_hash(import_canonical) {
                         crate::resolver_core::resolver_context::observe_fan_out(
-                            crate::resolver_core::FactVersionRef::FileWholeHash {
+                            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                                 canonical_id: import_canonical.clone(),
                                 hash: h,
                             },
@@ -1196,8 +1197,10 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             ExactScriptFacts::new(payload)
         }
         ScriptFactValidation::Exact(payload) => {
-            if let crate::resolver_core::FactReadSetFinalise::Ok(facts)
-            | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) = &finalise
+            if let verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
+            | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+                facts,
+            ) = &finalise
             {
                 crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
             }
@@ -1213,8 +1216,10 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             ));
         }
         ScriptFactValidation::Partial { payload, reason } => {
-            if let crate::resolver_core::FactReadSetFinalise::Ok(facts)
-            | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) = &finalise
+            if let verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
+            | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+                facts,
+            ) = &finalise
             {
                 crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
             }
@@ -1247,14 +1252,15 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // ReadSetSignature carries the SAME cross-file facts — a same-content import
     // reroute that flips the facts then misses the warm surface entry too. The
     // facts are bubbled BEFORE `finalise` is consumed by the admission check.
-    if let crate::resolver_core::FactReadSetFinalise::Ok(facts)
-    | crate::resolver_core::FactReadSetFinalise::NonCacheable(facts) = &finalise
+    if let verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts)
+    | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(facts) =
+        &finalise
     {
         crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
     }
     let validate_non_cacheable = matches!(
         &finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let admission = SignatureAdmission::from_finalise(finalise);
     // An import-dependent validation whose owner import-route rail could NOT be

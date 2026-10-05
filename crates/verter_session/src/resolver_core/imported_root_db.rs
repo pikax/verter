@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
-use crate::resolver_core::{FactVersionRef, SingleflightGroup, StoreView, ValidatedFactCache};
+use crate::resolver_core::{SingleflightGroup, StoreView, ValidatedFactCache};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// Result of resolving an imported type root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,7 +320,8 @@ fn test_host() -> &'static crate::VerterHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{FactVersionRef, StoreView, StoreViewCompatToken};
+    use crate::resolver_core::{StoreView, StoreViewCompatToken};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     struct TestView {
         token: StoreViewCompatToken,

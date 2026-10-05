@@ -2309,7 +2309,7 @@ fn observe_closedness_walk_consult(
         .map(|serve| serve.indexed)
     {
         crate::resolver_core::resolver_context::observe_fan_out(
-            crate::resolver_core::FactVersionRef::FileWholeHash {
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_id.to_string(),
                 hash: indexed.whole_hash,
             },

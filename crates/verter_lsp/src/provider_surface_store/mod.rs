@@ -57,7 +57,7 @@
 //! process-local [`SemanticRetentionAccount`] — the same aggregate byte ceiling
 //! the semantic caches admit against, so provider-surface bytes and semantic-cache
 //! bytes cannot each claim the ceiling independently. The charge is
-//! [`ChargeClass::Pinned`](verter_session::semantic_retention_account::ChargeClass::Pinned):
+//! [`ChargeClass::Pinned`](verter_session_query::retention::ChargeClass::Pinned):
 //! a synced surface is an obligation, not a policy choice — refusing to retain one
 //! would leave the provider holding content this store could no longer map back,
 //! which is the silent-corruption outcome the whole module exists to prevent. The
@@ -72,11 +72,11 @@ use verter_span::path::InjectedPathKey;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 
-use verter_session::semantic_retention_account::{
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::retention::{
     RetainedFootprint, RetentionCharge, SemanticRetentionAccount, StoreAccount,
     ENTRY_OVERHEAD_BYTES,
 };
-use verter_session_query::analysis::types::Hash16;
 
 use crate::carrier_cache::{EngineRecheckState, RegenKey};
 

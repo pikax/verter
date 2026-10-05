@@ -2954,7 +2954,7 @@ fn indexed_call_with_observed_roots(
     IndexedValueCall,
     Vec<(
         super::type_eval_build::IndexedCallReadSite,
-        super::type_eval_build::IndexedValueReadRoot,
+        verter_session_query::analysis::indexed_value::IndexedValueReadRoot,
     )>,
 ) {
     use super::type_eval_build::{
@@ -2985,7 +2985,8 @@ fn indexed_call_with_observed_roots(
 
 #[test]
 fn indexed_call_read_roots_follow_the_actual_value_inference_branch() {
-    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use super::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     for source in [
         "accept(x)",
         "accept(((x)))",
@@ -3062,7 +3063,8 @@ fn indexed_call_read_roots_follow_the_actual_value_inference_branch() {
 
 #[test]
 fn indexed_call_source_type_query_is_distinct_from_the_operand() {
-    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use super::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     for source in [
         "accept(other as typeof queried)",
         "accept(((other as typeof queried)))",
@@ -3133,7 +3135,8 @@ fn indexed_call_source_type_query_is_distinct_from_the_operand() {
 
 #[test]
 fn indexed_call_read_roots_preserve_each_occurrence_and_spread_ordinal() {
-    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use super::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     let source = "accept(x, (x satisfies unknown), undefined, ...x)";
     let (call, roots) = indexed_call_with_observed_roots(source);
     let spans: Vec<_> = source
@@ -3166,7 +3169,8 @@ fn indexed_call_read_roots_preserve_each_occurrence_and_spread_ordinal() {
 
 #[test]
 fn indexed_call_read_roots_observe_the_actual_member_receiver_once() {
-    use super::type_eval_build::{IndexedCallReadSite, IndexedValueReadRoot};
+    use super::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
     for source in [
         "(x satisfies unknown).method(other(x))",
         "(<const>x)[key](other(x))",

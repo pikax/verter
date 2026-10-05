@@ -114,6 +114,7 @@
         "verter_audit",
         "verter_compiler",
         "verter_debug_assert",
+        "verter_ecma",
         "verter_execution",
         "verter_identity",
         "verter_language",
@@ -700,7 +701,6 @@
         "verter": [
           "verter_audit",
           "verter_identity",
-          "verter_semantic",
           "verter_session_query",
           "verter_span",
           "verter_type_expr"

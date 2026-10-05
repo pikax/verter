@@ -21,14 +21,15 @@
 
 use std::sync::Arc;
 
-use verter_workspace::{
+use verter_session_query::facts::fact_cache::{
     AggregatePopulation, AggregateStamp, CompactionDomain, CompletionOverlayState,
     DomainGenerationFact, SessionOverlayFingerprint, ViewPopulation,
 };
 
-use crate::resolver_core::{FactVersionRef, StoreView};
+use crate::resolver_core::StoreView;
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn host_with_a_file() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -306,7 +307,7 @@ fn composite_stamp_domains_refuse_a_bare_counter_stamp() {
 /// component. The matching perturbation assertion fails.
 #[test]
 fn every_component_of_the_route_surface_composite_is_load_bearing() {
-    use verter_workspace::RouteSurfaceStamp;
+    use verter_session_query::facts::fact_cache::RouteSurfaceStamp;
 
     let host = host_with_a_file();
     let view = freshly_built_view(&host);
@@ -392,7 +393,7 @@ fn every_component_of_the_route_surface_composite_is_load_bearing() {
 /// perturbation test above stays green.
 #[test]
 fn an_isolated_shape_movement_refuses_a_previously_captured_route_surface_composite() {
-    use verter_workspace::RouteSurfaceStamp;
+    use verter_session_query::facts::fact_cache::RouteSurfaceStamp;
 
     let host = host_with_a_file();
     let components = |host: &VerterHost| -> RouteSurfaceStamp {
@@ -496,7 +497,7 @@ fn a_bare_counter_stamp_is_refused_for_the_semantic_imports_composite() {
 /// perturbation.
 #[test]
 fn every_component_of_the_semantic_imports_composite_is_load_bearing() {
-    use verter_workspace::{AggregateStamp, SemanticImportsStamp};
+    use verter_session_query::facts::fact_cache::{AggregateStamp, SemanticImportsStamp};
 
     let host = host_with_a_file();
     let view = freshly_built_view(&host);
@@ -682,7 +683,8 @@ fn a_request_store_view_refines_content_validation_only_after_it_shadows() {
 /// validator consults that map too.
 #[test]
 fn completion_overlay_state_tracks_effective_shadowing_identity() {
-    use crate::resolver_core::{CanonicalCompletionOverlay, DerivedFactKind};
+    use crate::resolver_core::CanonicalCompletionOverlay;
+    use verter_session_query::facts::fact_cache::DerivedFactKind;
 
     let first = CanonicalCompletionOverlay::new();
     let second = CanonicalCompletionOverlay::new();
@@ -762,7 +764,8 @@ fn completion_overlay_state_is_unavailable_during_a_writer() {
 /// union never described one world and must be refused.
 #[test]
 fn request_signature_validation_refuses_a_population_straddle() {
-    use crate::resolver_core::{CanonicalCompletionOverlay, FactVersionRef, RequestStoreView};
+    use crate::resolver_core::{CanonicalCompletionOverlay, RequestStoreView};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     let host = host_with_a_file();
     let base = freshly_built_view(&host);
@@ -813,7 +816,7 @@ fn request_signature_validation_refuses_a_population_straddle() {
 #[test]
 fn request_basis_arms_the_stable_view_domains_in_the_exact_completion_population() {
     use crate::resolver_core::{CanonicalCompletionOverlay, RequestStoreView};
-    use verter_workspace::AggregateGenerations;
+    use verter_session_query::facts::fact_cache::AggregateGenerations;
 
     let host = host_with_a_file();
     let base = freshly_built_view(&host);
@@ -910,7 +913,9 @@ fn request_signature_refuses_a_mixed_resolution_and_content_aggregate() {
         "control: a Content-only aggregate validates in the exact empty-completion population"
     );
     let receipt = |facts: Vec<FactVersionRef>| {
-        FactVersionRef::Receipt(verter_workspace::ResultReceipt::new(facts))
+        FactVersionRef::Receipt(verter_session_query::facts::fact_cache::ResultReceipt::new(
+            facts,
+        ))
     };
     assert_eq!(
         request.validate_fact_signature(&[receipt(vec![resolution.clone()])], &[]),
@@ -1174,7 +1179,7 @@ fn two_distinct_session_overlays_do_not_cross_validate_each_others_aggregates() 
 /// green, which is the pair showing the two tests cover different things.
 #[test]
 fn an_isolated_component_movement_refuses_a_previously_captured_composite() {
-    use verter_workspace::SemanticImportsStamp;
+    use verter_session_query::facts::fact_cache::SemanticImportsStamp;
 
     let host = host_with_a_file();
 

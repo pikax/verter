@@ -72,7 +72,6 @@ pub mod selector_match;
 pub mod style;
 mod style_syntax;
 pub mod template;
-pub mod template_class_facts;
 pub mod type_eval_build;
 pub mod type_expand;
 pub mod types;
@@ -102,7 +101,7 @@ pub use file_usage::{
 };
 pub use imports::extract_import_sources;
 pub use macros::collect_type_references;
-pub use macros::props_root_binding;
+
 pub use project_index::{
     ComponentEdge, ComponentUsageSummary, CssVarFlow, DynamicInjectEntry, FileInjectValidation,
     InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,
@@ -137,10 +136,6 @@ pub use template::{
     TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage,
     TemplateDirective, TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
     TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
-};
-pub use template_class_facts::{
-    ReactiveWrapperProof, TemplateClassFactsCompleteness, TemplateClassSemanticFactRow,
-    TemplateClassSemanticFacts, TemplateClassSubject,
 };
 
 pub use types::{DomQueryCallSite, ScriptAnalysisSnapshot};

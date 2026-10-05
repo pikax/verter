@@ -185,7 +185,7 @@ impl ComponentMetaQueryEngine<'_> {
             #[cfg(test)]
             super::INJECT_IMPORTED_REGISTRY_CONCURRENT_PUBLISH.with(|slot| {
                 if let Some(symbol) = slot.borrow().clone() {
-                    if let crate::cache_runtime::SignatureAdmission::Cacheable(sig) =
+                    if let verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) =
                         engine_fact_signature_for_exported_type(
                             ctx,
                             canonical_id,
@@ -342,7 +342,7 @@ impl ComponentMetaQueryEngine<'_> {
             };
         };
         match engine_fact_signature_for_exported_type(ctx, canonical_id, exported_name, observed) {
-            crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
                 crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     crate::component_meta_caches::ImportedRegistryEntry {
                         value: resolved_value,
@@ -351,7 +351,7 @@ impl ComponentMetaQueryEngine<'_> {
                     },
                 )
             }
-            crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+            verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(reason) => {
                 crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
                     value: resolved_value,
                     reason,
@@ -463,12 +463,12 @@ impl ComponentMetaQueryEngine<'_> {
                     requested_name,
                     observed,
                 ) {
-                    crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
                         ComputedEntry::Rooted(computed, sig.facts)
                     }
-                    crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                        ComputedEntry::Unrooted(computed, reason)
-                    }
+                    verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                        reason,
+                    ) => ComputedEntry::Unrooted(computed, reason),
                 }
             });
             match host_value {
@@ -583,12 +583,12 @@ impl ComponentMetaQueryEngine<'_> {
                     exported_name,
                     observed,
                 ) {
-                    crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
                         ComputedEntry::Rooted(computed, sig.facts)
                     }
-                    crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                        ComputedEntry::Unrooted(computed, reason)
-                    }
+                    verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                        reason,
+                    ) => ComputedEntry::Unrooted(computed, reason),
                 }
             });
             match host_value {
@@ -677,12 +677,12 @@ impl ComponentMetaQueryEngine<'_> {
                     name,
                     observed.whole_hash,
                 ) {
-                    crate::cache_runtime::SignatureAdmission::Cacheable(sig) => {
+                    verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
                         ComputedEntry::Rooted(computed, sig.facts)
                     }
-                    crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-                        ComputedEntry::Unrooted(computed, reason)
-                    }
+                    verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                        reason,
+                    ) => ComputedEntry::Unrooted(computed, reason),
                 }
             });
             match host_value {

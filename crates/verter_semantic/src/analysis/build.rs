@@ -787,7 +787,7 @@ fn build_script_analysis_inner(
     let macro_usage = if macros.is_empty() || parse_errors {
         None
     } else {
-        let props_binding = crate::analysis::macros::props_root_binding(&macros);
+        let props_binding = verter_session_query::analysis::macros::props_root_binding(&macros);
         let emit_binding = macros
             .iter()
             .find(|m| matches!(m.kind, AnalyzedMacroKind::DefineEmits))

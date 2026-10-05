@@ -676,18 +676,22 @@ impl Drop for CountingCharge {
     }
 }
 
-impl verter_workspace::ResolutionRetentionAccount for CountingAccount {
+impl verter_session_query::retention::resolution_charge::ResolutionRetentionAccount
+    for CountingAccount
+{
     fn reserve_retained(
         &self,
         bytes: usize,
-    ) -> Option<verter_workspace::ResolutionRetentionCharge> {
+    ) -> Option<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge> {
         self.0.fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
-        Some(verter_workspace::ResolutionRetentionCharge::new(
-            CountingCharge {
-                bytes,
-                charged: Arc::clone(&self.0),
-            },
-        ))
+        Some(
+            verter_session_query::retention::resolution_charge::ResolutionRetentionCharge::new(
+                CountingCharge {
+                    bytes,
+                    charged: Arc::clone(&self.0),
+                },
+            ),
+        )
     }
 }
 

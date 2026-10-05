@@ -59,7 +59,7 @@ impl SemanticGraphStore {
     pub fn entry_read_set_signature_for_tests(
         &self,
         key: &SemanticQueryKey,
-    ) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+    ) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
         let (family, slot) = family_and_slot(key);
         let entries = self.entries_lock_diagnosed();
         entries
@@ -113,7 +113,7 @@ impl SemanticGraphStore {
         &self,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
     ) -> usize {
         self.publish_with_carrier_dispatch_and_generation_for_tests(
@@ -135,7 +135,7 @@ impl SemanticGraphStore {
         &self,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         dispatch_dep_signature: DepSignature,
     ) -> usize {
@@ -162,7 +162,7 @@ impl SemanticGraphStore {
         &self,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         dispatch_dep_signature: DepSignature,
         validated_at_generation: u64,
@@ -192,7 +192,7 @@ impl SemanticGraphStore {
         &self,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         dispatch_dep_signature: DepSignature,
         validated_at_generation: u64,
@@ -224,7 +224,7 @@ impl SemanticGraphStore {
         host: &crate::VerterHost,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         dispatch_dep_signature: DepSignature,
         validated_at_generation: u64,
@@ -253,7 +253,7 @@ impl SemanticGraphStore {
         view: Option<&dyn crate::resolver_core::ResolverContext>,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         dispatch_dep_signature: DepSignature,
         validated_at_generation: u64,

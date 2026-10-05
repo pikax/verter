@@ -2,6 +2,7 @@ use oxc_allocator::Allocator;
 use oxc_parser::ParseOptions;
 use oxc_span::SourceType;
 use verter_parser::oxc_parse::Parser;
+use verter_session_query::analysis::macros::props_root_binding;
 
 use super::*;
 

@@ -155,8 +155,9 @@ fn sealed_carrier_none_arm_splits_unraisable_failure_from_genuine_absence() {
             vec![str_id, crate::semantic_query::SemanticNodeId(u64::MAX)].into_boxed_slice(),
         )),
     ));
-    let (_carrier, facts) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+    let (_carrier, facts) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
             let carrier = super::raise_node_to_sealed_carrier(
                 &dispatch,
                 unraisable,
@@ -166,11 +167,12 @@ fn sealed_carrier_none_arm_splits_unraisable_failure_from_genuine_absence() {
                 carrier.result_is_partial(),
                 "a present-but-unraisable composite must degrade PARTIAL, never admitted complete"
             );
-        });
+        },
+    );
     assert!(
         matches!(
             facts.finalise(),
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         ),
         "the unraisable arm must finalise NON-CACHEABLE on the loss rail"
     );

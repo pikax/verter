@@ -55,7 +55,7 @@ impl<'a> UnusedDeclarationContext<'a> {
         let use_slots_called = vue_api_calls
             .iter()
             .any(|call| matches!(call.api, VueApiClassification::UseSlots));
-        let props_binding = verter_semantic::analysis::props_root_binding(macros);
+        let props_binding = verter_session_query::analysis::macros::props_root_binding(macros);
         let props_root_used_in_style = props_binding.is_some_and(|name| {
             bindings
                 .iter()
@@ -737,7 +737,7 @@ fn populate_unused_declaration_facts(
         };
 
     // ── Props ──
-    let props_root = verter_semantic::analysis::props_root_binding(ctx.macros);
+    let props_root = verter_session_query::analysis::macros::props_root_binding(ctx.macros);
     let props_root_template = match props_root {
         Some(root) => bounded_member_reads(tpl, root),
         None => Some(FxHashSet::default()),
@@ -961,7 +961,7 @@ impl TemplateClassDomainIndex {
                 _ => None,
             };
             match &row.subject {
-                verter_semantic::analysis::TemplateClassSubject::Binding { label, .. } => {
+                verter_session_query::analysis::template_class_facts::TemplateClassSubject::Binding { label, .. } => {
                     match admitted {
                         Some(classes) => {
                             index.binding_domains.insert(
@@ -974,7 +974,7 @@ impl TemplateClassDomainIndex {
                         }
                     }
                 }
-                verter_semantic::analysis::TemplateClassSubject::Prop {
+                verter_session_query::analysis::template_class_facts::TemplateClassSubject::Prop {
                     label, props_root, ..
                 } => {
                     // An EMPTY `props_root` marks a BARE-requested prop; a
@@ -1005,7 +1005,7 @@ impl TemplateClassDomainIndex {
                         }
                     }
                 }
-                verter_semantic::analysis::TemplateClassSubject::Unresolved {
+                verter_session_query::analysis::template_class_facts::TemplateClassSubject::Unresolved {
                     label,
                     props_root,
                 } => match props_root {

@@ -74,10 +74,10 @@ pub(crate) fn integer_convention_index_key(number: f64) -> Option<CanonicalIndex
 /// The exact ECMA-262 `Number::toString` (radix 10) layout — including the
 /// even-tie-break (pinned tsgo, probe14) and the `1e21` → `"1e+21"` /
 /// `1e-7` → `"1e-7"` exponent forms (probe13) — lives in the workspace-canonical
-/// [`verter_compiler::js_number`] (the lowest reusable owner, shared with the
+/// [`verter_ecma`] (the lowest reusable owner, shared with the
 /// Svelte client const-fold). Re-exported here because this module OWNS the
 /// `IndexKey::Number` payload that the spelling canonicalizes.
-pub(crate) use verter_compiler::js_number::js_number_to_string;
+pub(crate) use verter_ecma::js_number_to_string;
 
 #[cfg(test)]
 mod tests {

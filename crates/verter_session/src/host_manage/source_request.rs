@@ -7,10 +7,10 @@ use crate::resolver_core::route_db::{
     emit_export_route_resolved_event, RouteDb, RouteFlightOutcome,
 };
 use crate::resolver_core::{
-    FactVersionRef, ResolverContext, RouteNameKey, RouteResult, SingleflightRole,
-    SingleflightRunResult, StoreView,
+    ResolverContext, RouteNameKey, RouteResult, SingleflightRole, SingleflightRunResult, StoreView,
 };
 use std::sync::Arc;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 pub(crate) struct ImportedRootRequestDriver<'a> {
     db: &'a ImportedRootDb,

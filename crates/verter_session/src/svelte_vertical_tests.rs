@@ -1127,7 +1127,7 @@ let { title }: Props = $props();
         .expect("prime admitted analysis");
     crate::host_test_force::arm_fact_tracer_overflow_once(
         crate::host_test_force::TracerScope::ComponentMetaOutput,
-        crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
     let overflow = overflow_host
         .get_public_api_projection("/Overflow.svelte")

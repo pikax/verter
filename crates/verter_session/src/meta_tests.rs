@@ -603,21 +603,24 @@ fn fact_versions_match_uses_derived_fact_kind_specific_validation() {
 
     let route_hash = project
         .host()
-        .current_derived_fact_hash("/index.ts", crate::resolver_core::DerivedFactKind::Route)
+        .current_derived_fact_hash(
+            "/index.ts",
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+        )
         .expect("a materialised wildcard reexporter must publish a Route fact");
 
     assert!(project.host().fact_versions_match(&[
-        crate::resolver_core::FactVersionRef::DerivedFactHash {
+        verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::Route,
+            kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
             hash: route_hash,
         },
     ]));
 
     assert!(!project.host().fact_versions_match(&[
-        crate::resolver_core::FactVersionRef::DerivedFactHash {
+        verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
             canonical_id: "/index.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::Route,
+            kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
             hash: [9; 16],
         },
     ]));
@@ -636,7 +639,7 @@ fn snapshot_view_is_stale_but_coherent_after_host_changes() {
         .expect("whole hash should exist before mutation");
     let before_view = project.host().snapshot_view();
     let before_epoch = before_view.mutation_epoch();
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: "/types.ts".to_string(),
         hash: before_hash,
     };
@@ -968,16 +971,16 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
         .host()
         .current_dependency_fact_versions("/index.ts", &std::collections::BTreeSet::new());
 
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(facts.contains(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/index.ts".to_string(),
             hash: whole_hash,
-        })
-    );
+        }
+    ));
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                 if inner.resolution_fact().is_some()
         )),
         "dependency fact versions should include the owner's import-route \
@@ -986,16 +989,18 @@ fn current_dependency_fact_versions_include_derived_resolver_facts() {
     assert!(
         facts.iter().all(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { .. }
-                | crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    kind: crate::resolver_core::DerivedFactKind::Route,
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { .. }
+                | verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
+                    kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                     ..
                 }
-                | crate::resolver_core::FactVersionRef::Parse(crate::resolver_core::ParseFactRef {
-                    key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
-                    ..
-                })
-                | crate::resolver_core::FactVersionRef::ResolveImports(_)
+                | verter_session_query::facts::fact_cache::FactVersionRef::Parse(
+                    verter_session_query::facts::fact_cache::ParseFactRef {
+                        key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
+                        ..
+                    }
+                )
+                | verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(_)
         )),
         "dependency fact versions should only publish file, route, and \
          resolve-domain import facts; got {facts:?}",
@@ -1032,16 +1037,16 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
         .host()
         .current_dependency_fact_versions("/index.ts", &std::collections::BTreeSet::new());
 
-    assert!(
-        facts.contains(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(facts.contains(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/index.ts".to_string(),
             hash: whole_hash,
-        })
-    );
+        }
+    ));
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                 if inner.resolution_fact().is_some()
         )),
         "non-scheduler store views must track the owner's import-route \
@@ -1050,12 +1055,12 @@ fn current_dependency_fact_versions_include_derived_resolver_facts_non_scheduler
     assert!(
         facts.iter().all(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { .. }
-                | crate::resolver_core::FactVersionRef::DerivedFactHash {
-                    kind: crate::resolver_core::DerivedFactKind::Route,
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { .. }
+                | verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
+                    kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                     ..
                 }
-                | crate::resolver_core::FactVersionRef::ResolveImports(_)
+                | verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(_)
         )),
         "non-scheduler dependency fact versions should only publish file, \
          route, and resolve-domain import facts; got {facts:?}",
@@ -1097,11 +1102,11 @@ defineProps<{ ui: typeof theme }>()
     assert!(
         facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                 if inner.resolution_fact().is_some()
         )) || facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { .. }
         )),
         "live-host fact capture should emit either an import-route resolution \
          witness or a FileWholeHash fact for tracked dependencies",
@@ -24094,7 +24099,7 @@ import Child from './Child.vue'
     assert!(
         cached.fact_versions.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/Child.vue"
         )),
         "cached fallthrough facts should include the child component file"
@@ -24102,7 +24107,7 @@ import Child from './Child.vue'
     assert!(
         cached.fact_versions.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                 if canonical_id == "/types.ts"
         )),
         "cached fallthrough facts should include transitive child component-meta deps"
@@ -24177,8 +24182,8 @@ defineProps<WidgetProps>()
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn cached_eval_inputs_track_macro_and_runtime_dependencies() {
-    use crate::resolver_core::FactVersionRef;
     use crate::types::ProjectionMode;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     let project = make_project();
     // Macro type dependency: `defineProps<WidgetProps>` imported from types.ts.
@@ -26773,8 +26778,8 @@ fn publication_reduce_path_admits_nothing_into_the_shared_type_expr_slot() {
 /// the sidecar roots it, and a project-generation bump misses.
 #[test]
 fn dispatch_project_generation_roots_fact_only_resolved_meta_sidecar() {
-    use crate::resolver_core::FactVersionRef;
     use crate::types::ProjectionMode;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     let project = make_project();
     project

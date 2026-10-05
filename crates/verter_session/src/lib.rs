@@ -197,7 +197,7 @@ mod value_symbol_depth_equivalence_tests;
 // `ReadSetSignature` — the return type of the public inspector
 // `compile_slot_fact_dep_signature` — selectively re-exported below.
 pub(crate) mod fact_signature_helpers;
-pub use crate::fact_signature_helpers::ReadSetSignature;
+pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 #[cfg(test)]
 mod error_propagation_lattice_tests;
 pub mod external_ts;
@@ -393,7 +393,6 @@ pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
 /// The one PROCESS-wide aggregate retention account: public so the LSP
 /// provider-surface store charges THIS one, not a second per-crate ceiling.
-pub mod semantic_retention_account;
 #[cfg(test)]
 mod semantic_retention_account_tests;
 pub(crate) mod session_runtime;

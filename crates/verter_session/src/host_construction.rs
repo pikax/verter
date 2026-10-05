@@ -526,7 +526,7 @@ impl VerterHost {
         // The workspace's resident request-overlay resolution state charges
         // the same aggregate account every host store charges.
         workspace_lock.read().install_resolution_retention(Arc::new(
-            crate::semantic_retention_account::ResolutionRetention(Arc::clone(
+            verter_session_query::retention::ResolutionRetention(Arc::clone(
                 project_type_store.retention_account(),
             )),
         ));
@@ -1066,7 +1066,7 @@ impl VerterHost {
     }
 
     /// TEST-ONLY: the live `parse_env_hash` dimension for `canonical`, as
-    /// the sealed [`ParseEnvHash`](crate::semantic_query::ParseEnvHash)
+    /// the sealed [`ParseEnvHash`](verter_session_query::facts::fact_cache::ParseEnvHash)
     /// newtype. Lets external test fixtures mirror the
     /// `instantiate_context_for` choke point's `file_backed(P)` keying
     /// WITHOUT opening the newtype's byte constructor — the wrapped value
@@ -1082,8 +1082,8 @@ impl VerterHost {
     pub fn live_parse_env_dim_for_tests(
         &self,
         canonical: &str,
-    ) -> crate::semantic_query::ParseEnvHash {
-        crate::semantic_query::ParseEnvHash::from_env_hash(
+    ) -> verter_session_query::facts::fact_cache::ParseEnvHash {
+        verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
             self.host_view_env_hashes_for(canonical).parse_env_hash,
         )
     }
@@ -1790,12 +1790,12 @@ impl crate::VerterHost {
 #[cfg(any(test, feature = "test-support"))]
 mod fact_validation_authority {
     use crate::resolver_core::fact_validation_port::FactValidation;
-    use crate::resolver_core::{
-        DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
-        ResolveImportsFactRef, ResolverHash16, RouteSurfaceFactRef, StoreView,
-        StoreViewCompatToken,
-    };
+    use crate::resolver_core::{ResolverHash16, StoreView, StoreViewCompatToken};
     use std::collections::BTreeSet;
+    use verter_session_query::facts::fact_cache::{
+        DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
+        ResolveImportsFactRef, RouteSurfaceFactRef,
+    };
     impl FactValidation for crate::VerterHost {
         fn current_external_supersession_fingerprint(&self) -> u64 {
             crate::VerterHost::current_external_supersession_fingerprint(self)
@@ -1903,7 +1903,7 @@ mod fact_validation_authority {
         fn validates_file_source_env(
             &self,
             canonical_id: &str,
-            parse_env_hash: crate::locator_identity::ParseEnvHash,
+            parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
             parse_key: &verter_language::ParseKey,
             file_language_id: &verter_language::FileLanguage,
         ) -> bool {
@@ -1931,7 +1931,9 @@ mod fact_validation_authority {
 
             view.validates_self_root_whole_hash(canonical_id, hash)
         }
-        fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+        fn strict_self_root_world_identity(
+            &self,
+        ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
@@ -1950,7 +1952,7 @@ mod fact_validation_authority {
         fn mint_strict_self_root_world(
             &self,
             roots: &[(&str, ResolverHash16)],
-        ) -> Option<verter_workspace::StrictSelfRootWorld> {
+        ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
@@ -1978,8 +1980,10 @@ mod fact_validation_authority {
 
             view.derived_hash_for(canonical_id, kind)
         }
-        fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
-            verter_workspace::AggregateBasisSeed::Unvouched
+        fn aggregate_basis_seed(
+            &self,
+        ) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched
         }
         fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
             let view = match crate::VerterHost::resolver_store_view_read(self) {

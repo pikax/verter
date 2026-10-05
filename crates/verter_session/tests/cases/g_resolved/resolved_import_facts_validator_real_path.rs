@@ -18,13 +18,12 @@
 
 use std::sync::Arc;
 
-use verter_session::resolver_core::{
-    FactVersionRef, ResolveImportsFactRef, ResolverStore, StoreView,
-};
+use verter_session::resolver_core::{ResolverStore, StoreView};
 use verter_session::session_view::{HostView, SessionView};
 use verter_session::{
     CompileErrorPolicy, DependencyResolution, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
+use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
 use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
 
 #[test]

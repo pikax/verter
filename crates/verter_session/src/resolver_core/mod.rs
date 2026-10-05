@@ -48,7 +48,9 @@ pub mod route_db;
 pub(crate) mod scope_shadowing;
 pub(crate) mod session_resolver_context;
 
-pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
+pub use verter_session_query::facts::fact_read_set::{
+    FactReadSet, FactReadSetCell, FactReadSetFinalise,
+};
 // Substrate re-export. Hot-path callers construct the
 // request-bound wrapper at entry points; the wiring lands in the
 // hot-path conversion commit (C).
@@ -265,7 +267,7 @@ pub trait StoreView {
     fn validates_file_source_env(
         &self,
         _canonical_id: &str,
-        _parse_env_hash: crate::locator_identity::ParseEnvHash,
+        _parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
         _parse_key: &verter_language::ParseKey,
         _file_language_id: &verter_language::FileLanguage,
     ) -> bool {
@@ -303,7 +305,9 @@ pub trait StoreView {
 
     /// Exact O(1) identity of the strict self-root world represented by this
     /// view, or `None` when the view cannot vouch for one.
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         None
     }
 
@@ -319,7 +323,7 @@ pub trait StoreView {
     fn mint_strict_self_root_world(
         &self,
         roots: &[(&str, ResolverHash16)],
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         let before = self.strict_self_root_world_identity()?;
         if !roots.iter().all(|(canonical, hash)| {
             self.strict_self_root_is_witnessable(canonical)
@@ -368,7 +372,7 @@ pub trait StoreView {
     /// boundary's movement re-check. A caller that already HOLDS a bound
     /// view borrows it here for free; the live half is composed from the
     /// host's atomics. See
-    /// [`AggregateGenerations::from_seed`](verter_workspace::AggregateGenerations::from_seed).
+    /// [`AggregateGenerations::from_seed`](verter_session_query::facts::fact_cache::AggregateGenerations::from_seed).
     ///
     /// The default is [`AggregateBasisSeed::Unvouched`]: a view that does
     /// not answer vouches for nothing, so scopes it seeds compact nothing
@@ -376,8 +380,8 @@ pub trait StoreView {
     /// alternative, a fabricated stamp, is a witness the wrong view can
     /// satisfy.
     #[inline]
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
-        verter_workspace::AggregateBasisSeed::Unvouched
+    fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched
     }
 
     /// **The single whole-signature validation entry point.** Every warm
@@ -415,17 +419,20 @@ pub trait StoreView {
         sig: &[FactVersionRef],
         self_root_canonicals: &[&str],
     ) -> Result<(), usize> {
-        let mut walk = verter_workspace::ReceiptWalk::default();
+        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
         for (index, fact) in sig.iter().enumerate() {
-            let ok =
-                verter_workspace::validates_through_receipts(fact, &mut walk, |leaf| match leaf {
+            let ok = verter_session_query::facts::fact_cache::validates_through_receipts(
+                fact,
+                &mut walk,
+                |leaf| match leaf {
                     FactVersionRef::FileWholeHash { canonical_id, hash }
                         if self_root_canonicals.contains(&canonical_id.as_str()) =>
                     {
                         self.validates_self_root_whole_hash(canonical_id, hash)
                     }
                     other => self.validates(other),
-                });
+                },
+            );
             if !ok {
                 return Err(index);
             }
@@ -503,7 +510,7 @@ pub trait StoreView {
     }
 }
 
-impl verter_workspace::FactVersionValidator for dyn StoreView + '_ {
+impl verter_session_query::facts::fact_cache::FactVersionValidator for dyn StoreView + '_ {
     #[inline]
     fn validates_fact_version(&self, fact: &FactVersionRef) -> bool {
         StoreView::validates(self, fact)
@@ -556,7 +563,7 @@ impl<T: StoreView + ?Sized> StoreView for &T {
     fn validates_file_source_env(
         &self,
         canonical_id: &str,
-        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
         parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
@@ -572,7 +579,9 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         (**self).validates_self_root_whole_hash(canonical_id, hash)
     }
     #[inline]
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         (**self).strict_self_root_world_identity()
     }
     #[inline]
@@ -583,7 +592,7 @@ impl<T: StoreView + ?Sized> StoreView for &T {
     fn mint_strict_self_root_world(
         &self,
         roots: &[(&str, ResolverHash16)],
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         (**self).mint_strict_self_root_world(roots)
     }
     #[inline]
@@ -599,7 +608,7 @@ impl<T: StoreView + ?Sized> StoreView for &T {
         (**self).derived_hash_for(canonical_id, kind)
     }
     #[inline]
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+    fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
         (**self).aggregate_basis_seed()
     }
     #[inline]
@@ -678,7 +687,7 @@ pub struct ResolveRequest {
     pub target: ResolveRequestTarget,
 }
 
-pub use verter_workspace::{
+pub use verter_session_query::facts::fact_cache::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
     ProgramAnalysisFunctionRef, ResolveImportsFactRef, RouteSurfaceFactRef,
 };
@@ -979,7 +988,9 @@ where
 
     /// Typed cache-only refusal captured by the cold compute. Unlike
     /// completeness, this does not make the value structurally partial.
-    fn capture_cache_refusal(&self) -> Option<fact_read_set::NonCacheablePropagation> {
+    fn capture_cache_refusal(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_read_set::NonCacheablePropagation> {
         None
     }
 
@@ -1386,13 +1397,13 @@ impl<V> ValidatedFactAdmission<V> {
 /// of the oldest candidate. Owned by the dependency-neutral carrier
 /// module so the workspace resolution slot and this slot share one
 /// bound.
-pub use verter_workspace::CANDIDATE_CAP;
+pub use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
 /// Per-candidate `fact_dep_signature` size cap. Larger signatures
 /// are admitted as `NonCacheable` (the candidate is dropped and the
 /// `FactSignatureOverflow` audit event fires). Callers fall back to
 /// cold recompute; correctness is preserved.
-pub use verter_workspace::FACT_SIGNATURE_CAP;
+pub use verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP;
 
 fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
     use std::hash::{BuildHasher, Hash, Hasher};
@@ -4994,7 +5005,7 @@ mod tests {
 mod file_source_env_fact_rail_tests {
     use super::*;
     use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
 
     fn source_env_fact(
         canonical: &str,
@@ -5127,7 +5138,7 @@ mod fact_signature_fingerprint_pins {
 
     use super::*;
     use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
     fn export_key(name: &str) -> FactKey {
@@ -5574,7 +5585,9 @@ mod receipt_validation_tests {
     }
 
     fn receipt(facts: Vec<FactVersionRef>) -> FactVersionRef {
-        FactVersionRef::Receipt(verter_workspace::ResultReceipt::new(facts))
+        FactVersionRef::Receipt(verter_session_query::facts::fact_cache::ResultReceipt::new(
+            facts,
+        ))
     }
 
     /// A signature is valid exactly when every fact its receipts reach is,

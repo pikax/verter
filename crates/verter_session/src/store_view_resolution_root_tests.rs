@@ -12,8 +12,9 @@
 
 use std::sync::Arc;
 
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
-use verter_workspace::{ReadSetSignature, ResolutionPublication};
+use verter_workspace::ResolutionPublication;
 
 use crate::resolver_store::HostStoreView;
 use crate::types::FileLanguage;
@@ -76,7 +77,7 @@ fn carries_resolution_facts(witness: &ReadSetSignature) -> bool {
     witness.facts.iter().any(|fact| {
         matches!(
             fact,
-            verter_workspace::FactVersionRef::ResolveImports(inner)
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                 if inner.resolution_fact().is_some()
         )
     })
@@ -163,7 +164,7 @@ fn a_view_with_no_captured_world_validates_no_resolution_fact() {
         .filter(|fact| {
             matches!(
                 fact,
-                verter_workspace::FactVersionRef::ResolveImports(inner)
+                verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                     if inner.resolution_fact().is_some()
             )
         })

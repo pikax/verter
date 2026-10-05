@@ -1412,16 +1412,17 @@ fn return_only_does_not_publish_reverse_index_or_persist() {
 /// admission even though the winner still receives its valid value.
 #[test]
 fn return_only_reason_propagates_only_transitive_hazards() {
-    use crate::resolver_core::FactReadSetFinalise;
     use crate::types::HostConfig;
     use crate::VerterHost;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
     fn run(reason: NonAdmissionReason) -> FactReadSetFinalise {
         let host = VerterHost::new_standalone(HostConfig::default());
         let map: DashMap<u32, Arc<String>> = DashMap::new();
         let inflight: InflightTable<(u32, u8)> = InflightTable::default();
-        let (value, finalise) =
-            host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+        let (value, finalise) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || {
                 cooperative_admit_with_post_publish_by_flight_key(
                     &map,
                     &inflight,
@@ -1438,7 +1439,8 @@ fn return_only_reason_propagates_only_transitive_hazards() {
                     |_e: &Arc<String>, _k: &u32| {},
                     None,
                 )
-            });
+            },
+        );
         assert_eq!(value.as_deref(), Some("winner-only"));
         finalise.finalise()
     }

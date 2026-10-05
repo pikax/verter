@@ -1085,7 +1085,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
         let mut forwarded =
             |reader: &FunctionProgramEntry,
              argument: &verter_type_expr::IndexedValueCallArg,
-             root: &verter_semantic::analysis::type_eval_build::IndexedValueReadRoot|
+             root: &verter_session_query::analysis::indexed_value::IndexedValueReadRoot|
              -> Option<SemanticNodeId> {
                 let verter_type_expr::IndexedValueExpression::Value(
                     verter_type_expr::TypeExpr::TypeOf(value),
@@ -1096,7 +1096,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
                 let ([name], true) = (value.path.as_slice(), value.type_args.is_empty()) else {
                     return None;
                 };
-                let verter_semantic::analysis::type_eval_build::IndexedValueReadRoot::Identifier(
+                let verter_session_query::analysis::indexed_value::IndexedValueReadRoot::Identifier(
                     root,
                 ) = root
                 else {

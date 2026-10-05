@@ -3988,7 +3988,7 @@ fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
                 crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
             )),
             ReuseClass::NoReuse(NoReuseCause::UnattributedRefusal(
-                verter_workspace::NonCacheablePropagation::Transitive,
+                verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
             )),
         ] {
             let mut txn = dispatch.dispatch_txn.borrow_mut();
@@ -4023,7 +4023,7 @@ fn reused_flow_result_replays(reuse: crate::resolver_core::reuse::ReuseClass) {
         let value = flow_result_value(dispatch, key.clone());
         // Unpublished, as a member queued behind its machinery root is.
         dispatch.graph().evict_family_for_tests(&query);
-        let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+        let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/ws/replayed.ts".to_string(),
             hash: [5; 16],
         };
@@ -4046,10 +4046,10 @@ fn reused_flow_result_replays(reuse: crate::resolver_core::reuse::ReuseClass) {
         );
         let epoch = dispatch.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
-        let (step, read_set) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                dispatch.execute_flow_return(key.clone())
-            });
+        let (step, read_set) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || dispatch.execute_flow_return(key.clone()),
+        );
         let observed = frame.finish();
         match step {
             crate::semantic_query::FlowReturnStep::Complete(result) => assert_eq!(
@@ -4060,10 +4060,16 @@ fn reused_flow_result_replays(reuse: crate::resolver_core::reuse::ReuseClass) {
             other => panic!("a reusable member answers Complete, got {other:?}"),
         }
         let signature = match (read_set.finalise(), reuse.is_shared()) {
-            (crate::resolver_core::FactReadSetFinalise::Ok(signature), true) => signature,
-            (crate::resolver_core::FactReadSetFinalise::NonCacheable(signature), false) => {
-                signature
-            }
+            (
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(signature),
+                true,
+            ) => signature,
+            (
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(
+                    signature,
+                ),
+                false,
+            ) => signature,
             (other, shared) => panic!(
                 "a {} result seals the live tracer {}, got {other:?}",
                 if shared { "shared" } else { "request-only" },
@@ -10849,9 +10855,13 @@ fn conv_upsert(host: &VerterHost, canonical: &str, source: String) {
 /// naming the dead file. A non-cacheable or overflowed tracer is a fixture
 /// fault, never a zero.
 fn conv_dead_file_fact_reads<R>(host: &VerterHost, f: impl FnOnce() -> R) -> (R, usize) {
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
-    let (value, read_set) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, f);
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
+    let (value, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        f,
+    );
     let facts = match read_set.finalise() {
         FactReadSetFinalise::Ok(facts) => facts,
         other => panic!("convergence tracer must finalise on a tiny fixture: {other:?}"),

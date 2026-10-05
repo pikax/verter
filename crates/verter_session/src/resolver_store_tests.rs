@@ -19,27 +19,29 @@ fn validates_accepts_untracked_file_whole_hash() {
     )]));
 
     // Tracked file with matching hash — should validate.
-    assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(view.validates(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/src/Accordion.vue".to_string(),
             hash: [1u8; 16],
-        })
-    );
+        }
+    ));
 
     // Tracked file with mismatching hash — should reject.
-    assert!(
-        !view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(!view.validates(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/src/Accordion.vue".to_string(),
             hash: [2u8; 16],
-        })
-    );
+        }
+    ));
 
     // Untracked dependency file — should accept (loaded after view snapshot).
     assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
-            hash: [42u8; 16],
-        }),
+        view.validates(
+            &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                hash: [42u8; 16],
+            }
+        ),
         "untracked dependency files should be accepted by the store view"
     );
 }
@@ -55,21 +57,25 @@ fn validates_derived_fact_hash_semantics() {
 
     // DirectSource for untracked file — should accept (content-hash alias).
     assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::DirectSource,
-            hash: [99u8; 16],
-        }),
+        view.validates(
+            &verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
+                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
+                kind: verter_session_query::facts::fact_cache::DerivedFactKind::DirectSource,
+                hash: [99u8; 16],
+            }
+        ),
         "DirectSource for untracked file should be accepted"
     );
 
     // Route for untracked file — should NOT accept (invalidation signal).
     assert!(
-        !view.validates(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::Route,
-            hash: [99u8; 16],
-        }),
+        !view.validates(
+            &verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
+                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
+                kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+                hash: [99u8; 16],
+            }
+        ),
         "Route derived fact for untracked file should NOT be accepted"
     );
 }
@@ -89,29 +95,31 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
     )]));
 
     // Tracked file — matches.
-    assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(view.validates(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/src/tracked.ts".to_string(),
             hash: [1u8; 16],
-        })
-    );
+        }
+    ));
 
     // Tracked file — mismatched hash rejected.
-    assert!(
-        !view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(!view.validates(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/src/tracked.ts".to_string(),
             hash: [2u8; 16],
-        })
-    );
+        }
+    ));
 
     // Untracked file — accepted (multi-candidate
     // substrate relies on the candidate's own `fact_dep_signature`
     // to discriminate concurrent generations).
     assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
-            hash: [42u8; 16],
-        }),
+        view.validates(
+            &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                hash: [42u8; 16],
+            }
+        ),
         "untracked files are accepted by primary validation in the multi-candidate substrate"
     );
 }
@@ -121,9 +129,9 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
 mod file_source_env_validation {
     use super::*;
     use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
-    use crate::resolver_core::FactVersionRef;
     use crate::resolver_store::SourceEnvIdentity;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
 
     const CONTRIB: &str = "/contrib.d.ts";
     const CONTRIB_HASH: [u8; 16] = [5u8; 16];
@@ -723,10 +731,13 @@ mod route_surface_hash_memo {
 
 mod syntactic_route_interface_fact {
     use super::route_surface_hash::routed_state;
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef, StoreView};
+    use crate::resolver_core::StoreView;
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use std::sync::Arc;
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
     use verter_session_query::facts::{FactKey, FactLane};
 
     fn upsert(host: &VerterHost, source: &str) {
@@ -784,10 +795,10 @@ mod syntactic_route_interface_fact {
         let host = VerterHost::new_standalone(HostConfig::default());
         upsert(&host, "export const value = 1;\n");
 
-        let (_, read_set) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                host.ensure_indexed_ready("/src/route.ts")
-            });
+        let (_, read_set) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || host.ensure_indexed_ready("/src/route.ts"),
+        );
         let FactReadSetFinalise::Ok(facts) = read_set.finalise() else {
             panic!("a published indexed serve must finalize its route-only read set");
         };
@@ -802,7 +813,7 @@ mod syntactic_route_interface_fact {
             fact,
             FactVersionRef::DerivedFactHash {
                 canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::Route,
+                kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                 ..
             } if canonical_id == "/src/route.ts"
         )));

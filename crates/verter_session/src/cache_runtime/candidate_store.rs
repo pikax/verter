@@ -61,7 +61,7 @@ use crate::bounded_query_retention::GlobalRetentionBudget;
 // Used only by the test/debug-gated `insert_for_test` surface below; gated
 // to match so release builds do not flag it as unused.
 #[cfg(any(test, feature = "test-support"))]
-use crate::fact_signature_helpers::ReadSetSignature;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// A candidate stored in the multi-candidate store. The carried
 /// [`Candidate`] discriminant is the [`FactCandidateDiscriminant`]; its

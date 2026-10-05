@@ -12,9 +12,12 @@ use parking_lot::Mutex;
 
 use crate::published_state::PublishedRoot;
 use crate::types::ExactResolution;
-use crate::{
-    AggregateStamp, FactReadSet, FactVersionRef, FactVersionValidator, ResolveImportsFactRef,
-    SignatureAdmission,
+use verter_session_query::facts::{
+    fact_cache::{
+        AggregateStamp, FactVersionRef, FactVersionValidator, ResolveImportsFactRef,
+        SignatureAdmission,
+    },
+    fact_read_set::FactReadSet,
 };
 #[cfg(test)]
 use verter_session_query::resolution::SessionFingerprint;
@@ -1711,9 +1714,9 @@ impl FactVersionValidator for CapturedResolutionWorld {
             // the aggregate replaced. Every other domain's aggregate
             // belongs to a producer this world knows nothing about.
             FactVersionRef::DomainGeneration(aggregate) => {
-                aggregate.domain == crate::fact_cache::CompactionDomain::Resolution
+                aggregate.domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
                     && match aggregate.population {
-                        crate::fact_cache::AggregatePopulation::Resolution(population) => {
+                        verter_session_query::facts::fact_cache::AggregatePopulation::Resolution(population) => {
                             self.resolution_stamp(population) == Some(aggregate.stamp)
                         }
                         // A VIEW population is another producer's identity
@@ -1722,7 +1725,7 @@ impl FactVersionValidator for CapturedResolutionWorld {
                         // the resolution domain under one is malformed, and
                         // vouching for it would let a view-scoped claim be
                         // settled by a resolution-world stamp.
-                        crate::fact_cache::AggregatePopulation::View(_) => false,
+                        verter_session_query::facts::fact_cache::AggregatePopulation::View(_) => false,
                     }
             }
             // A consumed result's receipt holds exactly when every fact it
@@ -1802,7 +1805,7 @@ pub struct AdmittedResolution<T = ResolveResult> {
     /// for this result. A persistent sink roots its entry on THIS signature
     /// so the entry revalidates through the resolve-imports fact rail; it
     /// travels with the carrier and is never re-derivable from the result.
-    signature: crate::ReadSetSignature,
+    signature: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 impl<T> AdmittedResolution<T> {
@@ -1822,7 +1825,7 @@ impl<T> AdmittedResolution<T> {
     /// validate against a captured [`CapturedResolutionWorld`] through the
     /// existing `FactVersionRef::ResolveImports` rail.
     #[must_use]
-    pub fn signature(&self) -> &crate::ReadSetSignature {
+    pub fn signature(&self) -> &verter_session_query::facts::fact_cache::ReadSetSignature {
         &self.signature
     }
 
@@ -2312,7 +2315,7 @@ pub(crate) struct ResolutionTransaction {
     query: Option<ResolutionQueryKey>,
     /// Per-domain generations this transaction compacts against. Only the
     /// resolution domain is populated — see [`Self::new`].
-    aggregate_basis: crate::fact_cache::AggregateGenerations,
+    aggregate_basis: verter_session_query::facts::fact_cache::AggregateGenerations,
 }
 
 /// Resolver-facing reader that makes every filesystem/config observation enter
@@ -2645,7 +2648,7 @@ pub(crate) fn resolution_basis_for_reader(
     );
     let population = reader.resolution_population();
     let world = reader.capture_resolution_world()?;
-    let crate::fact_cache::AggregateStamp::ResolutionRoots { base, session } =
+    let verter_session_query::facts::fact_cache::AggregateStamp::ResolutionRoots { base, session } =
         world.resolution_stamp(population)?
     else {
         return None;
@@ -2901,7 +2904,7 @@ impl ResolutionTransaction {
         // caller. Every other domain is left absent and stays precise.
         let resolution = root.resolution_stamp(root.population);
         Self {
-            aggregate_basis: crate::fact_cache::AggregateGenerations {
+            aggregate_basis: verter_session_query::facts::fact_cache::AggregateGenerations {
                 resolution,
                 ..Default::default()
             },
@@ -2949,7 +2952,7 @@ impl ResolutionTransaction {
 
     pub(crate) fn observe(&mut self, key: ResolutionFactKey) {
         if self.observed_keys.contains(&key) {
-            crate::probe_tally!(OBS_SUPPRESSED, 1);
+            verter_session_query::probe_tally!(OBS_SUPPRESSED, 1);
             return;
         }
         let version = self.root.fact_version(&key);
@@ -2987,7 +2990,10 @@ impl ResolutionTransaction {
     /// For a reuse with no decision node to root on: the facts are the ones
     /// the candidate observed, already validated against this attempt's
     /// world, so they carry exactly the versions this world reports.
-    pub(crate) fn adopt_witness(&mut self, witness: &crate::ReadSetSignature) {
+    pub(crate) fn adopt_witness(
+        &mut self,
+        witness: &verter_session_query::facts::fact_cache::ReadSetSignature,
+    ) {
         for fact in witness.facts.iter() {
             if let FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) =
                 fact
@@ -3168,11 +3174,11 @@ impl ResolutionTransaction {
         if let Some(reason) = self.non_admission {
             return SignatureAdmission::NonCacheable(reason);
         }
-        crate::probe_tally!(OBS_PRE_DEDUP, self.observations.len());
+        verter_session_query::probe_tally!(OBS_PRE_DEDUP, self.observations.len());
         let mut facts = FactReadSet::new();
         facts.set_aggregate_basis(self.aggregate_basis);
         {
-            crate::probe_scope!(FINISH_COLLECT);
+            verter_session_query::probe_scope!(FINISH_COLLECT);
             facts.observe_borrowed_signature(&self.observations);
         }
         SignatureAdmission::from_finalise(facts.finalise())
@@ -3362,7 +3368,7 @@ mod transaction_contract_tests {
     fn resolution_over_cap_single_domain_admits_instead_of_refusing() {
         let mut transaction = ResolutionTransaction::new(captured_world());
         transaction.set_query(query());
-        for index in 0..=crate::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
             transaction.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -3390,7 +3396,7 @@ mod transaction_contract_tests {
     fn resolution_over_cap_lifts_only_its_own_domain() {
         let mut transaction = ResolutionTransaction::new(captured_world());
         transaction.set_query(query());
-        for index in 0..=crate::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
             transaction.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -3421,11 +3427,13 @@ mod transaction_contract_tests {
         );
         assert_eq!(
             aggregates[0].domain,
-            crate::fact_cache::CompactionDomain::Resolution
+            verter_session_query::facts::fact_cache::CompactionDomain::Resolution
         );
         assert_eq!(
             aggregates[0].population,
-            crate::fact_cache::AggregatePopulation::Resolution(ResolutionPopulation::Base),
+            verter_session_query::facts::fact_cache::AggregatePopulation::Resolution(
+                ResolutionPopulation::Base
+            ),
             "the aggregate must carry the population of the bucket it replaced"
         );
         assert!(
@@ -3454,7 +3462,7 @@ mod transaction_contract_tests {
     fn a_lifted_resolution_domain_does_not_regrow() {
         let mut first = ResolutionTransaction::new(captured_world());
         first.set_query(query());
-        for index in 0..=crate::FACT_SIGNATURE_CAP {
+        for index in 0..=verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
             first.observe(ResolutionFactKey::PathProbe {
                 canonical: CanonicalResolutionId::new(format!("/p/{index}.ts")),
                 population: ResolutionPopulation::Base,
@@ -3491,7 +3499,7 @@ mod transaction_contract_tests {
         assert!(matches!(
             &signature.facts[0],
             FactVersionRef::DomainGeneration(fact)
-                if fact.domain == crate::fact_cache::CompactionDomain::Resolution
+                if fact.domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
         ));
     }
 
@@ -3503,7 +3511,7 @@ mod transaction_contract_tests {
     /// for any session) — the cross-population assertions fail.
     #[test]
     fn resolution_aggregate_never_validates_across_populations() {
-        use crate::fact_cache::{
+        use verter_session_query::facts::fact_cache::{
             AggregatePopulation, CompactionDomain, DomainGenerationFact, FactVersionValidator,
         };
 
@@ -3561,7 +3569,7 @@ mod transaction_contract_tests {
     /// nothing else in the workspace suite does.
     #[test]
     fn a_view_population_aggregate_is_refused_by_the_resolution_world() {
-        use crate::fact_cache::{
+        use verter_session_query::facts::fact_cache::{
             AggregatePopulation, CompactionDomain, DomainGenerationFact, FactVersionValidator,
             SessionOverlayFingerprint, ViewPopulation,
         };
@@ -3599,7 +3607,9 @@ mod transaction_contract_tests {
         }
     }
 
-    fn finished_signature(transaction: ResolutionTransaction) -> crate::ReadSetSignature {
+    fn finished_signature(
+        transaction: ResolutionTransaction,
+    ) -> verter_session_query::facts::fact_cache::ReadSetSignature {
         match transaction.finish() {
             SignatureAdmission::Cacheable(signature) => signature,
             other => panic!("expected a cacheable witness, got {other:?}"),

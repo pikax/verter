@@ -17,6 +17,7 @@
 //! statement locators to lower exactly a demanded symbol's contributing
 //! statements through the shared
 //! [`crate::analysis::type_eval_build::lower_top_level_statement`] arms.
+use verter_session_query::declarations::headers::EnumMemberPosition;
 
 use oxc_ast::ast::{
     Class, ClassElement, Comment, Declaration, ExportDefaultDeclarationKind, Expression,
@@ -333,17 +334,6 @@ pub struct EnumDeclHeader {
     /// an initializer's reference by. Empty in the `from_eval_env` mirror.
     pub member_positions: Vec<EnumMemberPosition>,
     pub contributors: Vec<DeclHeaderContributor>,
-}
-
-/// Where one enum member is declared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnumMemberPosition {
-    /// The member's source start offset.
-    pub start: u32,
-    /// The member is in an ambient context (a `declare enum`, an enum of a
-    /// declaration file or of an ambient namespace), where the checker
-    /// reads a reference to a later declaration as declared before its use.
-    pub ambient: bool,
 }
 
 /// The shallow declaration-header index for one parsed program.

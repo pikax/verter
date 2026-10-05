@@ -14097,7 +14097,14 @@ fn derive_list_has_hash_or_ord(list: &str) -> bool {
 /// route through THIS predicate, so the self-test exercises the real detection
 /// logic instead of a tautological `literal.contains(substring-of-literal)`.
 fn manifest_declares_dep(manifest: &str, dep: &str) -> bool {
-    manifest.contains(dep)
+    // A dependency entry names the crate as a whole key (`dep =` or
+    // `dep.workspace = true`), so a longer crate name that merely starts
+    // with `dep` (`verter_session_query`) is not a declaration of `dep`.
+    manifest.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix(dep)
+            .is_some_and(|rest| matches!(rest.trim_start().chars().next(), Some('=' | '.')))
+    })
 }
 
 /// Crate-ownership: `verter_session` owns the hot handle-bearing structs;
@@ -14124,6 +14131,17 @@ fn no_verter_semantic_to_verter_session_dep() {
             "verter_session"
         ),
         "scanner self-test (positive): a declared verter_session dep must be detected"
+    );
+    //   NEGATIVE — a longer crate name that starts with the dep is NOT a
+    //   declaration of it.
+    assert!(
+        !manifest_declares_dep(
+            "[dependencies]
+verter_session_query = { workspace = true }
+",
+            "verter_session"
+        ),
+        "scanner self-test (prefix): verter_session_query must not read as verter_session"
     );
     //   NEGATIVE — a manifest WITHOUT the dep is NOT detected. This is the
     //   discriminating half: it FAILS if the predicate vacuously returns true.

@@ -29,7 +29,7 @@
 //!
 //! * the RETURNED refusal carries the exact
 //!   [`NonCacheableReadReason`](crate::resolver_core::resolver_context::NonCacheableReadReason)
-//!   and [`NonCacheablePropagation`](verter_workspace::NonCacheablePropagation);
+//!   and [`NonCacheablePropagation`](verter_session_query::facts::fact_read_set::NonCacheablePropagation);
 //! * tracer finalisation exposes only the BOOLEAN — it never records the
 //!   reason.
 
@@ -281,7 +281,7 @@ fn request_only_first_and_nth_return_same_refusal_reason_and_propagation() {
     );
     assert_eq!(
         refusals[0].propagation(),
-        verter_workspace::NonCacheablePropagation::Transitive,
+        verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
         "an unrootable basis taints every enclosing scope that consumes the value"
     );
     for (index, refusal) in refusals.iter().enumerate().skip(1) {

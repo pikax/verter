@@ -16,7 +16,7 @@
 //! - warm read = STRICT same-generation gate (`validated_at_generation ==
 //!   live generation`) AND `ReadSetSignature.facts` validation against the
 //!   caller's live view;
-//! - publication only via [`crate::cache_runtime::SignatureAdmission::Cacheable`];
+//! - publication only via [`verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable`];
 //! - NO env dims, NO digest, NO version column — a normalizer change is a
 //!   registry reset that clears the store.
 //!
@@ -35,7 +35,7 @@ use rustc_hash::FxHashMap;
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 use verter_session_query::analysis::types::Hash16;
 
-use crate::fact_signature_helpers::ReadSetSignature;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 use crate::typeinfo::types::TypeInfoQueryLevel;
 
@@ -686,7 +686,10 @@ mod tests {
                 validity_fingerprint: 0,
             }
         }
-        fn validates(&self, _fact: &crate::resolver_core::FactVersionRef) -> bool {
+        fn validates(
+            &self,
+            _fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+        ) -> bool {
             false
         }
     }
@@ -703,10 +706,11 @@ mod tests {
         };
         // A NON-EMPTY cross-file fact signature: the entry observed a carrier
         // dependency's whole hash. The fact rail must be consulted on warm read.
-        let cross_file_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/Carrier.ts".to_string(),
-            hash: [9u8; 16],
-        };
+        let cross_file_fact =
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/Carrier.ts".to_string(),
+                hash: [9u8; 16],
+            };
         store.insert(
             key.clone(),
             StoredSurfaceDto {

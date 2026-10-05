@@ -779,7 +779,9 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
 impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     fn install_resolution_retention(
         &self,
-        account: Arc<dyn crate::overlay_residency::ResolutionRetentionAccount>,
+        account: Arc<
+            dyn verter_session_query::retention::resolution_charge::ResolutionRetentionAccount,
+        >,
     ) {
         self.engine.install_resolution_retention(account);
     }
@@ -795,7 +797,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
     fn publish_owner_resolution_set(
         &self,
         owner_canonical: &str,
-    ) -> Option<crate::fact_cache::FactVersionRef> {
+    ) -> Option<verter_session_query::facts::fact_cache::FactVersionRef> {
         self.engine.publish_owner_resolution_set(
             owner_canonical,
             crate::traits::WorkspaceRead::resolution_population(self),

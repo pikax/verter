@@ -78,11 +78,11 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::fact_cache::{
+use crate::facts::fact_cache::{
     compaction_domain, AggregateGenerations, AggregatePopulation, CompactionDomain,
     DomainGenerationFact, FactVersionRef, ViewPopulation,
 };
-use verter_session_query::resolution::ResolutionPopulation;
+use crate::resolution::ResolutionPopulation;
 
 pub const FACT_SIGNATURE_CAP: usize = 1_024;
 
@@ -611,7 +611,7 @@ impl FactReadSet {
         // identically.
         let mut canonical = std::mem::take(&mut self.observations).into_vec();
         // A receipt a sibling receipt consumed is already inside it.
-        crate::fact_cache::drop_subsumed_receipts(&mut canonical);
+        crate::facts::fact_cache::drop_subsumed_receipts(&mut canonical);
         compact_domains(&mut canonical, &self.aggregate_basis);
         self.observations = SmallVec::from_vec(canonical);
     }

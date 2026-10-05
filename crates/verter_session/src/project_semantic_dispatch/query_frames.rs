@@ -22,7 +22,7 @@ use rustc_hash::FxHashMap;
 
 use super::build::{InstantiateBuild, InstantiatePoll, InstantiateStart};
 use super::{BuildLocalTaint, CarrierNormalizationPrelude, ProjectSemanticDispatch};
-use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::semantic_execution::{EvalStep, External, Outcome, Program, SemanticExecution, Start};
 use crate::semantic_query::{
     CacheRead, QueryError, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
@@ -32,6 +32,7 @@ use crate::semantic_query_memo::{
     Claim, ClaimAttempt, ExecutionTask, Joined, ProducerLease, ReadCapture, Recursion,
     SemanticGraphStore, Subscription,
 };
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 

@@ -32,9 +32,10 @@ use std::sync::Arc;
 
 use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
 
-use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef, StoreView};
+use crate::resolver_core::StoreView;
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
 
 const ZERO_HASH: crate::types::Hash16 = [0u8; 16];
 

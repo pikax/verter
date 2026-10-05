@@ -24,10 +24,10 @@ use verter_type_expr::locators::{
     AuthoredAugmentationScope, AuthoredBodyLocator, TypeBodyPathStep,
 };
 
-use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt as _};
+use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::locator_identity::{
-    semantic_space_for_locator_space, LibEnvHash, LocatorLoweringKey, ParseEnvHash,
-    ProjectIdentityDim, ResolveEnvHash, SlotEnvIdentity, TypeEnvHash,
+    semantic_space_for_locator_space, LibEnvHash, LocatorLoweringKey, ProjectIdentityDim,
+    ResolveEnvHash, SlotEnvIdentity, TypeEnvHash,
 };
 use crate::resolver_core::{BudgetDomain, BudgetExceededFailure};
 use crate::semantic_query::operand::{
@@ -42,6 +42,8 @@ use crate::semantic_query::{
     InstantiateKey, PathSegment, QueryError, QueryResult, ResolvedDeclSlotIdentity,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
+use verter_session_query::facts::fact_cache::ParseEnvHash;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 use super::{ProjectSemanticDispatch, SemanticOperandAuthority};
 
@@ -135,7 +137,7 @@ fn union_operand_evidence(
     if inputs.is_empty() {
         return Ok(produced);
     }
-    let mut facts: Vec<crate::resolver_core::FactVersionRef> =
+    let mut facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
         produced.read_set().facts.iter().cloned().collect();
     let mut roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
         produced.self_roots().to_vec();
@@ -147,7 +149,7 @@ fn union_operand_evidence(
         for fact in input.read_set().facts.iter() {
             if !facts.contains(fact) {
                 facts.push(fact.clone());
-                if facts.len() > crate::resolver_core::FACT_SIGNATURE_CAP {
+                if facts.len() > verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
                     return Err(QueryError::SignatureOverflow);
                 }
             }
@@ -471,7 +473,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
             for fact in evidence.read_set().facts.iter() {
                 if !facts.contains(fact) {
                     facts.push(fact.clone());
-                    if facts.len() > crate::resolver_core::FACT_SIGNATURE_CAP {
+                    if facts.len() > verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP
+                    {
                         return Err(SemanticOperandMintError::SignatureOverflow);
                     }
                 }

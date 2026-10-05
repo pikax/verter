@@ -1049,7 +1049,7 @@ impl VerterHost {
     /// R3/R26/R28 warm-hit fact validator closure body.
     ///
     /// Validates every fact recorded on a non-empty
-    /// [`ReadSetSignature`](crate::fact_signature_helpers::ReadSetSignature)
+    /// [`ReadSetSignature`](verter_session_query::facts::fact_cache::ReadSetSignature)
     /// against the host's current `HostStoreView`. A single mismatch
     /// returns `false` and the warm hit misses; the caller falls
     /// through to cold recompute.
@@ -1077,7 +1077,7 @@ impl VerterHost {
     pub(crate) fn compile_slot_facts_validate(
         &self,
         current_view: &crate::resolver_store::CurrentHostStoreView,
-        signature: &crate::fact_signature_helpers::ReadSetSignature,
+        signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     ) -> bool {
         let view = current_view.view();
         use crate::resolver_core::StoreView;
@@ -1163,7 +1163,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         profile: &CompileProfile,
-    ) -> Option<crate::fact_signature_helpers::ReadSetSignature> {
+    ) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let profile_hash = compile_profile_hash(profile);
         let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
@@ -1961,7 +1961,7 @@ impl VerterHost {
         // and never finalise a signature.
         let (compile_result, compile_admission) = if actual_mode == CompileCacheMode::Session {
             let (result, fact_read_set) =
-                self.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+                self.with_fact_tracer(verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched, || {
                     // Replay the prefetch's BY-VALUE fenced-serve consumption
                     // into THIS tracer scope: the compile's payload derives from
                     // the prefetch-populated state, so a fenced serve consumed
@@ -1992,7 +1992,7 @@ impl VerterHost {
                     if force_n > 0 {
                         for n in 0..force_n {
                             crate::resolver_core::resolver_context::observe_fan_out(
-                                crate::resolver_core::FactVersionRef::FileWholeHash {
+                                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                                     canonical_id: format!("__compile_force_overflow_{n}.ts"),
                                     hash: [(n & 0xff) as u8; 16],
                                 },
@@ -2018,11 +2018,13 @@ impl VerterHost {
             // the caller is still served the fresh output below.
             let non_cacheable_read_observed = fact_read_set.non_cacheable_read_observed();
             let admission = if non_cacheable_read_observed {
-                crate::cache_runtime::SignatureAdmission::NonCacheable(
+                verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
                     crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
                 )
             } else {
-                crate::cache_runtime::SignatureAdmission::from_finalise(fact_read_set.finalise())
+                verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise(
+                    fact_read_set.finalise(),
+                )
             };
             (result, Some(admission))
         } else {
@@ -2256,7 +2258,7 @@ impl VerterHost {
                         .expect("Session mode always finalises a SignatureAdmission");
                     let is_cacheable = matches!(
                         admission,
-                        crate::cache_runtime::SignatureAdmission::Cacheable(_)
+                        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(_)
                     );
 
                     // The scheduler artifact carries PRODUCTS. A refused
