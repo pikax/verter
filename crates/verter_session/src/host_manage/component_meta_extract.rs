@@ -477,9 +477,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
-    >,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
@@ -594,9 +592,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     host: &VerterHost,
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
-    >,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,

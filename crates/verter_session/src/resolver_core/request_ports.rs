@@ -16,24 +16,58 @@ use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
 
+/// Content-free marker for the published workspace root an epoch retains.
+/// It has no methods and no `Any` supertrait, so a retained root can be
+/// neither read nor downcast through an epoch.
+trait EpochRoot: Send + Sync {}
+impl<T: Send + Sync + ?Sized> EpochRoot for T {}
+
+/// The operand-environment epoch a request observed: the content generation
+/// plus the identity of the published workspace root allocation it read.
+///
+/// The epoch retains a coerced clone of the ORIGINAL root `Arc` — the same
+/// allocation, no identity wrapper, no content hash. Two epochs match exactly
+/// when their generations are equal and they retain the same root allocation
+/// (or both retain none).
 pub struct OperandEnvEpoch {
-    root: Option<Arc<verter_workspace::published_state::PublishedRoot>>,
+    root: Option<Arc<dyn EpochRoot>>,
     generation: u64,
 }
 impl OperandEnvEpoch {
-    pub(super) fn new(
-        root: Option<Arc<verter_workspace::published_state::PublishedRoot>>,
-        generation: u64,
-    ) -> Self {
-        Self { root, generation }
+    pub(super) fn new<R: Send + Sync + 'static>(root: Option<Arc<R>>, generation: u64) -> Self {
+        Self {
+            root: root.map(|root| root as Arc<dyn EpochRoot>),
+            generation,
+        }
     }
     pub(crate) fn matches(&self, other: &Self) -> bool {
         self.generation == other.generation
             && match (&self.root, &other.root) {
                 (None, None) => true,
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (Some(a), Some(b)) => std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b)),
                 _ => false,
             }
+    }
+}
+
+#[cfg(test)]
+mod operand_env_epoch_tests {
+    use super::OperandEnvEpoch;
+    use std::sync::Arc;
+
+    /// Epoch identity is the retained root ALLOCATION plus the generation:
+    /// an equal-content root in another allocation is a different epoch.
+    #[test]
+    fn epochs_match_on_root_allocation_and_generation() {
+        let root = Arc::new(String::from("root"));
+        let same = OperandEnvEpoch::new(Some(Arc::clone(&root)), 7);
+        assert!(same.matches(&OperandEnvEpoch::new(Some(Arc::clone(&root)), 7)));
+        let equal_content = Arc::new(String::from("root"));
+        assert!(!same.matches(&OperandEnvEpoch::new(Some(equal_content), 7)));
+        assert!(!same.matches(&OperandEnvEpoch::new(Some(Arc::clone(&root)), 8)));
+        assert!(!same.matches(&OperandEnvEpoch::new(None::<Arc<String>>, 7)));
+        assert!(OperandEnvEpoch::new(None::<Arc<String>>, 7)
+            .matches(&OperandEnvEpoch::new(None::<Arc<String>>, 7)));
     }
 }
 pub trait IndexedInputs {
@@ -482,12 +516,6 @@ pub trait OwnedLowering {
         &self,
         serve: &IndexedInputServe,
     ) -> Vec<verter_type_expr::TypeParam>;
-    fn svelte_script_facts(
-        &self,
-        canonical: &str,
-    ) -> crate::framework::script_facts::ScriptFactEvidence<
-        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
-    >;
 
     fn prepared_type_decl(
         &self,

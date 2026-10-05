@@ -148,7 +148,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_bare_host_ctx_for_test<R>(
     host: &crate::VerterHost,
-    f: impl FnOnce(&(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync)) -> R,
+    f: impl FnOnce(&(dyn crate::resolver_core::HostRequestContext + Sync)) -> R,
 ) -> R {
     let view = crate::VerterHost::resolver_store_view(host).into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());

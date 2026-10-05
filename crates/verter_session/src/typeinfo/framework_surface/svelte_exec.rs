@@ -107,7 +107,7 @@ fn store_kind_for_source(source: SvelteSurfaceSource) -> FrameworkSurfaceKind {
 ///   this family (no `$props()`, no dispatcher, no legacy slots, …).
 #[must_use]
 pub(crate) fn resolve_svelte_surface(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
@@ -224,7 +224,7 @@ pub(crate) fn resolve_svelte_surface(
 /// The cold per-source resolution (no caching) — dispatched under the fact
 /// tracer by [`resolve_svelte_surface`].
 fn compute_svelte_surface(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,

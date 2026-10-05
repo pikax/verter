@@ -527,9 +527,7 @@ impl FallthroughRequestHost for VerterHost {
         .into_cold_seed_view();
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &host_ctx;
+        let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
         VerterHost::compute_fallthrough_surface_uncached(
             self,
             canonical_id,

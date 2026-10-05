@@ -77,9 +77,11 @@ impl IndexedInputRecord {
         &self,
     ) -> Option<verter_session_query::analysis::types::Hash16> {
         *self.route_surface_hash.get_or_init(|| {
-            self.shallow_state
-                .has_resolvable_surface()
-                .then(|| crate::resolver_store::hash_route_surface_inputs(&self.shallow_state))
+            self.shallow_state.has_resolvable_surface().then(|| {
+                verter_session_query::inputs::route_surface::hash_route_surface_inputs(
+                    &self.shallow_state,
+                )
+            })
         })
     }
 }

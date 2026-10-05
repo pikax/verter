@@ -461,9 +461,7 @@ impl VerterHost {
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        >,
+        ctx: &dyn crate::resolver_core::HostRequestContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
@@ -515,9 +513,7 @@ impl VerterHost {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        >,
+        ctx: &dyn crate::resolver_core::HostRequestContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
@@ -545,9 +541,7 @@ impl VerterHost {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        >,
+        ctx: &dyn crate::resolver_core::HostRequestContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,

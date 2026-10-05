@@ -354,7 +354,7 @@ pub enum ComponentMetaResolutionPurpose {
 /// component-meta cache entry correctly keyed — all inside the single
 /// resolution engine.
 pub(crate) fn component_meta_resolved_macros(
-    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,

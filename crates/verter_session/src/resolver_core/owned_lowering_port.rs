@@ -372,12 +372,18 @@ impl<
     }
 }
 
-impl<
-        T: SourceInputProvider
-            + super::request_ports::IndexedInputs
-            + super::request_ports::RouteLookup,
-    > OwnedLowering for T
-{
+/// Session-side extension over a request context: the Svelte
+/// resolved-validation script facts. The semantic engine never demands them,
+/// so they are not part of the engine's request ports.
+pub(crate) trait SvelteScriptFactsPort {
+    fn svelte_script_facts(
+        &self,
+        canonical: &str,
+    ) -> crate::framework::script_facts::ScriptFactEvidence<
+        verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
+    >;
+}
+impl<T: SourceInputProvider> SvelteScriptFactsPort for T {
     fn svelte_script_facts(
         &self,
         canonical: &str,
@@ -386,6 +392,25 @@ impl<
     > {
         self.raw_svelte_script_facts(canonical)
     }
+}
+
+/// A session request context: the engine's request contract plus the
+/// session-only extensions a framework-surface resolver demands.
+pub(crate) trait HostRequestContext:
+    super::ResolverContext<super::HostCapabilities> + SvelteScriptFactsPort
+{
+}
+impl<T: super::ResolverContext<super::HostCapabilities> + SvelteScriptFactsPort> HostRequestContext
+    for T
+{
+}
+
+impl<
+        T: SourceInputProvider
+            + super::request_ports::IndexedInputs
+            + super::request_ports::RouteLookup,
+    > OwnedLowering for T
+{
     fn script_setup_type_params(
         &self,
         serve: &super::request_inputs::IndexedInputServe,

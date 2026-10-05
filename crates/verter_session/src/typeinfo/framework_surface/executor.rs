@@ -450,7 +450,7 @@ impl VerterHost {
 struct ExecutorResolveCtx<'a> {
     /// The ONE proven-current request view every demand resolves against, so a
     /// single response never mixes owner versions under churn.
-    ctx: &'a dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &'a dyn crate::resolver_core::HostRequestContext,
     dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<
         'a,
         crate::resolver_core::HostCapabilities,

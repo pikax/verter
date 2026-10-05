@@ -58,6 +58,7 @@ pub use verter_session_query::facts::fact_read_set::{
 pub(crate) use host_resolver_context::with_bare_host_ctx_for_test;
 #[allow(unused_imports)]
 pub(crate) use host_resolver_context::HostResolverContext;
+pub(crate) use owned_lowering_port::HostRequestContext;
 pub(crate) use request_bound::HostCapabilities;
 #[allow(unused_imports)]
 pub(crate) use request_store_view::{CanonicalCompletionOverlay, RequestStoreView};

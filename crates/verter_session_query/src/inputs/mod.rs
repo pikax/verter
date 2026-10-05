@@ -3,4 +3,5 @@
 
 pub mod budget;
 pub mod contributors;
+pub mod route_surface;
 pub mod shallow;

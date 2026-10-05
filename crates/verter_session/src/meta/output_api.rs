@@ -237,9 +237,7 @@ impl MetaSession {
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &session_ctx;
+        let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let crate::host_manage::ComponentMetaExtractOutcome {
             analysis,

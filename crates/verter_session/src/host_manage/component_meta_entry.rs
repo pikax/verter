@@ -350,9 +350,7 @@ impl VerterHost {
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &host_ctx;
+        let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(cold) = self.component_meta_via_view_cold(
             canonical.as_str(),
@@ -516,9 +514,7 @@ impl VerterHost {
                 fixed.cold_seed(),
                 overlay,
             );
-            let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-                crate::resolver_core::HostCapabilities,
-            > = &host_ctx;
+            let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
             let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             let seed = with_resolution.then(|| {
                 crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
@@ -586,9 +582,7 @@ impl VerterHost {
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &session_ctx;
+        let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(ComponentMetaColdResult {
             resolved,
@@ -825,9 +819,7 @@ impl VerterHost {
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &session_ctx;
+        let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(cold) = self.component_meta_via_view_cold(
             canonical.as_str(),
@@ -872,9 +864,7 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        >,
+        ctx: &dyn crate::resolver_core::HostRequestContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
