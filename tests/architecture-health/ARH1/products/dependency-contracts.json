@@ -1439,6 +1439,7 @@
       ],
       "allowedImportDirection": {
         "verter": [
+          "verter_ecma",
           "verter_semantic",
           "verter_session_query",
           "verter_span",
@@ -1453,9 +1454,7 @@
           "oxc_syntax",
           "rustc_hash"
         ],
-        "crateInternal": [
-          "semantic_query"
-        ],
+        "crateInternal": [],
         "mustNotImport": [
           "verter_compiler",
           "verter_parser",
