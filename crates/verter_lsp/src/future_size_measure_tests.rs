@@ -29,7 +29,7 @@ fn report(label: &str, bytes: usize) {
 /// Keeps the `LspService` alive so the inner server reference stays valid.
 struct MeasureServer {
     service: tower_lsp_server::LspService<VerterLanguageServer>,
-    _socket: tower_lsp_server::ClientSocket,
+    _socket: crate::outbound::Wire,
 }
 
 impl MeasureServer {
@@ -42,9 +42,9 @@ impl MeasureServer {
         let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
         let host_for_server = Arc::clone(&host);
         let provider_for_server = Arc::clone(&provider);
-        let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
             VerterLanguageServer::new(
-                client,
+                crate::outbound::Outbound::default(),
                 LspConfig {
                     host: Arc::clone(&host_for_server),
                     type_provider: Some(Arc::clone(&provider_for_server)),
@@ -58,6 +58,7 @@ impl MeasureServer {
                 },
             )
         });
+        let socket = service.inner().outbound().wire();
         Self {
             service,
             _socket: socket,

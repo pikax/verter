@@ -112,9 +112,9 @@ async fn frontier_fixture_with(
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_access));
     let host_for_server = Arc::clone(&host);
     let provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             crate::LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&provider_for_server)),
@@ -128,6 +128,7 @@ async fn frontier_fixture_with(
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while futures_util::StreamExt::next(&mut socket).await.is_some() {}

@@ -20,9 +20,8 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::outbound::Outbound;
 use dashmap::DashMap;
-use tokio::sync::OnceCell;
-use tower_lsp_server::Client;
 use verter_session::external_ts::{
     BoundProject, CarrierOwnershipResolution, EngineBackend, ProjectBinding,
 };
@@ -291,7 +290,7 @@ pub struct ProjectTsserverProvider {
     tsdk: Option<String>,
     plugin_path: Option<String>,
     node_path: String,
-    client: Arc<OnceCell<Client>>,
+    client: Outbound,
     /// The witness backend the router mints each operation's [`BoundProject`]
     /// through. It is NOT the publish path's backend — `ensure_project` is a
     /// pure witness mint plus per-backend bookkeeping, and the router only needs
@@ -326,7 +325,7 @@ impl ProjectTsserverProvider {
         host: Arc<VerterHost>,
         tsdk: Option<String>,
         plugin_path: Option<String>,
-        client: Arc<OnceCell<Client>>,
+        client: Outbound,
     ) -> Result<Self, TypeProviderError> {
         let node_path = super::find_node().ok_or_else(|| {
             TypeProviderError::new("Node.js not found on PATH or standard locations")
@@ -610,7 +609,7 @@ impl ProjectTsserverProvider {
                         spec.workspace_root.clone(),
                         self.plugin_path.clone(),
                     ),
-                    Arc::clone(&self.client),
+                    self.client.clone(),
                     3,
                     self.admitted_state_rearm.read().clone(),
                     Arc::clone(&self.restart_pulse),

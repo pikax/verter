@@ -639,7 +639,7 @@ impl VerterLanguageServer {
         // This legacy compute path returns a Vec and cannot attest provider
         // completeness. The coordinator owns the subsequent complete receipt.
         self.documents
-            .publish_diagnostics(&self.client, uri, publication, diagnostics, false, None)
+            .publish_diagnostics(uri, publication, diagnostics, false, None)
             .await;
 
         tracing::info!("publish_diagnostics EXIT {}", uri.as_str());

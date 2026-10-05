@@ -12,43 +12,23 @@ use crate::ProjectSyncMode;
 use futures_util::{FutureExt, StreamExt};
 use std::time::Duration;
 use tokio::time::Instant;
-use tower_lsp_server::{LspService, Server};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
-#[derive(Default)]
-struct NoopLanguageServer;
-
-impl tower_lsp_server::LanguageServer for NoopLanguageServer {
-    async fn initialize(
-        &self,
-        _: InitializeParams,
-    ) -> tower_lsp_server::jsonrpc::Result<InitializeResult> {
-        Ok(InitializeResult::default())
-    }
-
-    async fn shutdown(&self) -> tower_lsp_server::jsonrpc::Result<()> {
-        Ok(())
-    }
+/// The transport of a registry-only fixture: it publishes through `documents`'
+/// diagnostics lane, and a reading client drains everything it sends.
+fn make_test_client(documents: &DocumentRegistry) -> crate::outbound::Outbound {
+    let outbound = undrained_test_client(documents);
+    let mut wire = outbound.wire();
+    tokio::spawn(async move { while wire.next().await.is_some() {} });
+    outbound
 }
 
-fn make_test_client() -> Client {
-    let client_slot = Arc::new(std::sync::Mutex::new(None));
-    let client_slot_for_service = Arc::clone(&client_slot);
-    let (service, socket) = LspService::new(move |client| {
-        *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
-        NoopLanguageServer
-    });
-    tokio::spawn(async move {
-        let _ = Server::new(tokio::io::empty(), tokio::io::sink(), socket)
-            .serve(service)
-            .await;
-    });
-    let client = client_slot
-        .lock()
-        .expect("client lock")
-        .clone()
-        .expect("test client should be captured");
-    client
+/// The transport of a registry-only fixture whose client the test reads itself.
+fn undrained_test_client(documents: &DocumentRegistry) -> crate::outbound::Outbound {
+    crate::outbound::Outbound::with_diagnostics_lane(
+        crate::outbound::OutboundBudget::DEFAULT,
+        documents.diagnostics_lane(),
+    )
 }
 
 #[tokio::test]
@@ -222,12 +202,12 @@ async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missin
     ))));
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(provider, ProjectSyncMode::FullProject)),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -267,7 +247,7 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
     ))));
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
@@ -275,7 +255,7 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -340,7 +320,7 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
 
     let provider = Arc::new(MockTypeProvider::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
@@ -348,7 +328,7 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -404,12 +384,12 @@ async fn merged_diagnostics_surface_verter_project_warning_on_unowned_carrier() 
     });
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -504,12 +484,12 @@ async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
     }
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -563,12 +543,12 @@ async fn merged_diagnostics_surface_verter_project_warning_on_carrier_path_confl
     });
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -651,7 +631,7 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
     );
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
@@ -659,7 +639,7 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -750,7 +730,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -904,7 +884,7 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
     );
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
@@ -912,7 +892,7 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1017,7 +997,7 @@ async fn sync_file_routes_open_plain_script_through_self_file_shadow_not_carrier
     );
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
@@ -1025,7 +1005,7 @@ async fn sync_file_routes_open_plain_script_through_self_file_shadow_not_carrier
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1133,7 +1113,7 @@ async fn sync_file_clears_non_open_plain_script_dependency_state_once_ready() {
     );
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
@@ -1141,7 +1121,7 @@ async fn sync_file_clears_non_open_plain_script_dependency_state_once_ready() {
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1233,7 +1213,7 @@ defineProps<{ msg: string }>()
     provider_sync_states.insert(canonical_id.to_string(), prior_state.clone());
 
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
@@ -1241,7 +1221,7 @@ defineProps<{ msg: string }>()
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1356,7 +1336,7 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1478,7 +1458,7 @@ async fn coordinator_direct_ide_sync_must_not_pair_stale_content_with_a_mid_flig
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1604,7 +1584,7 @@ async fn coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_afte
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1699,7 +1679,7 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1782,7 +1762,7 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -1897,6 +1877,21 @@ async fn make_carrier_diagnostics_fixture() -> (
     String,
     SyncCoordinatorDeps,
 ) {
+    carrier_diagnostics_fixture(true).await
+}
+
+/// [`make_carrier_diagnostics_fixture`], with the client read by the test
+/// itself when `drained` is false.
+async fn carrier_diagnostics_fixture(
+    drained: bool,
+) -> (
+    Arc<DocumentRegistry>,
+    Arc<DashMap<String, ProviderSyncState>>,
+    Arc<MockTypeProvider>,
+    String,
+    String,
+    SyncCoordinatorDeps,
+) {
     use crate::type_provider::protocol::{TypeDiagnostic, TypeDiagnosticSeverity};
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -1928,7 +1923,11 @@ async fn make_carrier_diagnostics_fixture() -> (
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: if drained {
+            make_test_client(&documents)
+        } else {
+            undrained_test_client(&documents)
+        },
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -2064,7 +2063,7 @@ async fn invalidated_inflight_diagnostics_cannot_restore_completion() {
     // previous provider completion, even at the same authored version.
     let publication = documents.begin_diagnostics_publication(&uri).unwrap();
     documents
-        .publish_diagnostics(&deps.client, &uri, &publication, Vec::new(), false, None)
+        .publish_diagnostics(&uri, &publication, Vec::new(), false, None)
         .await;
     assert!(!documents.diagnostics_ready(&uri));
 }
@@ -2141,7 +2140,7 @@ async fn generation_advance_after_a_committed_receipt_owes_a_refresh() {
     documents.host().bump_diagnostics_generation(&canonical_id);
     let publication = documents.begin_diagnostics_publication(&parent).unwrap();
     documents
-        .publish_diagnostics(&deps.client, &parent, &publication, Vec::new(), true, None)
+        .publish_diagnostics(&parent, &publication, Vec::new(), true, None)
         .await;
 
     let refresh = refreshes
@@ -2276,8 +2275,8 @@ async fn diagnostics_are_not_suppressed_by_same_version_deferred_api_work() {
 /// @ai-generated - Guards exact-version diagnostics publication after provider I/O.
 #[tokio::test(flavor = "multi_thread")]
 async fn provider_diagnostics_are_not_published_for_a_superseded_document_version() {
-    let (documents, _states, provider, canonical_id, ide_path, mut deps) =
-        make_carrier_diagnostics_fixture().await;
+    let (documents, _states, provider, canonical_id, ide_path, deps) =
+        carrier_diagnostics_fixture(false).await;
     let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
     let source = documents
         .get(&uri)
@@ -2294,33 +2293,7 @@ async fn provider_diagnostics_are_not_published_for_a_superseded_document_versio
         }),
     );
 
-    let client_slot = Arc::new(std::sync::Mutex::new(None));
-    let client_slot_for_service = Arc::clone(&client_slot);
-    let (mut service, mut socket) = LspService::new(move |client| {
-        *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
-        NoopLanguageServer
-    });
-    deps.client = client_slot
-        .lock()
-        .expect("client lock")
-        .clone()
-        .expect("test client should be captured");
-    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
-        .id(1)
-        .params(serde_json::json!({
-            "processId": null,
-            "rootUri": null,
-            "capabilities": {}
-        }))
-        .finish();
-    let response = tower_service::Service::call(&mut service, initialize)
-        .await
-        .expect("initialize service call")
-        .expect("initialize response");
-    assert!(
-        response.is_ok(),
-        "test client must initialize: {response:?}"
-    );
+    let mut socket = deps.client.wire();
 
     let publish_uri = uri.to_string();
     let publish = tokio::spawn(async move {
@@ -2356,8 +2329,8 @@ async fn provider_diagnostics_are_not_published_for_a_superseded_document_versio
 /// snapshot results and must reach the editor before that pull completes.
 #[tokio::test(flavor = "multi_thread")]
 async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
-    let (documents, _states, provider, canonical_id, ide_path, mut deps) =
-        make_carrier_diagnostics_fixture().await;
+    let (documents, _states, provider, canonical_id, ide_path, deps) =
+        carrier_diagnostics_fixture(false).await;
     let uri: Uri = "file:///workspace/src/App.vue".parse().expect("test uri");
     let source = "<script setup lang=\"ts\">\n\
                   defineProps<{ deadProp: string }>();\n\
@@ -2386,33 +2359,7 @@ async fn hanging_provider_diagnostics_do_not_starve_verter_owned_batch() {
         }),
     );
 
-    let client_slot = Arc::new(std::sync::Mutex::new(None));
-    let client_slot_for_service = Arc::clone(&client_slot);
-    let (mut service, mut socket) = LspService::new(move |client| {
-        *client_slot_for_service.lock().expect("client lock") = Some(client.clone());
-        NoopLanguageServer
-    });
-    deps.client = client_slot
-        .lock()
-        .expect("client lock")
-        .clone()
-        .expect("test client should be captured");
-    let initialize = tower_lsp_server::jsonrpc::Request::build("initialize")
-        .id(1)
-        .params(serde_json::json!({
-            "processId": null,
-            "rootUri": null,
-            "capabilities": {}
-        }))
-        .finish();
-    let response = tower_service::Service::call(&mut service, initialize)
-        .await
-        .expect("initialize service call")
-        .expect("initialize response");
-    assert!(
-        response.is_ok(),
-        "test client must initialize: {response:?}"
-    );
+    let mut socket = deps.client.wire();
 
     let publish_uri = uri.clone();
     let publish = tokio::spawn(async move {
@@ -2593,7 +2540,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -2719,12 +2666,12 @@ async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
     needs_provider_sync.insert(canonical_id.clone());
     let cached_verter_diags = Arc::new(DashMap::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync,
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::clone(&cached_verter_diags),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -2802,7 +2749,7 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::clone(&cached_verter_diags),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -2850,12 +2797,12 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
 /// Deps for a verter-only (no in-process provider) coordinator publish.
 fn verter_only_deps(documents: Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
     SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -3102,12 +3049,12 @@ fn debounce_probe_deps() -> (SyncCoordinatorDeps, Arc<DashSet<String>>) {
     ))));
     let needs_provider_sync = Arc::new(DashSet::new());
     let deps = SyncCoordinatorDeps {
-        documents,
+        documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::clone(&needs_provider_sync),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -4325,7 +4272,6 @@ const msg = '{marker}'
         )
     };
     let needs_provider_sync = Arc::clone(&deps.needs_provider_sync);
-    let client = deps.client.clone();
     let handle = spawn_sync_coordinator(deps);
     let open = |name: &str| {
         let uri: Uri = format!("file:///workspace/src/{name}.vue")
@@ -4400,7 +4346,7 @@ const msg = '{marker}'
         .begin_diagnostics_publication(other_uri)
         .expect("the other document is open");
     documents
-        .publish_diagnostics(&client, other_uri, &publication, Vec::new(), false, None)
+        .publish_diagnostics(other_uri, &publication, Vec::new(), false, None)
         .await;
 
     tokio::time::timeout(
@@ -4614,7 +4560,7 @@ async fn a_projectionless_carrier_recovers_without_a_provider_or_a_snapshot() {
             project_sync: None,
             needs_provider_sync: Arc::new(DashSet::new()),
             pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-            client: make_test_client(),
+            client: make_test_client(&documents),
             type_provider: None,
             cached_verter_diags: Arc::new(DashMap::new()),
             position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -4693,7 +4639,7 @@ fn make_provider_less_deps(documents: &Arc<DocumentRegistry>) -> SyncCoordinator
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -5373,7 +5319,7 @@ async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -6171,7 +6117,7 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -6271,7 +6217,7 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::clone(&pending_snapshot_provider_sync),
-        client: make_test_client(),
+        client: make_test_client(&documents),
         type_provider: Some(provider.clone()),
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),
@@ -6391,7 +6337,7 @@ fn lane_test_deps(
         )),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
-        client: make_test_client(),
+        client: make_test_client(documents),
         type_provider: None,
         cached_verter_diags: Arc::new(DashMap::new()),
         position_encoding: Arc::new(parking_lot::RwLock::new(PositionEncodingKind::UTF16)),

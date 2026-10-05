@@ -322,8 +322,8 @@ impl TestSessionBuilder {
                 // production provider hub (the carrier path then runs through the
                 // hub, the real production seam). Otherwise the raw provider.
                 let spawned: Result<Arc<dyn TypeProvider>, _> = if self.resilient {
-                    // The notifier rides an empty client cell (logs only) — the
-                    // test never injects a real `Client`.
+                    // The notifier rides a transport with no client attached
+                    // (logs only).
                     let hub = crate::tsserver::resilient::hub(
                         crate::tsserver::resilient::TsserverEngineInputs {
                             node_path,
@@ -333,7 +333,7 @@ impl TestSessionBuilder {
                             carrier_store_dir,
                             plugin_response_remap: self.plugin_response_remap,
                         },
-                        Arc::new(tokio::sync::OnceCell::new()),
+                        crate::outbound::Outbound::default(),
                         3,
                         None,
                         Arc::new(tokio::sync::Notify::new()),
@@ -485,10 +485,10 @@ impl TestSessionBuilder {
         // `with_isolated_store_segment` holds the install lock across that synchronous
         // construction, so the LSP backend resolves the SAME isolated dir the spawn
         // above used and no concurrent session observes this session's segment.
-        let (service, socket) = with_isolated_store_segment(&store_segment, || {
-            tower_lsp_server::LspService::new(move |client| {
+        let (service, _socket) = with_isolated_store_segment(&store_segment, || {
+            tower_lsp_server::LspService::new(move |_client| {
                 VerterLanguageServer::new(
-                    client,
+                    crate::outbound::Outbound::default(),
                     LspConfig {
                         host: Arc::clone(&host_for_server),
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -505,6 +505,7 @@ impl TestSessionBuilder {
                 )
             })
         });
+        let socket = service.inner().outbound().wire();
 
         // Drain the client socket to prevent backpressure
         let drain_handle = tokio::spawn(async move {

@@ -3,43 +3,44 @@
   "kind": "implementation",
   "finalOwner": "expansion.workspace-responsiveness",
   "products": [
-    "OutboundBudget bounding the replaceable class by admitted count and serialized bytes, with LaneLoad reporting admitted and waiting payloads (crates/verter_lsp/src/outbound/mod.rs); control from producers that cannot await its send is ordered and accounted by ControlLane (crates/verter_lsp/src/outbound/control.rs); awaiting control producers and responses are bounded structurally (one message per awaiting producer; LSP_MAX_CONCURRENCY and the zero-capacity response channel) and carry no byte account",
-    "Per-document versioned replacement coalescer: ReplaceableLane, the only route publishDiagnostics takes to the client (crates/verter_lsp/src/outbound/mod.rs, consumed by DocumentRegistry::publish_diagnostics)",
-    "Backpressure and slow-client recovery evidence (crates/verter_lsp/tests/cases/outbound_slow_client.rs)"
+    "OutboundBudget with separate control, response and replaceable-notification accounting: Verter owns the transport writer (outbound::serve, crates/verter_lsp/src/outbound/transport.rs), and every message is accounted in its class, by count and serialized bytes, from production until its write completes (OutboundLoad / OutboundHighWater, crates/verter_lsp/src/outbound/mod.rs). Control (crates/verter_lsp/src/outbound/control.rs) admits within its budget in offer order and accounts the producers left waiting, whether they await their send or cannot (Outbound::notify_detached); server-to-client requests carry Verter-assigned ids whose replies the serve loop routes back. Responses stop being taken from running handlers while their admitted set is full",
+    "Per-document versioned replacement coalescer: ReplaceableLane, the only route publishDiagnostics takes to the client (crates/verter_lsp/src/outbound/replaceable.rs, consumed by DocumentRegistry::publish_diagnostics). The writer pulls a payload only when it is about to write it and re-checks the publication's epoch at that take, atomically with the registry's cancellation fence",
+    "Backpressure and slow-client recovery evidence (crates/verter_lsp/tests/cases/outbound_slow_client.rs, crates/verter_lsp/src/outbound/tests.rs, documents::diagnostics::tests)"
   ],
-  "retiredRoute": "DocumentRegistry::publish_diagnostics handing payloads straight to the tower client channel, where a cancelled send left its payload queued and the queue grew by one payload per cancelled publication",
+  "retiredRoute": "tower-lsp-server's Server::serve writer and its client channel: diagnostics handed to that channel were committed on the first poll of their send, so a cancelled publication still reached the client, and control and responses queued there without any byte account. The server now sends only through the Outbound transport; tower-lsp-server's Client is no longer used to send",
   "preservedOwners": [
     "semantic algorithms",
     "project resolution",
     "format/lint logic",
     "TypeScript projection",
     "edit transactions",
-    "diagnostics epoch/receipt fence (DocumentRegistry)"
+    "diagnostics epoch/receipt fence (DocumentRegistry)",
+    "LspService request dispatch, $/cancelRequest and shutdown/exit handling"
   ],
   "cases": [
     {
       "id": "WSP3-AC1",
-      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs (under a stalled reader and edit storm: the admitted high-water reaches and never exceeds the budget; retained payloads, admitted and waiting, stay within the budget plus one payload per document; every document ends on its newest complete set, never older-after-newer) + crates/verter_lsp/src/outbound/tests.rs (message and byte backpressure, waiting payloads accounted, newer epoch retires the older payload while it waits, offer-order admission, pump retirement with the last lane handle, ordered and accounted ControlLane) + documents::diagnostics::tests::a_send_superseded_behind_a_slow_client_never_reaches_it"
+      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs (under a stalled reader, an edit storm, a control backlog and running requests: each class stays within its own budget, waiting control producers are accounted with their bytes, the replaceable admitted high-water reaches and never exceeds its budget and retained payloads stay within the budget plus one per document; every document ends on its newest complete set, never older-after-newer) + crates/verter_lsp/src/outbound/tests.rs (message and byte backpressure, waiting payloads accounted, newer epoch retires the older payload while it waits, offer-order admission, a taken payload accounted until written, retirement at the take of a publication no longer current, ended-transport release, ordered and accounted detached and awaiting control, server request routing) + documents::diagnostics::tests (a_stalled_transport_never_writes_a_cancelled_publication: supersession and close/reopen through the real writer with the cancelled publishers unpolled; a_cancelled_publication_is_retired_when_the_writer_reaches_it; a_send_superseded_behind_a_slow_client_never_reaches_it)"
     },
     {
       "id": "WSP3-AC2",
-      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs ($/cancelRequest error and shutdown result arrive behind only what the transport already held, not behind the diagnostics backlog)"
+      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs ($/cancelRequest error, shutdown result and the whole control backlog arrive behind only what the pipe already held and the one frame being written, not behind the diagnostics backlog; a server-to-client request is answered while that backlog stands) + outbound::tests::control_is_written_ahead_of_diagnostics"
     },
     {
       "id": "WSP3-AC3",
-      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs (large response delivered whole to a client without partial-result support) + outbound::tests::a_payload_larger_than_the_byte_budget_is_delivered_whole; the server emits no standard partial results"
+      "binding": "crates/verter_lsp/tests/cases/outbound_slow_client.rs (large response delivered whole to a client without partial-result support, accounted in the response class while stalled) + outbound::tests::a_payload_larger_than_the_byte_budget_is_delivered_whole; the server emits no standard partial results"
     },
     {
       "id": "WSP3-AC-OWNER",
-      "binding": "ReplaceableLane is the single replaceable-notification writer; DocumentRegistry::publish_diagnostics is its only producer; no dual live writer"
+      "binding": "outbound::serve is the single transport writer (an Outbound accepts exactly one writer); ReplaceableLane is the single replaceable-notification route and DocumentRegistry::publish_diagnostics its only producer; every other server message goes through Outbound; no dual live writer"
     },
     {
       "id": "WSP3-AC-BASIS",
-      "binding": "publication incrementality unchanged at the semantic layer (same epoch/receipt fence); the lane only removes superseded payloads. outbound_slow_client compares the full final diagnostic set of every document after the storm with a fresh publication of only the newest epoch through a fresh lane to the same client, contents and ranges included"
+      "binding": "publication incrementality unchanged at the semantic layer (same epoch/receipt fence); the lane only removes superseded or cancelled payloads. outbound_slow_client compares the full final diagnostic set of every document after the storm with a fresh publication of only the newest edit to the same client, contents and ranges included"
     },
     {
       "id": "WSP3-AC-RESOURCE",
-      "binding": "work-count evidence only: lane high-water and per-document delivered counts are asserted in tests; outbound bytes per run, client application/paint, provider process cost and retained memory are unavailable on the landing worker and are not reported as numbers"
+      "binding": "work-count evidence only: per-class loads while stalled, high-water marks and per-document delivered counts are asserted in tests; outbound bytes per run, client application/paint, provider process cost and retained memory are unavailable on the landing worker and are not reported as numbers"
     },
     {
       "id": "WSP3-AC-EXPOSURE",

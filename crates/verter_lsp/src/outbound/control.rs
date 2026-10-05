@@ -1,112 +1,417 @@
-//! The ordered, accounted route for control notifications whose producer cannot
-//! await its own send.
+//! The control class: every server→client request and every notification
+//! other than diagnostics.
 //!
-//! A synchronous callback that spawned one detached send per message would park
-//! one more message in the client channel for every event while the editor is
-//! not reading, with nothing counting them. A [`ControlLane`] instead owns the
-//! messages, sends them in order one at a time, and reports every message it
-//! holds. Control messages are never coalesced or dropped.
+//! A control message is serialized once, when it is offered, and accounted from
+//! then until the writer has written it. Messages are admitted for writing in
+//! the order they were offered while the class budget has room; a message
+//! offered while it has none waits in one first-come line, accounted with its
+//! exact bytes. A producer that awaits its send holds its place in that line; a
+//! producer that cannot await leaves its message there. Nothing is coalesced,
+//! reordered or dropped once offered.
+//!
+//! As with any LSP client connection, a notification offered before the client
+//! has been answered `initialize` is not sent (window messages excepted), and a
+//! request offered then fails as not initialized.
 
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Display;
 
-use futures_util::future::BoxFuture;
 use parking_lot::Mutex;
-use tokio::sync::OnceCell;
-use tower_lsp_server::ls_types::notification::Notification;
-use tower_lsp_server::Client;
+use serde::Serialize;
+use tokio::sync::oneshot;
+use tower_lsp_server::jsonrpc::{self, Error, ErrorCode, Id, Response};
+use tower_lsp_server::ls_types::notification::{self, Notification};
+use tower_lsp_server::ls_types::request::{self, Request};
+use tower_lsp_server::ls_types::{
+    LogMessageParams, MessageType, Registration, RegistrationParams, ShowMessageParams,
+};
 
-use super::{serialized_len, Load, Owner, Retirement};
+use super::replaceable::NotificationBody;
+use super::{ClassBudget, ClassHighWater, ClassLoad, Outbound};
 
-type QueuedSend = Box<dyn FnOnce(Client) -> BoxFuture<'static, ()> + Send>;
-
-/// Detached control notifications, sent in order through one client.
-#[derive(Clone)]
-pub struct ControlLane {
-    inner: Arc<Inner>,
-    _owner: Arc<Owner>,
-}
-
-struct Inner {
-    client: Arc<OnceCell<Client>>,
-    state: Mutex<State>,
-    retirement: Arc<Retirement>,
+#[derive(Default)]
+pub(super) struct ControlQueue {
+    state: Mutex<ControlState>,
 }
 
 #[derive(Default)]
-struct State {
-    queue: VecDeque<(usize, QueuedSend)>,
-    /// Queued messages plus the one handed to the transport and not yet
-    /// accepted by it.
-    load: Load,
-    high_water: Load,
-    draining: bool,
+struct ControlState {
+    /// Frames admitted for writing, in order.
+    admitted: VecDeque<Vec<u8>>,
+    /// Frames offered while the admitted set was full, in offer order.
+    waiting: VecDeque<Waiting>,
+    /// Size of the frame the writer has taken and not finished writing.
+    writing: Option<usize>,
+    load: ClassLoad,
+    high_water: ClassHighWater,
+    next_ticket: u64,
+    next_request_id: i64,
+    /// Server→client requests awaiting the client's reply.
+    replies: HashMap<Id, oneshot::Sender<Response>>,
+    initialized: bool,
+    closed: bool,
 }
 
-impl ControlLane {
-    /// A lane sending through the client `client` holds once the server is
-    /// built; messages offered before then are not sent, as with any
-    /// notification an uninitialized server emits.
-    pub fn new(client: Arc<OnceCell<Client>>) -> Self {
-        let retirement = Arc::new(Retirement::default());
-        Self {
-            inner: Arc::new(Inner {
-                client,
-                state: Mutex::new(State::default()),
-                retirement: Arc::clone(&retirement),
-            }),
-            _owner: Arc::new(Owner(retirement)),
-        }
-    }
-
-    /// Queue one notification behind every message offered before it.
-    pub fn notify<N>(&self, params: N::Params)
-    where
-        N: Notification,
-        N::Params: Send + 'static,
-    {
-        let bytes = serialized_len(&params);
-        let send: QueuedSend = Box::new(move |client: Client| {
-            Box::pin(async move { client.send_notification::<N>(params).await })
-        });
-        let mut state = self.inner.state.lock();
-        state.queue.push_back((bytes, send));
-        state.load.add(bytes);
-        state.high_water = state.high_water.max(state.load);
-        if !state.draining {
-            state.draining = true;
-            tokio::spawn(drain(Arc::clone(&self.inner)));
-        }
-    }
-
-    /// What the lane holds right now.
-    pub fn load(&self) -> Load {
-        self.inner.state.lock().load
-    }
-
-    /// The largest load the lane has held since it was built.
-    pub fn high_water(&self) -> Load {
-        self.inner.state.lock().high_water
-    }
+struct Waiting {
+    ticket: u64,
+    body: Vec<u8>,
+    /// Fired when the frame is admitted; `None` for a producer that does not
+    /// wait.
+    admitted: Option<oneshot::Sender<()>>,
 }
 
-async fn drain(inner: Arc<Inner>) {
-    loop {
-        let (bytes, send) = {
-            let mut state = inner.state.lock();
-            let Some(next) = state.queue.pop_front() else {
-                state.draining = false;
-                return;
-            };
-            next
-        };
-        if let Some(client) = inner.client.get() {
-            tokio::select! {
-                biased;
-                () = inner.retirement.retired() => return,
-                () = send(client.clone()) => {}
+enum Offered {
+    Admitted,
+    Waiting(u64),
+    Refused,
+}
+
+/// The body of a request frame, serialized without building a JSON value.
+#[derive(Serialize)]
+struct RequestBody<'a, P> {
+    jsonrpc: &'static str,
+    method: &'a str,
+    params: &'a P,
+    id: &'a Id,
+}
+
+impl ControlState {
+    fn admit_waiting(&mut self, budget: &ClassBudget) {
+        while let Some(next) = self.waiting.front() {
+            if !budget.admits(self.load.admitted, next.body.len()) {
+                break;
+            }
+            let next = self.waiting.pop_front().expect("front was just seen");
+            self.load.waiting.remove(next.body.len());
+            self.load.admitted.add(next.body.len());
+            self.admitted.push_back(next.body);
+            if let Some(admitted) = next.admitted {
+                let _ = admitted.send(());
             }
         }
-        inner.state.lock().load.remove(bytes);
+        self.high_water.record(self.load);
+    }
+}
+
+impl ControlQueue {
+    fn offer(
+        &self,
+        budget: &ClassBudget,
+        body: Vec<u8>,
+        admitted: Option<oneshot::Sender<()>>,
+    ) -> Offered {
+        let mut state = self.state.lock();
+        if state.closed {
+            return Offered::Refused;
+        }
+        if state.waiting.is_empty() && budget.admits(state.load.admitted, body.len()) {
+            state.load.admitted.add(body.len());
+            state.admitted.push_back(body);
+            let load = state.load;
+            state.high_water.record(load);
+            return Offered::Admitted;
+        }
+        let ticket = state.next_ticket;
+        state.next_ticket += 1;
+        state.load.waiting.add(body.len());
+        state.waiting.push_back(Waiting {
+            ticket,
+            body,
+            admitted,
+        });
+        let load = state.load;
+        state.high_water.record(load);
+        Offered::Waiting(ticket)
+    }
+
+    /// Remove a waiting frame whose producer gave up; `true` if the line moved.
+    fn withdraw(&self, budget: &ClassBudget, ticket: u64) -> bool {
+        let mut state = self.state.lock();
+        let Some(index) = state.waiting.iter().position(|w| w.ticket == ticket) else {
+            return false;
+        };
+        let withdrawn = state.waiting.remove(index).expect("index was just found");
+        state.load.waiting.remove(withdrawn.body.len());
+        state.admit_waiting(budget);
+        true
+    }
+
+    pub(super) fn take(&self) -> Option<Vec<u8>> {
+        let mut state = self.state.lock();
+        if state.writing.is_some() {
+            return None;
+        }
+        let body = state.admitted.pop_front()?;
+        state.writing = Some(body.len());
+        Some(body)
+    }
+
+    pub(super) fn complete(&self, budget: &ClassBudget) {
+        let mut state = self.state.lock();
+        if let Some(bytes) = state.writing.take() {
+            state.load.admitted.remove(bytes);
+        }
+        state.admit_waiting(budget);
+    }
+
+    /// The transport ended: release every producer and fail every request
+    /// still awaiting a reply.
+    pub(super) fn close(&self) {
+        let released = {
+            let mut state = self.state.lock();
+            state.closed = true;
+            state.load = ClassLoad::default();
+            state.writing = None;
+            (
+                std::mem::take(&mut state.admitted),
+                std::mem::take(&mut state.waiting),
+                std::mem::take(&mut state.replies),
+            )
+        };
+        drop(released);
+    }
+
+    pub(super) fn load(&self) -> ClassLoad {
+        self.state.lock().load
+    }
+
+    pub(super) fn high_water(&self) -> ClassHighWater {
+        self.state.lock().high_water
+    }
+
+    fn initialized(&self) -> bool {
+        self.state.lock().initialized
+    }
+
+    pub(super) fn mark_initialized(&self) {
+        self.state.lock().initialized = true;
+    }
+
+    fn register_request(&self) -> Option<(Id, oneshot::Receiver<Response>)> {
+        let mut state = self.state.lock();
+        if state.closed {
+            return None;
+        }
+        let id = Id::Number(state.next_request_id);
+        state.next_request_id += 1;
+        let (sender, receiver) = oneshot::channel();
+        state.replies.insert(id.clone(), sender);
+        Some((id, receiver))
+    }
+
+    fn forget_request(&self, id: &Id) {
+        self.state.lock().replies.remove(id);
+    }
+
+    fn route_reply(&self, response: Response) -> Result<(), Response> {
+        let reply = self.state.lock().replies.remove(response.id());
+        match reply {
+            Some(reply) => {
+                let _ = reply.send(response);
+                Ok(())
+            }
+            None => Err(response),
+        }
+    }
+}
+
+/// Withdraws a waiting frame when its producer is cancelled.
+struct WaitingPlace<'a> {
+    outbound: &'a Outbound,
+    ticket: Option<u64>,
+}
+
+impl Drop for WaitingPlace<'_> {
+    fn drop(&mut self) {
+        if let Some(ticket) = self.ticket.take() {
+            if self
+                .outbound
+                .hub
+                .control
+                .withdraw(&self.outbound.hub.budget.control, ticket)
+            {
+                self.outbound.wake().notify_one();
+            }
+        }
+    }
+}
+
+/// Fails the reply slot of a request whose producer is cancelled.
+struct ReplySlot<'a> {
+    outbound: &'a Outbound,
+    id: Id,
+}
+
+impl Drop for ReplySlot<'_> {
+    fn drop(&mut self) {
+        self.outbound.hub.control.forget_request(&self.id);
+    }
+}
+
+fn notification_frame<N: Notification>(params: &N::Params) -> Vec<u8> {
+    serde_json::to_vec(&NotificationBody {
+        jsonrpc: "2.0",
+        method: N::METHOD,
+        params,
+    })
+    .expect("notification params serialize to JSON")
+}
+
+impl Outbound {
+    /// Offer one control frame; resolves once it is admitted for writing, or at
+    /// once if the transport has ended. `false` if it never will be written.
+    async fn offer_control(&self, body: Vec<u8>) -> bool {
+        let (admitted, on_admission) = oneshot::channel();
+        match self
+            .hub
+            .control
+            .offer(&self.hub.budget.control, body, Some(admitted))
+        {
+            Offered::Admitted => {
+                self.wake().notify_one();
+                true
+            }
+            Offered::Waiting(ticket) => {
+                let mut place = WaitingPlace {
+                    outbound: self,
+                    ticket: Some(ticket),
+                };
+                let admitted = on_admission.await.is_ok();
+                place.ticket = None;
+                admitted
+            }
+            Offered::Refused => false,
+        }
+    }
+
+    /// Send a notification, in order behind every control message offered
+    /// before it. Resolves once the notification is admitted for writing.
+    pub async fn send_notification<N>(&self, params: N::Params)
+    where
+        N: Notification,
+    {
+        if !self.hub.control.initialized() {
+            tracing::trace!(
+                method = N::METHOD,
+                "server not initialized, suppressing notification"
+            );
+            return;
+        }
+        self.offer_control(notification_frame::<N>(&params)).await;
+    }
+
+    /// Send a notification from a producer that cannot await: it joins the
+    /// control line in order and is accounted there until written.
+    pub fn notify_detached<N>(&self, params: N::Params)
+    where
+        N: Notification,
+    {
+        if !self.hub.control.initialized() {
+            tracing::trace!(
+                method = N::METHOD,
+                "server not initialized, suppressing notification"
+            );
+            return;
+        }
+        let body = notification_frame::<N>(&params);
+        if let Offered::Admitted = self.hub.control.offer(&self.hub.budget.control, body, None) {
+            self.wake().notify_one();
+        }
+    }
+
+    /// Send a request to the client and await its reply.
+    pub async fn send_request<R>(&self, params: R::Params) -> jsonrpc::Result<R::Result>
+    where
+        R: Request,
+    {
+        if !self.hub.control.initialized() {
+            tracing::trace!(
+                method = R::METHOD,
+                "server not initialized, suppressing request"
+            );
+            return Err(Error {
+                code: ErrorCode::ServerError(-32002),
+                message: "Server not initialized".into(),
+                data: None,
+            });
+        }
+        let Some((id, reply)) = self.hub.control.register_request() else {
+            return Err(Error::internal_error());
+        };
+        let _slot = ReplySlot {
+            outbound: self,
+            id: id.clone(),
+        };
+        let body = serde_json::to_vec(&RequestBody {
+            jsonrpc: "2.0",
+            method: R::METHOD,
+            params: &params,
+            id: &id,
+        })
+        .expect("request params serialize to JSON");
+        if !self.offer_control(body).await {
+            return Err(Error::internal_error());
+        }
+        let Ok(response) = reply.await else {
+            return Err(Error::internal_error());
+        };
+        let (_, result) = response.into_parts();
+        result.and_then(|value| {
+            serde_json::from_value(value).map_err(|error| Error {
+                code: ErrorCode::ParseError,
+                message: error.to_string().into(),
+                data: None,
+            })
+        })
+    }
+
+    /// `window/showMessage`, which may be sent before initialization.
+    pub async fn show_message<M: Display>(&self, typ: MessageType, message: M) {
+        let params = ShowMessageParams {
+            typ,
+            message: message.to_string(),
+        };
+        self.offer_control(notification_frame::<notification::ShowMessage>(&params))
+            .await;
+    }
+
+    /// `window/logMessage`, which may be sent before initialization.
+    pub async fn log_message<M: Display>(&self, typ: MessageType, message: M) {
+        let params = LogMessageParams {
+            typ,
+            message: message.to_string(),
+        };
+        self.offer_control(notification_frame::<notification::LogMessage>(&params))
+            .await;
+    }
+
+    pub async fn register_capability(
+        &self,
+        registrations: Vec<Registration>,
+    ) -> jsonrpc::Result<()> {
+        self.send_request::<request::RegisterCapability>(RegistrationParams { registrations })
+            .await
+    }
+
+    pub async fn semantic_tokens_refresh(&self) -> jsonrpc::Result<()> {
+        self.send_request::<request::SemanticTokensRefresh>(())
+            .await
+    }
+
+    pub async fn inlay_hint_refresh(&self) -> jsonrpc::Result<()> {
+        self.send_request::<request::InlayHintRefreshRequest>(())
+            .await
+    }
+
+    /// The client answered `initialize`: control traffic may flow.
+    pub(super) fn mark_initialized(&self) {
+        self.hub.control.mark_initialized();
+    }
+
+    /// Hand a client reply to the request awaiting it.
+    pub(super) fn route_reply(&self, response: Response) {
+        if let Err(response) = self.hub.control.route_reply(response) {
+            tracing::warn!(id = %response.id(), "reply to an unknown server request");
+        }
     }
 }

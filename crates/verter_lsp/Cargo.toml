@@ -54,6 +54,8 @@ oxc_span = { workspace = true }
 oxc_sourcemap = "7.0.0"
 blake3 = { workspace = true }
 tower-lsp-server = "0.23"
+# The `Service` trait the owned transport drives `LspService` through.
+tower-service = "0.3.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1.52", features = [
@@ -87,7 +89,6 @@ name = "verter-lsp"
 path = "src/main.rs"
 
 [dev-dependencies]
-tower-service = "0.3.3"
 # Additive feature: unifies onto the main `tokio` dependency for test builds
 # only, activating `start_paused`/virtual-time control so deterministic tests
 # can prove "resolved via a signal, not a timer" as an exact virtual-clock

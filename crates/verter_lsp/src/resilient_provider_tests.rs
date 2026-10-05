@@ -23,7 +23,6 @@ use tokio::sync::{Notify, Semaphore};
 use crate::resilient_provider::{
     EstablishFuture, HubPolicy, LspNotifier, ProviderEstablisher, ProviderHub,
 };
-use crate::test_utils::initialized_client_with_socket;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::type_provider::protocol::{
     CompletionResolveData, CompletionResolveResult, ResolvedTextEdit,
@@ -99,7 +98,7 @@ async fn make_resilient(
     let spawn_gate = Arc::new(Semaphore::new(0));
     let initial_crash_notify = Arc::new(parking_lot::Mutex::new(None));
     let notifier = Arc::new(LspNotifier::new(
-        Arc::new(tokio::sync::OnceCell::new()),
+        crate::outbound::Outbound::default(),
         "tsgo",
     ));
     let provider = ProviderHub::new(
@@ -596,8 +595,10 @@ async fn resolve_completion_delegates_to_the_inner_provider() {
 /// fallback was activated: startedKinds=[\"tsgo\"]").
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_fallback_initial_start_stays_off_the_wire_but_a_recovery_is_announced() {
-    let (client_cell, wire) = initialized_client_with_socket().await;
-    let mut wire = wire;
+    let client = crate::outbound::Outbound::default();
+    let mut wire = client.wire();
+    // The editor has been answered `initialize`: start announcements may flow.
+    client.assume_initialized();
 
     let initial = MockTypeProvider::new();
     initial.set_child_pid(Some(4321));
@@ -614,7 +615,7 @@ async fn shared_fallback_initial_start_stays_off_the_wire_but_a_recovery_is_anno
             replacement,
             spawn_gate: Arc::clone(&spawn_gate),
         },
-        Arc::new(LspNotifier::recovery_only(Arc::clone(&client_cell), "tsgo")),
+        Arc::new(LspNotifier::recovery_only(client.clone(), "tsgo")),
         HubPolicy::explicit(3),
     );
     provider

@@ -12,11 +12,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::outbound::Outbound;
 use dashmap::{DashMap, DashSet};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tower_lsp_server::ls_types::*;
-use tower_lsp_server::Client;
 
 use crate::documents::line_index::LineIndex;
 use crate::documents::DocumentRegistry;
@@ -523,7 +523,7 @@ pub struct SyncCoordinatorDeps {
     pub project_sync: Option<ProjectSync>,
     pub needs_provider_sync: Arc<DashSet<String>>,
     pub pending_snapshot_provider_sync: Arc<DashSet<String>>,
-    pub client: Client,
+    pub client: Outbound,
     /// Type provider for fetching TS diagnostics after sync.
     pub type_provider: Option<Arc<dyn TypeProvider>>,
     /// Cached verter-only diagnostics (URI → (version, diag_gen, diagnostics)).
@@ -2561,7 +2561,6 @@ async fn publish_merged_diagnostics(
     // declaration hints. The provider result replaces this staged batch below.
     deps.documents
         .publish_diagnostics(
-            &deps.client,
             &uri,
             &publication,
             verter_diagnostics.clone(),
@@ -2576,7 +2575,6 @@ async fn publish_merged_diagnostics(
     let complete = batch.complete;
     deps.documents
         .publish_diagnostics(
-            &deps.client,
             &uri,
             &publication,
             batch.diagnostics,

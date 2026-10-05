@@ -1,7 +1,7 @@
-//! The thread that polls `Server::serve` must have a stack large enough for a
+//! The thread that polls `outbound::serve` must have a stack large enough for a
 //! request handler, on every profile.
 //!
-//! `tower-lsp-server` polls handler futures inline on the `block_on` thread, so
+//! The serve loop polls handler futures inline on the `block_on` thread, so
 //! that thread's stack — not a runtime worker's — is what every LSP request
 //! runs on. Under `#[tokio::main]` it is the process main thread, and on
 //! Windows/MSVC that is the linker default 1 MiB, which a debug build's nested

@@ -2,13 +2,11 @@
 //!
 //! This module re-exports the shared [`ProviderHub`] surface from
 //! `verter_type_runtime::provider_hub`, and provides the LSP-specific
-//! `LspNotifier` that bridges `tower_lsp_server::Client` → `ProviderNotifier`.
+//! `LspNotifier` that bridges the outbound transport → `ProviderNotifier`.
 
 use std::sync::Arc;
-use tokio::sync::OnceCell;
-use tower_lsp_server::Client;
 
-use crate::outbound::ControlLane;
+use crate::outbound::Outbound;
 use verter_type_runtime::provider_hub::{DroppedAdmittedState, EngineStart};
 
 // Re-export the shared lifecycle owner.
@@ -22,10 +20,11 @@ pub(crate) use verter_type_runtime::provider_hub::{
 /// to the new serving epoch (never an unproven replay).
 pub(crate) type AdmittedStateRearm = Arc<dyn Fn(&DroppedAdmittedState) + Send + Sync>;
 
-/// LSP-specific notifier. Its callbacks are synchronous, so every message goes
-/// through one ordered, accounted [`ControlLane`] instead of a detached send.
+/// LSP-specific notifier. Its callbacks are synchronous, so every message joins
+/// the transport's ordered, accounted control line
+/// ([`Outbound::notify_detached`]) instead of a detached send.
 pub(crate) struct LspNotifier {
-    control: ControlLane,
+    control: Outbound,
     /// The provider kind (`tsserver` / `tsgo`) carried on the structural
     /// respawn notification, matching the backend's own user label.
     kind: &'static str,
@@ -41,9 +40,9 @@ pub(crate) struct LspNotifier {
 impl LspNotifier {
     /// A notifier that announces every engine start on the wire — the policy
     /// of every route whose engine is editor-visible from its first serve.
-    pub fn new(client: Arc<OnceCell<Client>>, kind: &'static str) -> Self {
+    pub fn new(client: Outbound, kind: &'static str) -> Self {
         Self {
-            control: ControlLane::new(client),
+            control: client,
             kind,
             announce_initial_starts: true,
         }
@@ -52,9 +51,9 @@ impl LspNotifier {
     /// A notifier that announces only crash replacements — the policy of the
     /// shared route's managed fallback, whose attested promise is that the
     /// managed engine stays cold.
-    pub fn recovery_only(client: Arc<OnceCell<Client>>, kind: &'static str) -> Self {
+    pub fn recovery_only(client: Outbound, kind: &'static str) -> Self {
         Self {
-            control: ControlLane::new(client),
+            control: client,
             kind,
             announce_initial_starts: false,
         }
@@ -71,7 +70,7 @@ impl verter_type_runtime::provider_hub::ProviderNotifier for LspNotifier {
             NotifySeverity::Error => tower_lsp_server::ls_types::MessageType::ERROR,
         };
         self.control
-            .notify::<tower_lsp_server::ls_types::notification::ShowMessage>(
+            .notify_detached::<tower_lsp_server::ls_types::notification::ShowMessage>(
                 tower_lsp_server::ls_types::ShowMessageParams { typ, message },
             );
     }
@@ -94,7 +93,7 @@ impl verter_type_runtime::provider_hub::ProviderNotifier for LspNotifier {
             return;
         };
         self.control
-            .notify::<crate::server::protocol_types::TypeProviderStarted>(
+            .notify_detached::<crate::server::protocol_types::TypeProviderStarted>(
                 crate::server::protocol_types::TypeProviderStartedParams {
                     pid,
                     kind: self.kind.to_string(),

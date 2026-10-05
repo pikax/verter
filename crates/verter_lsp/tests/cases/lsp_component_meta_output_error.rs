@@ -27,9 +27,9 @@ use verter_session::{HostConfig, VerterHost};
 
 fn build_test_server(host: Arc<VerterHost>) -> LspService<VerterLanguageServer> {
     let host_for_server = Arc::clone(&host);
-    let (service, _socket) = LspService::new(move |client| {
+    let (service, _socket) = LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            verter_lsp::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,

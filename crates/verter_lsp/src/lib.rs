@@ -6,9 +6,9 @@
 #[macro_use]
 extern crate verter_debug_assert;
 
-/// Max concurrent in-flight requests the tower-lsp-server serve loop dispatches
-/// (`Server::concurrency_level`). tower-lsp-server 0.23 defaults to 4; a handful
-/// of slow semantic handlers then occupy every slot, the framed-stdin forwarder
+/// Max concurrent in-flight requests the serve loop ([`outbound::serve`])
+/// dispatches. With a small cap (tower-lsp-server's own default is 4) a handful
+/// of slow semantic handlers occupy every slot, the stdin reader
 /// stalls, and the server stops reading client stdin entirely — so provider-free
 /// control requests (`$/verter/getStatistics`, `$/cancelRequest`) are STARVED and
 /// no client-side rescue can land. Provider lifecycle watchdogs recover dead
@@ -18,9 +18,9 @@ extern crate verter_debug_assert;
 pub const LSP_MAX_CONCURRENCY: usize = 64;
 
 /// Stack size for the thread that runs the tokio runtime and therefore polls
-/// `Server::serve`.
+/// [`outbound::serve`].
 ///
-/// `tower-lsp-server` drives every request through `buffer_unordered`, so all
+/// The serve loop drives every request through `buffer_unordered`, so all
 /// handler futures are polled INLINE on whichever thread called `block_on` —
 /// not on runtime workers. Under `#[tokio::main]` that thread is the process
 /// main thread, whose stack on Windows/MSVC is the linker default of **1 MiB**
@@ -54,7 +54,7 @@ pub const SERVE_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 /// its value, propagating a panic to the caller.
 ///
 /// This is the server's entry point: it exists so the thread that polls
-/// `Server::serve` has an explicitly sized stack instead of inheriting the
+/// [`outbound::serve`] has an explicitly sized stack instead of inheriting the
 /// platform's main-thread default.
 pub fn run_on_serve_thread<F, T>(body: F) -> T
 where

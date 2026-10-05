@@ -1336,9 +1336,9 @@ fn make_hover_test_service_with_kind(
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -2306,9 +2306,9 @@ async fn make_definition_test_server_with_config(
     let host = Arc::new(VerterHost::new(host_config, vfs_workspace));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -2322,6 +2322,7 @@ async fn make_definition_test_server_with_config(
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     if enable_semantic_analysis {
         // Definition-server fixtures also back the native
         // component/directive/slot hover contract matrix. Keep that optional
@@ -3642,9 +3643,9 @@ fn did_open_provider_sync_policy_skips_api_sync_for_tsserver_but_not_tsgo() {
 async fn editor_tsserver_constructs_store_publication_without_a_local_provider() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,
@@ -3680,9 +3681,9 @@ async fn managed_tsgo_constructs_both_direct_provider_sync_and_editor_store_publ
     let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
     let host_for_server = Arc::clone(&host);
     let provider_for_server = Arc::clone(&provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&provider_for_server)),
@@ -3713,9 +3714,9 @@ async fn managed_tsgo_constructs_both_direct_provider_sync_and_editor_store_publ
 async fn editor_tsserver_yields_only_rename_and_keeps_serving_merged_features() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,
@@ -3887,16 +3888,16 @@ fn make_claimancy_rename_test_server(
     ws: Arc<verter_workspace::FilesystemWorkspace>,
 ) -> (
     tower_lsp_server::LspService<VerterLanguageServer>,
-    tower_lsp_server::ClientSocket,
+    crate::outbound::Wire,
     Arc<MockTypeProvider>,
 ) {
     let host = Arc::new(VerterHost::new(HostConfig::default(), ws));
     let provider = Arc::new(MockTypeProvider::new());
     let host_for_server = Arc::clone(&host);
     let provider_for_server: Arc<dyn TypeProvider> = provider.clone();
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&provider_for_server)),
@@ -3912,6 +3913,7 @@ fn make_claimancy_rename_test_server(
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     (service, socket, provider)
 }
 
@@ -3935,9 +3937,9 @@ async fn multi_claimant_carrier_fails_rename_closed_never_partial() {
     let provider: Arc<dyn TypeProvider> = Arc::new(MockTypeProvider::new());
     let host_for_server = Arc::clone(&host);
     let provider_for_server = Arc::clone(&provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&provider_for_server)),
@@ -4491,9 +4493,9 @@ async fn editor_tsserver_live_publish_refreshes_durable_carrier_content() {
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,
@@ -4576,9 +4578,9 @@ async fn publish_carrier_pin_is_captured_before_the_compile_not_after() {
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,
@@ -4660,9 +4662,9 @@ async fn publish_carrier_pin_is_captured_before_the_compile_not_after() {
 async fn editor_tsserver_completion_yields_member_access_but_keeps_bare_scope() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,
@@ -4873,9 +4875,9 @@ async fn initialized_returns_before_background_configure_paths_completes() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -4889,6 +4891,7 @@ async fn initialized_returns_before_background_configure_paths_completes() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain_handle = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -6187,9 +6190,9 @@ async fn completion_holds_for_in_flight_open_vue_ts_legacy_lane() {
     let host = Arc::new(VerterHost::new(HostConfig::default(), vfs_workspace));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -6203,6 +6206,7 @@ async fn completion_holds_for_in_flight_open_vue_ts_legacy_lane() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain_handle = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -12569,9 +12573,9 @@ async fn resolve_barrel_locations_preserves_non_barrel() {
 #[tokio::test]
 async fn goto_type_definition_returns_none_without_provider() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host),
                 type_provider: None,
@@ -12585,6 +12589,7 @@ async fn goto_type_definition_returns_none_without_provider() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain_handle = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -19451,9 +19456,9 @@ defineProps<{ msg: string }>()
     let host = crate::test_utils::make_filesystem_test_host(&workspace);
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -20230,9 +20235,9 @@ async fn sync_imported_carrier_api_lightweight_opens_snapshot_ide_path_for_tsgo(
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -20758,9 +20763,9 @@ async fn sync_imported_carrier_api_lightweight_preserves_open_unowned_state() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -21010,9 +21015,9 @@ async fn ensure_current_file_synced_preserves_open_unresolved_carrier_state_when
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -21112,9 +21117,9 @@ async fn ensure_current_file_synced_reconciles_owned_open_vue_on_owner_loss() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -21830,9 +21835,9 @@ async fn completion_with_real_tsserver_returns_fixture_vfor_member_access_proper
     // synchronous construction only, so concurrent tests never share a segment.
     let (service, _socket) =
         crate::test_harness::with_isolated_store_segment(&store_segment, || {
-            tower_lsp_server::LspService::new(move |client| {
+            tower_lsp_server::LspService::new(move |_client| {
                 VerterLanguageServer::new(
-                    client,
+                    crate::outbound::Outbound::default(),
                     LspConfig {
                         host: Arc::clone(&host_for_server),
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -22016,9 +22021,9 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_immed
     // synchronous construction only, so concurrent tests never share a segment.
     let (service, _socket) =
         crate::test_harness::with_isolated_store_segment(&store_segment, || {
-            tower_lsp_server::LspService::new(move |client| {
+            tower_lsp_server::LspService::new(move |_client| {
                 VerterLanguageServer::new(
-                    client,
+                    crate::outbound::Outbound::default(),
                     LspConfig {
                         host: Arc::clone(&host_for_server),
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -22145,9 +22150,9 @@ async fn completion_with_real_tsserver_recovers_fixture_vfor_member_access_on_do
     // synchronous construction only, so concurrent tests never share a segment.
     let (service, _socket) =
         crate::test_harness::with_isolated_store_segment(&store_segment, || {
-            tower_lsp_server::LspService::new(move |client| {
+            tower_lsp_server::LspService::new(move |_client| {
                 VerterLanguageServer::new(
-                    client,
+                    crate::outbound::Outbound::default(),
                     LspConfig {
                         host: Arc::clone(&host_for_server),
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -23132,9 +23137,9 @@ async fn completion_with_real_tsserver_recovers_when_current_file_sync_was_misse
     // synchronous construction only, so concurrent tests never share a segment.
     let (service, _socket) =
         crate::test_harness::with_isolated_store_segment(&store_segment, || {
-            tower_lsp_server::LspService::new(move |client| {
+            tower_lsp_server::LspService::new(move |_client| {
                 VerterLanguageServer::new(
-                    client,
+                    crate::outbound::Outbound::default(),
                     LspConfig {
                         host: Arc::clone(&host_for_server),
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -23319,9 +23324,9 @@ async fn real_tsserver_slot_member_access_stays_typed_after_opening_child_and_pa
     // synchronous construction only, so concurrent tests never share a segment.
     let (service, _socket) =
         crate::test_harness::with_isolated_store_segment(&store_segment, || {
-            tower_lsp_server::LspService::new(move |client| {
+            tower_lsp_server::LspService::new(move |_client| {
                 VerterLanguageServer::new(
-                    client,
+                    crate::outbound::Outbound::default(),
                     LspConfig {
                         host: Arc::clone(&host_for_server),
                         type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -24058,9 +24063,9 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -24074,6 +24079,7 @@ async fn provider_projection_context_serves_both_carrier_and_self_file() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -24186,9 +24192,9 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -24202,6 +24208,7 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -24287,9 +24294,9 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -24303,6 +24310,7 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -24391,9 +24399,9 @@ async fn non_vue_carrier_auto_import_resolve_fails_closed_no_script_setup_synthe
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -24407,6 +24415,7 @@ async fn non_vue_carrier_auto_import_resolve_fails_closed_no_script_setup_synthe
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -24872,9 +24881,9 @@ async fn rune_module_queryable_before_resolver_ownership() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -24888,6 +24897,7 @@ async fn rune_module_queryable_before_resolver_ownership() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -24938,9 +24948,9 @@ async fn rune_module_own_buffer_resyncs_on_did_change() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -24954,6 +24964,7 @@ async fn rune_module_own_buffer_resyncs_on_did_change() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -25029,9 +25040,9 @@ async fn rune_module_self_file_state_closed_on_did_close() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -25045,6 +25056,7 @@ async fn rune_module_self_file_state_closed_on_did_close() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -25109,9 +25121,9 @@ async fn plain_script_close_while_depended_upon_keeps_carrier_features_answering
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -25125,6 +25137,7 @@ async fn plain_script_close_while_depended_upon_keeps_carrier_features_answering
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -25248,9 +25261,9 @@ async fn plain_script_features_answer_on_every_provider_route() {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         let host_for_server = Arc::clone(&host);
         let type_provider_for_server = Arc::clone(&type_provider);
-        let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+        let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
             VerterLanguageServer::new(
-                client,
+                crate::outbound::Outbound::default(),
                 LspConfig {
                     host: Arc::clone(&host_for_server),
                     type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -25264,6 +25277,7 @@ async fn plain_script_features_answer_on_every_provider_route() {
                 },
             )
         });
+        let socket = service.inner().outbound().wire();
         let drain = tokio::spawn(async move {
             let mut socket = socket;
             while socket.next().await.is_some() {}
@@ -25419,9 +25433,9 @@ async fn plain_script_features_answer_on_every_provider_route() {
     // competing partial answer, no diagnostics of its own). ──
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,
@@ -25435,6 +25449,7 @@ async fn plain_script_features_answer_on_every_provider_route() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -25494,9 +25509,9 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -25510,6 +25525,7 @@ async fn deleting_carrier_source_closes_its_companions_in_provider() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -25602,9 +25618,9 @@ async fn self_file_rename_and_code_actions_gated_off() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -25618,6 +25634,7 @@ async fn self_file_rename_and_code_actions_gated_off() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -27592,9 +27609,9 @@ async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_han
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -27609,6 +27626,7 @@ async fn did_close_orders_didclose_before_release_so_no_overlay_leak_at_real_han
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -27830,9 +27848,9 @@ async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -27847,6 +27865,7 @@ async fn guarded_decl_close_does_not_strand_concurrently_reopened_overlay() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -30161,9 +30180,9 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
     }
     let provider = Arc::new(MockTypeProvider::new());
     let provider_for_server = provider.clone();
-    let (mut service, mut socket) = tower_lsp_server::LspService::new(move |client| {
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::new(VerterHost::new_standalone(HostConfig::default())),
                 type_provider: Some(provider_for_server.clone()),
@@ -30179,6 +30198,7 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
             },
         )
     });
+    let mut socket = service.inner().outbound().wire();
     let response = tower_service::Service::call(
         &mut service,
         tower_lsp_server::jsonrpc::Request::build("initialize")
@@ -30190,6 +30210,7 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
     .unwrap()
     .unwrap();
     assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
     let published = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let captured = published.clone();
     let published_changed = Arc::new(tokio::sync::Notify::new());
@@ -30864,9 +30885,9 @@ async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationF
     let host = Arc::new(VerterHost::new(HostConfig::default(), Arc::clone(&ws) as _));
     let mock = Arc::new(MockTypeProvider::new());
     let provider: Arc<dyn TypeProvider> = Arc::clone(&mock) as _;
-    let (mut service, mut socket) = tower_lsp_server::LspService::new(move |client| {
+    let (mut service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host),
                 type_provider: Some(Arc::clone(&provider)),
@@ -30882,6 +30903,7 @@ async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationF
             },
         )
     });
+    let mut socket = service.inner().outbound().wire();
     let response = tower_service::Service::call(
         &mut service,
         tower_lsp_server::jsonrpc::Request::build("initialize")
@@ -30893,6 +30915,7 @@ async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationF
     .unwrap()
     .unwrap();
     assert!(response.is_ok());
+    service.inner().outbound().assume_initialized();
 
     let ready = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let sync_complete = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -32585,9 +32608,9 @@ async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host_for_server = Arc::clone(&host);
     let type_provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider_for_server)),
@@ -32601,6 +32624,7 @@ async fn stale_close_is_superseded_when_a_reaching_root_reopens_the_overlay() {
             },
         )
     });
+    let socket = service.inner().outbound().wire();
     let drain = tokio::spawn(async move {
         let mut socket = socket;
         while socket.next().await.is_some() {}
@@ -35829,9 +35853,9 @@ async fn production_definition_handler_fails_closed_when_the_provider_wedges() {
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host_for_server = Arc::clone(&host);
     let provider_for_server = Arc::clone(&type_provider);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&provider_for_server)),
@@ -35918,9 +35942,9 @@ async fn get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
     let type_provider: Arc<dyn TypeProvider> = provider.clone();
     let host_for_server = Arc::clone(&host);
     let provider_for_server = Arc::clone(&type_provider);
-    let (service, socket) = tower_lsp_server::LspService::build(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::build(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&provider_for_server)),
@@ -35950,10 +35974,8 @@ async fn get_statistics_stays_live_under_a_burst_of_wedged_definitions() {
     let (server_stdin_read, client_to_server) = tokio::io::duplex(1 << 16);
     let (server_to_client, client_stdout_read) = tokio::io::duplex(1 << 16);
     tokio::spawn(async move {
-        tower_lsp_server::Server::new(server_stdin_read, server_to_client, socket)
-            .concurrency_level(crate::LSP_MAX_CONCURRENCY)
-            .serve(service)
-            .await;
+        let outbound = service.inner().outbound().clone();
+        crate::outbound::serve(server_stdin_read, server_to_client, service, outbound).await;
     });
 
     let writer = Arc::new(tokio::sync::Mutex::new(client_to_server));
@@ -37050,9 +37072,9 @@ fn wedged_provider_server(
 
     let type_provider: Arc<dyn TypeProvider> = provider;
     let host_for_server = Arc::clone(&host);
-    let (service, _socket) = tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: Some(Arc::clone(&type_provider)),
@@ -37905,7 +37927,7 @@ async fn css_class_rename_still_serves_without_any_provider_locations() {
 // ---------------------------------------------------------------------------
 // https://github.com/pikax/verter/issues/96 — the PRODUCTION ingress.
 //
-// `tower-lsp-server` does not spawn a task per notification. `Server::serve`
+// The serve loop does not spawn a task per notification. `outbound::serve`
 // pushes handler futures into an mpsc channel and polls them through
 // `buffer_unordered` INLINE on the serve thread (documented on
 // `SERVE_THREAD_STACK_BYTES` in `lib.rs`). `BufferUnordered` fills its queue
@@ -37951,25 +37973,22 @@ fn did_change_burst_frames(uri: &Uri, first_version: i32, count: usize) -> (Vec<
     (bytes, last)
 }
 
-/// Drive an LSP session over duplex pipes through a REAL `Server::serve` loop.
+/// Drive an LSP session over duplex pipes through the REAL serve loop.
 ///
 /// Returns the client-side write half (frames written here reach the server the
-/// way a client's stdin does, through `FramedRead` → the serve loop's mpsc
+/// way a client's stdin does, through the frame reader → the serve loop's mpsc
 /// channel → `buffer_unordered`) once the session is initialized, so a caller
 /// can measure from a settled baseline.
 async fn serve_over_duplex_initialized(
     service: tower_lsp_server::LspService<VerterLanguageServer>,
-    socket: tower_lsp_server::ClientSocket,
 ) -> (tokio::io::DuplexStream, tokio::task::JoinHandle<()>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let (server_stdin, mut client_to_server) = tokio::io::duplex(1 << 20);
     let (server_stdout, mut client_from_server) = tokio::io::duplex(1 << 20);
     let serve = tokio::spawn(async move {
-        tower_lsp_server::Server::new(server_stdin, server_stdout, socket)
-            .concurrency_level(crate::LSP_MAX_CONCURRENCY)
-            .serve(service)
-            .await;
+        let outbound = service.inner().outbound().clone();
+        crate::outbound::serve(server_stdin, server_stdout, service, outbound).await;
     });
 
     let body = serde_json::to_string(&serde_json::json!({
@@ -38033,14 +38052,11 @@ fn cold_compile_runs(host: &Arc<VerterHost>) -> u64 {
 /// import-dependency publication has nothing to walk.
 fn ingress_measurement_server(
     host: &Arc<VerterHost>,
-) -> (
-    tower_lsp_server::LspService<VerterLanguageServer>,
-    tower_lsp_server::ClientSocket,
-) {
+) -> tower_lsp_server::LspService<VerterLanguageServer> {
     let host_for_server = Arc::clone(host);
-    tower_lsp_server::LspService::new(move |client| {
+    let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
         VerterLanguageServer::new(
-            client,
+            crate::outbound::Outbound::default(),
             LspConfig {
                 host: Arc::clone(&host_for_server),
                 type_provider: None,
@@ -38055,14 +38071,15 @@ fn ingress_measurement_server(
                 suppress_imported_carrier_prewarm: true,
             },
         )
-    })
+    });
+    service
 }
 
 /// A burst of `didChange` notifications arriving on the wire must not cost one
 /// IDE compile per notification.
 ///
 /// This is the discriminating test for https://github.com/pikax/verter/issues/96.
-/// It drives the real `LspService` + `Server::serve` ingress, stages nothing by
+/// It drives the real `LspService` + serve-loop ingress, stages nothing by
 /// hand, and counts COLD COMPILE RUNS (a warm `ensure_compile_artifacts` hit
 /// does not move the rail, and a FAILED compile does) rather than provider
 /// updates.
@@ -38096,7 +38113,7 @@ async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notificat
     let source = "<script setup lang=\"ts\">\nconst count = 1\n</script>\n\
                   <template><div>{{ count }}</div></template>\n";
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let (service, socket) = ingress_measurement_server(&host);
+    let service = ingress_measurement_server(&host);
     let uri = open_test_vue(service.inner(), "/workspace/src/App.vue", source);
     let canonical_id = crate::documents::uri_to_canonical_id(&uri);
     let profile = service.inner().documents.tsx_profile.read().clone();
@@ -38107,7 +38124,7 @@ async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notificat
     );
     let coordinator = service.inner().sync_coordinator.clone();
 
-    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service).await;
 
     // Pin the document non-quiescent for the whole burst. This is what makes
     // the in-flight measurement a fact rather than a race.
@@ -38242,7 +38259,7 @@ fn invalid_did_change_burst_frames(
 async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notification() {
     const BURST: usize = 24;
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let (service, socket) = ingress_measurement_server(&host);
+    let service = ingress_measurement_server(&host);
 
     // Open in a state whose IDE projection cannot be built, so every commit
     // below takes the projection-less path.
@@ -38259,7 +38276,7 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
     );
     let coordinator = service.inner().sync_coordinator.clone();
 
-    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service).await;
     // Same deterministic pin as the sibling test: the coordinator cannot
     // dispatch for a canonical id with a change in flight, so the in-flight
     // count below is attributable to the notification path alone.
@@ -38364,7 +38381,7 @@ async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notif
 ///
 /// The invariant this pins is the general one — anything that clears
 /// `latest_diagnostics` must arm the recompute that refills it — checked at the
-/// shape that violated it. Driven through the real `Server::serve` ingress so it
+/// shape that violated it. Driven through the real serve-loop ingress so it
 /// covers `handle_did_change`'s wiring, not a hand-staged signal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_style_only_edit_does_not_erase_the_files_diagnostics() {
@@ -38382,7 +38399,7 @@ async fn a_style_only_edit_does_not_erase_the_files_diagnostics() {
         )
     };
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
-    let (service, socket) = ingress_measurement_server(&host);
+    let service = ingress_measurement_server(&host);
     let uri = open_test_vue(
         service.inner(),
         "/workspace/src/Styled.vue",
@@ -38403,7 +38420,7 @@ async fn a_style_only_edit_does_not_erase_the_files_diagnostics() {
     let cached_verter_diags = Arc::clone(&service.inner().cached_verter_diags);
     let coordinator = service.inner().sync_coordinator.clone();
 
-    let (mut client_to_server, serve) = serve_over_duplex_initialized(service, socket).await;
+    let (mut client_to_server, serve) = serve_over_duplex_initialized(service).await;
     let styled = revision("blue");
     {
         use tokio::io::AsyncWriteExt;
@@ -38600,14 +38617,7 @@ async fn an_incomplete_publication_is_re_armed_when_the_drain_settles_the_carrie
         .expect("an open document admits a publication");
     server
         .documents
-        .publish_diagnostics(
-            &server.client,
-            &healthy_uri,
-            &publication,
-            Vec::new(),
-            false,
-            None,
-        )
+        .publish_diagnostics(&healthy_uri, &publication, Vec::new(), false, None)
         .await;
     assert!(
         !server.documents.diagnostics_ready(&healthy_uri),

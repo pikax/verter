@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use tokio::sync::OnceCell;
-use tower_lsp_server::{LspService, Server};
+use tower_lsp_server::LspService;
 use tracing_subscriber::EnvFilter;
+use verter_lsp::outbound::Outbound;
 use verter_lsp::server::VerterLanguageServer;
 use verter_lsp::tsgo::composite::{SharedRendezvous, SharedTsgoOverlay, TsgoCompositeProvider};
 use verter_lsp::tsgo::resilient as tsgo_resilient;
@@ -14,7 +14,7 @@ use verter_session::{HostConfig, VerterHost};
 
 /// Start the server on a thread with an explicitly sized stack.
 ///
-/// `#[tokio::main]` would run the runtime — and therefore `Server::serve`, and
+/// `#[tokio::main]` would run the runtime — and therefore `outbound::serve`, and
 /// therefore every request handler `buffer_unordered` polls inline — on the
 /// process main thread, whose stack is whatever the platform's linker chose
 /// (1 MiB on Windows/MSVC). `verter_lsp::SERVE_THREAD_STACK_BYTES` documents
@@ -119,13 +119,13 @@ async fn serve() {
         None
     };
 
-    // Deferred client cell — populated inside LspService::build, used by
-    // ProviderHub's crash monitor to send user notifications.
-    let client_cell: Arc<OnceCell<tower_lsp_server::Client>> = Arc::new(OnceCell::new());
+    // The bounded outbound transport: the server, the providers' crash monitors
+    // and every other producer send through it, and `serve` is its one writer.
+    let outbound = Outbound::default();
 
     // Provider selection: identity-based serving order (editor tsgo → editor
     // tsserver plugin → managed tsgo), with explicit operator overrides.
-    let selection = create_type_provider(&args, &client_cell, &host).await;
+    let selection = create_type_provider(&args, &outbound, &host).await;
 
     let config = LspConfig {
         host,
@@ -140,11 +140,11 @@ async fn serve() {
         suppress_imported_carrier_prewarm: false,
     };
 
-    let client_cell_for_build = Arc::clone(&client_cell);
-    let (service, socket) = LspService::build(|client| {
-        // Populate the deferred client cell so the crash monitor can send notifications.
-        let _ = client_cell_for_build.set(client.clone());
-        VerterLanguageServer::new(client, config)
+    let server_outbound = outbound.clone();
+    let (service, _socket) = LspService::build(|_client| {
+        // The server sends only through the outbound transport, never through
+        // tower's client.
+        VerterLanguageServer::new(server_outbound, config)
     })
     .custom_method(
         "$/onDidChangeTsOrJsFile",
@@ -211,10 +211,7 @@ async fn serve() {
     )
     .finish();
 
-    Server::new(stdin, stdout, socket)
-        .concurrency_level(verter_lsp::LSP_MAX_CONCURRENCY)
-        .serve(service)
-        .await;
+    verter_lsp::outbound::serve(stdin, stdout, service, outbound).await;
 }
 
 /// Host policy for the editor-critical projection lane.
@@ -478,7 +475,7 @@ impl TypeProviderSelection {
 /// that remains cold until the first connected demand.
 async fn create_type_provider(
     args: &CliArgs,
-    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    outbound: &Outbound,
     host: &Arc<VerterHost>,
 ) -> TypeProviderSelection {
     tracing::info!(
@@ -522,14 +519,13 @@ async fn create_type_provider(
                 // No editor rendezvous: the managed fallback is all that is left,
                 // so its engine is chosen by capability and a route that cannot
                 // obtain one reports None rather than an armed empty shell.
-                return managed_fallback_topology(args, client_cell, host, &ws_canonical).await;
+                return managed_fallback_topology(args, outbound, host, &ws_canonical).await;
             }
             // Editor-owned tsgo is authoritative. The managed provider is represented
             // by a stateful lazy fallback: lifecycle/config updates are cached without
             // spawning, and only an observed shared attach/sync/decision failure on a
             // bound query activates it.
-            let provider =
-                wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
+            let provider = wrap_shared_first_admission(args, host, &ws_canonical, outbound.clone());
             TypeProviderSelection {
                 provider: Some(provider),
                 kind: TypeProviderKind::Tsgo,
@@ -541,7 +537,7 @@ async fn create_type_provider(
         "tsgo" => {
             // Explicit managed-tsgo operator override. This does not arm the editor
             // rendezvous and therefore starts the configured managed provider now.
-            match try_spawn_tsgo(&ws_canonical, client_cell).await {
+            match try_spawn_tsgo(&ws_canonical, outbound).await {
                 Ok(owned) => {
                     let tp = wrap_owned_admission(owned, host);
                     TypeProviderSelection {
@@ -565,7 +561,7 @@ async fn create_type_provider(
                         args.tsdk.as_deref(),
                         args.plugin_path.as_deref(),
                         &ws_canonical,
-                        client_cell,
+                        outbound,
                     ) {
                         Ok((tp, advisory)) => TypeProviderSelection {
                             provider: Some(tp),
@@ -603,7 +599,7 @@ async fn create_type_provider(
                 "--type-provider=editor-tsserver: no attested editor tsserver plugin; \
                  serving from the managed tier"
             );
-            managed_fallback_topology(args, client_cell, host, &ws_canonical).await
+            managed_fallback_topology(args, outbound, host, &ws_canonical).await
         }
         "tsserver" => {
             match build_tsserver_router(
@@ -611,7 +607,7 @@ async fn create_type_provider(
                 args.tsdk.as_deref(),
                 args.plugin_path.as_deref(),
                 &ws_canonical,
-                client_cell,
+                outbound,
             ) {
                 Ok((tp, advisory)) => TypeProviderSelection {
                     provider: Some(tp),
@@ -628,7 +624,7 @@ async fn create_type_provider(
                         "--type-provider=tsserver: workspace TypeScript {major}.x is the \
                          native (TSGO) family; serving via managed TSGO"
                     );
-                    match try_spawn_tsgo(&ws_canonical, client_cell).await {
+                    match try_spawn_tsgo(&ws_canonical, outbound).await {
                         Ok(owned) => {
                             let tp = wrap_owned_admission(owned, host);
                             TypeProviderSelection {
@@ -662,7 +658,7 @@ async fn create_type_provider(
             // responds to $/verter/tsQuery requests over the existing LSP pipe.
             tracing::info!("type provider: extension-hosted (Experiment E)");
             let provider = verter_lsp::extension_provider::ExtensionTypeProvider::new(
-                Arc::clone(client_cell),
+                outbound.clone(),
                 &ws_canonical,
             );
             TypeProviderSelection {
@@ -680,7 +676,7 @@ async fn create_type_provider(
             // editor route cannot serve it.
             if args.shared_rendezvous().is_some() {
                 let provider =
-                    wrap_shared_first_admission(args, host, &ws_canonical, Arc::clone(client_cell));
+                    wrap_shared_first_admission(args, host, &ws_canonical, outbound.clone());
                 return TypeProviderSelection {
                     provider: Some(provider),
                     kind: TypeProviderKind::Tsgo,
@@ -692,7 +688,7 @@ async fn create_type_provider(
 
             // The editor route is unavailable. Tier 2 admits tsgo OR tsserver,
             // and a workspace that can supply neither gets an honest `None`.
-            managed_fallback_topology(args, client_cell, host, &ws_canonical).await
+            managed_fallback_topology(args, outbound, host, &ws_canonical).await
         }
     }
 }
@@ -946,15 +942,14 @@ fn probe_managed_engine(workspace_root: &str, tsdk: Option<&str>) -> ManagedEngi
 /// front of a Node tsserver, and never a provider with no engine behind it.
 async fn managed_fallback_topology(
     args: &CliArgs,
-    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    outbound: &Outbound,
     host: &Arc<VerterHost>,
     ws_canonical: &str,
 ) -> TypeProviderSelection {
     match probe_managed_engine(ws_canonical, args.tsdk.as_deref()) {
         ManagedEngineChoice::Tsgo { detail } => {
             tracing::info!("managed fallback: {detail}");
-            let provider =
-                wrap_shared_first_admission(args, host, ws_canonical, Arc::clone(client_cell));
+            let provider = wrap_shared_first_admission(args, host, ws_canonical, outbound.clone());
             TypeProviderSelection {
                 provider: Some(provider),
                 kind: TypeProviderKind::Tsgo,
@@ -970,7 +965,7 @@ async fn managed_fallback_topology(
                 args.tsdk.as_deref(),
                 args.plugin_path.as_deref(),
                 ws_canonical,
-                client_cell,
+                outbound,
             ) {
                 Ok((tp, advisory)) => TypeProviderSelection {
                     provider: Some(tp),
@@ -1041,14 +1036,14 @@ fn editor_tsserver_topology(
 /// [hcp]: verter_workspace::config::has_configured_ts_project_anywhere
 async fn try_spawn_tsgo(
     workspace_root: &str,
-    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    outbound: &Outbound,
 ) -> Result<
     Arc<verter_type_runtime::provider_hub::ProviderHub<verter_lsp::tsgo::ipc::TsgoOwnedProvider>>,
     String,
 > {
     try_spawn_tsgo_with_request(
         workspace_root,
-        client_cell,
+        outbound,
         None,
         tsgo_resilient::OwnedStartAnnouncements::All,
     )
@@ -1080,7 +1075,7 @@ async fn try_spawn_tsgo(
 /// [fe]: verter_tsgo_api::toolchain::discovery::ResolutionRequest::for_environment
 async fn try_spawn_tsgo_with_request(
     workspace_root: &str,
-    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    outbound: &Outbound,
     request: Option<verter_tsgo_api::toolchain::discovery::ResolutionRequest>,
     announcements: tsgo_resilient::OwnedStartAnnouncements,
 ) -> Result<
@@ -1142,7 +1137,7 @@ async fn try_spawn_tsgo_with_request(
     let owned = tsgo_resilient::establish_owned(
         tsgo_bin.clone(),
         root_uri,
-        Arc::clone(client_cell),
+        outbound.clone(),
         3,
         announcements,
     )
@@ -1207,7 +1202,7 @@ fn wrap_shared_first_admission(
     args: &CliArgs,
     host: &Arc<VerterHost>,
     workspace_root: &str,
-    client_cell: Arc<OnceCell<tower_lsp_server::Client>>,
+    outbound: Outbound,
 ) -> Arc<dyn TypeProvider> {
     let workspace_root_owned = workspace_root.to_string();
     let tsdk = args.tsdk.clone();
@@ -1220,11 +1215,10 @@ fn wrap_shared_first_admission(
         let tsdk = tsdk.clone();
         let plugin_path = plugin_path.clone();
         let host = Arc::clone(&host_for_fallback);
-        let client_cell = Arc::clone(&client_cell);
+        let outbound = outbound.clone();
         async move {
             let spawned =
-                try_spawn_tsgo_with_request(&workspace_root, &client_cell, None, announcements)
-                    .await;
+                try_spawn_tsgo_with_request(&workspace_root, &outbound, None, announcements).await;
             match spawned {
                 Ok(provider) => Ok(provider as Arc<dyn TypeProvider>),
                 Err(tsgo_reason) => {
@@ -1237,7 +1231,7 @@ fn wrap_shared_first_admission(
                         tsdk.as_deref(),
                         plugin_path.as_deref(),
                         &workspace_root,
-                        &client_cell,
+                        &outbound,
                     )
                     .map_err(|error| {
                         verter_lsp::type_provider::protocol::TypeProviderError::new(format!(
@@ -1245,7 +1239,7 @@ fn wrap_shared_first_admission(
                             tsserver_error_message(&error)
                         ))
                     })?;
-                    announce_demand_time_tsserver(&client_cell, &provider, &tsgo_reason, advisory)
+                    announce_demand_time_tsserver(&outbound, &provider, &tsgo_reason, advisory)
                         .await;
                     Ok(provider)
                 }
@@ -1266,14 +1260,12 @@ fn wrap_shared_first_admission(
 /// provider-start notification (the extension tracks the child PID for orphan
 /// cleanup) and shows the serving-tier advisory, if the install carries one.
 async fn announce_demand_time_tsserver(
-    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    outbound: &Outbound,
     provider: &Arc<dyn TypeProvider>,
     tsgo_reason: &str,
     advisory: Option<String>,
 ) {
-    let Some(client) = client_cell.get() else {
-        return;
-    };
+    let client = outbound;
     use verter_lsp::server::{
         TypeProviderStarted, TypeProviderStartedParams, TypeProviderStatus,
         TypeProviderStatusParams,
@@ -1390,7 +1382,7 @@ fn build_tsserver_router(
     tsdk: Option<&str>,
     plugin_path: Option<&str>,
     workspace_root: &str,
-    client_cell: &Arc<OnceCell<tower_lsp_server::Client>>,
+    outbound: &Outbound,
 ) -> Result<(Arc<dyn TypeProvider>, Option<String>), TsserverSpawnError> {
     let probe = project_router::probe_workspace_tsserver(workspace_root, tsdk);
     let advisory = tsserver_route_decision(workspace_root, &probe)?;
@@ -1399,7 +1391,7 @@ fn build_tsserver_router(
             Arc::clone(host),
             tsdk.map(str::to_string),
             plugin_path.map(str::to_string),
-            Arc::clone(client_cell),
+            outbound.clone(),
         )
         .map_err(|error| TsserverSpawnError::Unavailable(error.to_string()))?,
     );

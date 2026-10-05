@@ -82,7 +82,7 @@ async fn batch_router_fixture_with_generated_membership(
         tsdk: None,
         plugin_path: None,
         node_path: "unused".to_string(),
-        client: Arc::new(OnceCell::new()),
+        client: crate::outbound::Outbound::default(),
         witness_backend: TsserverEngineBackend::with_default_host_version(),
         engine_specs: DashMap::new(),
         providers: DashMap::new(),
