@@ -708,7 +708,6 @@
         "external": ["rustc_hash", "smallvec", "tracing"],
         "crateInternal": [
           "cache_runtime",
-          "decl_body_memo",
           "flow_return_audit",
           "graph_walk",
           "project_semantic_dispatch",

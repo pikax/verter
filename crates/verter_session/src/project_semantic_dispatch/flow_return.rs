@@ -561,7 +561,7 @@ struct EvaluatedFlowRoot {
 /// [`ProjectSemanticDispatch::flow_slice_demand_site`] and consumed by both
 /// the demand preparation and the content evaluation.
 pub(super) struct FlowSliceDemandSite {
-    source_demand: crate::decl_body_memo::IndexedExpressionDemand,
+    source_demand: std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>,
     /// The served indexed state of the function's own file (pinned).
     indexed: Arc<crate::resolver_core::request_inputs::IndexedInputRecord>,
     /// The function's own file roots.

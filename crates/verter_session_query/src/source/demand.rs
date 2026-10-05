@@ -1,5 +1,7 @@
 //! Outcome of a per-symbol body demand: a completed run, or a broken lease that
 //! lowered nothing.
+use crate::source::indexed_call::IndexedFlowCallExpression;
+use verter_type_expr::TypeExpr;
 
 use std::sync::Arc;
 
@@ -43,4 +45,55 @@ impl<D> DemandOutcome<D> {
             }
         }
     }
+}
+
+/// The expression-source capability of one exact observed source: function
+/// program structure, indexed expression IR and flow-slice content, each
+/// demanded lazily from the source's retained parse. Selecting the
+/// capability performs no parsing or lowering.
+pub trait ExpressionSourceDemand: Send + Sync {
+    fn function_program_index(&self) -> Arc<crate::function_program::FunctionProgramIndex>;
+
+    fn indexed_program_expression_ir(
+        &self,
+        record: &crate::function_program::ProgramExpressionRecord,
+    ) -> Option<Arc<verter_type_expr::IndexedValueExpression>>;
+
+    fn indexed_call_expression_over_frame_at(
+        &self,
+        span: verter_span::Span,
+        frame_lowered: Arc<[bool]>,
+    ) -> Option<Arc<IndexedFlowCallExpression>>;
+
+    fn function_type_param_clause(
+        &self,
+        entry: &crate::function_program::FunctionProgramEntry,
+    ) -> Option<Vec<crate::flow::slice::SliceTypeParam>>;
+
+    fn flow_slice_content(
+        &self,
+        entry: &crate::function_program::FunctionProgramEntry,
+        selection: crate::flow::slice::FlowSliceSelection,
+        bound: &crate::flow::bundle::BoundFlowGraph,
+        policy: crate::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<crate::flow::slice::SliceContent>>;
+
+    fn flow_slice_content_with_context(
+        &self,
+        entry: &crate::function_program::FunctionProgramEntry,
+        selection: Option<crate::flow::slice::FlowSliceSelection>,
+        bound: &crate::flow::bundle::BoundFlowGraph,
+        context: Option<Arc<crate::flow::slice::NestedFlowContext>>,
+        policy: crate::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<crate::flow::slice::SliceContent>>;
+
+    fn flow_capture_authorities(
+        &self,
+        locators: &[crate::flow::slice::SliceCaptureAuthorityLocator],
+    ) -> Option<Vec<Option<Option<crate::flow::slice::SliceCaptureAuthority>>>>;
+
+    fn transient_macro_type_argument(
+        &self,
+        macro_span: verter_span::Span,
+    ) -> DemandOutcome<TypeExpr>;
 }

@@ -1460,7 +1460,7 @@ fn macro_hot_product(
         }
     }
     match build_macro_hot_ref(
-        source_demand.as_ref(),
+        source_demand.as_deref(),
         graph,
         owner_canonical,
         &indexed,
@@ -1506,7 +1506,7 @@ enum MacroHotRefOutcome {
 /// [`build_script_setup_seed_frames`] DIRECTLY — both are module-private, so
 /// only this module's own producer paths can reach them.
 fn build_macro_hot_ref(
-    source_demand: Option<&crate::decl_body_memo::IndexedExpressionDemand>,
+    source_demand: Option<&dyn verter_session_query::source::demand::ExpressionSourceDemand>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     owner_canonical: &str,
     indexed: &crate::resolver_core::request_inputs::IndexedInputRecord,

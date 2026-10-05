@@ -587,7 +587,7 @@ pub trait OwnedLowering {
         canonical: &str,
     ) -> Option<(
         IndexedInputServe,
-        Option<crate::decl_body_memo::IndexedExpressionDemand>,
+        Option<std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>>,
     )>;
 
     fn indexed_expression_source(
@@ -595,7 +595,7 @@ pub trait OwnedLowering {
         canonical: &str,
     ) -> Option<(
         IndexedInputServe,
-        crate::decl_body_memo::IndexedExpressionDemand,
+        std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>,
     )>;
 
     fn recover_member_spans(

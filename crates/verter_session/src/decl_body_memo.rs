@@ -26,6 +26,7 @@
 //! performed — path-independent population of only what the compute
 //! produced).
 use verter_session_query::source::demand::DemandOutcome;
+use verter_session_query::source::demand::ExpressionSourceDemand;
 use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 
 use std::sync::atomic::Ordering;
@@ -395,272 +396,6 @@ pub struct IndexedExpressionDemand {
     #[cfg(test)]
     lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
 }
-impl IndexedExpressionDemand {
-    pub(crate) fn function_program_index(
-        &self,
-    ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
-        self.index.function_program_index()
-    }
-    pub fn indexed_program_expression_ir(
-        &self,
-        record: &verter_session_query::function_program::ProgramExpressionRecord,
-    ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
-        let service = self.snapshot.service.as_ref()?;
-        self.snapshot.ensure_lease();
-        let record = record.clone();
-        let node = service.run_leased(&self.snapshot.key, move |program| {
-            program.and_then(|parsed| {
-                verter_semantic::analysis::function_program::build_indexed_program_expression_ir(
-                    parsed.borrow_dependent(),
-                    parsed.source_str(),
-                    &record,
-                )
-            })
-        })??;
-        Some(Arc::new(node))
-    }
-
-    pub(crate) fn indexed_call_expression_over_frame_at(
-        &self,
-        span: verter_span::Span,
-        frame_lowered: Arc<[bool]>,
-    ) -> Option<Arc<IndexedFlowCallExpression>> {
-        use verter_semantic::analysis::function_program::IndexedCallSite;
-        use verter_semantic::analysis::type_eval_build::{
-            lower_indexed_call_expression_with_read_roots,
-            lower_indexed_new_expression_with_read_roots,
-            lower_indexed_tagged_template_expression_with_read_roots,
-        };
-        let service = self.snapshot.service.as_ref()?;
-        self.snapshot.ensure_lease();
-        let _index = self.function_program_index();
-        let node = service.run_leased(&self.snapshot.key, move |program| {
-            program.and_then(|parsed| {
-                let source = parsed.source_str();
-                parsed
-                    .with_indexed_call_site(span, |site| match site {
-                        IndexedCallSite::Call(call) => {
-                            observed_indexed_call(call.arguments.len(), |observe| {
-                                lower_indexed_call_expression_with_read_roots(
-                                    call,
-                                    source,
-                                    observe,
-                                    &frame_lowered,
-                                )
-                            })
-                        }
-                        IndexedCallSite::Construct(call) => {
-                            observed_indexed_call(call.arguments.len(), |observe| {
-                                lower_indexed_new_expression_with_read_roots(
-                                    call,
-                                    source,
-                                    observe,
-                                    &frame_lowered,
-                                )
-                            })
-                        }
-                        // The template strings are the first argument.
-                        IndexedCallSite::TaggedTemplate(tagged) => {
-                            observed_indexed_call(tagged.quasi.expressions.len() + 1, |observe| {
-                                lower_indexed_tagged_template_expression_with_read_roots(
-                                    tagged, source, observe,
-                                )
-                            })
-                        }
-                    })
-                    .flatten()
-            })
-        })??;
-        Some(Arc::new(node))
-    }
-
-    pub(crate) fn function_type_param_clause(
-        &self,
-        entry: &verter_session_query::function_program::FunctionProgramEntry,
-    ) -> Option<Vec<verter_session_query::flow::slice::SliceTypeParam>> {
-        let service = self.snapshot.service.as_ref()?;
-        // Pin the retained snapshot for this memo's lifetime; the
-        // LEASE-ONLY run below reuses it.
-        self.snapshot.ensure_lease();
-        let _index = self.function_program_index();
-        let entry = entry.clone();
-        let Some(clause) = service.run_leased(&self.snapshot.key, move |program| {
-            program.and_then(|p| {
-                p.with_indexed_function(&entry, |resolved, _entry| {
-                    crate::flow_slice_content::build_function_type_param_clause(
-                        resolved,
-                        p.source_str(),
-                    )
-                })
-            })
-        }) else {
-            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
-            // retry under a live lease recovers.
-            tracing::error!(
-                canonical = %self.snapshot.key.canonical,
-                "decl-body lease pin broken: function_type_param_clause's lease-only run missed \
-                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
-            );
-            return None;
-        };
-        clause
-    }
-
-    pub(crate) fn flow_slice_content(
-        &self,
-        entry: &verter_session_query::function_program::FunctionProgramEntry,
-        selection: verter_session_query::flow::slice::FlowSliceSelection,
-        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
-        policy: verter_session_query::flow::policy::FlowReturnPolicy,
-    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
-        self.flow_slice_content_with_context(entry, Some(selection), bound, None, policy)
-    }
-
-    pub(crate) fn flow_slice_content_with_context(
-        &self,
-        entry: &verter_session_query::function_program::FunctionProgramEntry,
-        selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
-        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
-        context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
-        policy: verter_session_query::flow::policy::FlowReturnPolicy,
-    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
-        if bound.key().function != entry.key
-            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
-            || context
-                .as_ref()
-                .is_some_and(|context| !context.matches_snapshot(&self.snapshot.key))
-        {
-            return None;
-        }
-        let skeleton = Arc::clone(&bound.bundle().skeleton);
-        let bindings = Arc::clone(&bound.bundle().bindings);
-        let service = self.snapshot.service.as_ref()?;
-        // Pin the retained snapshot for this memo's lifetime; the
-        // LEASE-ONLY run below reuses it.
-        self.snapshot.ensure_lease();
-        let entry = entry.clone();
-        let index = self.function_program_index();
-        // A carrier's script block (`.vue` / `.svelte`) compiles to a
-        // module by construction; a plain script file proves module scope
-        // only through its own top-level syntax.
-        let carrier_module = self.carrier_module;
-        let snapshot = self.snapshot.key.clone();
-        #[cfg(test)]
-        let work = Arc::clone(&self.capture_lookup_work);
-        #[cfg(test)]
-        let lowering_work = Arc::clone(&self.lowering_work);
-        let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
-            #[cfg(test)]
-            let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
-            #[cfg(test)]
-            let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
-            program.and_then(|p| {
-                p.with_indexed_function(&entry, |resolved, entry| {
-                    crate::flow_slice_content::build_flow_slice_content(
-                        crate::flow_slice_content::FlowSliceSource {
-                            program: p.borrow_dependent(),
-                            walks: p.walk_stack(),
-                            resolved,
-                        },
-                        p.source_str(),
-                        &index,
-                        entry,
-                        selection.as_ref(),
-                        &skeleton,
-                        Arc::clone(&bindings),
-                        carrier_module,
-                        &snapshot,
-                        context.as_deref(),
-                        policy,
-                    )
-                })
-                .flatten()
-            })
-        }) else {
-            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
-            // retry under a live lease recovers.
-            tracing::error!(
-                canonical = %self.snapshot.key.canonical,
-                "decl-body lease pin broken: flow_slice_content's lease-only run missed \
-                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
-            );
-            return None;
-        };
-        node.map(Arc::new)
-    }
-
-    pub(crate) fn flow_capture_authorities(
-        &self,
-        locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
-    ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
-        let service = self.snapshot.service.as_ref()?;
-        let index = self.function_program_index();
-        let snapshot = self.snapshot.key.clone();
-        let locators = locators.to_vec();
-        #[cfg(test)]
-        let work = Arc::clone(&self.capture_lookup_work);
-        self.snapshot.ensure_lease();
-        service.run_leased(&self.snapshot.key, move |program| {
-            #[cfg(test)]
-            let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
-            let program = program?;
-            Some(
-                locators
-                    .iter()
-                    .map(|locator| {
-                        if !locator.matches_snapshot(&snapshot) {
-                            return None;
-                        }
-                        let entry = index.get(&locator.declaration.defining_function)?;
-                        crate::flow_slice_content::build_flow_capture_authority(
-                            program.borrow_dependent(),
-                            program.source_str(),
-                            entry.entry(),
-                            locator,
-                        )
-                    })
-                    .collect(),
-            )
-        })?
-    }
-
-    pub(crate) fn transient_macro_type_argument(
-        &self,
-        macro_span: verter_span::Span,
-    ) -> DemandOutcome<TypeExpr> {
-        let Some(service) = self.snapshot.service.as_ref() else {
-            return DemandOutcome::Ready(None);
-        };
-        self.snapshot.ensure_lease();
-        let outcome = service.run_leased(&self.snapshot.key, move |program| {
-            let program = program?;
-            let source = program.source_str();
-            let program = program.borrow_dependent();
-            Some(
-                verter_semantic::analysis::lower_macro_type_argument_at_span(
-                    program, source, macro_span,
-                ),
-            )
-        });
-        match outcome {
-            // Service-level lease miss OR a program-absent re-borrow: both are
-            // the transient broken-pin class — fail closed to ReturnOnly.
-            None | Some(None) => {
-                tracing::error!(
-                    canonical = %self.snapshot.key.canonical,
-                    "decl-body lease pin broken: transient macro type-argument re-borrow \
-                     missed the retained snapshot; failing closed to ReturnOnly"
-                );
-                DemandOutcome::LeaseMiss
-            }
-            // A genuine typed absence: no macro-shaped call at the span / no
-            // authored type argument.
-            Some(Some(None)) => DemandOutcome::Ready(None),
-            Some(Some(Some(expr))) => DemandOutcome::Ready(Some(Arc::new(expr))),
-        }
-    }
-}
-
 /// See module docs.
 pub struct DeclBodyMemo {
     #[cfg(test)]
@@ -3594,4 +3329,271 @@ pub(crate) fn fold_flow_body_env_identity(
         buf.extend_from_slice(format!("{source_type:?}").as_bytes());
         crate::hash::hash_16(&buf)
     })
+}
+
+impl ExpressionSourceDemand for IndexedExpressionDemand {
+    fn function_program_index(
+        &self,
+    ) -> Arc<verter_session_query::function_program::FunctionProgramIndex> {
+        self.index.function_program_index()
+    }
+
+    fn indexed_program_expression_ir(
+        &self,
+        record: &verter_session_query::function_program::ProgramExpressionRecord,
+    ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
+        let service = self.snapshot.service.as_ref()?;
+        self.snapshot.ensure_lease();
+        let record = record.clone();
+        let node = service.run_leased(&self.snapshot.key, move |program| {
+            program.and_then(|parsed| {
+                verter_semantic::analysis::function_program::build_indexed_program_expression_ir(
+                    parsed.borrow_dependent(),
+                    parsed.source_str(),
+                    &record,
+                )
+            })
+        })??;
+        Some(Arc::new(node))
+    }
+
+    fn indexed_call_expression_over_frame_at(
+        &self,
+        span: verter_span::Span,
+        frame_lowered: Arc<[bool]>,
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
+        use verter_semantic::analysis::function_program::IndexedCallSite;
+        use verter_semantic::analysis::type_eval_build::{
+            lower_indexed_call_expression_with_read_roots,
+            lower_indexed_new_expression_with_read_roots,
+            lower_indexed_tagged_template_expression_with_read_roots,
+        };
+        let service = self.snapshot.service.as_ref()?;
+        self.snapshot.ensure_lease();
+        let _index = self.function_program_index();
+        let node = service.run_leased(&self.snapshot.key, move |program| {
+            program.and_then(|parsed| {
+                let source = parsed.source_str();
+                parsed
+                    .with_indexed_call_site(span, |site| match site {
+                        IndexedCallSite::Call(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_call_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
+                            })
+                        }
+                        IndexedCallSite::Construct(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_new_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
+                            })
+                        }
+                        // The template strings are the first argument.
+                        IndexedCallSite::TaggedTemplate(tagged) => {
+                            observed_indexed_call(tagged.quasi.expressions.len() + 1, |observe| {
+                                lower_indexed_tagged_template_expression_with_read_roots(
+                                    tagged, source, observe,
+                                )
+                            })
+                        }
+                    })
+                    .flatten()
+            })
+        })??;
+        Some(Arc::new(node))
+    }
+
+    fn function_type_param_clause(
+        &self,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
+    ) -> Option<Vec<verter_session_query::flow::slice::SliceTypeParam>> {
+        let service = self.snapshot.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.snapshot.ensure_lease();
+        let _index = self.function_program_index();
+        let entry = entry.clone();
+        let Some(clause) = service.run_leased(&self.snapshot.key, move |program| {
+            program.and_then(|p| {
+                p.with_indexed_function(&entry, |resolved, _entry| {
+                    crate::flow_slice_content::build_function_type_param_clause(
+                        resolved,
+                        p.source_str(),
+                    )
+                })
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: function_type_param_clause's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        clause
+    }
+
+    fn flow_slice_content(
+        &self,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
+        selection: verter_session_query::flow::slice::FlowSliceSelection,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
+        self.flow_slice_content_with_context(entry, Some(selection), bound, None, policy)
+    }
+
+    fn flow_slice_content_with_context(
+        &self,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
+        selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
+        context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
+        if bound.key().function != entry.key
+            || bound.key().flow_body_exact_hash != entry.flow_body_exact_hash?
+            || context
+                .as_ref()
+                .is_some_and(|context| !context.matches_snapshot(&self.snapshot.key))
+        {
+            return None;
+        }
+        let skeleton = Arc::clone(&bound.bundle().skeleton);
+        let bindings = Arc::clone(&bound.bundle().bindings);
+        let service = self.snapshot.service.as_ref()?;
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.snapshot.ensure_lease();
+        let entry = entry.clone();
+        let index = self.function_program_index();
+        // A carrier's script block (`.vue` / `.svelte`) compiles to a
+        // module by construction; a plain script file proves module scope
+        // only through its own top-level syntax.
+        let carrier_module = self.carrier_module;
+        let snapshot = self.snapshot.key.clone();
+        #[cfg(test)]
+        let work = Arc::clone(&self.capture_lookup_work);
+        #[cfg(test)]
+        let lowering_work = Arc::clone(&self.lowering_work);
+        let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
+            #[cfg(test)]
+            let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
+            #[cfg(test)]
+            let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
+            program.and_then(|p| {
+                p.with_indexed_function(&entry, |resolved, entry| {
+                    crate::flow_slice_content::build_flow_slice_content(
+                        crate::flow_slice_content::FlowSliceSource {
+                            program: p.borrow_dependent(),
+                            walks: p.walk_stack(),
+                            resolved,
+                        },
+                        p.source_str(),
+                        &index,
+                        entry,
+                        selection.as_ref(),
+                        &skeleton,
+                        Arc::clone(&bindings),
+                        carrier_module,
+                        &snapshot,
+                        context.as_deref(),
+                        policy,
+                    )
+                })
+                .flatten()
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: flow_slice_content's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return None;
+        };
+        node.map(Arc::new)
+    }
+
+    fn flow_capture_authorities(
+        &self,
+        locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
+    ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
+        let service = self.snapshot.service.as_ref()?;
+        let index = self.function_program_index();
+        let snapshot = self.snapshot.key.clone();
+        let locators = locators.to_vec();
+        #[cfg(test)]
+        let work = Arc::clone(&self.capture_lookup_work);
+        self.snapshot.ensure_lease();
+        service.run_leased(&self.snapshot.key, move |program| {
+            #[cfg(test)]
+            let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
+            let program = program?;
+            Some(
+                locators
+                    .iter()
+                    .map(|locator| {
+                        if !locator.matches_snapshot(&snapshot) {
+                            return None;
+                        }
+                        let entry = index.get(&locator.declaration.defining_function)?;
+                        crate::flow_slice_content::build_flow_capture_authority(
+                            program.borrow_dependent(),
+                            program.source_str(),
+                            entry.entry(),
+                            locator,
+                        )
+                    })
+                    .collect(),
+            )
+        })?
+    }
+
+    fn transient_macro_type_argument(
+        &self,
+        macro_span: verter_span::Span,
+    ) -> DemandOutcome<TypeExpr> {
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.snapshot.ensure_lease();
+        let outcome = service.run_leased(&self.snapshot.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            Some(
+                verter_semantic::analysis::lower_macro_type_argument_at_span(
+                    program, source, macro_span,
+                ),
+            )
+        });
+        match outcome {
+            // Service-level lease miss OR a program-absent re-borrow: both are
+            // the transient broken-pin class — fail closed to ReturnOnly.
+            None | Some(None) => {
+                tracing::error!(
+                    canonical = %self.snapshot.key.canonical,
+                    "decl-body lease pin broken: transient macro type-argument re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            // A genuine typed absence: no macro-shaped call at the span / no
+            // authored type argument.
+            Some(Some(None)) => DemandOutcome::Ready(None),
+            Some(Some(Some(expr))) => DemandOutcome::Ready(Some(Arc::new(expr))),
+        }
+    }
 }

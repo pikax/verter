@@ -573,13 +573,14 @@ impl<
         canonical: &str,
     ) -> Option<(
         super::request_inputs::IndexedInputServe,
-        Option<crate::decl_body_memo::IndexedExpressionDemand>,
+        Option<std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>>,
     )> {
         let serve =
             super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
-        let demand = self
-            .source(&serve.indexed.shallow_state)
-            .map(|source| source.decl_bodies().indexed_expression_demand());
+        let demand = self.source(&serve.indexed.shallow_state).map(|source| {
+            std::sync::Arc::new(source.decl_bodies().indexed_expression_demand())
+                as std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>
+        });
         Some((serve, demand))
     }
 
@@ -588,12 +589,14 @@ impl<
         canonical: &str,
     ) -> Option<(
         super::request_inputs::IndexedInputServe,
-        crate::decl_body_memo::IndexedExpressionDemand,
+        std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>,
     )> {
         let serve =
             super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
         let source = self.source(&serve.indexed.shallow_state)?;
-        let demand = source.decl_bodies().indexed_expression_demand();
+        let demand: std::sync::Arc<
+            dyn verter_session_query::source::demand::ExpressionSourceDemand,
+        > = std::sync::Arc::new(source.decl_bodies().indexed_expression_demand());
         Some((serve, demand))
     }
 
