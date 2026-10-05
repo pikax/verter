@@ -67,6 +67,7 @@ bitflags = "2.11"
 web-time = "1.1"
 
 [dev-dependencies]
+verter_resolution = { workspace = true }
 verter_session_query = { workspace = true, features = ["test-support"] }
 static_assertions = "1.1.0"
 # The C2 privacy-rail UI harness (tests/ui/type_info_privacy.rs) compiles its

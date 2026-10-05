@@ -2,7 +2,7 @@
 //!
 //! `ExternalTsProjectResolver` maps a source URI to one of the explicit
 //! carrier-ownership resolution states. This is distinct from module resolution,
-//! which is owned by `verter_session_query::resolution::ModuleResolverCore`;
+//! which is owned by `verter_resolution::ModuleResolverCore`;
 //! consumers reach this ownership resolver as
 //! `external_ts::ExternalTsProjectResolver`.
 //!

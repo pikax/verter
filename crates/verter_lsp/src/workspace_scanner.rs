@@ -1810,7 +1810,7 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
+        let resolver = verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 "/workspace/pkg-a".to_string(),
                 "/workspace".to_string(),
@@ -1907,13 +1907,12 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-            verter_workspace::ide_project_config(
+        let resolver =
+            verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
                 "/workspace/pkg-a".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/pkg-a/tsconfig.json".to_string()),
-            ),
-        ]);
+            )]);
         let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
             resolver,
             &[(
@@ -2008,7 +2007,7 @@ mod tests {
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
+        let resolver = verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 "/workspace/src".to_string(),
                 "/workspace".to_string(),
@@ -2107,13 +2106,12 @@ defineProps<{ msg: string }>()
             .ensure_compiled("/workspace/src/Child.vue", &profile)
             .is_ok());
 
-        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-            verter_workspace::ide_project_config(
+        let resolver =
+            verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/tsconfig.json".to_string()),
-            ),
-        ]);
+            )]);
         let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
             resolver,
             &[("/workspace", "/workspace", Some("/workspace/tsconfig.json"))],
@@ -2339,8 +2337,9 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_configured_is_project_source() {
+        use verter_resolution::ModuleResolverCore;
         use verter_session_query::resolution::{
-            CompiledGlob, ConfiguredMembership, ModuleResolverCore, NormalizedGlob,
+            CompiledGlob, ConfiguredMembership, NormalizedGlob,
         };
         use verter_workspace::workspace_snapshot::*;
         use verter_workspace::{CanonicalPath, FallbackMembership};
@@ -2400,7 +2399,7 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_outside_all_projects_is_other() {
-        use verter_session_query::resolution::ModuleResolverCore;
+        use verter_resolution::ModuleResolverCore;
         use verter_workspace::workspace_snapshot::*;
 
         let snap = WorkspaceSnapshot {
@@ -2417,7 +2416,8 @@ defineProps<{ msg: string }>()
 
     #[test]
     fn classify_from_snapshot_node_modules_is_other() {
-        use verter_session_query::resolution::{ConfiguredMembership, ModuleResolverCore};
+        use verter_resolution::ModuleResolverCore;
+        use verter_session_query::resolution::ConfiguredMembership;
         use verter_workspace::workspace_snapshot::*;
         use verter_workspace::CanonicalPath;
 
@@ -2481,13 +2481,12 @@ defineProps<{ msg: string }>()
         };
         assert!(host.ensure_compiled(canonical_id, &profile).is_ok());
 
-        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-            verter_workspace::ide_project_config(
+        let resolver =
+            verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
                 "/workspace".to_string(),
                 "/workspace".to_string(),
                 Some("/workspace/tsconfig.json".to_string()),
-            ),
-        ]);
+            )]);
         let snapshot = crate::test_utils::make_test_vfs_workspace_with_resolver_and_projects(
             resolver,
             &[("/workspace", "/workspace", Some("/workspace/tsconfig.json"))],
@@ -2647,13 +2646,12 @@ defineProps<{ msg: string }>()
                 workspace_aliases: Vec::new(),
             },
         }];
-        let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-            verter_workspace::ide_project_config(
+        let resolver =
+            verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
                 root.to_string(),
                 root.to_string(),
                 Some(tsconfig.to_string()),
-            ),
-        ]);
+            )]);
         let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
             owners_memo: Default::default(),
             projects,

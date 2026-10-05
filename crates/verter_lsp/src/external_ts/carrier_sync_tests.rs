@@ -40,7 +40,7 @@ use crate::external_ts::{
 use crate::provider_surface_store::ProviderSurfaceStore;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::workspace_scanner::{classify_from_snapshot, Tier};
-use verter_session_query::resolution::ModuleResolverCore;
+use verter_resolution::ModuleResolverCore;
 
 fn owned_carrier_state() -> ProviderSyncState {
     ProviderSyncState {
@@ -1059,13 +1059,12 @@ fn carrier_close_target_returns_companion_paths_owner_independent() {
     // buffers must be closable regardless of its ownership state (e.g. after an owner
     // loss). A carrier path yields both companion paths under an `Unresolved` binding;
     // a non-carrier path yields `None` (the single carrier-vs-not gate).
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+        )]);
 
     let target = carrier_close_target(&resolver, "/workspace/src/App.vue", false, None)
         .expect("a carrier has provider paths to close");

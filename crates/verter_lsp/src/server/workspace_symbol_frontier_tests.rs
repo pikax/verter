@@ -265,7 +265,7 @@ fn install_materialized_workspace_with_paths(
                 ..Default::default()
             };
     }
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![project_config]);
+    let resolver = verter_resolution::ModuleResolverCore::new(vec![project_config]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,

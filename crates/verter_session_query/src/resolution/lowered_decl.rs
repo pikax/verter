@@ -8,7 +8,7 @@
 //! session-owned because it retains a
 //! scheduler-side parse snapshot and blocks on a worker-thread rendezvous
 //! (`DeclLoweringService::acquire_lease`) to lower on first demand, which
-//! `verter_semantic`'s `ResolverObservation` (I/O-free, non-blocking) must
+//! `verter_resolution`'s `ResolverObservation` (I/O-free, non-blocking) must
 //! never do. This module owns only the lowered, content-free result values.
 
 use std::sync::Arc;

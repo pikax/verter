@@ -1172,7 +1172,7 @@ key only when the cached value depends on lib data:
 
 A single bundled `project_config_hash` is forbidden.
 
-The five hash functions live on `verter_semantic::resolver_core::IdeProjectConfig` (the `verter_workspace::env_hash` trait impls)
+The five hash functions live on `verter_session_query::resolution::IdeProjectConfig` (the `verter_workspace::env_hash` trait impls)
 + per-call inputs surfaced through `EnvHashInputs<'_>`:
 
 ```rust

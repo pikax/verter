@@ -209,7 +209,7 @@ pub(crate) struct PublishedResolutionView {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PublishedResolverSnapshot {
-    pub(crate) resolver: verter_session_query::resolution::ModuleResolverCore,
+    pub(crate) resolver: verter_resolution::ModuleResolverCore,
     /// Exact Engine-backed workspace publication paired with `resolver`.
     pub(crate) resolution_view: Option<PublishedResolutionView>,
     /// `true` after `background_init` publishes a real snapshot with the

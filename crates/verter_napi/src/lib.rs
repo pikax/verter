@@ -3222,11 +3222,7 @@ impl NapiVerterHost {
             .into_iter()
             .map(napi_module_reference_to_analysis)
             .collect::<Result<Vec<_>>>()?;
-        Ok(
-            verter_session_query::resolution::collect_resolvable_module_reference_specifiers(
-                &module_references,
-            ),
-        )
+        Ok(verter_resolution::collect_resolvable_module_reference_specifiers(&module_references))
     }
 
     /// Resolves exact and finite module reference candidates against a caller-provided
@@ -3245,7 +3241,7 @@ impl NapiVerterHost {
             .collect::<Result<Vec<_>>>()?;
         let extensions = extensions.unwrap_or_else(default_known_dependency_extensions);
         Ok(
-            verter_session_query::resolution::resolve_known_module_reference_dependencies(
+            verter_resolution::resolve_known_module_reference_dependencies(
                 &owner_id,
                 &module_references,
                 &known_ids,

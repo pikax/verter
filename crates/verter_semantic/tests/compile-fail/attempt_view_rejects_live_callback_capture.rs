@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 
-use verter_session_query::resolution::{AttemptOutcome, ResolverAttemptView};
+use verter_resolution::ResolverAttemptView;
+use verter_session_query::resolution::AttemptOutcome;
 
 struct HostShapedState {
     generation: u64,
@@ -12,7 +13,6 @@ struct HostShapedState {
 
 fn main() {
     let host = Arc::new(HostShapedState { generation: 7 });
-    let _view = ResolverAttemptView::new().with_project_generation(move || {
-        AttemptOutcome::Complete(host.generation)
-    });
+    let _view = ResolverAttemptView::new()
+        .with_project_generation(move || AttemptOutcome::Complete(host.generation));
 }

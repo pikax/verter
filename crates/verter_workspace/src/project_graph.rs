@@ -1,9 +1,10 @@
 // Named only by the native-only `impl ProjectGraph` builder below.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::canonical_path::CanonicalPath;
+use verter_resolution::ModuleResolverCore;
 use verter_session_query::resolution::ConfiguredMembership;
 use verter_session_query::resolution::{
-    IdeProjectCompilerOptions, IdeProjectConfig, ModuleResolverCore, WorkspaceAlias,
+    IdeProjectCompilerOptions, IdeProjectConfig, WorkspaceAlias,
 };
 // Likewise native-only.
 #[cfg(not(target_arch = "wasm32"))]

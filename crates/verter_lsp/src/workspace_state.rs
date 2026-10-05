@@ -246,7 +246,8 @@ pub fn set_conditional_root_narrowing(views: &mut LspViews, enabled: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_session_query::resolution::{CompiledGlob, ModuleResolverCore, NormalizedGlob};
+    use verter_resolution::ModuleResolverCore;
+    use verter_session_query::resolution::{CompiledGlob, NormalizedGlob};
     use verter_workspace::workspace_snapshot::{
         OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };

@@ -116,6 +116,7 @@ hotpath = [
 ]
 
 [dependencies]
+verter_resolution = { workspace = true }
 verter_ecma = { workspace = true }
 verter_execution = { path = "../verter_execution" }
 imbl = "7.0.1"

@@ -273,7 +273,7 @@ pub(crate) fn quote_wrapped_specifier(raw_text: &str, specifier: &str) -> String
 }
 
 pub(super) fn provider_ide_path_for_source(
-    resolver: &verter_session_query::resolution::ModuleResolverCore,
+    resolver: &verter_resolution::ModuleResolverCore,
     canonical_id: &str,
     is_jsx: bool,
 ) -> Option<String> {
@@ -282,14 +282,14 @@ pub(super) fn provider_ide_path_for_source(
 
 #[cfg(test)]
 pub(super) fn provider_api_path_for_source(
-    resolver: &verter_session_query::resolution::ModuleResolverCore,
+    resolver: &verter_resolution::ModuleResolverCore,
     canonical_id: &str,
 ) -> Option<String> {
     resolver.provider_id_for_source(canonical_id)
 }
 
 pub(super) fn source_id_from_provider_carrier_path(
-    resolver: &verter_session_query::resolution::ModuleResolverCore,
+    resolver: &verter_resolution::ModuleResolverCore,
     host: &verter_session::VerterHost,
     provider_path: &str,
 ) -> Option<String> {
@@ -520,7 +520,7 @@ fn resolve_import_from_published_snapshot(
 }
 
 pub(crate) fn compute_specifier_replacements(
-    _resolver: &verter_session_query::resolution::ModuleResolverCore,
+    _resolver: &verter_resolution::ModuleResolverCore,
     resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
@@ -859,7 +859,7 @@ pub(crate) async fn sync_self_file_shadow_state(
 }
 
 pub(crate) fn rewrite_non_carrier_source_with_resolver(
-    resolver: &verter_session_query::resolution::ModuleResolverCore,
+    resolver: &verter_resolution::ModuleResolverCore,
     resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
@@ -923,7 +923,7 @@ pub(crate) fn prepare_non_carrier_provider_sync(
 }
 
 pub(crate) fn collect_resolved_provider_dependencies(
-    _resolver: &verter_session_query::resolution::ModuleResolverCore,
+    _resolver: &verter_resolution::ModuleResolverCore,
     resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
@@ -994,7 +994,7 @@ pub(crate) fn collect_resolved_provider_dependencies(
 }
 
 pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
-    _resolver: &verter_session_query::resolution::ModuleResolverCore,
+    _resolver: &verter_resolution::ModuleResolverCore,
     resolution_view: Option<&super::PublishedResolutionView>,
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,

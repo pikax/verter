@@ -5,6 +5,7 @@
 # part of the shipped addon.
 members = [
   "crates/*",
+  "crates/verter_resolution",
   "crates/verter_napi/tests/fixture_addon",
   "xtask",
 ]
@@ -58,6 +59,7 @@ verter_no_typeexpr = { path = "crates/verter_no_typeexpr" }
 verter_no_typeexpr_derive = { path = "crates/verter_no_typeexpr_derive" }
 verter_no_storedspan = { path = "crates/verter_no_storedspan" }
 verter_no_storedspan_derive = { path = "crates/verter_no_storedspan_derive" }
+verter_resolution = { path = "crates/verter_resolution" }
 verter_session_query = { path = "crates/verter_session_query" }
 verter_type_expr = { path = "crates/verter_type_expr" }
 verter_type_expr_oxc = { path = "crates/verter_type_expr_oxc" }

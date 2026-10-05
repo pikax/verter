@@ -13,9 +13,9 @@ use crate::workspace_snapshot::{
     WorkspaceSnapshot,
 };
 use crate::ProjectMembership;
+use verter_resolution::ModuleResolverCore;
 use verter_session_query::resolution::{
-    typescript_default_excludes, ConfiguredMembership, IdeProjectConfig, ModuleResolverCore,
-    StaticMembershipSpec,
+    typescript_default_excludes, ConfiguredMembership, IdeProjectConfig, StaticMembershipSpec,
 };
 
 /// Result of building a workspace snapshot from workspace roots.

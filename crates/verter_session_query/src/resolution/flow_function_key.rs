@@ -1,4 +1,4 @@
-//! `crate::resolution::ResolverObservation::function_body_skeleton`'s
+//! `verter_resolution::ResolverObservation::function_body_skeleton`'s
 //! query key.
 //!
 //! Dependency-neutral, narrowed mirror of `verter_session::cache_runtime::

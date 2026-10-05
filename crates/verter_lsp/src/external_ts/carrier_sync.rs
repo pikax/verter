@@ -57,7 +57,7 @@ use crate::provider_sync::{
     ProviderSyncState, ProviderSyncTransition,
 };
 use crate::server::block_in_place_guarded as block_in_place_if_available;
-use verter_session_query::resolution::ModuleResolverCore;
+use verter_resolution::ModuleResolverCore;
 
 /// How the semantic provider receives carrier companions after durable editor
 /// membership has been reconciled.

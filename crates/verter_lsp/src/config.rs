@@ -831,10 +831,8 @@ impl ProjectRegistry {
         &self.projects
     }
 
-    pub fn to_native_project_resolver(
-        &self,
-    ) -> verter_session_query::resolution::ModuleResolverCore {
-        verter_session_query::resolution::ModuleResolverCore::new(
+    pub fn to_native_project_resolver(&self) -> verter_resolution::ModuleResolverCore {
+        verter_resolution::ModuleResolverCore::new(
             self.projects
                 .iter()
                 .map(ProjectConfig::to_ide_project_config)

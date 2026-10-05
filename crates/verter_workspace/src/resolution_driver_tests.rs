@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use verter_resolution::{AttemptOutput, CompletedAttempt, KernelAttempt, ResolverObservation};
 use verter_session_query::facts::version::FactVersionRef;
 use verter_session_query::resolution::{
-    AttemptFailure, AttemptOutcome, AttemptOutput, CompletedAttempt,
-    ConsumedResolutionObservationKey, InputKey, InputLoadIntegrityReason,
-    InputResolutionBudgetMeter, InputResolutionBudgets, KernelAttempt, LoadSet, PathProbe,
-    ResolutionContext, ResolvePhase, ResolveRequestKind, ResolverObservation,
+    AttemptFailure, AttemptOutcome, ConsumedResolutionObservationKey, InputKey,
+    InputLoadIntegrityReason, InputResolutionBudgetMeter, InputResolutionBudgets, LoadSet,
+    PathProbe, ResolutionContext, ResolvePhase, ResolveRequestKind,
 };
 
 use super::resolution_conversion_tests::{

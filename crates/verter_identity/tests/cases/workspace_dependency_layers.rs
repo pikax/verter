@@ -48,8 +48,12 @@ const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[
     "verter_session_query",
 ];
 
-const LAYER_3_SEMANTIC_KERNEL: &[&str] =
-    &["verter_semantic", "verter_diagnostics", "verter_actions"];
+const LAYER_3_SEMANTIC_KERNEL: &[&str] = &[
+    "verter_semantic",
+    "verter_resolution",
+    "verter_diagnostics",
+    "verter_actions",
+];
 
 const LAYER_4_COMPILER: &[&str] = &["verter_compiler"];
 

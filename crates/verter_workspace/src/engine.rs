@@ -770,7 +770,7 @@ impl Engine {
     /// then ascending lex. Used by [`Engine::new`] and
     /// [`Engine::set_default_resolve_extensions`] (single source of truth).
     fn merge_extensions(host_resolve_extensions: &[String]) -> Vec<String> {
-        let mut merged: BTreeSet<String> = verter_session_query::resolution::probe_extensions()
+        let mut merged: BTreeSet<String> = verter_resolution::probe_extensions()
             .iter()
             .map(|s| (*s).to_string())
             .collect();
@@ -2742,7 +2742,7 @@ impl Engine {
             let graph = self.project_graph.read();
             let resolver = configured_projects
                 .clone()
-                .map(verter_session_query::resolution::ModuleResolverCore::new)
+                .map(verter_resolution::ModuleResolverCore::new)
                 .unwrap_or_else(|| graph.to_module_resolver_core());
 
             // Build a WorkspaceSnapshot from the graph's projects

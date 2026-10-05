@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
+verter_resolution = { workspace = true }
 verter_session_query = { workspace = true }
 verter_audit = { path = "../verter_audit" }
 verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }

@@ -2,7 +2,10 @@
   "schema": "ARH0ResponsibilityMap",
   "version": 1,
   "contractNode": "ARH0",
-  "sourceReference": {"title":"test(compiler): qualify content-mapper diagnostics and (#606)","date":"2026-09-18"},
+  "sourceReference": {
+    "title": "test(compiler): qualify content-mapper diagnostics and (#606)",
+    "date": "2026-09-18"
+  },
   "charterRef": "charters/expansion-architecture-health/ARH0.md",
   "ac3Rationale": "ARH0 is a zero-production-mutation constitution: no state, query, map, cache or scheduling boundary is touched, so fresh-vs-incremental equivalence, edit/revert, cancellation, stale/partial rejection and deterministic ordering remain owned and proven by their untouched owners (B4R0 source lineage, LSO0 snapshot publication, rev11.scheduler-runtime admission, rev11.flow dispatch).",
   "ac4Rationale": "ARH0 adds no editor surface; VIM/DX capability evidence is the capability matrix product with exact host/profile pins, and the examples/reference obligations are specified for DOC1 in the contract.",
@@ -1006,7 +1009,8 @@
         "kind": "train"
       },
       "responsibility": [
-        "query side of the host/query inversion of control (what the query layer demands of the session host)"
+        "query side of the host/query inversion of control (what the query layer demands of the session host)",
+        "owned resolution identities, supplied configuration, requests/results, observation records, immutable budget policy and lexical path operations"
       ],
       "evidence": [
         "documented: crate contract (query-boundary crate for the shared semantic engine)",
@@ -1164,6 +1168,20 @@
         "workspace: pnpm-workspace.yaml literal package entry docs (outside the inventoried packages/ globs)",
         "charter-declared: web-product-expansion-v1.md Part II §7 public-docs obligation (DOC2)",
         "coupling: 103 shared commits with crates/verter_session (changeCoupling.topPairs)"
+      ]
+    },
+    {
+      "module": "crates/verter_resolution",
+      "owner": {
+        "id": "rev11.host-session",
+        "kind": "train"
+      },
+      "responsibility": [
+        "reusable implementation of workspace module-resolution authority: project routing, candidate and probe choice, sealed observations and operational attempt/retention state"
+      ],
+      "evidence": [
+        "documented: crate contract; resolution inputs and answer vocabulary remain in verter_session_query",
+        "graph: parser-free dependency closure below workspace, session and transport consumers"
       ]
     }
   ],

@@ -28,8 +28,8 @@ pub type CanonicalId = Arc<str>;
 /// Which lowering space a [`InputKey::DeclBody`] demand targets.
 ///
 /// A bare `(canonical, owner, name)` `DeclBody` key cannot tell a retry
-/// driver whether [`crate::resolution::ResolverObservation::type_decl`]
-/// or [`crate::resolution::ResolverObservation::value_decl`] produced
+/// driver whether `ResolverObservation::type_decl`
+/// or `ResolverObservation::value_decl` produced
 /// it — the two spaces can independently miss for the same declaration
 /// name (e.g. a `type Foo` and a `const Foo` in the same file), and a
 /// driver that could not tell them apart would either load the wrong
@@ -264,7 +264,7 @@ impl LoadSet {
     }
 }
 
-/// Closed taxonomy naming every [`crate::resolution::ResolverObservation`]
+/// Closed taxonomy naming every `ResolverObservation`
 /// method — one variant per method, in trait declaration order.
 ///
 /// The keyed input-load failure variants name a loadable
@@ -432,36 +432,6 @@ impl<T> AttemptOutcome<T> {
         }
     }
 }
-
-/// A successfully completed kernel attempt's answer, paired with the
-/// [`crate::resolution::AttemptOutput`] it accumulated along the way.
-///
-/// The only envelope that publishes an [`AttemptOutput`] with a completed
-/// kernel answer.
-/// `AttemptOutcome::Complete(T)` itself stays UNCHANGED — this wrapper
-/// exists at the TOP-LEVEL kernel entry point ([`KernelAttempt`]), not on
-/// [`ResolverObservation`]'s 13 inbound query methods, which have no
-/// outbound effects of their own to accumulate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompletedAttempt<T> {
-    pub value: T,
-    pub output: crate::resolution::AttemptOutput,
-}
-
-impl<T> CompletedAttempt<T> {
-    #[must_use]
-    pub const fn new(value: T, output: crate::resolution::AttemptOutput) -> Self {
-        Self { value, output }
-    }
-}
-
-/// The top-level kernel attempt envelope: [`AttemptOutcome`] specialized
-/// so a successful attempt carries its accumulated
-/// [`crate::resolution::AttemptOutput`] alongside the answer.
-/// `NeedInputs`/`Terminal` carry no output — an attempt that does not
-/// reach `Complete` discards everything it accumulated (contract §4: no
-/// torn/partial output is ever promoted).
-pub type KernelAttempt<T> = AttemptOutcome<CompletedAttempt<T>>;
 
 #[cfg(test)]
 #[path = "attempt_outcome_tests.rs"]

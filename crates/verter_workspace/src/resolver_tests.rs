@@ -3,12 +3,12 @@ use crate::canonical_path::CanonicalPath;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use verter_resolution::{ancestor_dirs, ancestor_dirs_from_dir};
 use verter_session_query::resolution::ResolvePhase;
 use verter_session_query::resolution::{
-    ancestor_dirs, ancestor_dirs_from_dir, carrier_api_provider_path, carrier_ide_provider_path,
-    collapse_path, is_relative_specifier, join_paths, normalize_canonical_id, path_is_carrier,
-    strip_carrier_extension, AttemptFailure, ProviderTarget, ResolutionKind, ResolveRequestKind,
-    WorkspaceAlias,
+    carrier_api_provider_path, carrier_ide_provider_path, collapse_path, is_relative_specifier,
+    join_paths, normalize_canonical_id, path_is_carrier, strip_carrier_extension, AttemptFailure,
+    ProviderTarget, ResolutionKind, ResolveRequestKind, WorkspaceAlias,
 };
 
 #[test]

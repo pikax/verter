@@ -423,7 +423,7 @@ async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
     // DISCRIMINATING: a regression that re-terminals a multi-claimant carrier as
     // `Ambiguous(MultipleOwners)` while still serving `Bound` would surface a
     // `verter(project)` warning here and fail this assertion.
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
+    let resolver = verter_resolution::ModuleResolverCore::new(vec![
         verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),

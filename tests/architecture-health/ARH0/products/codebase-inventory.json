@@ -2,7 +2,10 @@
   "schema": "ARH0CodebaseInventory",
   "version": 1,
   "contractNode": "ARH0",
-  "sourceReference": {"title":"test(compiler): qualify content-mapper diagnostics and (#606)","date":"2026-09-18"},
+  "sourceReference": {
+    "title": "test(compiler): qualify content-mapper diagnostics and (#606)",
+    "date": "2026-09-18"
+  },
   "measuredAt": "2026-09-18",
   "platform": "win32-x64, Node 26, cargo metadata --no-deps",
   "method": {
@@ -12,10 +15,10 @@
     "note": "packages/* root-level build/config scripts counted as otherLoc, not production"
   },
   "rustWorkspace": {
-    "members": 50,
-    "crates": 49,
-    "productionLoc": 1108242,
-    "testLoc": 1062523,
+    "members": 51,
+    "crates": 50,
+    "productionLoc": 1156976,
+    "testLoc": 1074704,
     "generatedLoc": 12926
   },
   "typescriptPackages": {
@@ -27,16 +30,6 @@
   },
   "crates": [
     {
-      "module": "crates/verter-editor-client",
-      "crate": "verter-editor-client",
-      "productionLoc": 1532,
-      "testLoc": 542,
-      "generatedLoc": 0,
-      "srcFiles": 5,
-      "fanIn": 0,
-      "fanOut": 0
-    },
-    {
       "module": "crates/verter_actions",
       "crate": "verter_actions",
       "productionLoc": 7287,
@@ -44,7 +37,7 @@
       "generatedLoc": 0,
       "srcFiles": 31,
       "fanIn": 5,
-      "fanOut": 3
+      "fanOut": 4
     },
     {
       "module": "crates/verter_analysis_inputs",
@@ -53,7 +46,7 @@
       "testLoc": 1196,
       "generatedLoc": 0,
       "srcFiles": 7,
-      "fanIn": 1,
+      "fanIn": 2,
       "fanOut": 1
     },
     {
@@ -63,7 +56,7 @@
       "testLoc": 2843,
       "generatedLoc": 0,
       "srcFiles": 46,
-      "fanIn": 10,
+      "fanIn": 12,
       "fanOut": 1
     },
     {
@@ -74,7 +67,7 @@
       "generatedLoc": 0,
       "srcFiles": 4,
       "fanIn": 0,
-      "fanOut": 9
+      "fanOut": 10
     },
     {
       "module": "crates/verter_compile_contracts",
@@ -114,7 +107,7 @@
       "generatedLoc": 2955,
       "srcFiles": 345,
       "fanIn": 9,
-      "fanOut": 12
+      "fanOut": 13
     },
     {
       "module": "crates/verter_css_syntax",
@@ -133,7 +126,7 @@
       "testLoc": 0,
       "generatedLoc": 0,
       "srcFiles": 1,
-      "fanIn": 13,
+      "fanIn": 15,
       "fanOut": 0
     },
     {
@@ -144,7 +137,7 @@
       "generatedLoc": 0,
       "srcFiles": 212,
       "fanIn": 7,
-      "fanOut": 4
+      "fanOut": 5
     },
     {
       "module": "crates/verter_dx_baseline",
@@ -163,7 +156,7 @@
       "testLoc": 0,
       "generatedLoc": 0,
       "srcFiles": 1,
-      "fanIn": 3,
+      "fanIn": 4,
       "fanOut": 1
     },
     {
@@ -174,7 +167,7 @@
       "generatedLoc": 0,
       "srcFiles": 14,
       "fanIn": 3,
-      "fanOut": 10
+      "fanOut": 11
     },
     {
       "module": "crates/verter_identity",
@@ -193,8 +186,8 @@
       "testLoc": 666,
       "generatedLoc": 0,
       "srcFiles": 11,
-      "fanIn": 13,
-      "fanOut": 2
+      "fanIn": 15,
+      "fanOut": 1
     },
     {
       "module": "crates/verter_lsp",
@@ -204,7 +197,7 @@
       "generatedLoc": 0,
       "srcFiles": 228,
       "fanIn": 0,
-      "fanOut": 16
+      "fanOut": 20
     },
     {
       "module": "crates/verter_macro_dto",
@@ -213,7 +206,7 @@
       "testLoc": 782,
       "generatedLoc": 0,
       "srcFiles": 1,
-      "fanIn": 3,
+      "fanIn": 4,
       "fanOut": 2
     },
     {
@@ -224,7 +217,7 @@
       "generatedLoc": 0,
       "srcFiles": 15,
       "fanIn": 1,
-      "fanOut": 7
+      "fanOut": 8
     },
     {
       "module": "crates/verter_mcp_server",
@@ -243,8 +236,8 @@
       "testLoc": 5124,
       "generatedLoc": 0,
       "srcFiles": 12,
-      "fanIn": 1,
-      "fanOut": 13
+      "fanIn": 0,
+      "fanOut": 15
     },
     {
       "module": "crates/verter_no_storedspan",
@@ -273,7 +266,7 @@
       "testLoc": 0,
       "generatedLoc": 0,
       "srcFiles": 1,
-      "fanIn": 5,
+      "fanIn": 6,
       "fanOut": 2
     },
     {
@@ -293,8 +286,8 @@
       "testLoc": 14839,
       "generatedLoc": 0,
       "srcFiles": 66,
-      "fanIn": 4,
-      "fanOut": 5
+      "fanIn": 8,
+      "fanOut": 6
     },
     {
       "module": "crates/verter_protocol",
@@ -304,7 +297,7 @@
       "generatedLoc": 0,
       "srcFiles": 16,
       "fanIn": 6,
-      "fanOut": 5
+      "fanOut": 6
     },
     {
       "module": "crates/verter_relay_shim",
@@ -317,6 +310,16 @@
       "fanOut": 1
     },
     {
+      "module": "crates/verter_resolution",
+      "crate": "verter_resolution",
+      "productionLoc": 6393,
+      "testLoc": 5079,
+      "generatedLoc": 0,
+      "srcFiles": 21,
+      "fanIn": 5,
+      "fanOut": 4
+    },
+    {
       "module": "crates/verter_scheduler",
       "crate": "verter_scheduler",
       "productionLoc": 30865,
@@ -324,7 +327,7 @@
       "generatedLoc": 0,
       "srcFiles": 30,
       "fanIn": 5,
-      "fanOut": 4
+      "fanOut": 5
     },
     {
       "module": "crates/verter_semantic",
@@ -334,7 +337,7 @@
       "generatedLoc": 9971,
       "srcFiles": 181,
       "fanIn": 13,
-      "fanOut": 10
+      "fanOut": 11
     },
     {
       "module": "crates/verter_session",
@@ -344,7 +347,7 @@
       "generatedLoc": 0,
       "srcFiles": 747,
       "fanIn": 9,
-      "fanOut": 18
+      "fanOut": 21
     },
     {
       "module": "crates/verter_session_oracle_macro",
@@ -359,12 +362,12 @@
     {
       "module": "crates/verter_session_query",
       "crate": "verter_session_query",
-      "productionLoc": 336,
-      "testLoc": 739,
+      "productionLoc": 42677,
+      "testLoc": 7841,
       "generatedLoc": 0,
-      "srcFiles": 1,
-      "fanIn": 1,
-      "fanOut": 1
+      "srcFiles": 107,
+      "fanIn": 15,
+      "fanOut": 8
     },
     {
       "module": "crates/verter_shipped_cfg_contract",
@@ -393,7 +396,7 @@
       "testLoc": 1369,
       "generatedLoc": 0,
       "srcFiles": 9,
-      "fanIn": 24,
+      "fanIn": 25,
       "fanOut": 0
     },
     {
@@ -424,7 +427,7 @@
       "generatedLoc": 0,
       "srcFiles": 9,
       "fanIn": 0,
-      "fanOut": 7
+      "fanOut": 9
     },
     {
       "module": "crates/verter_tsgo_api",
@@ -443,7 +446,7 @@
       "testLoc": 3747,
       "generatedLoc": 0,
       "srcFiles": 19,
-      "fanIn": 13,
+      "fanIn": 15,
       "fanOut": 4
     },
     {
@@ -464,7 +467,7 @@
       "generatedLoc": 0,
       "srcFiles": 28,
       "fanIn": 3,
-      "fanOut": 4
+      "fanOut": 6
     },
     {
       "module": "crates/verter_validation_probe",
@@ -484,7 +487,7 @@
       "generatedLoc": 0,
       "srcFiles": 6,
       "fanIn": 1,
-      "fanOut": 0
+      "fanOut": 1
     },
     {
       "module": "crates/verter_wasm",
@@ -494,7 +497,7 @@
       "generatedLoc": 0,
       "srcFiles": 6,
       "fanIn": 0,
-      "fanOut": 10
+      "fanOut": 12
     },
     {
       "module": "crates/verter_workspace",
@@ -503,8 +506,18 @@
       "testLoc": 30264,
       "generatedLoc": 0,
       "srcFiles": 71,
-      "fanIn": 8,
-      "fanOut": 8
+      "fanIn": 9,
+      "fanOut": 12
+    },
+    {
+      "module": "crates/verter-editor-client",
+      "crate": "verter-editor-client",
+      "productionLoc": 1532,
+      "testLoc": 542,
+      "generatedLoc": 0,
+      "srcFiles": 5,
+      "fanIn": 0,
+      "fanOut": 0
     },
     {
       "module": "xtask",

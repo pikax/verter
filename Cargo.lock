@@ -3561,6 +3561,7 @@ dependencies = [
  "verter_macro_dto",
  "verter_parser",
  "verter_protocol",
+ "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
@@ -3650,6 +3651,7 @@ dependencies = [
  "verter_ffi",
  "verter_napi_request_fixture",
  "verter_protocol",
+ "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
@@ -3780,6 +3782,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_resolution"
+version = "0.0.1-beta.6"
+dependencies = [
+ "rustc-hash",
+ "serde_json",
+ "static_assertions",
+ "verter_audit",
+ "verter_language",
+ "verter_session_query",
+ "verter_span",
+ "verter_type_expr",
+]
+
+[[package]]
 name = "verter_scheduler"
 version = "0.0.1-beta.6"
 dependencies = [
@@ -3829,6 +3845,7 @@ dependencies = [
  "verter_macro_dto",
  "verter_no_typeexpr",
  "verter_parser",
+ "verter_resolution",
  "verter_session_query",
  "verter_span",
  "verter_test_support",
@@ -3897,6 +3914,7 @@ dependencies = [
  "verter_no_typeexpr",
  "verter_parser",
  "verter_protocol",
+ "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
@@ -4154,6 +4172,7 @@ dependencies = [
  "verter_ffi",
  "verter_identity",
  "verter_protocol",
+ "verter_resolution",
  "verter_semantic",
  "verter_session",
  "verter_session_query",
@@ -4189,6 +4208,7 @@ dependencies = [
  "verter_execution",
  "verter_language",
  "verter_parser",
+ "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
  "verter_session_query",

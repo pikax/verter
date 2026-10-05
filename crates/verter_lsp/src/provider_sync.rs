@@ -1,7 +1,7 @@
 use crate::provider_surface_store::ContentHash;
 use dashmap::DashMap;
+use verter_resolution::ModuleResolverCore;
 use verter_session_query::analysis::types::Hash16;
-use verter_session_query::resolution::ModuleResolverCore;
 use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

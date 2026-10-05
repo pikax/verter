@@ -8,7 +8,8 @@ use parking_lot::Mutex;
 use super::ModuleResolverCoreTestExt;
 use crate::traits::WorkspaceRead;
 use crate::types::{ResolutionKind, ResolvePhase, ResolveRequest, ResolveRequestKind};
-use verter_session_query::resolution::{normalize_canonical_id, AttemptFailure, ModuleResolverCore};
+use verter_session_query::resolution::{normalize_canonical_id, AttemptFailure};
+use verter_resolution::{ModuleResolverCore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResolverObservation {

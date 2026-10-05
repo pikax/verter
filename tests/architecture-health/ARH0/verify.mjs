@@ -247,11 +247,11 @@ function validateInventory(inv, errors) {
       }
     }
   }
-  if (inv.rustWorkspace.members !== 50) {
+  if (inv.rustWorkspace.members !== 51) {
     errors.push({
       caseId,
       code: "workspace-members",
-      detail: `expected 50 cargo workspace members, recorded ${inv.rustWorkspace.members}`,
+      detail: `expected 51 cargo workspace members, recorded ${inv.rustWorkspace.members}`,
     });
   }
 }

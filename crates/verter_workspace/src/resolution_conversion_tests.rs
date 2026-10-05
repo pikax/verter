@@ -7,12 +7,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use parking_lot::Mutex;
+use verter_resolution::{AttemptOutput, CompletedAttempt, ModuleResolverCore, ResolverAttemptView};
 use verter_session_query::resolution::{
-    AttemptFailure, AttemptOutcome, AttemptOutput, CompletedAttempt,
-    ConsumedResolutionObservationKey, IdeProjectConfig, InputKey, ModuleResolverCore, PathProbe,
-    ProjectOwnership, ResolutionBasis, ResolutionContext, ResolutionObservationSnapshot,
+    AttemptFailure, AttemptOutcome, ConsumedResolutionObservationKey, IdeProjectConfig, InputKey,
+    PathProbe, ProjectOwnership, ResolutionBasis, ResolutionContext, ResolutionObservationSnapshot,
     ResolutionPackageManifest, ResolutionWorldBasis, ResolvePhase, ResolveRequest,
-    ResolveRequestKind, ResolveResult, ResolverAttemptView,
+    ResolveRequestKind, ResolveResult,
 };
 
 pub(crate) const CONVERTED_CASE_COUNT: usize = 24;

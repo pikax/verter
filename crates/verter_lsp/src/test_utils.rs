@@ -80,13 +80,12 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
         payload,
     }];
 
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             root.to_string(),
             root.to_string(),
             tsconfig.map(|s| s.to_string()),
-        ),
-    ]);
+        )]);
 
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
@@ -194,7 +193,7 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
 ///
 /// Creates fallback projects for each workspace root in the resolver.
 pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
-    resolver: verter_session_query::resolution::ModuleResolverCore,
+    resolver: verter_resolution::ModuleResolverCore,
     project_roots: &[(&str, &str, Option<&str>)], // (root, workspace_root, tsconfig)
 ) -> parking_lot::RwLock<Option<Arc<verter_workspace::FilesystemWorkspace>>> {
     let vfs_ws = Arc::new(verter_workspace::FilesystemWorkspace::new(
@@ -215,7 +214,7 @@ pub(crate) fn make_test_vfs_workspace_with_resolver_and_projects(
 /// entry — the ownership substrate the VFS helper above publishes, exposed
 /// on its own for tests that need the ownership decision without a workspace.
 pub(crate) fn make_test_snapshot(
-    resolver: verter_session_query::resolution::ModuleResolverCore,
+    resolver: verter_resolution::ModuleResolverCore,
     project_roots: &[(&str, &str, Option<&str>)], // (root, workspace_root, tsconfig)
 ) -> Arc<verter_workspace::WorkspaceSnapshot> {
     let projects: Vec<verter_workspace::workspace_snapshot::OwnershipProject> = project_roots

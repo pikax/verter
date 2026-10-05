@@ -382,8 +382,9 @@ pub struct IdeProjectConfig {
 }
 
 impl IdeProjectConfig {
-    #[cfg(test)]
-    pub(crate) fn new(root: String, workspace_root: String, tsconfig_path: Option<String>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn new(root: String, workspace_root: String, tsconfig_path: Option<String>) -> Self {
         use rustc_hash::FxHashSet;
 
         let membership = ConfiguredMembership {

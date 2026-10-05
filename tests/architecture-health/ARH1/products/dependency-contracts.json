@@ -2,7 +2,10 @@
   "schema": "ARH1DependencyContracts",
   "version": 2,
   "contractNode": "ARH1",
-  "sourceReference": {"title":"docs(arch): ratify responsibility, visibility and dependency contracts (#636)","date":"2026-09-19"},
+  "sourceReference": {
+    "title": "docs(arch): ratify responsibility, visibility and dependency contracts (#636)",
+    "date": "2026-09-19"
+  },
   "predecessorProducts": {
     "responsibilityMap": "../ARH0/products/responsibility-map.json",
     "debtRegister": "../ARH0/products/debt-register.json"
@@ -58,7 +61,13 @@
       "id": "ARH1-LAYER-1",
       "crate": "crates/verter_scheduler",
       "rule": "scheduler-runtime stays below every orchestration crate: it may depend only on the leaf utility crates",
-      "mayImport": ["verter_audit", "verter_debug_assert", "verter_execution", "verter_language", "verter_span"],
+      "mayImport": [
+        "verter_audit",
+        "verter_debug_assert",
+        "verter_execution",
+        "verter_language",
+        "verter_span"
+      ],
       "mustNotImport": [
         "verter_session",
         "verter_compiler",
@@ -122,6 +131,7 @@
         "verter_no_typeexpr",
         "verter_parser",
         "verter_protocol",
+        "verter_resolution",
         "verter_scheduler",
         "verter_semantic",
         "verter_session_query",
@@ -131,8 +141,43 @@
         "verter_type_runtime",
         "verter_workspace"
       ],
-      "mustNotImport": ["verter_lsp", "verter_napi", "verter_ffi", "verter_wasm"],
+      "mustNotImport": [
+        "verter_lsp",
+        "verter_napi",
+        "verter_ffi",
+        "verter_wasm"
+      ],
       "evidence": "crates/verter_session/Cargo.toml [dependencies] contains no editor/transport crate",
+      "heir": {
+        "id": "ARH12",
+        "kind": "node"
+      }
+    },
+    {
+      "id": "ARH1-LAYER-4",
+      "crate": "crates/verter_resolution",
+      "rule": "module-resolution implementation consumes query-boundary inputs and parser-free leaves, never host orchestration or syntax frontends",
+      "mayImport": [
+        "verter_audit",
+        "verter_language",
+        "verter_session_query",
+        "verter_type_expr"
+      ],
+      "mustNotImport": [
+        "verter_semantic",
+        "verter_parser",
+        "verter_type_expr_oxc",
+        "verter_compiler",
+        "verter_session",
+        "verter_workspace",
+        "verter_protocol",
+        "verter_lsp",
+        "verter_scheduler",
+        "verter_tsgo_api",
+        "verter_type_runtime"
+      ],
+      "evidence": "crates/verter_resolution/Cargo.toml production dependencies and crate-private ResolverObservation seal",
+      "nonHotspotRationale": "The reusable workspace module-resolution implementation is a cohesive kernel below workspace/session consumers; supplied values remain in the query boundary.",
       "heir": {
         "id": "ARH12",
         "kind": "node"
@@ -166,8 +211,18 @@
         }
       ],
       "allowedImportDirection": {
-        "verter": ["verter_audit", "verter_execution", "verter_language"],
-        "external": ["crossbeam_channel", "dashmap", "hotpath", "parking_lot", "web_time"],
+        "verter": [
+          "verter_audit",
+          "verter_execution",
+          "verter_language"
+        ],
+        "external": [
+          "crossbeam_channel",
+          "dashmap",
+          "hotpath",
+          "parking_lot",
+          "web_time"
+        ],
         "crateInternal": [
           "audit_publish",
           "cache_id",
@@ -249,7 +304,11 @@
       "constructorCapabilities": [
         {
           "constructor": "new",
-          "signatureAnchors": ["Arc<dyn SourceLoader>", "SchedulerCpuPool", "SchedulerIoPool"],
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "SchedulerCpuPool",
+            "SchedulerIoPool"
+          ],
           "rules": [
             "pools and the source loader are host-injected Arc handles: the scheduler constructs no pool and performs no file I/O in the constructor",
             "spawns exactly one driver thread on native targets and none on wasm32",
@@ -271,7 +330,10 @@
         },
         {
           "constructor": "new_sync",
-          "signatureAnchors": ["Arc<dyn SourceLoader>", "SchedulerCpuPool"],
+          "signatureAnchors": [
+            "Arc<dyn SourceLoader>",
+            "SchedulerCpuPool"
+          ],
           "rules": [
             "synchronous-driver variant of new with the same injected-pool capability; wasm32 target carries no native pool parameter"
           ]
@@ -433,17 +495,28 @@
             "item": "test_worker_pool_ids",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/host_construction.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/host_construction.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_worker_pool_ids", "scheduler.test_worker_pool_ids("]
+            "referenceForms": [
+              "Scheduler::test_worker_pool_ids",
+              "scheduler.test_worker_pool_ids("
+            ]
           },
           {
             "item": "test_new",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/cooperative_scheduler_tests.rs", "crates/verter_session/src/host_batch_coordinator.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/cooperative_scheduler_tests.rs",
+              "crates/verter_session/src/host_batch_coordinator.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_new", ".test_new("]
+            "referenceForms": [
+              "Scheduler::test_new",
+              ".test_new("
+            ]
           },
           {
             "item": "test_with_executor",
@@ -456,15 +529,23 @@
               "crates/verter_session/tests/cases/g_session/inline_execute_clears_all_install_tls_slots.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_with_executor", ".test_with_executor("]
+            "referenceForms": [
+              "Scheduler::test_with_executor",
+              ".test_with_executor("
+            ]
           },
           {
             "item": "test_new_sync",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/cooperative_scheduler_tests.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/cooperative_scheduler_tests.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_new_sync", ".test_new_sync("]
+            "referenceForms": [
+              "Scheduler::test_new_sync",
+              ".test_new_sync("
+            ]
           },
           {
             "item": "test_new_sync_with_executor",
@@ -498,7 +579,10 @@
               "crates/verter_session/tests/cases/g_session/cooperative_drive_seam.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_arm_dispatch_pause", ".test_arm_dispatch_pause("]
+            "referenceForms": [
+              "Scheduler::test_arm_dispatch_pause",
+              ".test_arm_dispatch_pause("
+            ]
           },
           {
             "item": "test_wait_until_dispatch_paused",
@@ -523,7 +607,10 @@
               "crates/verter_session/tests/cases/g_misc2/scheduler_audit_queue_dwell_under_load.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_job_queue_depth", ".test_job_queue_depth("]
+            "referenceForms": [
+              "Scheduler::test_job_queue_depth",
+              ".test_job_queue_depth("
+            ]
           },
           {
             "item": "test_release_dispatch_pause",
@@ -555,7 +642,9 @@
             "item": "test_install_batch_admit_epoch_trace",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/host_compile_atomic_upsert_tests.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": [
               "Scheduler::test_install_batch_admit_epoch_trace",
@@ -577,7 +666,9 @@
             "item": "test_take_batch_admit_epochs",
             "kind": "fn",
             "to": "test-configuration",
-            "consumersAffected": ["crates/verter_session/src/host_compile_atomic_upsert_tests.rs"],
+            "consumersAffected": [
+              "crates/verter_session/src/host_compile_atomic_upsert_tests.rs"
+            ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
             "referenceForms": [
               "Scheduler::test_take_batch_admit_epochs",
@@ -592,7 +683,10 @@
               "crates/verter_session/src/compile_style_vbind_source_snapshot_tests.rs"
             ],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification",
-            "referenceForms": ["Scheduler::test_clear_analysis", ".test_clear_analysis("]
+            "referenceForms": [
+              "Scheduler::test_clear_analysis",
+              ".test_clear_analysis("
+            ]
           },
           {
             "item": "test_reset_wake_posts",
@@ -600,7 +694,10 @@
             "to": "test-configuration",
             "consumersAffected": [],
             "note": "test-only seam (cfg(any(test, feature = \"test-support\")) gated) whose consumer inventory is exact: every recorded consumer references the hook through one of the recorded forms in code (comments never count), and every file outside crates/verter_scheduler referencing those forms is recorded; hooks with an empty list have no reference outside the owning crate at ratification; observes reset()'s teardown-wake post count so a teardown test can release its rendezvous exactly once the wake is posted",
-            "referenceForms": ["Scheduler::test_reset_wake_posts", ".test_reset_wake_posts("]
+            "referenceForms": [
+              "Scheduler::test_reset_wake_posts",
+              ".test_reset_wake_posts("
+            ]
           }
         ],
         "crossCrateRetainedVerifiedByConsumers": false,
@@ -705,7 +802,11 @@
           "verter_span",
           "verter_type_expr"
         ],
-        "external": ["rustc_hash", "smallvec", "tracing"],
+        "external": [
+          "rustc_hash",
+          "smallvec",
+          "tracing"
+        ],
         "crateInternal": [
           "cache_runtime",
           "flow_return_audit",
@@ -862,7 +963,11 @@
           "verter_span",
           "verter_type_expr"
         ],
-        "external": ["indexmap", "rustc_hash", "tracing"],
+        "external": [
+          "indexmap",
+          "rustc_hash",
+          "tracing"
+        ],
         "crateInternal": [
           "cache_runtime",
           "component_meta_audit",
@@ -995,7 +1100,12 @@
           "verter_span",
           "verter_type_expr"
         ],
-        "external": ["serde", "smallvec", "static_assertions", "xxhash_rust"],
+        "external": [
+          "serde",
+          "smallvec",
+          "static_assertions",
+          "xxhash_rust"
+        ],
         "crateInternal": [
           "locator_identity",
           "project_semantic_dispatch",
@@ -1340,7 +1450,9 @@
           "oxc_syntax",
           "rustc_hash"
         ],
-        "crateInternal": ["semantic_query"],
+        "crateInternal": [
+          "semantic_query"
+        ],
         "mustNotImport": [
           "verter_compiler",
           "verter_parser",

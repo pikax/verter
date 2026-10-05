@@ -1,5 +1,5 @@
 //! Observation DTOs for
-//! [`crate::resolution::ResolverObservation::module_augmentation_index`].
+//! `verter_resolution::ResolverObservation::module_augmentation_index`.
 //!
 //! `verter_session::file_artifact_store::FileArtifactStore`'s
 //! `augmentation_index` remains the session-owned authoritative store —
@@ -12,8 +12,8 @@
 //! `build_toolchain_fingerprint`) entirely, carrying only what a kernel
 //! consumer needs to (a) know which files contribute and in what order,
 //! and (b) re-demand each contributor's declaration bodies through
-//! [`crate::resolution::ResolverObservation::type_decl`]/
-//! [`crate::resolution::ResolverObservation::value_decl`] — the session
+//! `verter_resolution::ResolverObservation::type_decl`/
+//! `verter_resolution::ResolverObservation::value_decl` — the session
 //! side re-derives the exact artifact key from the live content hash when
 //! it actually needs to re-fetch a contributor's raw facts: the
 //! session side heals/materializes before constructing the immutable

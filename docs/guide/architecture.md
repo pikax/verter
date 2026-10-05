@@ -76,7 +76,8 @@ flowchart LR
 | `crates/verter_parser/`      | Framework-neutral parser and syntax facts                                |
 | `crates/verter_compiler/`    | Runtime and IDE code generation                                          |
 | `crates/verter_semantic/`    | Reusable semantic facts and typed IR                                     |
-| `crates/verter_session_query/` | Session query schema and query-domain contracts                        |
+| `crates/verter_session_query/` | Session query contracts and owned resolution inputs/answers            |
+| `crates/verter_resolution/`  | Parser-free implementation of workspace module-resolution authority     |
 | `crates/verter_session/`     | Host-backed resolution, semantic graph, caches, and compilation sessions |
 | `crates/verter_type_runtime/` | Shared runtime support for native type evaluation                       |
 | `crates/verter_workspace/`   | Virtual filesystem and import-resolution authority                       |

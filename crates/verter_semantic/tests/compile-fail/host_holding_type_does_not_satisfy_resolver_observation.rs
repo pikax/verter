@@ -4,13 +4,17 @@
 //! `verter_semantic` cannot even name `VerterHost` (it lives in
 //! `verter_session`, which depends on `verter_semantic`, never the
 //! reverse) — this fixture stands a locally-defined host-shaped handle in
-//! for it and proves the trait's seal (private to `verter_semantic`)
+//! for it and proves the trait's seal (private to `verter_resolution`)
 //! rejects an external implementor regardless of what it holds. If this
 //! ever compiles, the trait stopped being sealed against outside crates,
 //! which is the layer-safe ownership guarantee.
 
-use verter_session_query::resolution::{AttemptOutcome, AugmentationTargetKey, CanonicalId, EnvHashes, FlowFunctionObservationKey, LoweredTypeDecl, LoweredValueDecl, ModuleAugmentationIndexObservation, ResolutionPackageManifest, StoreViewProjectIdentity};
-use verter_session_query::resolution::ResolverObservation;
+use verter_resolution::ResolverObservation;
+use verter_session_query::resolution::{
+    AttemptOutcome, AugmentationTargetKey, CanonicalId, EnvHashes, FlowFunctionObservationKey,
+    LoweredTypeDecl, LoweredValueDecl, ModuleAugmentationIndexObservation,
+    ResolutionPackageManifest, StoreViewProjectIdentity,
+};
 
 /// Stands in for a host/scheduler-backed handle an outside crate might try
 /// to launder through the observation interface.
@@ -82,8 +86,9 @@ impl ResolverObservation for FakeHostHandle {
     fn function_body_skeleton(
         &self,
         _key: &FlowFunctionObservationKey,
-    ) -> AttemptOutcome<Option<std::sync::Arc<verter_session_query::flow::skeleton::FunctionBodySkeleton>>>
-    {
+    ) -> AttemptOutcome<
+        Option<std::sync::Arc<verter_session_query::flow::skeleton::FunctionBodySkeleton>>,
+    > {
         unimplemented!()
     }
 

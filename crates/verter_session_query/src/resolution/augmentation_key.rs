@@ -12,7 +12,7 @@
 //! `ensure_augmentation_index_populated`'s cold-scan/publish machinery
 //! are session-owned. Only the key vocabulary crosses the observation
 //! boundary, so
-//! [`crate::resolution::ResolverObservation::module_augmentation_index`]
+//! `verter_resolution::ResolverObservation::module_augmentation_index`
 //! can accept the SAME key type the session-owned index is stored under
 //! rather than a parallel shape.
 //!

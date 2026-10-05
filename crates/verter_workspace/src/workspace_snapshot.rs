@@ -19,8 +19,9 @@ use smallvec::SmallVec;
 
 use crate::canonical_path::CanonicalPath;
 use crate::membership::FallbackMembership;
+use verter_resolution::ModuleResolverCore;
 use verter_session_query::resolution::{
-    ConfiguredMembership, IdeProjectCompilerOptions, ModuleResolverCore, WorkspaceAlias,
+    ConfiguredMembership, IdeProjectCompilerOptions, WorkspaceAlias,
 };
 
 /// Index into [`WorkspaceSnapshot::projects`].

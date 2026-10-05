@@ -11,7 +11,7 @@ pub struct ResolutionObservationSnapshot {
     path_probes: HashMap<String, PathProbe>,
     real_paths: HashMap<String, Option<Arc<str>>>,
     manifests: HashMap<String, Option<Arc<ResolutionPackageManifest>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     stable_absent_defaults: bool,
 }
 
@@ -53,7 +53,7 @@ impl ResolutionObservationSnapshot {
 
     pub fn path_probe(&self, path: &str) -> Option<PathProbe> {
         let probe = self.path_probes.get(path).copied();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if probe.is_none() && self.stable_absent_defaults {
             return Some(PathProbe::Absent);
         }
@@ -62,7 +62,7 @@ impl ResolutionObservationSnapshot {
 
     pub fn real_path(&self, path: &str) -> Option<Option<Arc<str>>> {
         let real_path = self.real_paths.get(path).cloned();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if real_path.is_none() && self.stable_absent_defaults {
             return Some(None);
         }
@@ -74,15 +74,16 @@ impl ResolutionObservationSnapshot {
         directory: &str,
     ) -> Option<Option<Arc<ResolutionPackageManifest>>> {
         let manifest = self.manifests.get(directory).cloned();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if manifest.is_none() && self.stable_absent_defaults {
             return Some(None);
         }
         manifest
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_stable_absent_defaults_for_test() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn with_stable_absent_defaults_for_test() -> Self {
         Self {
             stable_absent_defaults: true,
             ..Self::default()

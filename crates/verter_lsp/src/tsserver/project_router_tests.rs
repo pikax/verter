@@ -62,9 +62,8 @@ async fn batch_router_fixture() -> BatchRouterFixture {
 async fn batch_router_fixture_with_generated_membership(
     admit_generated: bool,
 ) -> BatchRouterFixture {
-    use verter_session_query::resolution::{
-        ConfiguredMembership, ModuleResolverCore, StaticMembershipSpec,
-    };
+    use verter_resolution::ModuleResolverCore;
+    use verter_session_query::resolution::{ConfiguredMembership, StaticMembershipSpec};
     use verter_workspace::workspace_snapshot::{OwnershipProject, ProjectPayload};
     use verter_workspace::{CanonicalPath, PublishedRoot, WorkspaceSnapshot};
 
@@ -447,7 +446,7 @@ async fn two_provider_aba_aliases_share_a_group_and_withdrawal_blocks_stale_deli
             verter_workspace::WorkspaceSnapshot {
                 owners_memo: Default::default(),
                 projects: Vec::new(),
-                resolver: verter_session_query::resolution::ModuleResolverCore::new(Vec::new()),
+                resolver: verter_resolution::ModuleResolverCore::new(Vec::new()),
                 generation: SnapshotGeneration(2),
             },
         )));
@@ -530,7 +529,7 @@ async fn carrier_batches_revalidate_live_ownership_after_routes_are_registered()
             verter_workspace::WorkspaceSnapshot {
                 owners_memo: Default::default(),
                 projects: Vec::new(),
-                resolver: verter_session_query::resolution::ModuleResolverCore::new(Vec::new()),
+                resolver: verter_resolution::ModuleResolverCore::new(Vec::new()),
                 generation: SnapshotGeneration(2),
             },
         )));
@@ -1023,7 +1022,7 @@ async fn query_racing_a_basis_drift_is_reissued_under_a_fresh_admission() {
                 verter_workspace::WorkspaceSnapshot {
                     owners_memo: Default::default(),
                     projects: Vec::new(),
-                    resolver: verter_session_query::resolution::ModuleResolverCore::new(Vec::new()),
+                    resolver: verter_resolution::ModuleResolverCore::new(Vec::new()),
                     generation: SnapshotGeneration(2),
                 },
             )));

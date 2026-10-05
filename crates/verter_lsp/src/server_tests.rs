@@ -1476,8 +1476,7 @@ fn install_test_resolver_for_root_with_options(
         tsconfig.map(|s| s.to_string()),
     );
     resolver_project.compiler_options = compiler_options;
-    let resolver =
-        verter_session_query::resolution::ModuleResolverCore::new(vec![resolver_project]);
+    let resolver = verter_resolution::ModuleResolverCore::new(vec![resolver_project]);
 
     let snapshot = std::sync::Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
@@ -1540,13 +1539,12 @@ fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::Fil
             workspace_aliases: Vec::new(),
         },
     }];
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             root.to_string(),
             root.to_string(),
             Some(tsconfig.to_string()),
-        ),
-    ]);
+        )]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,
@@ -2602,13 +2600,12 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
 /// target must therefore never become a provider buffer or an exact host route.
 #[test]
 fn provider_sync_refuses_return_only_resolution_products() {
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+        )]);
     let source = "import { value } from './dep';\n";
     let expr = "'./dep'";
     let start = source.find(expr).expect("fixture import");
@@ -2645,13 +2642,12 @@ fn provider_sync_refuses_return_only_resolution_products() {
 
 #[test]
 fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let reader =
         TestResolverReader::with_files(&["/workspace/src/Foo.vue", "/workspace/src/util.ts"]);
     let source =
@@ -2742,13 +2738,12 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
 
 #[test]
 fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let reader = TestResolverReader::with_files(&[
         "/workspace/src/tempUtil.ts",
         "/workspace/src/ExternalChild.vue",
@@ -2799,13 +2794,12 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
 
 #[test]
 fn provider_vue_path_helpers_use_original_paths() {
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
 
     let ide_path =
         provider_ide_path_for_source(&resolver, "/workspace/src/App.vue", false).unwrap();
@@ -2823,13 +2817,12 @@ fn provider_vue_path_helpers_use_original_paths() {
 
 #[test]
 fn provider_path_helpers_round_trip_through_resolver() {
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     // Host must have the backing .vue source for the collision guard to pass
     let host = VerterHost::new_standalone(HostConfig::default());
     host.upsert(verter_session::UpsertRequest {
@@ -2858,13 +2851,12 @@ fn provider_path_helpers_round_trip_through_resolver() {
 fn vue_tsx_collision_with_real_file() {
     // A real .vue.tsx file exists but there's no matching .vue source in any project.
     // source_id_from_provider_carrier_path should return None (collision guard).
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace/src".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let host = VerterHost::new_standalone(HostConfig::default());
 
     // "/workspace/src/weird.vue.tsx" has no backing "/workspace/src/weird.vue"
@@ -2879,13 +2871,12 @@ fn vue_tsx_collision_with_real_file() {
 #[test]
 fn vue_tsx_virtual_file_resolves() {
     // A virtual .vue.tsx with a backing .vue source registered in a project.
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     // Host must have the backing .vue source for the collision guard to pass
     let host = VerterHost::new_standalone(HostConfig::default());
     host.upsert(verter_session::UpsertRequest {
@@ -2910,13 +2901,12 @@ fn vue_tsx_collision_guard_rejects_when_host_missing_source() {
     // The resolver thinks /workspace/src/Real.vue.tsx belongs to the project
     // and strips the suffix to get /workspace/src/Real.vue, but the host
     // has never compiled Real.vue → collision guard must reject.
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let host = VerterHost::new_standalone(HostConfig::default());
     // Do NOT upsert /workspace/src/Real.vue into host
 
@@ -2934,13 +2924,12 @@ fn svelte_ts_rune_module_resolves_to_itself_not_phantom_component() {
     // but no backing `store.svelte` component source exists in the host. The
     // generalized collision guard must reject the phantom `store.svelte` and
     // map the rune module to ITSELF.
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let host = VerterHost::new_standalone(HostConfig::default());
     let rune_language = verter_session::FileLanguage::adapter_module(
         verter_session::ScriptSourceType::Ts,
@@ -2978,13 +2967,12 @@ fn svelte_component_virtual_still_resolves_to_carrier() {
     // The genuine component-virtual case: a real `Foo.svelte` component source
     // exists, and its `Foo.svelte.ts` API virtual must still reverse-map to the
     // `Foo.svelte` carrier (the generalization must not break this).
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let host = VerterHost::new_standalone(HostConfig::default());
     host.upsert(verter_session::UpsertRequest {
         canonical_id: Some("/workspace/src/Foo.svelte".to_string()),
@@ -5199,13 +5187,12 @@ fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
 
 #[test]
 fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let reader = TestResolverReader::with_files(&[
         "/workspace/src/Foo.vue",
         "/workspace/src/Bar.vue",
@@ -5251,13 +5238,12 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
 
 #[test]
 fn unknown_dynamic_imports_sync_no_provider_dependencies() {
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let reader = TestResolverReader::with_files(&["/workspace/src/Foo.vue"]);
     let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
@@ -16486,7 +16472,7 @@ export const direct = Comp;
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(vec![project]),
+        resolver: verter_resolution::ModuleResolverCore::new(vec![project]),
         resolution_view: None,
         ownership_ready: true,
     };
@@ -19876,7 +19862,7 @@ defineProps<{ msg: string }>()
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_root.clone(),
                 workspace_root.clone(),
@@ -20020,7 +20006,7 @@ defineProps<{ msg: string }>()
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_root.clone(),
                 workspace_root.clone(),
@@ -20142,7 +20128,7 @@ defineProps<{ msg: string }>()
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_root.clone(),
                 workspace_root.clone(),
@@ -20558,7 +20544,7 @@ fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
             configured_project(0, "/workspace/a", "/workspace/a/tsconfig.json", true),
             configured_project(1, "/workspace/b", "/workspace/b/tsconfig.json", false),
         ],
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(Vec::new()),
+        resolver: verter_resolution::ModuleResolverCore::new(Vec::new()),
         generation: SnapshotGeneration(1),
     };
     assert!(
@@ -20582,7 +20568,7 @@ fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
             configured_project(0, "/workspace", "/workspace/tsconfig.a.json", true),
             configured_project(1, "/workspace", "/workspace/tsconfig.b.json", false),
         ],
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(Vec::new()),
+        resolver: verter_resolution::ModuleResolverCore::new(Vec::new()),
         generation: SnapshotGeneration(1),
     };
     assert!(
@@ -23614,7 +23600,7 @@ async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_
 
     // Verify the resolver can resolve these specifiers
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(vec![project]),
+        resolver: verter_resolution::ModuleResolverCore::new(vec![project]),
         resolution_view: None,
         ownership_ready: true,
     };
@@ -23736,7 +23722,7 @@ defineProps<{ msg: string }>()
 
     let tsconfig = format!("{workspace_id}/tsconfig.app.json");
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_id.clone(),
                 workspace_id.clone(),
@@ -36580,13 +36566,12 @@ async fn generic_rename_fails_closed_while_project_carrier_frontier_is_incomplet
             workspace_aliases: Vec::new(),
         },
     }];
-    let resolver = verter_session_query::resolution::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             workspace_id.clone(),
             workspace_id.clone(),
             Some(tsconfig),
-        ),
-    ]);
+        )]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,
@@ -38558,7 +38543,7 @@ async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
 
     let tsconfig = format!("{workspace_id}/tsconfig.app.json");
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_session_query::resolution::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_id.clone(),
                 workspace_id.clone(),

@@ -2,9 +2,10 @@ use super::*;
 use crate::canonical_path::CanonicalPath;
 use crate::membership::FallbackMembership;
 use rustc_hash::FxHashSet;
+use verter_resolution::ModuleResolverCore;
 use verter_session_query::resolution::{
-    CompiledGlob, ConfiguredMembership, IdeProjectCompilerOptions, ModuleResolverCore,
-    NormalizedGlob, StaticMembershipSpec,
+    CompiledGlob, ConfiguredMembership, IdeProjectCompilerOptions, NormalizedGlob,
+    StaticMembershipSpec,
 };
 
 // ── Helpers ──

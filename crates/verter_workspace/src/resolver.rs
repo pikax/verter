@@ -10,13 +10,15 @@ use crate::canonical_path::CanonicalPath;
 use crate::membership::configured_membership_match_all_under_root;
 #[cfg(test)]
 use crate::membership::ProjectMembership;
+use verter_resolution::{
+    AttemptOutput, InputResolutionRetention, KernelAttempt, ModuleResolverCore, ResolverAttemptView,
+};
 use verter_session_query::resolution::{
-    AttemptFailure, AttemptOutcome, AttemptOutput, ConsumedResolutionObservationKey,
-    IdeProjectCompilerOptions, IdeProjectConfig, InputKey, InputLoadIntegrityReason,
-    InputResolutionBudgetExhaustion, InputResolutionBudgetMeter, InputResolutionBudgets,
-    InputResolutionRetention, KernelAttempt, LoadSet, ModuleResolverCore, ResolutionBasis,
+    AttemptFailure, AttemptOutcome, ConsumedResolutionObservationKey, IdeProjectCompilerOptions,
+    IdeProjectConfig, InputKey, InputLoadIntegrityReason, InputResolutionBudgetExhaustion,
+    InputResolutionBudgetMeter, InputResolutionBudgets, LoadSet, ResolutionBasis,
     ResolutionContext, ResolutionObservationSnapshot, ResolutionPackageManifest, ResolveRequest,
-    ResolveResult, ResolverAttemptView, ResolverObservationKind,
+    ResolveResult, ResolverObservationKind,
 };
 
 /// One exact bounded preflight entry. Payload-bearing package content is not
@@ -1008,8 +1010,7 @@ pub(crate) fn drive_attempt_with_bounded_io<T>(
                             .map_or_else(Vec::new, |load_set| copy_terminal_keys(load_set.keys())),
                     }));
                 }
-                let verter_session_query::resolution::CompletedAttempt { value, output } =
-                    completed;
+                let verter_resolution::CompletedAttempt { value, output } = completed;
                 ledger.applied_outputs.push(output);
                 ledger.last_load_set = last_load_set;
                 return Ok(value);

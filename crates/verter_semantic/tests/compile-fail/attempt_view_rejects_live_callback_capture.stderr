@@ -1,11 +1,13 @@
 error[E0599]: no method named `with_project_generation` found for struct `ResolverAttemptView` in the current scope
-  --> tests/compile-fail/attempt_view_rejects_live_callback_capture.rs:15:44
+  --> tests/compile-fail/attempt_view_rejects_live_callback_capture.rs:17:10
    |
-15 |     let _view = ResolverAttemptView::new().with_project_generation(move || {
-   |                 ---------------------------^^^^^^^^^^^^^^^^^^^^^^^
+16 |       let _view = ResolverAttemptView::new()
+   |  _________________-
+17 | |         .with_project_generation(move || AttemptOutcome::Complete(host.generation));
+   | |_________-^^^^^^^^^^^^^^^^^^^^^^^
    |
 help: there is a method `project_generation` with a similar name, but with different arguments
-  --> src/resolver_core/observation.rs
+  --> $WORKSPACE/crates/verter_resolution/src/observation.rs
    |
    |     fn project_generation(&self) -> AttemptOutcome<u64>;
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
