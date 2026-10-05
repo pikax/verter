@@ -332,8 +332,25 @@ fn live_graph() -> ProductionGraph {
     cargo_metadata(&manifest, &["--locked"])
 }
 
+/// Rule roots that are not members of this workspace. A listed root is
+/// checked for ABSENCE (its live check proves it is still missing); a root
+/// that exists must not be listed, so its live closure check can never be
+/// skipped by staying on this list.
+const ABSENT_ROOTS: &[&str] = &["verter_type_engine", "verter_semantic_source"];
+
 fn assert_live_rule(root: &str) {
-    if let Err(message) = live_graph().check(rule(root)) {
+    let graph = live_graph();
+    if ABSENT_ROOTS.contains(&root) {
+        let error = graph
+            .check(rule(root))
+            .expect_err("a root listed in ABSENT_ROOTS must not be a workspace member");
+        assert!(
+            error.contains("is not a workspace member"),
+            "`{root}` is listed in ABSENT_ROOTS but its check failed differently: {error}"
+        );
+        return;
+    }
+    if let Err(message) = graph.check(rule(root)) {
         panic!("{message}");
     }
 }
@@ -349,13 +366,11 @@ fn resolution_production_closure_stays_syntax_semantic_and_host_free() {
 }
 
 #[test]
-#[ignore = "enabled when the crate exists"]
 fn type_engine_production_closure_stays_syntax_host_and_provider_free() {
     assert_live_rule("verter_type_engine");
 }
 
 #[test]
-#[ignore = "enabled when the crate exists"]
 fn semantic_source_production_closure_stays_engine_host_and_provider_free() {
     assert_live_rule("verter_semantic_source");
 }
@@ -381,6 +396,16 @@ type Edge = (&'static str, &'static str, Kind);
 /// Write a path-only fixture workspace into a fresh temporary directory and
 /// resolve it offline.
 fn fixture_graph(crates: &[&'static str], edges: &[Edge]) -> ProductionGraph {
+    fixture_graph_with(crates, edges, &[])
+}
+
+/// [`fixture_graph`] plus raw manifest text appended to named crates, for
+/// dependency shapes the edge list cannot express.
+fn fixture_graph_with(
+    crates: &[&'static str],
+    edges: &[Edge],
+    raw: &[(&'static str, &'static str)],
+) -> ProductionGraph {
     let dir = tempfile::tempdir().expect("fixture tempdir");
     let root = dir.path();
     let mut members = String::new();
@@ -423,6 +448,9 @@ fn fixture_graph(crates: &[&'static str], edges: &[Edge]) -> ProductionGraph {
             let _ = write!(manifest, "\n[{header}]\n{body}");
         }
         let _ = write!(manifest, "\n[features]\n{features}");
+        for (_, text) in raw.iter().filter(|(crate_name, _)| crate_name == name) {
+            let _ = write!(manifest, "\n{text}\n");
+        }
         let src = root.join(name).join("src");
         std::fs::create_dir_all(&src).expect("create fixture crate");
         std::fs::write(root.join(name).join("Cargo.toml"), manifest).expect("write fixture crate");
@@ -482,9 +510,6 @@ const PLANTED_DIRECT: &[(&str, &str)] = &[
     ("verter_resolution", "verter_scheduler"),
 ];
 
-/// Planted roots and targets not yet present in this repository.
-const NOT_YET_CREATED: &[&str] = &["verter_type_engine", "verter_semantic_source"];
-
 #[test]
 fn planted_direct_violation_is_rejected_for_every_rule_and_class() {
     let mut failures = Vec::new();
@@ -526,15 +551,19 @@ fn planted_forbidden_names_are_real_packages() {
     for &(root, forbidden) in PLANTED_DIRECT {
         for name in [root, forbidden] {
             assert!(
-                live.contains(name) || NOT_YET_CREATED.contains(&name),
-                "planted name `{name}` is neither a resolved package nor a crate pending creation"
+                live.contains(name) || ABSENT_ROOTS.contains(&name),
+                "planted name `{name}` is neither a resolved package nor listed in ABSENT_ROOTS"
             );
         }
     }
-    for name in NOT_YET_CREATED {
+    for name in ABSENT_ROOTS {
         assert!(
             RULES.iter().any(|rule| rule.root == *name),
-            "pending crate `{name}` has no closure rule"
+            "absent root `{name}` has no closure rule"
+        );
+        assert!(
+            !live.contains(name),
+            "`{name}` is now a workspace package: remove it from ABSENT_ROOTS so its live closure check runs"
         );
     }
 }
@@ -566,6 +595,23 @@ fn planted_feature_gated_optional_violation_is_rejected() {
         )],
     );
     assert_rejects("verter_type_engine", &graph, "verter_parser");
+}
+
+#[test]
+fn planted_renamed_target_specific_violation_is_rejected() {
+    // A renamed dependency under a target table the host never matches: the
+    // closure must follow the resolved package, not the local alias, and must
+    // not filter edges by the host platform.
+    let graph = fixture_graph_with(
+        &["verter_type_engine", "oxc_span"],
+        &[],
+        &[(
+            "verter_type_engine",
+            "[target.'cfg(target_os = \"none\")'.dependencies]\n\
+             span_alias = { path = \"../oxc_span\", package = \"oxc_span\" }",
+        )],
+    );
+    assert_rejects("verter_type_engine", &graph, "oxc_span");
 }
 
 #[test]
