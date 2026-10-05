@@ -7247,6 +7247,15 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
                 raced_membership.is_err(),
                 "close membership must wait for the final native completion fence"
             );
+            // Background settlement keeps running while the fence is held: the
+            // sync coordinator re-arms this open importer once its imported
+            // child's publication settles, advancing only the diagnostics
+            // generation. Land that move inside the fenced calculation so the
+            // final answer must survive it rather than depend on its timing.
+            server
+                .documents
+                .host()
+                .bump_diagnostics_generation(&crate::documents::uri_to_canonical_id(&app_uri));
             final_snapshot_release.notify_one();
         };
         futures_util::future::join(close, prove_serialized).await;
