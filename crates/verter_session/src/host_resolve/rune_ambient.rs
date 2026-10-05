@@ -18,9 +18,9 @@
 //! runes, so a plain `.ts` / `.js` never sees `$state`.
 //!
 //! The rune declaration text is the SINGLE shared rune source
-//! ([`verter_compiler::svelte::ide::prelude::module_rune_ambient_source`]) — no
+//! ([`verter_language::svelte_rune_ambient::module_rune_ambient_source`]) — no
 //! second declaration list. Its version
-//! ([`verter_compiler::svelte::ide::prelude::RUNE_AMBIENT_PRELUDE_VERSION`])
+//! ([`verter_language::svelte_rune_ambient::RUNE_AMBIENT_PRELUDE_VERSION`])
 //! feeds the rune module's `parse_env_hash` (via the workspace parser flag) so
 //! a prelude fix invalidates a rune module's stale inferred exports through the
 //! whole content-addressed cache lineage.
@@ -106,7 +106,7 @@ impl RuneAmbientInventory {
 fn rune_ambient_inventory() -> &'static RuneAmbientInventory {
     static INVENTORY: OnceLock<RuneAmbientInventory> = OnceLock::new();
     INVENTORY.get_or_init(|| {
-        let source = verter_compiler::svelte::ide::prelude::module_rune_ambient_source();
+        let source = verter_language::svelte_rune_ambient::module_rune_ambient_source();
         let allocator = oxc_allocator::Allocator::default();
         let parsed =
             verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
@@ -300,11 +300,11 @@ mod tests {
         // The parse-env flag's version suffix MUST track the rune-prelude
         // version so a prelude-surface change invalidates a rune module's stale
         // inferred exports through `parse_env_hash`. The version constant lives
-        // in `verter_compiler`; the flag lives in `verter_workspace`; this guard
-        // (in the crate that sees both) pins them in lockstep.
+        // in `verter_language`; the flag lives in `verter_workspace`; this guard
+        // pins them in lockstep.
         let expected = format!(
             "svelte-rune-ambient-v{}",
-            verter_compiler::svelte::ide::prelude::RUNE_AMBIENT_PRELUDE_VERSION
+            verter_language::svelte_rune_ambient::RUNE_AMBIENT_PRELUDE_VERSION
         );
         assert_eq!(
             verter_workspace::SVELTE_RUNE_AMBIENT_PARSER_FLAG,

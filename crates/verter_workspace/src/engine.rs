@@ -5528,11 +5528,9 @@ impl std::fmt::Debug for Engine {
 const WORKSPACE_PARSER_FLAGS: &[&str] = &["verter-parser-v1", SVELTE_RUNE_AMBIENT_PARSER_FLAG];
 
 /// The Svelte rune-ambient parse-env flag mixed into `parse_env_hash`. Its
-/// version suffix MUST track `verter_compiler`'s `RUNE_AMBIENT_PRELUDE_VERSION`
+/// version suffix MUST track `verter_language`'s `RUNE_AMBIENT_PRELUDE_VERSION`
 /// so a rune-prelude surface change invalidates a rune module's stale inferred
-/// exports. A `verter_session` freshness guard pins the two in lockstep (the
-/// version constant lives in `verter_compiler`, which `verter_workspace` does
-/// not depend on, so the link is asserted from the crate that sees both).
+/// exports. A `verter_session` freshness guard pins the two in lockstep.
 pub const SVELTE_RUNE_AMBIENT_PARSER_FLAG: &str = "svelte-rune-ambient-v1";
 
 /// Workspace-level ambient corpus fingerprint mixed into every project's
