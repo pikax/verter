@@ -10,6 +10,7 @@
 //! `impl VerterHost { … }` block.
 
 use std::sync::Arc;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::instant::Instant;
 

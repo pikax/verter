@@ -448,7 +448,7 @@ impl<
         target: crate::file_artifact_store::AugmentationTargetKind,
     ) -> (
         crate::file_artifact_store::AugmentationTargetKey,
-        Arc<crate::file_artifact_store::AugmenterSet>,
+        Arc<verter_session_query::resolution::AugmenterSet>,
     ) {
         let host = self.source_host();
         host.ingest_program_ambient_roots();
@@ -534,7 +534,7 @@ impl<
     fn refresh_augmentation_keys(
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
-        observed: &crate::file_artifact_store::AugmenterSet,
+        observed: &verter_session_query::resolution::AugmenterSet,
         refreshed: Vec<(
             usize,
             verter_session_query::source::artifact_key::FileArtifactKey,
@@ -552,7 +552,7 @@ impl<
             .indexed()
             .populate_augmenter_set(
                 key.clone(),
-                Arc::new(crate::file_artifact_store::AugmenterSet {
+                Arc::new(verter_session_query::resolution::AugmenterSet {
                     entries,
                     fingerprint: observed.fingerprint,
                 }),
@@ -737,7 +737,7 @@ impl<
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> verter_session_query::source::demand::DemandOutcome<
-        crate::decl_body_memo::TransientTypeParts,
+        verter_session_query::source::transient_parts::TransientTypeParts,
     > {
         let Some(source) = self.source(source) else {
             missing_source();
@@ -751,7 +751,7 @@ impl<
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> verter_session_query::source::demand::DemandOutcome<
-        crate::decl_body_memo::TransientValueParts,
+        verter_session_query::source::transient_parts::TransientValueParts,
     > {
         let Some(source) = self.source(source) else {
             missing_source();

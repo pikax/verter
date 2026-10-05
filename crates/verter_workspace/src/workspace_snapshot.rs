@@ -21,12 +21,8 @@ use crate::canonical_path::CanonicalPath;
 use crate::membership::FallbackMembership;
 use verter_resolution::ModuleResolverCore;
 use verter_session_query::resolution::{
-    ConfiguredMembership, IdeProjectCompilerOptions, WorkspaceAlias,
+    ConfiguredMembership, IdeProjectCompilerOptions, ProjectId, WorkspaceAlias,
 };
-
-/// Index into [`WorkspaceSnapshot::projects`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ProjectId(pub u32);
 
 /// Monotonic generation counter for published snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

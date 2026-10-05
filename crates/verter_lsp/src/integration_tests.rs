@@ -5000,7 +5000,9 @@ const pageTitle: string = 'Hello'
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc.source,
-        verter_session::AnalysisSourceRevision::of_source(&doc.source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+            &doc.source,
+        ),
         analysis.as_ref(),
         &blocks,
         &doc.line_index,
@@ -5065,7 +5067,9 @@ const x = 1
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc.source,
-        verter_session::AnalysisSourceRevision::of_source(&doc.source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+            &doc.source,
+        ),
         analysis.as_ref(),
         &blocks,
         &doc.line_index,
@@ -5116,7 +5120,9 @@ defineSlots<{
     let blocks = test_carrier_blocks(&doc.source);
     let control = crate::features::macro_actions::macro_code_actions(
         &doc.source,
-        verter_session::AnalysisSourceRevision::of_source(&doc.source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+            &doc.source,
+        ),
         Some(&analysis_v1),
         &blocks,
         &doc.line_index,
@@ -5152,7 +5158,9 @@ defineSlots<{}>()
 
     let actions = crate::features::macro_actions::macro_code_actions(
         &doc_v2.source,
-        verter_session::AnalysisSourceRevision::of_source(&doc_v2.source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+            &doc_v2.source,
+        ),
         Some(&analysis_v1),
         &blocks_v2,
         &doc_v2.line_index,

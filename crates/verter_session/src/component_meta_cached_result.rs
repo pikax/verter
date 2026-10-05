@@ -136,7 +136,7 @@ impl ResolutionTemplate {
     /// - All other fields are restored from the cached template.
     pub fn rehydrate(
         &self,
-        snapshot: crate::types::FileAnalysisSnapshot,
+        snapshot: verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
         request_id: u64,
     ) -> crate::meta_resolve::ResolvedComponentMetaState {
         crate::meta_resolve::ResolvedComponentMetaState {

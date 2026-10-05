@@ -64,7 +64,7 @@ use crate::semantic_query::{
     DeclIdentity, DepSignature, DepVersion, PathSegment, ProjectionMode, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 /// Identifies a single `defineSlots` (or peer macro) invocation by
 /// `(owner_canonical, macro_index, type_args)`. Used as the primary key

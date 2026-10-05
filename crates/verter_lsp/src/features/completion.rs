@@ -3,7 +3,7 @@
 // AST-based cursor context detection via cursor_context module.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use verter_session::carrier_publication_store::RegisteredFileStructure;
 

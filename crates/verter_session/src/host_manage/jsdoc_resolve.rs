@@ -21,8 +21,9 @@
 
 use crate::request_observers::{component_meta_debug, component_meta_debug_enabled};
 use crate::resolver_core::ComponentMetaEvalOutputs;
-use crate::types::{FileAnalysisSnapshot, ProjectionMode};
+use crate::types::ProjectionMode;
 use crate::VerterHost;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::instant::Instant;
 

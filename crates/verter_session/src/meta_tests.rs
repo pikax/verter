@@ -147,7 +147,9 @@ defineProps<{{ {props} }}>()
 }
 
 /// Extract prop field names from a FileAnalysisSnapshot's macros.
-fn prop_names(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
+fn prop_names(
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> Vec<String> {
     snapshot
         .macros
         .iter()

@@ -1862,9 +1862,9 @@ impl VerterHost {
         parse: &crate::ParseSnapshot,
         export_signatures: Arc<Vec<verter_session_query::analysis::types::ExportSignature>>,
         template: Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>>,
-    ) -> crate::types::FileAnalysisSnapshot {
+    ) -> verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
         let sa = parse.script_analysis.as_ref();
-        crate::types::FileAnalysisSnapshot {
+        verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
             imports: sa.imports.clone(),
             bindings: sa.bindings.clone(),
             module_references: Arc::new(sa.module_references.clone()),
@@ -1885,7 +1885,7 @@ impl VerterHost {
             store_usages: Arc::new(sa.store_usages.clone()),
             store_definitions: Arc::new(sa.store_definitions.clone()),
             is_typescript: sa.is_typescript,
-            anchor_revision: crate::types::AnalysisSourceRevision::from_whole_hash(
+            anchor_revision: verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(
                 parse.whole_hash,
             ),
         }
@@ -1908,7 +1908,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
-        snapshot: &crate::types::FileAnalysisSnapshot,
+        snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
         route_inventory: &Arc<
             verter_session_query::analysis::route_inventory::ScriptRouteInventory,
         >,

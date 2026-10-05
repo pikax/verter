@@ -10,6 +10,7 @@
 //! export-graph resolution helpers. Public surface remains rooted at
 //! `crate::host_manage::*`; this file contributes a continuation
 //! `impl VerterHost { … }` block.
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
 use crate::file_artifact_store::FileArtifactKeySource;
@@ -630,7 +631,7 @@ impl VerterHost {
                 // the SAME held source read (`whole_hash` is already
                 // `hash_16` of the whole file — no re-hash here).
                 let anchor_revision =
-                    crate::types::AnalysisSourceRevision::from_whole_hash(hd.parse.whole_hash);
+                    verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(hd.parse.whole_hash);
                 let structure = hd.structure.clone();
                 drop(source_snap);
 
@@ -1830,7 +1831,7 @@ impl VerterHost {
             .filter(|source_snap| source_snap.generation == analysis_snap.generation)
             .and_then(|source_snap| {
                 let hd = source_snap.downcast_data::<crate::host_executor::HostSourceData>()?;
-                Some(crate::types::AnalysisSourceRevision::from_whole_hash(
+                Some(verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(
                     hd.parse.whole_hash,
                 ))
             })

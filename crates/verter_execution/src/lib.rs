@@ -8,6 +8,8 @@
 //!   one instance.
 //! - [`cancellation`]: one-shot and aggregate cancellation tokens and the
 //!   current-job cancellation scope.
+//! - [`pool_size`]: the worker-count policy a host-owned pool resolves at
+//!   construction.
 //! - [`request_context`]: the opaque request-context carrier, its TLS slots
 //!   and the installation/restoration guards.
 //!
@@ -18,5 +20,6 @@
 extern crate verter_debug_assert;
 
 pub mod cancellation;
+pub mod pool_size;
 pub mod request_context;
 pub mod tasks;

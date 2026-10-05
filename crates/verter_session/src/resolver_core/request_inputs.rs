@@ -44,7 +44,7 @@ pub struct IndexedInputRecord {
         Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     pub(crate) script_analysis:
         Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
-    pub(crate) snapshot: Arc<crate::types::FileAnalysisSnapshot>,
+    pub(crate) snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
     /// The owner's `interface AppConfig` shallow flag, mirrored from the
     /// artifact onto the request-input record. The authoritative copy is
     /// [`crate::project_type_store::IndexedReady::declares_interface_app_config`];

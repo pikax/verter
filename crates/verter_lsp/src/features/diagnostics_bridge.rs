@@ -4,7 +4,7 @@ use tower_lsp_server::ls_types::*;
 use verter_diagnostics::{
     DiagnosticSet, DiagnosticTag as LintDiagnosticTag, LintDiagnostic, Severity,
 };
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::AnalysisFlags;
 

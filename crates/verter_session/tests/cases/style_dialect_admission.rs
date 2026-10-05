@@ -6,7 +6,7 @@ use std::sync::Arc;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::analysis::style::{BlockContentAvailability, StyleAnalysisLang};
 
-fn analyze(source: &str) -> verter_session::FileAnalysisSnapshot {
+fn analyze(source: &str) -> verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
     let host = VerterHost::new_standalone(HostConfig::default());
     let update = host
         .upsert(UpsertRequest {

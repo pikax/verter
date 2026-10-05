@@ -47,8 +47,9 @@ pub(crate) fn resolve_ambient_global<C: crate::resolver_core::ResolverCapabiliti
 mod tests {
     use std::sync::Arc;
 
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::{
-        AmbientLibSpec, MemoryOptions, MemoryWorkspace, ProjectId, WorkspaceAccess, WorkspaceRead,
+        AmbientLibSpec, MemoryOptions, MemoryWorkspace, WorkspaceAccess, WorkspaceRead,
     };
 
     use super::*;

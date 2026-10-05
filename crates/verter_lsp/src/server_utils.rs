@@ -1145,7 +1145,10 @@ pub(crate) fn resolve_component_for(
     host: &verter_session::VerterHost,
     parent_canonical_id: &str,
     import_source: &str,
-) -> Option<(String, verter_session::FileAnalysisSnapshot)> {
+) -> Option<(
+    String,
+    verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+)> {
     let read_component_analysis = |canonical_id: &str| {
         let mut analysis = host.get_analysis(canonical_id);
 

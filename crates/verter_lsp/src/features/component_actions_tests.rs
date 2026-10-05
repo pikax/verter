@@ -1,7 +1,7 @@
 use super::*;
 use crate::documents::carrier_structure::{test_carrier_blocks, test_structure};
 use crate::documents::line_index::LineIndex;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
@@ -114,7 +114,10 @@ fn add_prop_to_type_based_define_props() {
         // `resolve_component_context` produces. A hand-forged anchor could not
         // discriminate a mint bug.
         macros: producer_backed_macros(child_source),
-        anchor_revision: verter_session::AnalysisSourceRevision::of_source(child_source),
+        anchor_revision:
+            verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+                child_source,
+            ),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);
@@ -238,7 +241,10 @@ fn no_action_for_runtime_based_define_props() {
     let child_source = "<script setup>\ndefineProps(['msg'])\n</script>";
     let child_analysis = FileAnalysisSnapshot {
         macros: producer_backed_macros(child_source),
-        anchor_revision: verter_session::AnalysisSourceRevision::of_source(child_source),
+        anchor_revision:
+            verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+                child_source,
+            ),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);

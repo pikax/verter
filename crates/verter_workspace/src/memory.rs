@@ -754,7 +754,7 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
 
     fn project_stable_key(
         &self,
-        project_id: crate::workspace_snapshot::ProjectId,
+        project_id: verter_session_query::resolution::ProjectId,
     ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         self.engine.project_stable_key(project_id)
     }
@@ -1075,7 +1075,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
 
     fn env_hash_array_for_project(
         &self,
-        project_id: crate::workspace_snapshot::ProjectId,
+        project_id: verter_session_query::resolution::ProjectId,
     ) -> Option<crate::published_state::ProjectEnvHashArray> {
         let root = self.engine.load_published()?;
         root.env_hashes_by_project.get(&project_id).copied()
@@ -1083,7 +1083,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
 
     fn project_identity_hash_for_project(
         &self,
-        project_id: crate::workspace_snapshot::ProjectId,
+        project_id: verter_session_query::resolution::ProjectId,
     ) -> Option<verter_scheduler::invalidation::Hash16> {
         let root = self.engine.load_published()?;
         root.project_identity_hashes.get(&project_id).copied()
@@ -1091,7 +1091,7 @@ impl crate::traits::WorkspaceAccess for MemoryWorkspace {
 
     fn semantic_compiler_options_for_project(
         &self,
-        project_id: crate::workspace_snapshot::ProjectId,
+        project_id: verter_session_query::resolution::ProjectId,
     ) -> Option<verter_session_query::resolution::SemanticCompilerOptions> {
         let root = self.engine.load_published()?;
         root.snapshot.semantic_compiler_options(project_id)

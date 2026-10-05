@@ -1142,7 +1142,7 @@ fn project_host(ambient_lib: Option<&str>) -> Arc<VerterHost> {
         verter_workspace::WorkspaceAccess::register_ambient_lib(
             workspace.as_ref(),
             verter_workspace::AmbientLibSpec {
-                project_id: Some(verter_workspace::workspace_snapshot::ProjectId(0)),
+                project_id: Some(verter_session_query::resolution::ProjectId(0)),
                 canonical_id: Arc::from("lib.d.ts"),
                 source: Arc::from(lib),
             },
@@ -1150,7 +1150,7 @@ fn project_host(ambient_lib: Option<&str>) -> Arc<VerterHost> {
         .expect("the ambient corpus registers");
         let key = verter_workspace::WorkspaceRead::project_stable_key(
             workspace.as_ref(),
-            verter_workspace::workspace_snapshot::ProjectId(0),
+            verter_session_query::resolution::ProjectId(0),
         )
         .expect("project key");
         virtual_id = Some(verter_workspace::ambient_virtual_canonical_id(

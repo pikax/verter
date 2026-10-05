@@ -6,13 +6,13 @@
 //! per-owner evaluated-type compute path. Public surface
 //! remains rooted at `crate::host_manage::*`; this file contributes a
 //! continuation `impl VerterHost { … }` block.
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
 use std::sync::Arc;
 
 use crate::instant::Instant;
 use crate::resolver_core::ValueDeclIdentity;
-use crate::types::*;
 use crate::VerterHost;
 
 use super::resolve_eval_dependency_canonical_with;
@@ -539,7 +539,9 @@ impl VerterHost {
         // `whole_hash` is already `hash_16` of the exact bytes this parse (and
         // therefore this analysis) observed.
         let anchor_revision =
-            crate::types::AnalysisSourceRevision::from_whole_hash(parse.whole_hash);
+            verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(
+                parse.whole_hash,
+            );
         FileAnalysisSnapshot {
             imports: script_analysis.imports,
             bindings: script_analysis.bindings,

@@ -45,7 +45,7 @@ use verter_session_query::analysis::types::AnalyzedMacroKind;
 use verter_session_query::type_solver::result::{ExecutionStatus, SolverExactness};
 
 use crate::resolver_core::ResolverContext;
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 /// Top-level driver: publish the `define_props` / `define_emits` /
 /// `define_slots` shapes for every type-based macro in `snapshot`.

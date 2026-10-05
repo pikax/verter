@@ -17,6 +17,7 @@ use verter_session::external_ts::{
 };
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::ProjectId;
 use verter_workspace::canonical_path::CanonicalPath;
 use verter_workspace::config::{
     load_compiler_options, load_project_membership, load_project_references,
@@ -26,7 +27,7 @@ use verter_workspace::snapshot_builder::{
     build_workspace_snapshot_simple, membership_to_spec, supported_extensions_for,
 };
 use verter_workspace::workspace_snapshot::{
-    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 
 pub const WORKSPACE_ROOT: &str = "d:/ws";

@@ -748,7 +748,7 @@ impl crate::resolver_core::ImportedRuntimeValueResolver for RecordingRuntimeValu
 fn materializer_touched_source_pairs(
     host: &crate::VerterHost,
     owner: &str,
-    snapshot: &crate::types::FileAnalysisSnapshot,
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
 ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
     // The materializer's INPUTS (its parameters), identical to what the
     // production `build_fallthrough_eval_env_lightweight` template path

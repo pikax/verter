@@ -5,7 +5,8 @@
 //! type aliases, and a handful of standalone scope-selection and
 //! transitive-cycle-reachability helpers.
 
-use crate::types::{FileAnalysisSnapshot, ProjectionMode};
+use crate::types::ProjectionMode;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
 // `ResolvedDeclarationKind`, `ResolvedTypeDeclaration`,

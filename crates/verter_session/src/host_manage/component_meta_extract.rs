@@ -13,12 +13,12 @@
 //! use` re-export block in the parent shell — see §11c.5.
 
 use crate::instant::Instant;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::resolver_core::{
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
     component_meta_type_registry as resolver_component_meta_type_registry,
 };
-use crate::types::*;
 use crate::VerterHost;
 
 use crate::request_observers::{

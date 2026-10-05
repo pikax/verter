@@ -11,3 +11,4 @@ pub mod indexed_call;
 pub mod input_binding;
 pub mod snapshot;
 pub mod toolchain;
+pub mod transient_parts;

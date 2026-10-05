@@ -3528,7 +3528,8 @@ fn fenced_serve_baked_edges_reresolve_in_dependency_candidates() {
         let flight = {
             let host = Arc::clone(&host);
             scope.spawn(move || {
-                let snapshot = crate::types::FileAnalysisSnapshot::default();
+                let snapshot =
+                    verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
                 host.cache_dependency_candidates_from_snapshot(owner, &snapshot)
             })
         };

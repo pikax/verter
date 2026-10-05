@@ -20,7 +20,7 @@ use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::ShallowFileState;
 use crate::resolver_core::ValueDeclIdentity;
 
-use crate::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
 /// The capability types every host request context hands out: the source's
@@ -137,7 +137,7 @@ impl IndexedInputs for crate::VerterHost {
     fn resolve_project_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
+    ) -> Option<verter_session_query::resolution::ProjectId> {
         crate::VerterHost::resolve_project_for_canonical(self, canonical)
     }
     fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
@@ -751,7 +751,7 @@ where
     fn resolve_project_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
+    ) -> Option<verter_session_query::resolution::ProjectId> {
         self.0.host().resolve_project_for_canonical(canonical)
     }
     fn declaration_sequence_rank(&self, canonical: &str) -> u32 {

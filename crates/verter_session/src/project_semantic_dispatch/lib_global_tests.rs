@@ -426,7 +426,7 @@ fn two_library_host(lib_a: &str, lib_b: &str) -> Arc<VerterHost> {
         .into_iter()
         .enumerate()
     {
-        let project = verter_workspace::workspace_snapshot::ProjectId(ordinal as u32);
+        let project = verter_session_query::resolution::ProjectId(ordinal as u32);
         verter_workspace::WorkspaceAccess::register_ambient_lib(
             workspace.as_ref(),
             verter_workspace::AmbientLibSpec {

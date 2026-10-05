@@ -30,9 +30,10 @@ use crate::resolution_currency::{
 use crate::traits::WorkspaceResourceSnapshot;
 use crate::types::{ExactResolution, ExactResolutionResult, VfsProvenance};
 use crate::workspace_snapshot::{
-    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 use verter_session_query::facts::fact_cache::{SignatureAdmission, CANDIDATE_CAP};
+use verter_session_query::resolution::ProjectId;
 use verter_session_query::resolution::{
     IdeProjectConfig, ResolutionPopulation, ResolutionWorldId, ResolvePhase, ResolveRequestKind,
     ResolveResult, SessionFingerprint,
@@ -2752,7 +2753,7 @@ impl Engine {
                 .map(|(i, config)| {
                     crate::snapshot_builder::ownership_project_from_vfs_config(
                         config,
-                        crate::workspace_snapshot::ProjectId(i as u32),
+                        verter_session_query::resolution::ProjectId(i as u32),
                     )
                 })
                 .collect();
@@ -5489,7 +5490,7 @@ impl Engine {
     /// Resolve a `ProjectId` to its stable key against the published snapshot.
     pub(crate) fn project_stable_key(
         &self,
-        project_id: crate::workspace_snapshot::ProjectId,
+        project_id: verter_session_query::resolution::ProjectId,
     ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         let published = self.load_published()?;
         published

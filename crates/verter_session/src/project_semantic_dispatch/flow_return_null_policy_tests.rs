@@ -11778,7 +11778,7 @@ fn four_policy_host_with_lib(lib: &str) -> VerterHost {
     for ordinal in 0..4u32 {
         host.workspace()
             .register_ambient_lib(verter_workspace::AmbientLibSpec {
-                project_id: Some(verter_workspace::workspace_snapshot::ProjectId(ordinal)),
+                project_id: Some(verter_session_query::resolution::ProjectId(ordinal)),
                 canonical_id: std::sync::Arc::from(format!("lib.array{ordinal}.d.ts").as_str()),
                 source: std::sync::Arc::from(lib),
             })

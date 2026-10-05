@@ -3,6 +3,7 @@
 pub mod component_meta;
 pub mod fact_projection;
 pub mod field_path;
+pub mod file_analysis;
 pub mod indexed_value;
 pub mod jsdoc_spans;
 pub mod macro_usage;

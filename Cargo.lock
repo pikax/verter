@@ -4119,6 +4119,7 @@ dependencies = [
  "verter_debug_assert",
  "verter_identity",
  "verter_language",
+ "verter_session_query",
  "verter_span",
  "verter_test_support",
  "verter_tsgo_api",

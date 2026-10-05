@@ -1595,7 +1595,7 @@ fn trait_configure_resolver_empty_clears_resolver() {
 /// did not move. PASSES post-fix: the setter republishes and bumps once.
 #[test]
 fn changing_default_resolve_extensions_republishes_resolve_env_hash() {
-    use crate::workspace_snapshot::ProjectId;
+    use verter_session_query::resolution::ProjectId;
 
     let ws = MemoryWorkspace::new(MemoryOptions::default());
     let project = crate::resolver::ide_project_config(

@@ -679,7 +679,10 @@ impl ComponentMetaSession {
     pub fn get_analysis(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<crate::types::FileAnalysisSnapshot>, ComponentMetaHostError> {
+    ) -> Result<
+        Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
+        ComponentMetaHostError,
+    > {
         self.inner
             .get_analysis(canonical_or_alias)
             .map_err(ComponentMetaHostError::from)

@@ -56,8 +56,8 @@ use verter_audit::{
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::project_type_store::{AnalysisArtifactKey, AnalysisReady};
 use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::types::FileAnalysisSnapshot;
 use crate::VerterHost;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 impl VerterHost {
     /// Run a semantic-analysis request through the host's shared

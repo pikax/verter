@@ -49,8 +49,8 @@ use verter_semantic::analysis::framework_facts::svelte::{
 };
 use verter_semantic::analysis::type_eval_build::{
     lower_jsdoc_typedef_at_comment, lower_statement_parts, lower_svelte_runes_statement_parts,
-    register_statement_parts, BuildEvalEnvContext, LoweredSignatureParts, LoweredTypeDeclParts,
-    LoweredValueDeclParts, StatementLowerCtx,
+    register_statement_parts, BuildEvalEnvContext, LoweredTypeDeclParts, LoweredValueDeclParts,
+    StatementLowerCtx,
 };
 use verter_session_query::declarations::header_index::DeclHeaderIndex;
 use verter_session_query::declarations::{
@@ -62,6 +62,7 @@ use verter_session_query::facts::{
     EmptyRouteFactLens, HashOutcome, RouteFactLens, TransientTypeBody, UnresolvedLens,
     ValueBodyFingerprintInput,
 };
+use verter_session_query::source::transient_parts::{TransientTypeParts, TransientValueParts};
 use verter_session_query::type_solver::prepared::{
     collect_heritage_base_facts, collect_key_domain_closedness_fact,
 };
@@ -2097,42 +2098,6 @@ impl DeclBodyMemo {
             let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
         }
     }
-}
-
-/// Owned TRANSIENT value-declaration parts of one demanded symbol, re-lowered
-/// from the retained snapshot by [`DeclBodyMemo::transient_value_parts_in`] for
-/// the locator-deref worker: the merged contributor view over the per-
-/// statement [`LoweredValueDeclParts`] (last-wins annotation / object shape;
-/// signatures concatenated in contributor order, so the vector index IS the
-/// GROUP-level `ValueSignature` ordinal the producer-minted locators carry).
-/// Fact-production intermediates — returned owned, never stored.
-#[derive(Debug, Clone, Default)]
-pub struct TransientValueParts {
-    pub(crate) type_annotation: Option<TypeExpr>,
-    pub(crate) object_shape: Option<ObjectExpr>,
-    pub(crate) signatures: Vec<LoweredSignatureParts>,
-    /// The owning declaration's kind (strict last-wins, the annotation rule)
-    /// — the whole-signature recovery reads it to name the served function
-    /// position of a body-derived return (declaration body vs initializer).
-    pub(crate) kind: Option<verter_session_query::declarations::ValueDeclKind>,
-    /// The owning declaration's HEADER type parameters — populated for a
-    /// dual-space declaration (a `class K<T>` whose VALUE side's constructor
-    /// shape references `T`) from the SAME statements' type-side parts,
-    /// unioned first-seen-by-name. Empty for plain value declarations.
-    pub(crate) type_parameters: Vec<TypeParam>,
-}
-
-/// Owned TRANSIENT type-declaration parts of one demanded symbol, re-lowered
-/// from the retained snapshot by [`DeclBodyMemo::transient_type_parts_in`]
-/// for the locator-deref worker: the ordered contributor bodies (source /
-/// binder order, a JSDoc-`@typedef` payload appended) plus the header type
-/// parameters unioned first-seen-by-name across contributors in that same
-/// order — the SAME union the demanded lowering folded. Fact-production
-/// intermediates — returned owned, never stored.
-#[derive(Debug, Clone, Default)]
-pub struct TransientTypeParts {
-    pub(crate) bodies: Vec<TypeExpr>,
-    pub(crate) type_parameters: Vec<TypeParam>,
 }
 
 /// Union one contributor's header type parameters into the transient list,

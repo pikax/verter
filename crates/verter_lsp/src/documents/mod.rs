@@ -209,7 +209,7 @@ pub(crate) struct SourceFeatureDocumentCapture {
 #[derive(Clone)]
 pub(crate) struct ProgressiveSourceAnalysis {
     source: Arc<str>,
-    analysis: Arc<verter_session::FileAnalysisSnapshot>,
+    analysis: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
     prop_owner_witnesses: Arc<[ProgressivePropOwnerWitness]>,
 }
 
@@ -218,7 +218,9 @@ impl ProgressiveSourceAnalysis {
         &self.source
     }
 
-    pub(crate) fn analysis(&self) -> &verter_session::FileAnalysisSnapshot {
+    pub(crate) fn analysis(
+        &self,
+    ) -> &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
         &self.analysis
     }
 
@@ -264,7 +266,7 @@ fn progressive_prop_owner_witness_is_current(
 }
 
 fn exact_svelte_prop_owner_witnesses(
-    analysis: &verter_session::FileAnalysisSnapshot,
+    analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
         verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
     >,
@@ -344,7 +346,7 @@ fn exact_svelte_evidence_reproves_callable_role(
 }
 
 fn merge_stable_progressive_prop_definitions(
-    fresh: &mut verter_session::FileAnalysisSnapshot,
+    fresh: &mut verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     carried: &ProgressiveSourceAnalysis,
     fresh_source: &str,
     fresh_svelte_evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
@@ -443,7 +445,7 @@ pub struct SemanticAnalysisEnvelope {
     semantic_generation: u64,
     semantic_host_revision: HostSourceRevisionToken,
     structure: RegisteredFileStructure,
-    analysis: Arc<verter_session::FileAnalysisSnapshot>,
+    analysis: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
 }
 
 impl SemanticAnalysisEnvelope {
@@ -459,7 +461,9 @@ impl SemanticAnalysisEnvelope {
         &self.structure
     }
 
-    pub fn analysis(&self) -> &Arc<verter_session::FileAnalysisSnapshot> {
+    pub fn analysis(
+        &self,
+    ) -> &Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         &self.analysis
     }
 }

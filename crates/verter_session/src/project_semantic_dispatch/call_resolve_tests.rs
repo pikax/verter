@@ -2566,7 +2566,7 @@ fn ambient_lib_host(lib: &str, canonical: &str, source: &str) -> Arc<VerterHost>
     .expect("the ambient corpus registers against the configured project");
     let key = verter_workspace::WorkspaceRead::project_stable_key(
         workspace.as_ref(),
-        verter_workspace::ProjectId(0),
+        verter_session_query::resolution::ProjectId(0),
     )
     .expect("project key");
     let virtual_id = verter_workspace::ambient_virtual_canonical_id(key, "lib.es5.d.ts");

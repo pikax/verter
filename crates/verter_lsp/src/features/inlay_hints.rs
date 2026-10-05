@@ -10,7 +10,7 @@ use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
 use tower_lsp_server::ls_types::{InlayHint, InlayHintLabel};
 use verter_semantic::analysis::{match_selector, MatchResult};
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
 use verter_session_query::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 use verter_session_query::analysis::types::{DomQueryKind, VueApiCallSite, VueApiClassification};

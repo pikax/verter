@@ -10,7 +10,7 @@
 //! hover and Ctrl+click navigation. Unknown directives stay silent.
 
 use tower_lsp_server::ls_types::{Hover, HoverContents, MarkupContent, MarkupKind};
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::features::hover::{hover_for_word, VerterHoverResult};
 

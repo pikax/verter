@@ -183,7 +183,7 @@ pub struct IndexedReady {
     pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
     /// File-level analysis snapshot consumed by component-meta / linter
     /// pipelines.
-    pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
+    pub snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
     /// Parser-authored import/export routes from the retained program.
     /// Declaration headers and bodies live on the shallow state's memo.
     pub route_inventory: Arc<verter_session_query::analysis::route_inventory::ScriptRouteInventory>,
@@ -297,7 +297,9 @@ impl IndexedReady {
             framework_parse: None,
             script_analysis: None,
             export_signatures: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            snapshot: Arc::new(
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+            ),
             route_inventory,
             declares_interface_app_config: false,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
@@ -335,7 +337,9 @@ impl IndexedReady {
             framework_parse: None,
             script_analysis: None,
             export_signatures: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            snapshot: Arc::new(
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+            ),
             route_inventory,
             declares_interface_app_config: false,
             macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
@@ -388,7 +392,7 @@ pub struct AnalysisReady {
     pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
     /// File-level analysis snapshot used by the existing component-meta and
     /// linter pipelines.
-    pub snapshot: Arc<crate::types::FileAnalysisSnapshot>,
+    pub snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -566,7 +570,9 @@ impl AnalysisReadyDb {
             scope: AnalysisScope::empty(),
             script_analysis: None,
             export_signatures: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            snapshot: Arc::new(
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+            ),
         });
         self.insert(key, value);
     }
@@ -2125,7 +2131,9 @@ mod tests {
     #[test]
     fn broader_analysis_scope_satisfies_narrower_request() {
         let db = AnalysisReadyDb::new();
-        let snapshot = Arc::new(crate::types::FileAnalysisSnapshot::default());
+        let snapshot = Arc::new(
+            verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+        );
         let whole_hash = [1u8; 16];
 
         // Cache a BUILD-scope entry.
@@ -2187,7 +2195,9 @@ mod tests {
                 framework_parse: None,
                 script_analysis: None,
                 export_signatures: None,
-                snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+                snapshot: Arc::new(
+                    verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+                ),
                 route_inventory,
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
@@ -2242,7 +2252,7 @@ mod tests {
                 framework_parse: None,
                 script_analysis: None,
                 export_signatures: None,
-                snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+                snapshot: Arc::new(verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default()),
                 route_inventory: Arc::clone(&route_inventory),
                 declares_interface_app_config: false,
                 macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
@@ -2367,7 +2377,9 @@ mod tests {
     #[test]
     fn analysis_invalidate_canonical_removes_all_scopes_and_updates_counters() {
         let store = ProjectTypeStore::new();
-        let snapshot = Arc::new(crate::types::FileAnalysisSnapshot::default());
+        let snapshot = Arc::new(
+            verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+        );
         let hash = [1u8; 16];
 
         store.analysis().insert(

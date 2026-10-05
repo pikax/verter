@@ -236,10 +236,10 @@ fn token_advances_on_augmentation_index_populate() {
     // (the base view snapshots `route_surface_index_fingerprints` by
     // value). A populate MUST advance the token.
     use crate::file_artifact_store::{
-        AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, AugmenterSet,
-        ProjectIdentity,
+        AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, ProjectIdentity,
     };
     use smallvec::SmallVec;
+    use verter_session_query::resolution::AugmenterSet;
 
     let (host, _canonical) = host_with_one_file();
     let before = host.current_validation_token();

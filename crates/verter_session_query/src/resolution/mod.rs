@@ -17,6 +17,7 @@ pub mod normalized_glob;
 pub mod path_probe;
 pub mod path_utils;
 pub mod project_config;
+pub mod project_id;
 pub mod project_stable_key;
 pub mod resolution_snapshot;
 pub mod resolution_world_identity;
@@ -31,7 +32,8 @@ pub use crate::resolution::attempt_outcome::{
 };
 pub use crate::resolution::attempt_output::{AmbientDependency, ConsumedResolutionObservationKey};
 pub use crate::resolution::augmentation_key::{
-    AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, ProjectIdentity,
+    AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, AugmenterEntry,
+    AugmenterSet, ProjectIdentity,
 };
 pub use crate::resolution::dto::{
     ProjectOwnership, ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase,
@@ -64,6 +66,7 @@ pub use crate::resolution::project_config::{
     canonical_lib_file_name, IdeProjectCompilerOptions, IdeProjectConfig,
     RawSemanticCompilerOptions, ScriptTarget, SemanticCompilerOptions, WorkspaceAlias,
 };
+pub use crate::resolution::project_id::ProjectId;
 pub use crate::resolution::project_stable_key::ProjectStableKey;
 pub use crate::resolution::resolution_snapshot::ResolutionObservationSnapshot;
 pub use crate::resolution::resolution_world_identity::{

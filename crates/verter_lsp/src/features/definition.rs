@@ -10,7 +10,7 @@
 
 use tower_lsp_server::ls_types::*;
 use verter_semantic::analysis::{match_selector, MatchResult};
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
 use verter_session_query::analysis::types::DomQueryKind;
 

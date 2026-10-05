@@ -1881,8 +1881,10 @@ The discrimination matrix:
   `FileArtifactKey`, `FileArtifacts`, `FileFacts` (registry-backed); re-exports
   `Interned{Specifier,Name,GlobPattern}` + `SymbolSpace` from
   `verter_semantic::facts::registry`; `AugmentationTargetKey`,
-  `AugmentationTargetKind`, `AugmenterSet`, `AugmenterEntry`, `ParsedEdges`,
-  `ModuleAugmentationFact`, `ProjectIdentity`.
+  `AugmentationTargetKind`, `ParsedEdges`, `ModuleAugmentationFact`,
+  `ProjectIdentity`. The owned augmenter-set answer (`AugmenterSet`,
+  `AugmenterEntry`) lives in `verter_session_query::resolution` beside
+  `AugmentationTargetKey`.
 - `crates/verter_session/src/fact_emission.rs` —
   `emit_parse_facts(&IndexedReady) -> ParseFactsEmission`,
   `GLOBAL_AUGMENTATION_TAG`, and typed augmentation-header fact emission.

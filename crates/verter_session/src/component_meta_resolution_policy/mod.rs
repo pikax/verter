@@ -43,8 +43,8 @@ use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
 use crate::resolver_core::ComponentMetaQueryEngine;
 use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
-use crate::types::FileAnalysisSnapshot;
 use crate::VerterHost;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 mod core;
 mod cycle_guard;

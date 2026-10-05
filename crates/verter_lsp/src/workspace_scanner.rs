@@ -2339,7 +2339,7 @@ defineProps<{ msg: string }>()
     fn classify_from_snapshot_configured_is_project_source() {
         use verter_resolution::ModuleResolverCore;
         use verter_session_query::resolution::{
-            CompiledGlob, ConfiguredMembership, NormalizedGlob,
+            CompiledGlob, ConfiguredMembership, NormalizedGlob, ProjectId,
         };
         use verter_workspace::workspace_snapshot::*;
         use verter_workspace::{CanonicalPath, FallbackMembership};
@@ -2417,7 +2417,7 @@ defineProps<{ msg: string }>()
     #[test]
     fn classify_from_snapshot_node_modules_is_other() {
         use verter_resolution::ModuleResolverCore;
-        use verter_session_query::resolution::ConfiguredMembership;
+        use verter_session_query::resolution::{ConfiguredMembership, ProjectId};
         use verter_workspace::workspace_snapshot::*;
         use verter_workspace::CanonicalPath;
 
@@ -2631,7 +2631,7 @@ defineProps<{ msg: string }>()
             .into(),
         };
         let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            id: verter_session_query::resolution::ProjectId(0),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {

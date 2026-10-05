@@ -35,7 +35,7 @@ use super::{ResolvedComponentDocument, VerterLanguageServer};
 /// fallback for not-yet-indexed relative files.
 fn imported_component_canonical_candidates(
     parent_canonical_id: &str,
-    parent_analysis: Option<&verter_session::FileAnalysisSnapshot>,
+    parent_analysis: Option<&verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
     import_source: &str,
     workspace_resolved: Option<String>,
 ) -> Vec<String> {
@@ -84,7 +84,7 @@ impl VerterLanguageServer {
     fn ensure_component_ready(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let host = self.documents.host();
         if host.get_source(canonical_id).is_none() && !host.ensure_loaded(canonical_id) {
             return None;
@@ -104,7 +104,9 @@ impl VerterLanguageServer {
     }
 
     fn imported_component_export_name<'a>(
-        parent_analysis: Option<&'a verter_session::FileAnalysisSnapshot>,
+        parent_analysis: Option<
+            &'a verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+        >,
         import_source: &str,
         local_binding_name: Option<&'a str>,
     ) -> Option<&'a str> {
@@ -132,7 +134,9 @@ impl VerterLanguageServer {
     fn resolve_imported_component_canonical_id(
         &self,
         parent_uri: &Uri,
-        parent_analysis: Option<&verter_session::FileAnalysisSnapshot>,
+        parent_analysis: Option<
+            &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+        >,
         import_source: &str,
         local_binding_name: Option<&str>,
     ) -> Option<String> {
@@ -242,7 +246,7 @@ impl VerterLanguageServer {
 
     pub(super) fn component_import_binding_name(
         &self,
-        analysis: &verter_session::FileAnalysisSnapshot,
+        analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
         component: &verter_session_query::analysis::template::TemplateComponentUsage,
     ) -> Option<String> {
         let import_source = component.import_source.as_ref()?;
@@ -265,7 +269,7 @@ impl VerterLanguageServer {
     pub(super) fn resolve_component_document_for_usage(
         &self,
         parent_uri: &Uri,
-        parent_analysis: &verter_session::FileAnalysisSnapshot,
+        parent_analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
         component: &verter_session_query::analysis::template::TemplateComponentUsage,
     ) -> Option<ResolvedComponentDocument> {
         let import_source = component.import_source.as_ref()?;
@@ -283,7 +287,7 @@ impl VerterLanguageServer {
     pub(super) fn resolve_component_document_for_import_binding(
         &self,
         parent_uri: &Uri,
-        parent_analysis: &verter_session::FileAnalysisSnapshot,
+        parent_analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
         import_source: &str,
         binding_name: &str,
     ) -> Option<ResolvedComponentDocument> {
@@ -429,7 +433,7 @@ impl VerterLanguageServer {
     pub(super) fn resolve_template_identifier(
         &self,
         uri: &Uri,
-        analysis: &verter_session::FileAnalysisSnapshot,
+        analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
         line_index: &LineIndex,
         word: &str,
     ) -> Option<GotoDefinitionResponse> {
@@ -1304,7 +1308,8 @@ mod imported_component_candidate_tests {
     // @ai-generated - Verifies parent-analysis identity outranks mutable fallbacks.
     #[test]
     fn analysis_identity_precedes_competing_workspace_and_lexical_fallbacks() {
-        let mut analysis = verter_session::FileAnalysisSnapshot::default();
+        let mut analysis =
+            verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
         analysis.imports.push(AnalyzedImport {
             source: "../shared/DirectChild".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),

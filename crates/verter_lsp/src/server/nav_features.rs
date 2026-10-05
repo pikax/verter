@@ -43,7 +43,7 @@ use nav_features_support::*;
 
 pub(super) fn child_contract_completion_analysis(
     availability: verter_session::framework::ComponentContractAvailability,
-) -> Option<verter_session::FileAnalysisSnapshot> {
+) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
     let verter_session::framework::ComponentContractAvailability::Supported(contract) =
         availability
     else {
@@ -105,7 +105,8 @@ pub(super) fn child_contract_completion_analysis(
             }
         })
         .collect();
-    let mut analysis = verter_session::FileAnalysisSnapshot::default();
+    let mut analysis =
+        verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
     analysis.template = Some(std::sync::Arc::new(
         verter_session_query::analysis::template::TemplateAnalysisSnapshot {
             prop_definitions,
@@ -799,7 +800,7 @@ async fn handle_completion_attempt(
     struct NativeCompletionSnapshot {
         source: std::sync::Arc<str>,
         line_index: crate::documents::line_index::LineIndex,
-        analysis: Option<verter_session::FileAnalysisSnapshot>,
+        analysis: Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
         blocks: Vec<crate::documents::carrier_structure::CarrierBlockView>,
         structure: Option<verter_session::carrier_publication_store::RegisteredFileStructure>,
         canonical_id: String,
@@ -889,7 +890,7 @@ async fn handle_completion_attempt(
                     &import.source,
                 ));
             }
-            let analysis = verter_session::FileAnalysisSnapshot {
+            let analysis = verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
                 imports,
                 ..Default::default()
             };
@@ -956,7 +957,9 @@ async fn handle_completion_attempt(
                 && !native.authored_component_ingress_captured;
             let resolve_component = |import_source: &str,
                                      component_name: Option<&str>|
-             -> Option<verter_session::FileAnalysisSnapshot> {
+             -> Option<
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+            > {
                 let local_component_name = component_name?;
                 let (import, binding) =
                     native
@@ -1035,8 +1038,12 @@ async fn handle_completion_attempt(
             } else {
                 Vec::new()
             };
-            type NativeComponentResolver<'a> =
-                dyn Fn(&str, Option<&str>) -> Option<verter_session::FileAnalysisSnapshot> + 'a;
+            type NativeComponentResolver<'a> = dyn Fn(
+                    &str,
+                    Option<&str>,
+                )
+                    -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>
+                + 'a;
             let resolve_component: Option<&NativeComponentResolver<'_>> = Some(&resolve_component);
             completions_at_position(
                 server.documents.language_classifier(),

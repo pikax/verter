@@ -218,7 +218,7 @@ mod self_tests {
     //!   shadow ambient libs).
     use std::sync::Arc;
 
-    use verter_workspace::ProjectId;
+    use verter_session_query::resolution::ProjectId;
 
     use super::{build_hermetic_host_with_lib, STUB_LIB_ES5};
 

@@ -297,7 +297,9 @@ const TORN_IDENTITY_SOURCE_B: &str = concat!(
     "<template><div>{{ betaExport }}</div></template>\n",
 );
 
-fn export_names_of(snapshot: &crate::types::FileAnalysisSnapshot) -> Vec<String> {
+fn export_names_of(
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> Vec<String> {
     snapshot
         .export_signatures
         .iter()

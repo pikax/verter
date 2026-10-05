@@ -507,7 +507,8 @@ fn augmentation_index_starts_empty() {
 fn augmentation_index_round_trip() {
     use smallvec::smallvec;
 
-    use super::{AugmenterEntry, AugmenterSet};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
     use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let store = FileArtifactStore::new();
@@ -1037,7 +1038,8 @@ fn legacy_insert_bumps_on_content_change() {
 fn populate_augmenter_set_is_bump_iff_fingerprint_changed() {
     use smallvec::smallvec;
 
-    use super::{AugmenterEntry, AugmenterSet};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
 
     let store = FileArtifactStore::new();
     let key = AugmentationTargetKey {
@@ -1414,8 +1416,9 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
     // next probe warm-hits a stale augmenter set.
     use smallvec::smallvec;
 
-    use super::{AugmenterEntry, AugmenterSet};
     use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
     use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     let store = FileArtifactStore::new();
@@ -1757,9 +1760,8 @@ fn parse_stable_hash_change_with_same_facts_invalidates_augmentation_index_and_b
 fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     use smallvec::smallvec;
 
-    use super::{
-        augmentation_contribution_equivalent, compute_augmenter_set_fingerprint, AugmenterEntry,
-    };
+    use super::{augmentation_contribution_equivalent, compute_augmenter_set_fingerprint};
+    use verter_session_query::resolution::AugmenterEntry;
     use verter_session_query::source::artifact_key::FileArtifactKey;
 
     // Helper: the single fingerprint input that varies per augmenter at a
@@ -2527,7 +2529,8 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
     use smallvec::{smallvec, SmallVec};
     use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
 
-    use super::{AugmenterEntry, AugmenterSet};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
     use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
     let store = FileArtifactStore::new();

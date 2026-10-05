@@ -413,7 +413,10 @@ async fn handle_code_action_attempt(
             // macro edit offset is analyzer-minted against the bytes the
             // ANALYSIS saw, so the two identities must agree before an edit is
             // produced.
-            let live_revision = verter_session::AnalysisSourceRevision::of_source(&doc.source);
+            let live_revision =
+                verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+                    &doc.source,
+                );
             let mut macro_actions = crate::features::macro_actions::macro_code_actions(
                 &doc.source,
                 live_revision,

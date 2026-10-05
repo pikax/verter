@@ -331,7 +331,7 @@ fn apparent_type_widens_a_callable_to_the_registered_ambient_function_surface() 
         .expect("the widened `call` member MUST carry its declaring canonical");
     let expected = host
         .workspace_read()
-        .project_stable_key(verter_workspace::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .map(|key| verter_workspace::ambient_virtual_canonical_id(key, AMBIENT_LIB_ID))
         .expect("the configured project MUST have a stable key");
     assert_eq!(

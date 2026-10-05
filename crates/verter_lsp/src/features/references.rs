@@ -3,7 +3,7 @@
 
 use tower_lsp_server::ls_types::*;
 use verter_session::carrier_publication_store::RegisteredFileStructure;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::{
     offset_in_markup_comment, project_markup_comment_facts, CarrierBlockView,

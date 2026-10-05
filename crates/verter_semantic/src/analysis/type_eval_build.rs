@@ -41,6 +41,9 @@ use verter_session_query::declarations::*;
 use crate::analysis::namespace_walk::for_each_namespace;
 use oxc_span::GetSpan;
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
+use verter_session_query::source::transient_parts::{
+    LoweredSignatureOrigin, LoweredSignatureParts,
+};
 use verter_type_expr::facts::{
     AuthoredReferenceHeadFact, ClosedTypeFact, DeclaredLiteralFreshness, EnumMemberEntry,
     EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain, FlowFunctionReturnIdentity,
@@ -61,7 +64,7 @@ use verter_type_expr::{
     AuthoredPropertyKey, FunctionExpr, FunctionParam, FunctionSpans, IndexSignature,
     IndexSignatureSpans, IndexedValueLiteralMode, LiteralValue, MemberSpans, MemberVisibility,
     MethodSignature, ObjectExpr, ObjectMember, ObjectMethodKind, PrimitiveName, TopLevelOwnerId,
-    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate, ValueRef,
+    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, ValueRef,
 };
 use verter_type_expr_oxc::{lower_property_key, lower_return_annotation, lower_ts_type};
 
@@ -305,52 +308,6 @@ pub struct LoweredTypeDeclParts {
     /// `unique symbol` — object-type-literal and interface property
     /// members, including intersection arms.
     pub unique_symbol_members: Vec<String>,
-}
-
-/// Where a transient signature's authored function node lives, relative to its
-/// owning declaration statement — drives the minted [`FunctionSpansOrigin`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoweredSignatureOrigin {
-    /// The declaration statement's body IS the function (a `function` decl, an
-    /// arrow / function-expression initializer).
-    DeclBody,
-    /// A member of the produced object shape at this ordinal (a class
-    /// constructor / static method in the `typeof C` constructor shape).
-    ShapeMember { ordinal: u32 },
-    /// Genuinely synthesized — no authored function node (a class with no
-    /// declared constructor).
-    Synthetic,
-}
-
-/// TRANSIENT lowered parts of one function/method signature: the typed-IR
-/// parameter / return / type-parameter forms JSDoc enrichment and inference
-/// operate on. The stored form is the minted [`FunctionSignatureFact`].
-#[derive(Debug, Clone)]
-pub struct LoweredSignatureParts {
-    pub parameters: Vec<FunctionParam>,
-    /// The AUTHORED return carrier (a TS annotation or a JSDoc `@returns`
-    /// recovery). An unannotated function's return is body-derived and names
-    /// its served function position instead — never a body scan.
-    pub return_type: Option<TypeExpr>,
-    /// The authored return's type predicate (`x is T`, `asserts x`, …),
-    /// beside a `boolean` / `void` [`Self::return_type`].
-    pub predicate: Option<Arc<TypePredicate>>,
-    pub type_parameters: Vec<TypeParam>,
-    /// Whether this signature is backed by an implementation body (vs. a
-    /// bodiless overload / ambient declaration). Projection-time overload
-    /// visibility reads the stored fact's copy of this flag.
-    pub has_implementation_body: bool,
-    /// Whether the function carried an explicit AUTHORED TS return annotation
-    /// (`(): T`). Only an authored return position mints a `FunctionReturn`
-    /// body locator — an inferred / JSDoc-filled return has no authored
-    /// `TSType` node to address and is recovered whole-signature on demand.
-    pub has_authored_return: bool,
-    /// Whether the return carrier was recovered from a JSDoc `@returns`
-    /// payload (no authored TS annotation present). Set only by the shared
-    /// JSDoc enrichment; distinguishes the declared-recovery provenance.
-    pub jsdoc_return: bool,
-    /// Span-recovery origin of the authored function node.
-    pub origin: LoweredSignatureOrigin,
 }
 
 /// TRANSIENT lowered parts of one VALUE declaration.

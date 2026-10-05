@@ -262,7 +262,7 @@ pub(crate) fn configured_owners_allow_authored_carrier_specifiers(
     snapshot: &verter_workspace::WorkspaceSnapshot,
     canonical_id: &str,
 ) -> bool {
-    let owner_allows = |id: verter_workspace::workspace_snapshot::ProjectId| {
+    let owner_allows = |id: verter_session_query::resolution::ProjectId| {
         matches!(
             &snapshot.project(id).payload,
             ProjectPayload::Configured { compiler_options, .. }

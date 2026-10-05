@@ -20,7 +20,7 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use verter_scheduler::invalidation::Hash16;
 
-use crate::workspace_snapshot::ProjectId;
+use verter_session_query::resolution::ProjectId;
 use verter_session_query::resolution::ProjectStableKey;
 
 /// Public spec passed to [`crate::traits::WorkspaceAccess::register_ambient_lib`].

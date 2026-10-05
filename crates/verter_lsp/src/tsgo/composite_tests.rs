@@ -13,6 +13,7 @@ use verter_session::external_ts::{
 };
 use verter_session::{HostConfig, VerterHost};
 use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::ProjectId;
 use verter_type_runtime::protocol::*;
 use verter_type_runtime::provider_hub::{
     HubPolicy, ProviderEstablisher, ProviderHub, TracingNotifier,
@@ -29,7 +30,7 @@ use verter_workspace::snapshot_builder::{
 };
 use verter_workspace::traits::WorkspaceRead;
 use verter_workspace::workspace_snapshot::{
-    OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+    OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, WorkspaceAccess};
 

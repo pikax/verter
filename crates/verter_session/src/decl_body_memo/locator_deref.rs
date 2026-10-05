@@ -15,9 +15,9 @@ use std::sync::Arc;
 use verter_semantic::analysis::framework_facts::svelte::{
     PropsAnnotationLowering, SvelteTypeArgumentLowering,
 };
-use verter_semantic::analysis::type_eval_build::LoweredSignatureParts;
 use verter_semantic::analysis::MacroFieldPayloadLowering;
 use verter_session_query::declarations::AugmentationScopeKind;
+use verter_session_query::source::transient_parts::LoweredSignatureParts;
 use verter_type_expr::facts::NarrowTypeParam;
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator, LocatorSymbolSpace,
@@ -25,8 +25,10 @@ use verter_type_expr::locators::{
 };
 use verter_type_expr::{FunctionExpr, ObjectMember, TupleElement, TypeExpr, TypeParam};
 
-use super::{DeclBodyMemo, TransientTypeParts, TransientValueParts};
+use super::DeclBodyMemo;
 use verter_session_query::source::demand::DemandOutcome;
+use verter_session_query::source::transient_parts::TransientTypeParts;
+use verter_session_query::source::transient_parts::TransientValueParts;
 
 impl DeclBodyMemo {
     /// Locator deref — the WORKER phase of locator-shape lowering: re-borrow

@@ -346,7 +346,7 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     // declines.
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
     use crate::resolver_core::ResolverContext;
-    let analysis: crate::types::FileAnalysisSnapshot = host
+    let analysis: verter_session_query::analysis::file_analysis::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
     let producer_scope = RegistryProducerScope::explicit(
@@ -435,7 +435,7 @@ fn owner_local_alias_of_alias_external_import_declines() {
     // root preserves its existing routing.
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
     use crate::resolver_core::ResolverContext;
-    let analysis: crate::types::FileAnalysisSnapshot = host
+    let analysis: verter_session_query::analysis::file_analysis::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
     let producer_scope = RegistryProducerScope::explicit(
@@ -487,7 +487,7 @@ fn owner_local_generic_typeparameter_body_declines() {
     // A bare type parameter's name (`T`) — the predicate must decline
     // since there is no declaration to enqueue (no owner-local alias
     // named `T` resolves to a `ComponentConfig` body).
-    let analysis: crate::types::FileAnalysisSnapshot = host
+    let analysis: verter_session_query::analysis::file_analysis::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
     let producer_scope = RegistryProducerScope::explicit(

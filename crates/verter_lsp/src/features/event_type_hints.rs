@@ -5,7 +5,7 @@
 //   @click="handler" → @click="(e: MouseEvent) => handler(e)"
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::template::TemplateEventHandler;
 
 use crate::documents::line_index::LineIndex;

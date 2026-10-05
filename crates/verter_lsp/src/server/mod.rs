@@ -265,7 +265,7 @@ pub(crate) struct PreparedNonCarrierProviderSync {
 
 pub(crate) struct ResolvedComponentDocument {
     pub(crate) uri: Uri,
-    pub(crate) analysis: verter_session::FileAnalysisSnapshot,
+    pub(crate) analysis: verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     pub(crate) line_index: LineIndex,
 }
 

@@ -64,7 +64,7 @@ fn merge_semantic_prop_definitions(
 pub(super) struct SemanticSnapshot {
     pub(super) document_revision: DocumentRevisionId,
     pub(super) semantic_generation: u64,
-    pub(super) analysis: Arc<verter_session::FileAnalysisSnapshot>,
+    pub(super) analysis: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -519,7 +519,10 @@ impl DocumentRegistry {
 
     /// Return optional full enrichment when current, otherwise the bounded BUILD
     /// snapshot that the IDE projection already paid to construct.
-    pub fn get_analysis(&self, uri: &Uri) -> Option<verter_session::FileAnalysisSnapshot> {
+    pub fn get_analysis(
+        &self,
+        uri: &Uri,
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
         let semantic_generation = self.current_semantic_generation();
         if let Some(document) = self.documents.get(uri.as_str()) {
@@ -657,7 +660,7 @@ impl DocumentRegistry {
     fn current_analysis_for_source_feature_capture(
         &self,
         capture: &SourceFeatureDocumentCapture,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         if self.semantic_generation_is_current(capture.semantic_generation) {
             if let Some(analysis) = capture
                 .document
@@ -695,7 +698,7 @@ impl DocumentRegistry {
         current_svelte_evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
             verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
         >,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let current = self.current_analysis_for_source_feature_capture(capture);
         let current_source = Arc::clone(&capture.document.source);
         let Some(progressive) = capture.document.progressive_analysis.as_ref() else {
@@ -795,7 +798,7 @@ impl DocumentRegistry {
     pub(crate) fn source_feature_analysis(
         &self,
         uri: &Uri,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         for _ in 0..2 {
             let Some(capture) = self.capture_source_feature_document(uri) else {
                 continue;
@@ -822,7 +825,7 @@ impl DocumentRegistry {
     pub(crate) fn cached_semantic_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let generation = self.current_semantic_generation();
         let result = self
             .semantic_generation_is_current(generation)

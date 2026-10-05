@@ -3032,7 +3032,7 @@ const msg = "hello"
 
 fn scope_probe_analysis(
     scope: verter_semantic::analysis::AnalysisScope,
-) -> verter_session::FileAnalysisSnapshot {
+) -> verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
     let host = VerterHost::new_standalone(HostConfig {
         analysis_scope: Some(scope),
         ..HostConfig::default()

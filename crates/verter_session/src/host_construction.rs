@@ -1112,7 +1112,7 @@ impl VerterHost {
     pub fn resolve_project_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
+    ) -> Option<verter_session_query::resolution::ProjectId> {
         let root = self.workspace().published_root()?;
         root.snapshot.owners_for_file(canonical).first().copied()
     }

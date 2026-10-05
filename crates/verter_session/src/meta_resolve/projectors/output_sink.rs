@@ -55,7 +55,7 @@ use crate::semantic_query::{
     DeclIdentity, ProjectionMode, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
     SemanticOutcome, SemanticQueryKey, SurfaceMember,
 };
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
 

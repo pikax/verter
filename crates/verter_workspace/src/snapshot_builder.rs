@@ -9,11 +9,12 @@ use rustc_hash::FxHashSet;
 use crate::canonical_path::CanonicalPath;
 use crate::membership::{FallbackMembership, SupportedExtensions};
 use crate::workspace_snapshot::{
-    compare_project_precedence, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+    compare_project_precedence, OwnershipProject, ProjectPayload, SnapshotGeneration,
     WorkspaceSnapshot,
 };
 use crate::ProjectMembership;
 use verter_resolution::ModuleResolverCore;
+use verter_session_query::resolution::ProjectId;
 use verter_session_query::resolution::{
     typescript_default_excludes, ConfiguredMembership, IdeProjectConfig, StaticMembershipSpec,
 };

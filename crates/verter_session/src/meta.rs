@@ -639,7 +639,10 @@ impl MetaSession {
     pub fn get_analysis(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<crate::types::FileAnalysisSnapshot>, MetaError> {
+    ) -> Result<
+        Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
+        MetaError,
+    > {
         self.check_alive()?;
         let host = self.project.host();
         // Route through the view-aware host entry point so overlayed

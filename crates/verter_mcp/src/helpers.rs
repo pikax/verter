@@ -69,7 +69,10 @@ pub fn ensure_template_analysis(host: &VerterHost, canonical_id: &str) -> Result
 pub fn batch_analysis_with_template(
     host: &VerterHost,
     canonical_ids: &[&str],
-) -> Vec<(String, verter_session::FileAnalysisSnapshot)> {
+) -> Vec<(
+    String,
+    verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+)> {
     for id in canonical_ids {
         let _ = ensure_template_analysis(host, id);
     }

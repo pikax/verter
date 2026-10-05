@@ -110,9 +110,7 @@ fn two_project_host(lib_a: &'static str, lib_b: &'static str) -> Arc<VerterHost>
         verter_workspace::WorkspaceAccess::register_ambient_lib(
             workspace.as_ref(),
             verter_workspace::AmbientLibSpec {
-                project_id: Some(verter_workspace::workspace_snapshot::ProjectId(
-                    ordinal as u32,
-                )),
+                project_id: Some(verter_session_query::resolution::ProjectId(ordinal as u32)),
                 canonical_id: Arc::from(lib_id),
                 source: Arc::from(lib),
             },
@@ -120,7 +118,7 @@ fn two_project_host(lib_a: &'static str, lib_b: &'static str) -> Arc<VerterHost>
         .expect("the ambient corpus registers against its project");
         let key = verter_workspace::WorkspaceRead::project_stable_key(
             workspace.as_ref(),
-            verter_workspace::workspace_snapshot::ProjectId(ordinal as u32),
+            verter_session_query::resolution::ProjectId(ordinal as u32),
         )
         .expect("project key");
         virtual_ids.push((

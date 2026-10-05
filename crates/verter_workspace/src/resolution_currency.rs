@@ -2874,7 +2874,7 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn project_stable_key(
         &self,
-        project_id: crate::workspace_snapshot::ProjectId,
+        project_id: verter_session_query::resolution::ProjectId,
     ) -> Option<verter_session_query::resolution::ProjectStableKey> {
         self.inner.project_stable_key(project_id)
     }

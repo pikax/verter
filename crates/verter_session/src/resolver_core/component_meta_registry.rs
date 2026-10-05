@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::resolver_core::ResolverContext;
 use crate::resolver_core::RouteDemand;
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 /// Issue #7 / capture-token counters for route-demand
 /// emission. Recorded inside [`enqueue_component_meta_registry_ref`]

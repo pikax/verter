@@ -217,7 +217,7 @@ fn install_materialized_workspace_with_paths(
     .collect();
     let projects = vec![
         verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            id: verter_session_query::resolution::ProjectId(0),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -233,7 +233,7 @@ fn install_materialized_workspace_with_paths(
             },
         },
         verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(1),
+            id: verter_session_query::resolution::ProjectId(1),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
@@ -303,7 +303,7 @@ fn configured_project_with_materialized_carriers(
             .collect(),
     };
     verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(id),
+        id: verter_session_query::resolution::ProjectId(id),
         root: root_cp.clone(),
         workspace_root: root_cp,
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -321,8 +321,9 @@ fn configured_project_with_materialized_carriers(
 /// source set follows the resolved owner identity, not the parent's raw walk cache.
 #[test]
 fn configured_frontier_scope_excludes_nested_project_carriers_from_broad_membership() {
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::workspace_snapshot::{
-        ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+        ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
 
     let root = "d:/workspace";

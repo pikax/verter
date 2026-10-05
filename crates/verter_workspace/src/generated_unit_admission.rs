@@ -38,7 +38,8 @@ use std::hash::{Hash, Hasher};
 use rustc_hash::FxHasher;
 
 use crate::canonical_path::CanonicalPath;
-use crate::workspace_snapshot::{ProjectId, ProjectPayload, WorkspaceSnapshot};
+use crate::workspace_snapshot::{ProjectPayload, WorkspaceSnapshot};
+use verter_session_query::resolution::ProjectId;
 
 /// Why ONE generated unit is not admitted to the intended configured project.
 /// A closed set: every non-admission is exactly one of these.

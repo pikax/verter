@@ -56,7 +56,7 @@ mod tests {
 
     use super::*;
     use crate::membership::FallbackMembership;
-    use crate::workspace_snapshot::ProjectId;
+    use verter_session_query::resolution::ProjectId;
     use verter_session_query::resolution::{
         ConfiguredMembership, IdeProjectCompilerOptions, StaticMembershipSpec,
     };

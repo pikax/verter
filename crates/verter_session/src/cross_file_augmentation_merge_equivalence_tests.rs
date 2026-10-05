@@ -1673,12 +1673,11 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
 /// one-augmenter fingerprint the augmented fixture would produce.
 #[test]
 fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
-    use crate::file_artifact_store::{
-        compute_augmenter_set_fingerprint, AugmentationTargetKind, AugmenterEntry,
-    };
+    use crate::file_artifact_store::{compute_augmenter_set_fingerprint, AugmentationTargetKind};
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
+    use verter_session_query::resolution::AugmenterEntry;
     use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let host = make_host();

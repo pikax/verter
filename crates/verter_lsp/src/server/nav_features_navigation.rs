@@ -249,7 +249,7 @@ pub(super) async fn handle_goto_definition(
 
     struct NativeDefinitionSnapshot {
         capture: crate::documents::SourceFeatureDocumentCapture,
-        analysis: Option<verter_session::FileAnalysisSnapshot>,
+        analysis: Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
         svelte_render_lexical_visibility: Option<SvelteRenderLexicalVisibility>,
         svelte_script_render_prop: SvelteScriptRenderPropResolution,
         source_authoritative_svelte_render: bool,

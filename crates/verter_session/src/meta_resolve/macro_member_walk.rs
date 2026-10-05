@@ -5,7 +5,7 @@
 //! reduction is owned by the projector via
 //! `materialize_component_meta_type_expr_until_stable`.
 
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 /// Capture-token counter name recorded every time the slot-binding
 /// registry-collection skip predicate fires for a slot binding rooted

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use verter_execution::pool_size::PoolSize;
 use verter_session_query::analysis::types::Hash16;
 
 use rustc_hash::FxHashMap;
@@ -21,41 +22,6 @@ pub(crate) fn format_hash16_hex(hash: &Hash16) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
-}
-
-/// Content identity of the exact source bytes an analysis observed.
-///
-/// A consumer applying an analyzer-minted edit compares this to
-/// [`Self::of_source`] of the live buffer; mismatch must produce no edit
-/// (an in-bounds offset from another revision lands in the wrong place).
-/// Not `RevisionMarker` (query revision, not content) and not LSP
-/// `version` alone (a host-served analysis has none).
-///
-/// `Default` is the unstamped sentinel — equals no realistic identity,
-/// so an unstamped analysis fails closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
-#[serde(transparent)]
-pub struct AnalysisSourceRevision(Hash16);
-
-impl AnalysisSourceRevision {
-    /// Mint from these exact source bytes. Producer and consumer share
-    /// this so the hash algorithm cannot drift.
-    pub fn of_source(source: &str) -> Self {
-        Self(crate::hash::hash_16(source.as_bytes()))
-    }
-
-    /// Adopt a `ParseSnapshot::whole_hash`, which is already
-    /// `hash_16(source.as_bytes())` over the whole file — identical to
-    /// [`Self::of_source`] on the same bytes, and free at a producer that
-    /// already holds it.
-    pub(crate) fn from_whole_hash(whole_hash: Hash16) -> Self {
-        Self(whole_hash)
-    }
-
-    /// Whether this revision was never stamped (the `Default` sentinel).
-    pub fn is_unstamped(&self) -> bool {
-        *self == Self::default()
-    }
 }
 
 /// Hot Module Replacement strategy injected into the assembled main module.
@@ -806,69 +772,6 @@ pub enum PoolSpawn {
     /// decl-lowering service). The `batch_typecheck` preset uses this to
     /// drop the cold thread-spawn cost a one-shot batch never amortises.
     LazyOnFirstUse,
-}
-
-/// How many worker threads a host-owned pool resolves to.
-///
-/// The size resolves once, eagerly at host construction, in BOTH spawn modes:
-/// [`resolve`](Self::resolve) (the `available_parallelism()` call) runs up
-/// front and the resolved count is handed to the pool regardless of
-/// [`PoolSpawn`]. Under [`PoolSpawn::LazyOnFirstUse`] that count is passed to
-/// the lazy pool constructor; only the OS-thread spawn itself is deferred —
-/// never the size resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PoolSize {
-    /// [`std::thread::available_parallelism`] (final-fallback `1` when the
-    /// platform cannot report it).
-    AvailableParallelism,
-    /// Exactly `n` workers (`0` is clamped up to `1`; the pool always has
-    /// at least one worker).
-    Fixed(usize),
-    /// `(available_parallelism / divisor)` clamped to the `{ min, max }`
-    /// bounds. The bounds are ORDERED before clamping (an inverted `min > max`
-    /// is tolerated) and `divisor == 0` is floored to `1`, so every public
-    /// value resolves without panicking. The decl-lowering default is
-    /// `Fraction { divisor: 4, min: 1, max: 4 }`. When the platform cannot
-    /// report parallelism the fallback is `2`, likewise clamped to the ordered
-    /// bounds (matching the historical decl-lowering sizing).
-    Fraction {
-        divisor: usize,
-        min: usize,
-        max: usize,
-    },
-}
-
-impl PoolSize {
-    /// Resolve this size to a concrete worker count (always `>= 1`).
-    ///
-    /// TOTAL over all public inputs: a malformed [`PoolSize::Fraction`]
-    /// (`divisor == 0`, or `min > max`) never panics. The divisor is floored
-    /// to `1` (no divide-by-zero) and the `{ min, max }` bounds are ORDERED
-    /// before clamping, so inverted bounds resolve to a sane in-range value
-    /// instead of tripping `clamp`'s `min <= max` requirement. BOTH the
-    /// computed value AND the `available_parallelism` fallback are clamped to
-    /// the caller's ordered bounds and floored at `1`.
-    pub fn resolve(self) -> usize {
-        match self {
-            PoolSize::AvailableParallelism => std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1),
-            PoolSize::Fixed(n) => n.max(1),
-            PoolSize::Fraction { divisor, min, max } => {
-                // Order the bounds so an inverted `{ min, max }` cannot trip
-                // `clamp` (which requires `min <= max`), and floor the divisor
-                // so `divisor == 0` cannot divide-by-zero.
-                let lo = min.min(max);
-                let hi = min.max(max);
-                let divisor = divisor.max(1);
-                std::thread::available_parallelism()
-                    .map(|n| n.get() / divisor)
-                    .unwrap_or(2)
-                    .clamp(lo, hi)
-                    .max(1)
-            }
-        }
-    }
 }
 
 /// Spawn-timing + sizing for a single host-owned worker pool.
@@ -1907,102 +1810,6 @@ impl HostUpdateResult {
     }
 }
 
-/// Serializable snapshot of file analysis data, suitable for WASM export.
-///
-/// Returned by [`VerterHost::get_analysis`](crate::VerterHost::get_analysis).
-/// Contains the combined script, style, and template analysis for an SFC.
-///
-/// Most fields are `Arc`-wrapped for cheap cloning — the underlying data is
-/// shared between all snapshots of the same file version. Only `imports` and
-/// `bindings` are owned `Vec`s because [`VerterHost::get_analysis`] mutates
-/// them (import resolution and destructured binding enrichment).
-#[derive(Debug, Clone, Default, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FileAnalysisSnapshot {
-    /// Import statements found in script blocks.
-    /// Owned because `resolve_snapshot_imports` mutates `resolved_canonical_id`.
-    pub imports: Vec<verter_session_query::analysis::types::AnalyzedImport>,
-    /// Module reference sites found in script blocks.
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub module_references: Arc<Vec<verter_session_query::analysis::types::AnalyzedModuleReference>>,
-    /// Variable/function bindings declared in script blocks.
-    /// Owned because `enrich_destructured_bindings` mutates `reactivity_kind`.
-    pub bindings: Vec<verter_session_query::analysis::types::AnalyzedBinding>,
-    /// Vue compiler macros used (defineProps, defineEmits, etc.).
-    pub macros: Arc<Vec<verter_session_query::analysis::types::AnalyzedMacro>>,
-    /// Type dependencies from macros that reference external files.
-    pub macro_type_deps: Arc<Vec<verter_session_query::analysis::types::MacroTypeDep>>,
-    /// Bitflags representing script characteristics (see `verter_semantic::analysis::ScriptFlags`).
-    pub script_flags: u32,
-    /// Per-style-block analysis (scoped, modules, v-bind usage).
-    pub styles: Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
-    /// Template analysis (components, bindings, slots, refs, events).
-    /// Present after compilation when template analysis scope flags are active.
-    pub template: Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>>,
-    /// Vue API call sites (lifecycle hooks, watchers, provide/inject, etc.).
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub vue_api_calls: Arc<Vec<verter_session_query::analysis::types::VueApiCallSite>>,
-    /// DOM query call sites (querySelector, getElementById, etc.).
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub dom_query_calls:
-        Arc<Vec<verter_session_query::analysis::script_snapshot::DomQueryCallSite>>,
-
-    /// CSS variable manipulations via DOM style APIs.
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub css_var_manipulations: Arc<Vec<verter_session_query::analysis::types::CssVarManipulation>>,
-
-    /// Script-side binding usage occurrences with exact spans.
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub script_binding_occurrences:
-        Arc<Vec<verter_session_query::analysis::types::ScriptBindingOccurrence>>,
-
-    /// Script-side usage facts for macro-declared members (unused-declaration
-    /// diagnostics). `None` for files without Vue macros.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub macro_usage: Option<verter_session_query::analysis::macro_usage::MacroUsageFacts>,
-
-    /// Root identifiers referenced by `<style>` `v-bind()` expressions —
-    /// style `v-bind()` resolves PROPS by bare name, so prop-member liveness
-    /// consumes this set (see `ScriptAnalysisSnapshot::style_vbind_roots`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub style_vbind_roots: Vec<String>,
-
-    /// Resolvable class-name tokens in carrier markup, for carriers WITHOUT a
-    /// template element IR (Svelte). Empty for Vue.
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub markup_class_tokens: Arc<Vec<verter_session_query::analysis::template::MarkupClassToken>>,
-
-    /// Export signatures extracted from the file's script block.
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub export_signatures: Arc<Vec<verter_session_query::analysis::types::ExportSignature>>,
-
-    /// Options API analysis (`export default { ... }` or `export default defineComponent({ ... })`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub options_api: Option<verter_session_query::analysis::types::AnalyzedOptionsApi>,
-
-    /// Store usage sites (Pinia, Vuex, convention-based composables).
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub store_usages: Arc<Vec<verter_session_query::analysis::types::StoreUsage>>,
-    /// Store definitions (defineStore, createStore, etc.).
-    #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub store_definitions: Arc<Vec<verter_session_query::analysis::types::StoreDefinition>>,
-
-    /// Whether the script block uses TypeScript (`lang="ts"`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub is_typescript: bool,
-
-    /// Content identity of the exact source bytes this analysis observed.
-    ///
-    /// A per-FILE identity, so two macros in one snapshot can never disagree
-    /// about which buffer they address. Consumers that apply analyzer-minted
-    /// edit anchors to a live buffer compare this against
-    /// [`AnalysisSourceRevision::of_source`] of that buffer and fail closed on
-    /// mismatch. `Default` (unstamped) never matches, so an unstamped snapshot
-    /// also fails closed.
-    #[serde(default, skip_serializing_if = "AnalysisSourceRevision::is_unstamped")]
-    pub anchor_revision: AnalysisSourceRevision,
-}
-
 /// Compile-time dependencies that must be available before a Vue SFC can codegen.
 #[derive(Debug, Clone, Default)]
 pub struct CompileBlockersSnapshot {
@@ -2025,11 +1832,6 @@ pub struct ResolvedExport {
     pub source_canonical_id: Option<String>,
     /// Name in the ultimate source file (may differ, e.g. `"default"` → `"Button"`).
     pub source_name: String,
-}
-
-/// Helper for `skip_serializing_if` on `Arc<Vec<T>>`.
-fn arc_vec_is_empty<T>(v: &Arc<Vec<T>>) -> bool {
-    v.is_empty()
 }
 
 /// Result of [`VerterHost::resolve`](crate::VerterHost::resolve).
@@ -4235,6 +4037,9 @@ pub(crate) struct HostMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::file_analysis::{
+        AnalysisSourceRevision, FileAnalysisSnapshot,
+    };
 
     #[test]
     fn without_runtime_module_clears_needs_runtime_module_for_every_runtime_bit() {

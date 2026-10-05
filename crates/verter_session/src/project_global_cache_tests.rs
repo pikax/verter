@@ -1272,7 +1272,9 @@ fn analysis_scope_satisfaction_is_bitflag_based() {
             scope: AnalysisScope::BUILD,
             script_analysis: None,
             export_signatures: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            snapshot: Arc::new(
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+            ),
         }),
     );
 

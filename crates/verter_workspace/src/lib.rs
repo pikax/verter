@@ -212,7 +212,7 @@ pub use vite_config::{
     ViteConfigAnalysis, ViteConfigOptions, ViteConfigTrustInfo,
 };
 pub use workspace_snapshot::{
-    ConfiguredOwnerResolution, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+    ConfiguredOwnerResolution, OwnershipProject, ProjectPayload, SnapshotGeneration,
     WorkspaceSnapshot,
 };
 

@@ -12,7 +12,7 @@ use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use super::resolver_context::MaterializeScopeObservation;
 use crate::fact_tracing::note_non_cacheable_read_fan_out;
 use crate::resolver_core::ValueDeclIdentity;
-use crate::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
 
@@ -60,7 +60,7 @@ pub trait IndexedInputs {
     fn resolve_project_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_workspace::workspace_snapshot::ProjectId>;
+    ) -> Option<verter_session_query::resolution::ProjectId>;
     fn declaration_sequence_rank(&self, canonical: &str) -> u32;
     fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy;
 
@@ -570,7 +570,7 @@ pub trait OwnedLowering {
         target: crate::file_artifact_store::AugmentationTargetKind,
     ) -> (
         crate::file_artifact_store::AugmentationTargetKey,
-        Arc<crate::file_artifact_store::AugmenterSet>,
+        Arc<verter_session_query::resolution::AugmenterSet>,
     );
     fn global_contributor_answer(
         &self,
@@ -592,7 +592,7 @@ pub trait OwnedLowering {
     fn refresh_augmentation_keys(
         &self,
         key: &crate::file_artifact_store::AugmentationTargetKey,
-        observed: &crate::file_artifact_store::AugmenterSet,
+        observed: &verter_session_query::resolution::AugmenterSet,
         refreshed: Vec<(
             usize,
             verter_session_query::source::artifact_key::FileArtifactKey,
@@ -669,7 +669,7 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> verter_session_query::source::demand::DemandOutcome<
-        crate::decl_body_memo::TransientTypeParts,
+        verter_session_query::source::transient_parts::TransientTypeParts,
     >;
     fn transient_value_parts(
         &self,
@@ -677,7 +677,7 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> verter_session_query::source::demand::DemandOutcome<
-        crate::decl_body_memo::TransientValueParts,
+        verter_session_query::source::transient_parts::TransientValueParts,
     >;
 
     /// The owner's `TypeDecl` with its body already lowered — the port's

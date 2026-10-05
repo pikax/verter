@@ -1432,7 +1432,7 @@ fn install_test_resolver_for_root_with_options(
             .into(),
         };
         projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            id: verter_session_query::resolution::ProjectId(0),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -1448,7 +1448,7 @@ fn install_test_resolver_for_root_with_options(
         });
     }
     projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        id: verter_session_query::resolution::ProjectId(0),
         root: root_cp.clone(),
         workspace_root: root_cp.clone(),
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
@@ -1467,7 +1467,7 @@ fn install_test_resolver_for_root_with_options(
     // IDs must match index position (the snapshot invariant
     // `build_workspace_snapshot_simple` upholds after its precedence sort).
     for (i, project) in projects.iter_mut().enumerate() {
-        project.id = verter_workspace::workspace_snapshot::ProjectId(i as u32);
+        project.id = verter_session_query::resolution::ProjectId(i as u32);
     }
 
     let mut resolver_project = verter_workspace::ide_project_config(
@@ -1524,7 +1524,7 @@ fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::Fil
         .into(),
     };
     let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        id: verter_session_query::resolution::ProjectId(0),
         root: root_cp.clone(),
         workspace_root: root_cp.clone(),
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -3829,7 +3829,7 @@ fn configured_claimant_snapshot(
             .into(),
         };
         verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            id: verter_session_query::resolution::ProjectId(0),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
@@ -5490,7 +5490,7 @@ async fn svelte_dotted_component_completion_is_sanitized_but_edit_placement_defe
 
     // The shared COMPLETION ITEM synthesis (tag insert + CLASS kind) is the
     // user-visible shared surface — assert it produces a valid tag + CLASS.
-    let analysis = verter_session::FileAnalysisSnapshot::default();
+    let analysis = verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
     let items = crate::features::completion::tag_name_completions(
         &analysis,
         Some(&ws_components),
@@ -20594,8 +20594,9 @@ async fn tsserver_barrel_resolution_rewrites_carrier_exports_without_ts_extensio
 // the allowImportingTsExtensions barrel policy.
 #[test]
 fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::workspace_snapshot::{
-        OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+        OwnershipProject, ProjectPayload, SnapshotGeneration,
     };
 
     fn configured_project(
@@ -36764,7 +36765,7 @@ async fn generic_rename_fails_closed_while_project_carrier_frontier_is_incomplet
     .into_iter()
     .collect();
     let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        id: verter_session_query::resolution::ProjectId(0),
         root: root.clone(),
         workspace_root: root.clone(),
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {

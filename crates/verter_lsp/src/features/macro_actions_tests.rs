@@ -1131,7 +1131,7 @@ fn cursor_on_slot_element_shows_slot_actions() {
     let cursor_in_slot = Some(slot_start + 2); // inside "<sl|ot"
     let actions = macro_code_actions(
         source,
-        verter_session::AnalysisSourceRevision::of_source(source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(source),
         Some(&analysis),
         &blocks,
         &line_index,
@@ -1202,7 +1202,7 @@ fn cursor_on_define_slots_macro_shows_augmentation_actions() {
     let cursor_on_macro = Some(macro_start + 5);
     let actions = macro_code_actions(
         source,
-        verter_session::AnalysisSourceRevision::of_source(source),
+        verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(source),
         Some(&analysis),
         &blocks,
         &line_index,

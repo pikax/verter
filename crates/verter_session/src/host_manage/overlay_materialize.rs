@@ -739,7 +739,7 @@ impl VerterHost {
         struct ColdIndexProducts {
             header_index: verter_session_query::declarations::header_index::DeclHeaderIndex,
             route_inventory: verter_session_query::analysis::route_inventory::ScriptRouteInventory,
-            snapshot: Option<crate::types::FileAnalysisSnapshot>,
+            snapshot: Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
             svelte_component_runes_mode: bool,
             owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
             /// The snapshot's walks, or a parse of its own, were refused for
@@ -874,7 +874,7 @@ impl VerterHost {
                         // overlay: a re-parse over the same bytes under the
                         // same source type panics identically, so the
                         // default-empty snapshot IS the parse outcome.
-                        Some(crate::types::FileAnalysisSnapshot::default())
+                        Some(verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default())
                     };
                     Ok::<_, crate::parse::ScriptOwnerIndexError>(ColdIndexProducts {
                         header_index,

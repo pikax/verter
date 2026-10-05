@@ -15,8 +15,8 @@ use crate::ambient_lib::{AmbientLibError, AmbientLibSpec, AmbientLibsByProject};
 use crate::exact_resolution::DependencySnapshotView;
 use crate::published_state::ProjectEnvHashArray;
 use crate::types::{ExactResolution, ExactResolutionResult, PackageManifest, ParsedEdge};
-use crate::workspace_snapshot::ProjectId;
 use verter_language::FileLanguage;
+use verter_session_query::resolution::ProjectId;
 use verter_session_query::resolution::ProjectStableKey;
 use verter_session_query::resolution::{
     AmbientSymbolHit, ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind,

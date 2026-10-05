@@ -16,7 +16,7 @@
 //! rebuilt.
 
 use verter_diagnostics::{Linter, ResolvedLintConfig};
-use verter_workspace::workspace_snapshot::ProjectId;
+use verter_session_query::resolution::ProjectId;
 
 use verter_workspace::{ViteConfigTrustInfo, WorkspaceRead};
 
@@ -247,9 +247,10 @@ pub fn set_conditional_root_narrowing(views: &mut LspViews, enabled: bool) {
 mod tests {
     use super::*;
     use verter_resolution::ModuleResolverCore;
+    use verter_session_query::resolution::ProjectId;
     use verter_session_query::resolution::{CompiledGlob, NormalizedGlob};
     use verter_workspace::workspace_snapshot::{
-        OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
+        OwnershipProject, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
     };
     use verter_workspace::ViteConfigTrustInfo;
     use verter_workspace::{CanonicalPath, FallbackMembership, MemoryOptions, MemoryWorkspace};

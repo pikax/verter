@@ -62,7 +62,7 @@ pub(super) struct CarrierSyncCommit<'a> {
 /// the snapshot's authoritative configured-owner resolution before admission.
 fn configured_frontier_scope(
     snapshot: &verter_workspace::WorkspaceSnapshot,
-    owner: verter_workspace::workspace_snapshot::ProjectId,
+    owner: verter_session_query::resolution::ProjectId,
     initiating_canonical: &str,
 ) -> Option<(Vec<String>, String)> {
     let project = snapshot.projects.get(owner.0 as usize)?;

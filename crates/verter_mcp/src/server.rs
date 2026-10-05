@@ -210,7 +210,7 @@ pub struct VerterMcpServer {
 // ── Helper: build ScriptAnalysisSnapshot from host FileAnalysisSnapshot ──
 
 fn build_script_snapshot(
-    analysis: &verter_session::FileAnalysisSnapshot,
+    analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
 ) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
         imports: analysis.imports.clone(),
@@ -3311,7 +3311,9 @@ const CLIENT_ONLY_HOOKS: &[VueApiClassification] = &[
 ];
 
 /// Compute SSR readiness score (0-100) for a component.
-fn compute_ssr_readiness(analysis: &verter_session::FileAnalysisSnapshot) -> serde_json::Value {
+fn compute_ssr_readiness(
+    analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> serde_json::Value {
     let mut score: i32 = 100;
     let mut issues = Vec::new();
 
@@ -3397,7 +3399,9 @@ fn compute_ssr_readiness(analysis: &verter_session::FileAnalysisSnapshot) -> ser
 }
 
 /// Build an ordered migration plan for SSR safety.
-fn build_ssr_migration_plan(analysis: &verter_session::FileAnalysisSnapshot) -> serde_json::Value {
+fn build_ssr_migration_plan(
+    analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+) -> serde_json::Value {
     let mut steps = Vec::new();
     let mut priority = 1u32;
 

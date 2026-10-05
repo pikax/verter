@@ -1,5 +1,5 @@
 use oxc_span::GetSpan;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use verter_session::carrier_publication_store::RegisteredFileStructure;
 

@@ -861,7 +861,7 @@ fn reload_component_meta_template_snapshot(
     host: &crate::VerterHost,
     canonical_id: &str,
     whole_hash: verter_session_query::analysis::types::Hash16,
-) -> Option<crate::types::FileAnalysisSnapshot> {
+) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
     let key = host.authoritative_current_artifact_key(canonical_id)?;
     if key.content_hash != whole_hash {
         return None;

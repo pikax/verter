@@ -7,7 +7,7 @@ use verter_session::framework::{
     ComponentContractAvailability, ComponentContractUnsupported, PublicParameter, PublicSlot,
     PublicTypeReference,
 };
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_type_expr::{render_type_expr_display, PublicationResult, TypeExpr};
 
 use crate::documents::carrier_structure::{

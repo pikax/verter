@@ -74,7 +74,7 @@ pub(crate) fn make_test_vfs_workspace_with_resolver(
         },
     };
     let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        id: verter_session_query::resolution::ProjectId(0),
         root: root_cp.clone(),
         workspace_root: root_cp.clone(),
         payload,
@@ -166,7 +166,7 @@ pub(crate) fn make_test_vfs_workspace_from_registry(
                 },
             };
             verter_workspace::workspace_snapshot::OwnershipProject {
-                id: verter_workspace::workspace_snapshot::ProjectId(i as u32),
+                id: verter_session_query::resolution::ProjectId(i as u32),
                 root: root_cp.clone(),
                 workspace_root: verter_workspace::CanonicalPath::new(&p.workspace_root),
                 payload,
@@ -269,7 +269,7 @@ pub(crate) fn make_test_snapshot(
                 },
             };
             verter_workspace::workspace_snapshot::OwnershipProject {
-                id: verter_workspace::workspace_snapshot::ProjectId(i as u32),
+                id: verter_session_query::resolution::ProjectId(i as u32),
                 root: root_cp,
                 workspace_root: verter_workspace::CanonicalPath::new(ws_root),
                 payload,

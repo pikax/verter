@@ -392,8 +392,8 @@ from the OXC nodes already in scope (`type_argument_member_list_anchor`,
 (`object_member_list_anchor`). Publication is a pure `match` — no traversal, no
 locator deref, no resolution, and no final-index stamping pass.
 
-`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (a newtype over
-`Hash16`) is stamped at every producer from the source node's own
+`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (both owned by
+`verter_session_query::analysis::file_analysis`; a newtype over `Hash16`) is stamped at every producer from the source node's own
 `ParseSnapshot::whole_hash` — already `hash_16` of the whole file, so no
 producer re-hashes. A torn generation join leaves it `Default` (unstamped), which
 matches no live buffer and therefore fails closed.

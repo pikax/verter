@@ -29,8 +29,9 @@ use crate::resolver_core::{
     ComponentMetaCacheLookup, ComponentMetaComputeOutcome, ComponentMetaRequestHost, RequestSource,
     SingleflightRole,
 };
-use crate::types::{FileAnalysisSnapshot, ProjectionMode};
+use crate::types::ProjectionMode;
 use crate::VerterHost;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
 #[cfg(test)]

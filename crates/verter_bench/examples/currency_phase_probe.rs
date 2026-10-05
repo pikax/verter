@@ -26,7 +26,8 @@ use std::time::{Duration, Instant};
 
 use verter_diagnostics::{LintConfig, Linter};
 use verter_session::component_meta_host::ComponentMetaHost;
-use verter_session::{FileAnalysisSnapshot, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::AnalysisFlags;
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};

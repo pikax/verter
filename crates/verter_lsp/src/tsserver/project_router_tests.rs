@@ -13,7 +13,8 @@ use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use std::path::PathBuf;
 use verter_session::external_ts::EnvDims;
 use verter_session::file_artifact_store::ProjectIdentity;
-use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+use verter_session_query::resolution::ProjectId;
+use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
 struct BatchRouterFixture {
     _temp: tempfile::TempDir,

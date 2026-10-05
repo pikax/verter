@@ -4176,7 +4176,7 @@ impl NapiVerterHost {
 /// Extracts all script-related fields, preserving `vue_api_calls` and
 /// `dom_query_calls` from the snapshot.
 fn build_script_snapshot(
-    snapshot: &host::FileAnalysisSnapshot,
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
 ) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
@@ -4228,7 +4228,7 @@ mod symbol_kind {
 
 /// Build document symbols from analysis data.
 fn build_document_symbols_from_analysis(
-    snapshot: &host::FileAnalysisSnapshot,
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     source: &str,
 ) -> Vec<FfiDocumentSymbol> {
     let mut symbols = Vec::new();
@@ -4381,7 +4381,7 @@ fn build_document_symbols_from_analysis(
 
 /// Build CSS selector match results for visualization.
 fn build_selector_match_results(
-    snapshot: &host::FileAnalysisSnapshot,
+    snapshot: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     source: &str,
 ) -> Vec<FfiSelectorMatchResult> {
     let template = match &snapshot.template {

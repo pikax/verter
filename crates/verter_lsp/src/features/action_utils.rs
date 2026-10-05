@@ -5,7 +5,8 @@
 // component_actions, event_type_hints, etc.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::{AnalysisSourceRevision, FileAnalysisSnapshot};
+use verter_session_query::analysis::file_analysis::AnalysisSourceRevision;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::MemberListAnchor;
 
 use crate::documents::carrier_structure::CarrierBlockView;

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::{
     AnalysisFlags, AnalyzedMacro, AnalyzedMacroKind, VueApiClassification,
 };
@@ -426,7 +426,10 @@ mod tests {
             bindings: script.bindings.clone(),
             macros: script.macros.clone().into(),
             script_flags: script.flags.bits(),
-            anchor_revision: verter_session::AnalysisSourceRevision::of_source(source),
+            anchor_revision:
+                verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+                    source,
+                ),
             ..Default::default()
         }
     }

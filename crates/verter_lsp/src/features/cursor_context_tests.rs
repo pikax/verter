@@ -3,7 +3,7 @@ use crate::documents::carrier_structure::{
     authored_component_attribute_name_context, project_carrier_blocks, test_carrier_blocks,
     test_structure,
 };
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::template::*;
 use verter_span::Span;
 

@@ -16,9 +16,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use verter_diagnostics::{LintConfig, Linter};
-use verter_session::{
-    CompileProfile, CompileTarget, FileAnalysisSnapshot, HostConfig, UpsertRequest, VerterHost,
-};
+use verter_session::{CompileProfile, CompileTarget, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::AnalysisFlags;
 use verter_workspace::{
