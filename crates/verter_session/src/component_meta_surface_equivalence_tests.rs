@@ -37,7 +37,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
 use crate::meta::MetaProject;
@@ -78,7 +78,7 @@ fn prop_names(meta: &ComponentMetaAnalysis) -> Vec<&str> {
 fn prop<'m>(
     meta: &'m ComponentMetaAnalysis,
     name: &str,
-) -> &'m verter_semantic::analysis::component_meta::PropAnalysis {
+) -> &'m verter_session_query::analysis::component_meta::PropAnalysis {
     meta.props
         .iter()
         .find(|prop| prop.name == name)
@@ -91,7 +91,7 @@ fn prop<'m>(
 fn demand_prop_type(
     project: &Arc<MetaProject>,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> TypeExpr {
     crate::test_only::semantic_source_probe::demand_type_expr(
         project.host(),
@@ -115,7 +115,7 @@ fn demand_prop_type(
 fn shallow_prop_type(
     project: &Arc<MetaProject>,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> TypeExpr {
     crate::test_only::semantic_source_probe::shallow_type_expr(
         project.host(),

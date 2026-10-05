@@ -32,7 +32,9 @@
 
 use super::harness;
 
-use verter_semantic::analysis::type_expand::{ExpandedComponentTypes, ExpandedMacroObjectShape};
+use verter_session_query::analysis::type_expand::{
+    ExpandedComponentTypes, ExpandedMacroObjectShape,
+};
 use verter_type_expr::{LiteralValue, TypeExpr};
 
 /// Collect the member names published on the `define_props` mirror for

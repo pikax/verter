@@ -42,7 +42,8 @@ pub struct IndexedInputRecord {
     pub(crate) eval_source: Arc<str>,
     pub(crate) framework_parse:
         Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
-    pub(crate) script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+    pub(crate) script_analysis:
+        Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     pub(crate) snapshot: Arc<crate::types::FileAnalysisSnapshot>,
     /// The owner's `interface AppConfig` shallow flag, mirrored from the
     /// artifact onto the request-input record. The authoritative copy is

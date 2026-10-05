@@ -16,13 +16,13 @@ use crate::resolver_core::{
     component_meta_type_registry as resolver_component_meta_type_registry,
 };
 #[cfg(test)]
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 #[cfg(test)]
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedSurfaceCompleteness, FallthroughSurface, RootReachability,
 };
 #[cfg(test)]
-use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
 #[cfg(test)]
 use verter_type_expr::{ObjectMember, TypeExpr};
 
@@ -32,7 +32,7 @@ use crate::VerterHost;
 /// Project one registered carrier into its content-free ordered structure.
 pub fn ordered_sfc_structure_projection(
     structure: &crate::carrier_publication_store::RegisteredFileStructure,
-) -> verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+) -> verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis {
     crate::host_resolve::ordered_sfc_structure_analysis(structure)
 }
 
@@ -380,7 +380,7 @@ impl ComponentMetaSession {
         &self,
         canonical_or_alias: &str,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         ComponentMetaHostError,
     > {
         component_meta_trace_custom!("component_meta_session_query", canonical_or_alias);
@@ -430,7 +430,7 @@ impl ComponentMetaSession {
     ) -> Result<
         Vec<
             Result<
-                Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+                Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
                 ComponentMetaHostError,
             >,
         >,
@@ -594,7 +594,7 @@ impl ComponentMetaSession {
         canonical_or_alias: &str,
     ) -> Result<
         Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
         )>,
         ComponentMetaHostError,
@@ -815,10 +815,12 @@ fn extract_component_meta_from_resolved_with_evaluated(
         } else {
             meta.accepted_surface_completeness = AcceptedSurfaceCompleteness::LowerBound;
             meta.root_reachability = RootReachability::NoFallthrough {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             };
             meta.fallthrough_surface = FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             };
         }
     }

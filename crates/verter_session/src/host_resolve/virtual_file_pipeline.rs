@@ -394,7 +394,8 @@ enum CompiledProducts {
     Produced {
         outputs: FxHashMap<VirtualNodeKind, CachedVirtualFile>,
         tsx: Option<CachedTsx>,
-        template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        template_analysis:
+            Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     },
     RuntimeSurfaceRefused {
         diagnostic_code: Arc<str>,
@@ -412,7 +413,7 @@ impl CompiledProducts {
 
     fn template_analysis(
         &self,
-    ) -> Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot> {
         match self {
             Self::Produced {
                 template_analysis, ..
@@ -485,7 +486,7 @@ pub(crate) struct CompileEntryProducts {
     pub(crate) diagnostics: DiagnosticsSnapshot,
     pub(crate) tsx: Option<CachedTsx>,
     pub(crate) template_analysis:
-        Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     pub(crate) template_class_admission:
         crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
 }
@@ -3459,7 +3460,7 @@ impl VerterHost {
         snapshot: &CompileInput,
         facts_product: &verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct,
     ) -> (
-        verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
         crate::project_semantic_dispatch::template_class_facts::TemplateClassCacheAdmission,
     ) {
         // Build script import pairs for component â†’ source resolution

@@ -177,7 +177,8 @@ pub struct IndexedReady {
     pub framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     /// Script-level analysis snapshot (imports/exports/macros/bindings/etc.).
     /// Always present after materialization.
-    pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+    pub script_analysis:
+        Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     /// Cached per-export signatures used by smart dependent invalidation.
     pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
     /// File-level analysis snapshot consumed by component-meta / linter
@@ -380,7 +381,8 @@ pub struct AnalysisReady {
     /// Script analysis snapshot (existing shape — migration work in a later
     /// phase replaces this with a reader over `IndexedReady`-owned lowered
     /// block facts).
-    pub script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+    pub script_analysis:
+        Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     /// Per-export signatures for smart invalidation, when the scope requested
     /// [`AnalysisScope::EXPORT_SIGNATURES`].
     pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
@@ -2071,8 +2073,8 @@ mod tests {
     /// about cache-key behaviour. Keeps the test surface decoupled from the
     /// real resolver's analysis output.
     fn empty_component_meta_analysis(
-    ) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
-        use verter_semantic::analysis::component_meta::{
+    ) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        use verter_session_query::analysis::component_meta::{
             AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags,
             FallthroughSurface, NoFallthroughReason, RootReachability,
         };

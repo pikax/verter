@@ -8,7 +8,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 pub struct CustomEventNameCasing;
 
@@ -51,8 +51,9 @@ impl LintRule for CustomEventNameCasing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::template::AnalyzedEmitDefinition;
+    use verter_session_query::analysis::template::TemplateEventHandler;
 
-    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run_rule(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

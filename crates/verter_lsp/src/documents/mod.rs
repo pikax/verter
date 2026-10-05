@@ -224,7 +224,7 @@ impl ProgressiveSourceAnalysis {
 
     fn prop_owner_witness_for(
         &self,
-        prop: &verter_semantic::analysis::AnalyzedPropDefinition,
+        prop: &verter_session_query::analysis::template::AnalyzedPropDefinition,
     ) -> Option<&ProgressivePropOwnerWitness> {
         self.prop_owner_witnesses
             .iter()

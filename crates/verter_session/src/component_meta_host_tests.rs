@@ -810,7 +810,7 @@ import Link from './Link.vue'
     assert!(
         matches!(
             meta.fallthrough_surface,
-            verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
+            verter_session_query::analysis::component_meta::FallthroughSurface::Branches { .. }
         ),
         "captured store views should keep child fallthrough resolution pinned to the resolved snapshot",
     );

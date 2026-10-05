@@ -79,7 +79,7 @@ mod tests {
     use verter_diagnostics::{
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
     };
-    use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
     use verter_session_query::analysis::types::{
         AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind,
     };

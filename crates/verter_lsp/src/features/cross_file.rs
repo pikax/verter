@@ -159,7 +159,9 @@ impl ChildComponentContext {
 mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
-    use verter_semantic::analysis::template::{AnalyzedEmitDefinition, AnalyzedPropDefinition};
+    use verter_session_query::analysis::template::{
+        AnalyzedEmitDefinition, AnalyzedPropDefinition,
+    };
 
     fn make_child_context(source: &str, analysis: FileAnalysisSnapshot) -> ChildComponentContext {
         let blocks = test_carrier_blocks(source);
@@ -271,7 +273,7 @@ mod tests {
     fn prop_names_returns_all_defined_props() {
         let analysis = FileAnalysisSnapshot {
             template: Some(
-                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                     prop_definitions: vec![
                         AnalyzedPropDefinition {
                             name: "msg".into(),
@@ -316,7 +318,7 @@ mod tests {
     fn emit_names_returns_declared_emits() {
         let analysis = FileAnalysisSnapshot {
             template: Some(
-                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                     emit_definitions: vec![
                         AnalyzedEmitDefinition {
                             event_name: "save".into(),

@@ -4181,8 +4181,8 @@ impl NapiVerterHost {
 /// `dom_query_calls` from the snapshot.
 fn build_script_snapshot(
     snapshot: &host::FileAnalysisSnapshot,
-) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
-    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
+    verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
         imports: snapshot.imports.clone(),
         module_references: snapshot.module_references.to_vec(),
         bindings: snapshot.bindings.clone(),

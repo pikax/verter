@@ -3,7 +3,7 @@
 //! Converts `verter_semantic::analysis` types into `verter_semantic` fact types.
 //! This is the bridge between the raw analysis layer and the semantic DB.
 
-use crate::input::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind, ReactivityKind};
 
 use verter_session_query::facts::binding::{
@@ -402,7 +402,7 @@ pub fn extract_boundary_edges(
 
 // ── Prop constness extraction ──────────────────────────────────────────────
 
-use crate::input::{PropValueConstness, TemplateAnalysisSnapshot};
+use verter_session_query::analysis::template::{PropValueConstness, TemplateAnalysisSnapshot};
 use verter_session_query::facts::component::{PropConstness, PropConstnessFact};
 
 /// Compute per-prop constness for a child component across all call sites
@@ -1247,7 +1247,7 @@ mod tests {
     // ── Prop constness tests ───────────────────────────────────────────────
 
     fn make_template_with_component_usage(
-        usages: Vec<crate::input::TemplateComponentUsage>,
+        usages: Vec<verter_session_query::analysis::template::TemplateComponentUsage>,
     ) -> TemplateAnalysisSnapshot {
         let mut template = TemplateAnalysisSnapshot::default();
         template.components = usages;
@@ -1256,9 +1256,9 @@ mod tests {
 
     fn make_component_usage(
         name: &str,
-        props: Vec<crate::input::TemplatePropUsage>,
-    ) -> crate::input::TemplateComponentUsage {
-        crate::input::TemplateComponentUsage {
+        props: Vec<verter_session_query::analysis::template::TemplatePropUsage>,
+    ) -> verter_session_query::analysis::template::TemplateComponentUsage {
+        verter_session_query::analysis::template::TemplateComponentUsage {
             name: name.to_string(),
             import_source: None,
             is_dynamic: false,
@@ -1278,8 +1278,8 @@ mod tests {
     fn make_prop_usage(
         name: &str,
         constness: PropValueConstness,
-    ) -> crate::input::TemplatePropUsage {
-        crate::input::TemplatePropUsage {
+    ) -> verter_session_query::analysis::template::TemplatePropUsage {
+        verter_session_query::analysis::template::TemplatePropUsage {
             name: name.to_string(),
             is_bound: constness != PropValueConstness::Const,
             expression: None,
@@ -1423,7 +1423,7 @@ mod tests {
 
     #[test]
     fn extract_boundary_edges_v_model_creates_update_event() {
-        use crate::input::TemplateComponentVModel;
+        use verter_session_query::analysis::template::TemplateComponentVModel;
 
         let mut usage = make_component_usage("Input", vec![]);
         usage.v_models = vec![TemplateComponentVModel {

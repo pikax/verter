@@ -13,8 +13,10 @@
 //! (`inheritAttrs`) stays parser-side because it operates on the
 //! source-text annotation, not on the dispatched type.
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::ExpandedField;
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::ExpandedField;
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
 use crate::resolver_core::ResolverContext;

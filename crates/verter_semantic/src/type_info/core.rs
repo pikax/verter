@@ -24,7 +24,7 @@ use verter_macro_dto::{
     RuntimePropType, SynthesizedRowKind,
 };
 
-use crate::analysis::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind, MacroTypeDepUsage};
 use verter_session_query::resolution::ResolutionBasis;
 

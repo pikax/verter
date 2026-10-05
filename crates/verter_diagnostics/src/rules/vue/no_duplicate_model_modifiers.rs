@@ -26,7 +26,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct NoDuplicateModelModifiers;

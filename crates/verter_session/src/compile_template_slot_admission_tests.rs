@@ -92,7 +92,7 @@ fn session_slot_present(host: &VerterHost, profile: &CompileProfile) -> bool {
 
 fn template_slot(
     host: &VerterHost,
-) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
     host.derived_raw_cache().get(OWNER).and_then(|cc| {
         cc.raw_template_analysis()
             .map(|entry| Arc::clone(&entry.template))

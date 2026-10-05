@@ -137,7 +137,7 @@ impl VerterHost {
         type_name: &str,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+    ) -> Option<verter_session_query::analysis::type_expand::ExpandedObjectShape> {
         // The root shape resolves in NODE DOMAIN through the query engine's
         // intrinsic rail (`project_intrinsic_root_shape`): the root-symbol
         // whole-surface PRIMARY, then the Class-A FALLBACK for re-exported /
@@ -197,7 +197,7 @@ impl VerterHost {
     }
 
     fn intrinsic_members_from_shape(
-        shape: verter_semantic::analysis::type_expand::ExpandedObjectShape,
+        shape: verter_session_query::analysis::type_expand::ExpandedObjectShape,
     ) -> Vec<IntrinsicSurfaceMember> {
         let mut members = rustc_hash::FxHashMap::default();
         for property in shape.properties {

@@ -64,7 +64,7 @@ fn read_fixture(rel: &str) -> String {
 /// exercise HTMLAttributes-globals; `global: false` is the
 /// structural default for the fixture-driven assertions.
 fn surface_from_meta(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> AnalyzedSurface {
     AnalyzedSurface {
         props: meta

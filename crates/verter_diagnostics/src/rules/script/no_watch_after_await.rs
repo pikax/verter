@@ -9,7 +9,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 
 pub struct NoWatchAfterAwait;
 
@@ -60,7 +60,7 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
     use verter_session_query::analysis::types::VueApiCallSite;
     use verter_session_query::analysis::types::VueApiClassification;
 

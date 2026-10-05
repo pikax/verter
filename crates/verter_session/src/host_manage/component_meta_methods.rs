@@ -959,7 +959,7 @@ impl VerterHost {
         // a synthesis walk that reverted to boolean suppression could not
         // feed this fold.
         let mut synthesis_diagnostics: Vec<
-            verter_semantic::analysis::component_meta::MacroExpansionDiagnostics,
+            verter_session_query::analysis::component_meta::MacroExpansionDiagnostics,
         > = Vec::new();
         let mut synthesis_suppression: Option<
             crate::typeinfo::surface_resolution::NonEmptyReasons,
@@ -1274,9 +1274,11 @@ impl VerterHost {
         &self,
         owner_canonical: &str,
         snapshot: &FileAnalysisSnapshot,
-        evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+        evaluated_types: Option<
+            &verter_session_query::analysis::type_expand::ExpandedComponentTypes,
+        >,
         resolved_type_registry: &mut Vec<
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis,
+            verter_session_query::analysis::component_meta::ResolvedTypeAnalysis,
         >,
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
         tracked_dependencies: &mut BTreeSet<String>,

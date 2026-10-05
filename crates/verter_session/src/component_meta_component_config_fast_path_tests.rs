@@ -66,7 +66,7 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
 fn resolve_button_meta(
     host: &Arc<VerterHost>,
     canonical: &str,
-) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     host.get_component_meta(canonical)
         .expect("getComponentMeta must succeed for the ComponentConfig fixture")
 }

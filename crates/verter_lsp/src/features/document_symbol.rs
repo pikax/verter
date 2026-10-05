@@ -448,8 +448,13 @@ fn macro_kind_display(
 mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
-    use verter_semantic::analysis::style::{AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis};
-    use verter_semantic::analysis::*;
+
+    use verter_session_query::analysis::style::{
+        AnalyzedCssClass, CssAnalysis, StyleBlockAnalysis,
+    };
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateComponentUsage;
+    use verter_session_query::analysis::template::TemplateElement;
     use verter_session_query::analysis::types::AnalyzedBinding;
     use verter_session_query::analysis::types::AnalyzedBindingKind;
     use verter_session_query::analysis::types::AnalyzedImport;

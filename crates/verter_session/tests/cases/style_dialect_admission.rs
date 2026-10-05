@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::{BlockContentAvailability, StyleAnalysisLang};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::analysis::style::{BlockContentAvailability, StyleAnalysisLang};
 
 fn analyze(source: &str) -> verter_session::FileAnalysisSnapshot {
     let host = VerterHost::new_standalone(HostConfig::default());

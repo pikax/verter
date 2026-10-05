@@ -121,7 +121,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
     ) -> Option<(
-        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
         crate::meta_resolve::ResolvedComponentMetaState,
     )> {
         self.try_get_component_meta_with_resolution(canonical_or_alias)
@@ -136,7 +136,7 @@ impl VerterHost {
         canonical_or_alias: &str,
     ) -> Result<
         Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
         )>,
         crate::semantic_query::ExecutionAbort,
@@ -530,7 +530,7 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
     ) -> Result<
         Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
         )>,
         crate::semantic_query::ExecutionAbort,
@@ -641,7 +641,7 @@ impl VerterHost {
         canonical: &str,
         request_id: u64,
     ) -> Option<(
-        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
         crate::meta_resolve::ResolvedComponentMetaState,
     )> {
         // Fact-precise validation is the sole cache oracle. Accepts ONLY a
@@ -668,7 +668,7 @@ impl VerterHost {
         request_id: u64,
         current_view: &crate::resolver_store::CurrentHostStoreView,
     ) -> Option<(
-        verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
         crate::meta_resolve::ResolvedComponentMetaState,
     )> {
         let shallow = self.shallow_file_state(canonical)?;

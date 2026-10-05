@@ -30,7 +30,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 
 /// Lint rule: warn when `onMounted` + DOM queries exist without a cleanup lifecycle hook.
 pub struct NoLeakedEventListeners;
@@ -103,7 +103,7 @@ impl LintRule for NoLeakedEventListeners {
 mod tests {
     use super::*;
 
-    use verter_semantic::analysis::types::DomQueryCallSite;
+    use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
     use verter_session_query::analysis::types::{
         DomQueryKind, VueApiCallSite, VueApiClassification,
     };

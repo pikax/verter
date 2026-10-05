@@ -36,7 +36,9 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
 use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;

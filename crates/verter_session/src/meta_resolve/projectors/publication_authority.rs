@@ -66,7 +66,9 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
 use crate::meta_resolve::projection_demand::{ProjectionCursor, PublishedSurfaceKind};

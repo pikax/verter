@@ -30,10 +30,10 @@
 //! Prevention).
 
 use std::sync::Arc;
-use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_session::meta::MetaProject;
 use verter_session::resolver_core::{PermissiveStoreView, RouteDb, RouteResult};
 use verter_session::{AnalysisLevel, HostConfig, VerterHost};
+use verter_session_query::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
@@ -77,7 +77,7 @@ fn upsert(project: &Arc<MetaProject>, path: &str, source: &str) {
 fn meta_for(
     project: &Arc<MetaProject>,
     path: &str,
-) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     let session = project
         .open_session_batch()
         .expect("open_session_batch should succeed");
@@ -296,7 +296,7 @@ fn demand_registry_entry_type(
 fn demand_prop_type(
     project: &Arc<MetaProject>,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> TypeExpr {
     let source = prop
         .publication

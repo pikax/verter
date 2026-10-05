@@ -6,7 +6,7 @@
 
 mod request;
 
-pub use request::{
+pub use crate::analysis::type_expand::request::{
     ExpandedCallSignature, ExpandedComponentTypes, ExpandedField, ExpandedIndexSignature,
     ExpandedMacroExposed, ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedNormalizedExpr,
     ExpandedObjectShape, ExpandedParameter, ExpandedProperty, ExpansionDiagnostic,
@@ -14,7 +14,7 @@ pub use request::{
     ExpansionStopReason,
 };
 
-use verter_session_query::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};
+use crate::type_solver::result::{IncompleteReason, SolverDiagnostic, SolverResult};
 use verter_type_expr::facts::SemanticTypeSource;
 
 // ---------------------------------------------------------------------------

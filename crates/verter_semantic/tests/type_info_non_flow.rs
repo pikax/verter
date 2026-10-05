@@ -11,7 +11,6 @@
 use std::sync::Arc;
 
 use verter_macro_dto::{MacroAnchor, RuntimePropType, SynthesizedRowKind};
-use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_semantic::type_info::{
     ImportedComponentResolution, MacroSemanticLane, NonFlowObservationKey,
     NonFlowObservationSnapshot, NonFlowOperation, NonFlowOutcome, NonFlowPayload, NonFlowTerminal,
@@ -19,6 +18,7 @@ use verter_semantic::type_info::{
     MISSING_PROOF_EXPOSE, MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL,
     MISSING_PROOF_PROPS, MISSING_PROOF_VUE_MACRO,
 };
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::{
     AnalyzedEmitField, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
     AnalyzedPropField, MacroTypeDep, MacroTypeDepUsage, TypeResolutionSource,

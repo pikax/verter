@@ -913,7 +913,7 @@ fn component_element_gets_component_usage_index_from_span_match() {
 
 mod unused_declaration_population {
     use super::*;
-    use verter_semantic::analysis::macro_usage::{MacroUsageCall, MacroUsageFacts};
+    use verter_session_query::analysis::macro_usage::{MacroUsageCall, MacroUsageFacts};
     use verter_session_query::analysis::types::{
         AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     };

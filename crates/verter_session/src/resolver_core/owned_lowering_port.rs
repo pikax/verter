@@ -503,7 +503,7 @@ impl<
     fn ordered_sfc_structure(
         &self,
         canonical: &str,
-    ) -> Option<verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis> {
+    ) -> Option<verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis> {
         let host = self.source_host();
         let structure = match self.source_session_view() {
             Some(view) => host.registered_structure_for_view(canonical, view),

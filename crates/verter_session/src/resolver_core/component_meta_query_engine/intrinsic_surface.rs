@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::type_expand::{
     ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
     ExpandedProperty,
 };

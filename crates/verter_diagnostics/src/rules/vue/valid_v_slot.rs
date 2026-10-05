@@ -6,7 +6,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateElement;
+use verter_session_query::analysis::template::TemplateElement;
 
 pub struct ValidVSlot;
 
@@ -68,8 +68,9 @@ impl LintRule for ValidVSlot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateDirective;
 
-    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

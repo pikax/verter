@@ -245,7 +245,10 @@ pub fn organize_imports_actions(
 mod tests {
     use super::*;
     use crate::documents::line_index::LineIndex;
-    use verter_semantic::analysis::*;
+
+    use verter_session_query::analysis::template::BindingUsageKind;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateBindingOccurrence;
     use verter_session_query::analysis::types::AnalyzedBinding;
     use verter_session_query::analysis::types::AnalyzedImport;
     use verter_session_query::analysis::types::AnalyzedImportBinding;

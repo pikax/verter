@@ -157,7 +157,9 @@ impl VerterHost {
 
         // Extract boundary edges from template analysis
         let boundary_edges = {
-            let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = None;
+            let template: Option<
+                verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+            > = None;
             template
                 .map(|t| {
                     verter_semantic::extract::extract_boundary_edges(

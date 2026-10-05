@@ -8017,7 +8017,7 @@ defineEmits<ConditionalEmits>()
         &dispatch,
         payload_node,
         0,
-        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+        verter_session_query::analysis::component_meta::MacroExpansionKind::DefineEmits,
         PayloadSurfaceScope::EmitClassMacroObject,
         &mut diag_sink,
     );
@@ -8169,7 +8169,7 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
             &dispatch,
             payload_node,
             0,
-            verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+            verter_session_query::analysis::component_meta::MacroExpansionKind::DefineEmits,
             PayloadSurfaceScope::EmitClassMacroObject,
             &mut diag_sink,
         );
@@ -8324,7 +8324,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
         &dispatch,
         conditional,
         0,
-        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+        verter_session_query::analysis::component_meta::MacroExpansionKind::DefineEmits,
         PayloadSurfaceScope::EmitClassMacroObject,
         &mut diag_sink,
     )
@@ -8364,7 +8364,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     assert!(
         diag_sink.iter().any(|diag| matches!(
             diag.exactness,
-            verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete
+            verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete
         )),
         "the open branch's incompleteness rides the diagnostic envelope"
     );
@@ -8482,7 +8482,7 @@ defineEmits<EmitChain0>()
         &dispatch,
         payload_node,
         0,
-        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+        verter_session_query::analysis::component_meta::MacroExpansionKind::DefineEmits,
         PayloadSurfaceScope::EmitClassMacroObject,
         &mut diag_sink,
     );

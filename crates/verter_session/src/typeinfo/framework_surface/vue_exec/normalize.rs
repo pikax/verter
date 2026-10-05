@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
+use verter_session_query::analysis::type_expand::ExpandedIndexSignature;
 use verter_session_query::analysis::types::AnalyzedMacroKind;
 use verter_session_query::analysis::types::AnalyzedPropField;
 use verter_type_expr::{

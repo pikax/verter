@@ -26,7 +26,7 @@ use crate::types::ProjectionMode;
 /// [`SemanticNodeId`](crate::semantic_query::SemanticNodeId) plus the cache
 /// metadata the expansion carries, held in NODE-DOMAIN until the sink materialises
 /// it. Distinct from
-/// [`ExpandedNormalizedExpr`](verter_semantic::analysis::type_expand::ExpandedNormalizedExpr),
+/// [`ExpandedNormalizedExpr`](verter_session_query::analysis::type_expand::ExpandedNormalizedExpr),
 /// which OWNS a `TypeExpr` — that materialised form is produced ONLY at the sink
 /// by [`materialize_admitted_expansion_node`].
 ///
@@ -96,7 +96,7 @@ impl AdmittedExpansionNode {
 }
 
 /// Materialisation sink: the SINGLE place an [`AdmittedExpansionNode`] becomes an
-/// [`ExpandedNormalizedExpr`](verter_semantic::analysis::type_expand::ExpandedNormalizedExpr).
+/// [`ExpandedNormalizedExpr`](verter_session_query::analysis::type_expand::ExpandedNormalizedExpr).
 ///
 /// MODULE-PRIVATE. The artifact reaching it was produced inside a sink-owned
 /// demand method from a closed demand — never passed in from a sibling module —
@@ -120,7 +120,7 @@ fn materialize_admitted_expansion_node(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     artifact: &AdmittedExpansionNode,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
-) -> Option<verter_semantic::analysis::type_expand::ExpandedNormalizedExpr> {
+) -> Option<verter_session_query::analysis::type_expand::ExpandedNormalizedExpr> {
     use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
 
     if crate::project_semantic_dispatch::raise::node_raise_misses_or_root_sentinel_with_dispatch(
@@ -136,7 +136,7 @@ fn materialize_admitted_expansion_node(
             None => fallback_source.clone(),
         },
     };
-    Some(verter_semantic::analysis::type_expand::ExpandedNormalizedExpr { expr })
+    Some(verter_session_query::analysis::type_expand::ExpandedNormalizedExpr { expr })
 }
 
 /// Outcome of [`expand_define_model_output`] — the `defineModel<T>()` prop/model
@@ -157,7 +157,7 @@ pub(crate) enum DefineModelOutputExpansion {
     /// resolved head; `normalized` the sealed materialisation.
     Materialized {
         produced_node_id: crate::semantic_query::SemanticNodeId,
-        normalized: verter_semantic::analysis::type_expand::ExpandedNormalizedExpr,
+        normalized: verter_session_query::analysis::type_expand::ExpandedNormalizedExpr,
     },
     /// The carrier head resolved but the sink materialisation missed. The caller
     /// keeps its `parsed` fallback (already the model's type); `produced_node_id`
@@ -181,7 +181,7 @@ pub(crate) enum MacroPathOutputExpansion {
     /// The terminal hop resolved to a node and materialised.
     Materialized {
         produced_node_id: crate::semantic_query::SemanticNodeId,
-        normalized: verter_semantic::analysis::type_expand::ExpandedNormalizedExpr,
+        normalized: verter_session_query::analysis::type_expand::ExpandedNormalizedExpr,
     },
     /// The terminal hop resolved to a node but the sink materialisation missed.
     /// `produced_node_id` is set for audit parity; the caller emits its

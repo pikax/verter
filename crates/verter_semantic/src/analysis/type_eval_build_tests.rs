@@ -1,10 +1,11 @@
 use super::type_eval_build::{parse_and_build_env, parse_and_lower_parts};
 use crate::analysis::type_eval_build::{
     expand_macro_types_impl_with_expander, FieldExpansionContext, FieldKind, LoweredFileParts,
-    MacroExpansionScope, PathSegment, MAX_SEMANTIC_INFERENCE_WORK,
+    MacroExpansionScope, MAX_SEMANTIC_INFERENCE_WORK,
 };
-use crate::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
 use std::sync::Arc;
+use verter_session_query::analysis::field_path::PathSegment;
+use verter_session_query::analysis::type_expand::{ExpandedNormalizedExpr, ExpansionResult};
 use verter_session_query::analysis::types::{
     AnalyzedEmitField, AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField,
     AnalyzedSlotFieldBinding, TypeResolutionSource,

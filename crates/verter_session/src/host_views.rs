@@ -81,7 +81,7 @@ impl VerterHost {
     pub fn ordered_sfc_structure(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis> {
+    ) -> Option<verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis> {
         let structure = self.registered_file_structure(canonical_id)?;
         Some(crate::host_resolve::ordered_sfc_structure_analysis(
             &structure,
@@ -117,7 +117,7 @@ impl VerterHost {
     pub fn scheduler_script_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>> {
+    ) -> Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(Arc::clone(&data.script_analysis))
@@ -158,7 +158,7 @@ impl VerterHost {
     pub fn scheduler_style_analyses(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>> {
+    ) -> Option<Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>> {
         let snap = self.scheduler.try_get_analysis(canonical_id)?;
         let data = snap.downcast_data::<host_executor::HostAnalysisData>()?;
         Some(Arc::clone(&data.style_analyses))
@@ -224,7 +224,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         _profile: Option<u64>,
-    ) -> Option<Vec<verter_semantic::analysis::StyleBlockAnalysis>> {
+    ) -> Option<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>> {
         use crate::host_executor::HostAnalysisData;
 
         let analysis_snap = self.scheduler.try_get_analysis(canonical_id)?;

@@ -21,10 +21,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use verter_diagnostics::{LintConfig, Linter};
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 use verter_session::{
     CompileProfile, CompileTarget, FileAnalysisSnapshot, HostConfig, UpsertRequest, VerterHost,
 };
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::AnalysisFlags;
 use verter_workspace::{FilesystemOptions, FilesystemWorkspace, ProjectGraph, ViteConfigOptions};
 
@@ -319,7 +319,7 @@ fn main() {
 mod tests {
     use super::*;
 
-    use verter_semantic::analysis::types::DomQueryCallSite;
+    use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
     use verter_session_query::analysis::types::{
         AnalyzedModuleReference, AnalyzedOptionsApi, CssVarManipulation, CssVarManipulationKind,
         DomQueryKind, ModuleReferenceAnalyzability, ModuleReferenceSemantics,

@@ -54,7 +54,7 @@ pub(super) fn child_contract_completion_analysis(
         .iter()
         .map(|prop| {
             let materialized = prop.ty.publication.materialized_type();
-            verter_semantic::analysis::AnalyzedPropDefinition {
+            verter_session_query::analysis::template::AnalyzedPropDefinition {
                 name: prop.name.to_string(),
                 callable_role: verter_type_expr::PropCallableRole::Other,
                 type_annotation: materialized.and_then(|expression| {
@@ -75,7 +75,7 @@ pub(super) fn child_contract_completion_analysis(
         .events
         .iter()
         .map(
-            |event| verter_semantic::analysis::template::AnalyzedEmitDefinition {
+            |event| verter_session_query::analysis::template::AnalyzedEmitDefinition {
                 event_name: event.name.to_string(),
                 has_validator: false,
                 is_declared: true,
@@ -94,7 +94,7 @@ pub(super) fn child_contract_completion_analysis(
                 .iter()
                 .map(|binding| binding.name.to_string())
                 .collect::<Vec<_>>();
-            verter_semantic::analysis::template::DefinedSlot {
+            verter_session_query::analysis::template::DefinedSlot {
                 name: slot.name.to_string(),
                 has_bindings: !binding_names.is_empty(),
                 binding_expressions: vec![String::new(); binding_names.len()],
@@ -107,7 +107,7 @@ pub(super) fn child_contract_completion_analysis(
         .collect();
     let mut analysis = verter_session::FileAnalysisSnapshot::default();
     analysis.template = Some(std::sync::Arc::new(
-        verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot {
             prop_definitions,
             emit_definitions,
             defined_slots,

@@ -685,7 +685,7 @@ impl VerterHost {
     }
 
     fn is_expanded_types_empty(
-        result: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+        result: &verter_session_query::analysis::type_expand::ExpandedComponentTypes,
     ) -> bool {
         result.is_empty()
     }
@@ -1220,7 +1220,7 @@ impl VerterHost {
                     use crate::resolver_core::component_meta_query_engine::{
                         FastShallowFieldExpr, FastShallowFieldExprExactness,
                     };
-                    use verter_semantic::analysis::type_expand::{
+                    use verter_session_query::analysis::type_expand::{
                         ExpandedNormalizedExpr, ExpansionResult,
                     };
                     use verter_type_expr::facts::SemanticTypeSource;
@@ -1275,7 +1275,7 @@ impl VerterHost {
                             ctx.kind,
                             verter_semantic::analysis::type_eval_build::FieldKind::Binding
                         ) {
-                            use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+                            use verter_session_query::analysis::field_path::PathSegment as MacroPathSegment;
                             if let [MacroPathSegment::Member(name)] = ctx.output_path.as_ref() {
                                 // An IMPORT alias binds no value declaration
                                 // in THIS file. A locator anchored here would
@@ -1364,7 +1364,7 @@ impl VerterHost {
                         use crate::semantic_query::{
                             PathSegment as SemanticPathSegment, ProjectionMode,
                         };
-                        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+                        use verter_session_query::analysis::field_path::PathSegment as MacroPathSegment;
 
                         let preserve_authored_symbolically = || {
                             ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
@@ -1832,7 +1832,7 @@ impl VerterHost {
             binding_node_ids.borrow_mut().push(None);
             result
                 .bindings
-                .push(verter_semantic::analysis::type_expand::ExpandedField {
+                .push(verter_session_query::analysis::type_expand::ExpandedField {
                     name: key.name.to_string(),
                     owner: key.owner,
                     authority: verter_type_expr::ResolvedTypeAuthority::failed(

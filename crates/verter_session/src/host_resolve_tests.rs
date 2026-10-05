@@ -4009,9 +4009,9 @@ fn template_expression_diagnostics_match_across_analysis_and_bundle_routes() {
         rows
     }
     fn expression_rows(
-        diags: &[verter_semantic::analysis::template::TemplateExpressionDiagnostic],
+        diags: &[verter_session_query::analysis::template::TemplateExpressionDiagnostic],
     ) -> Vec<Row> {
-        use verter_semantic::analysis::template::TemplateDiagnosticSeverity as S;
+        use verter_session_query::analysis::template::TemplateDiagnosticSeverity as S;
         diags
             .iter()
             .filter(|d| d.code == "XInvalidExpression")
@@ -7299,7 +7299,7 @@ fn barrel_imported_root_component_is_named_by_its_real_namespace_member() {
 #[test]
 fn an_unnameable_root_component_zeroes_its_whole_arm() {
     use verter_compiler::tsc::{FallthroughArm, FallthroughPropsProjection};
-    use verter_semantic::analysis::component_meta::{
+    use verter_session_query::analysis::component_meta::{
         AcceptedSurfaceCompleteness, BranchStatus, FallthroughBranch, FallthroughPropEntry,
         FallthroughSurface, InheritedSource, ResolvedRootStep,
     };
@@ -7766,7 +7766,7 @@ fn multi_hop_chain_through_an_options_api_middle_reaches_the_leaf_prop() {
 /// regression that broke barrel imports generally could not hide here.
 #[test]
 fn a_namespace_member_root_fails_closed_with_a_typed_unresolved_reason() {
-    use verter_semantic::analysis::component_meta::{
+    use verter_session_query::analysis::component_meta::{
         BranchStatus, FallthroughSurface, ResolvedRootStep, UnresolvedBranchReason,
         UnresolvedRootTargetReason,
     };

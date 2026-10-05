@@ -4,9 +4,8 @@
 use verter_css_syntax::{
     parse_selector_structure_thread_invocations, parse_style_ir_thread_invocations,
 };
-use verter_semantic::analysis::{
-    build_css_style_analysis, SpecialPseudoKind, StyleAnalysisFlags, VueStyleInput,
-};
+use verter_semantic::analysis::{build_css_style_analysis, VueStyleInput};
+use verter_session_query::analysis::style::{SpecialPseudoKind, StyleAnalysisFlags};
 
 #[test]
 fn nested_special_pseudo_facts_unchanged_and_no_secondary_parse() {

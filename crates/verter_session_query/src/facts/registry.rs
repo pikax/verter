@@ -503,7 +503,7 @@ impl AugmentationScopeKindTag {
 /// `defineProps` / `defineEmits` / etc. macro kind, used by
 /// `FactKey::MacroSurface`.
 ///
-/// Inlined from `verter_semantic::analysis::template::MacroKind` to
+/// Inlined from `crate::analysis::template::MacroKind` to
 /// avoid leaking that domain's serialisation contract into the fact
 /// registry. The variants must remain in lock-step.
 #[derive(

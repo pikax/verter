@@ -522,19 +522,21 @@ const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
 pub(in crate::host_manage) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
 impl FallthroughResolutionView for crate::types::FallthroughResolution {
-    fn accepted_props(&self) -> &[verter_semantic::analysis::component_meta::AcceptedPropAnalysis] {
+    fn accepted_props(
+        &self,
+    ) -> &[verter_session_query::analysis::component_meta::AcceptedPropAnalysis] {
         &self.accepted_props
     }
 
     fn accepted_events(
         &self,
-    ) -> &[verter_semantic::analysis::component_meta::AcceptedEventAnalysis] {
+    ) -> &[verter_session_query::analysis::component_meta::AcceptedEventAnalysis] {
         &self.accepted_events
     }
 
     fn fallthrough_surface(
         &self,
-    ) -> &verter_semantic::analysis::component_meta::FallthroughSurface {
+    ) -> &verter_session_query::analysis::component_meta::FallthroughSurface {
         &self.fallthrough_surface
     }
 
@@ -1026,7 +1028,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         branch_key: &str,
         snapshot: &Self::Snapshot,
         element_index: u32,
-        base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
+        base: &verter_session_query::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<Self::EvalEnv>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
@@ -1161,7 +1163,7 @@ pub(in crate::host_manage) fn log_snapshot_debug(
 #[derive(Debug, Clone)]
 pub(crate) struct ComputedEvaluatedTypes {
     pub(crate) evaluated_types:
-        Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     pub(crate) discovered_dependencies: std::collections::BTreeSet<String>,
     /// Step 9.1 / D32: surface-id sidecar populated during the
     /// `expand_macro_types_impl_with_expander` closure's per-field run.

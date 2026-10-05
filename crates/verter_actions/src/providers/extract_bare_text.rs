@@ -11,10 +11,10 @@
 // @ai-generated
 
 use verter_diagnostics::LintDiagnostic;
-use verter_semantic::analysis::template::{
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::template::{
     TemplateAnalysisSnapshot, TemplateElement, TemplateTextSegment,
 };
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::{
     AnalyzedMacroKind, BindingInitializer, ReactivityKind, VueApiClassification,
 };

@@ -5,7 +5,9 @@
 //! facts + locators minted from those parts (the transient typed IR is
 //! discarded; bodies are lowered again on demand through the shared
 //! resolver's body service).
+use verter_session_query::analysis::field_path::PathSegment;
 use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
+use verter_session_query::analysis::signature_params::narrow_signature_type_params;
 
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
@@ -155,12 +157,12 @@ fn type_expand_debug(message: impl FnOnce() -> String) {
 }
 
 fn expansion_metadata_hit_budget(
-    exactness: crate::analysis::type_expand::ExpansionExactness,
-    diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
+    diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> bool {
-    exactness == crate::analysis::type_expand::ExpansionExactness::Incomplete
+    exactness == verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete
         && diagnostics.iter().any(|diagnostic| {
-            diagnostic.reason == crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded
+            diagnostic.reason == verter_session_query::analysis::type_expand::ExpansionStopReason::BudgetExceeded
         })
 }
 
@@ -175,9 +177,9 @@ struct ExpandStageLog<'a> {
 
 fn log_expand_stage(
     log: ExpandStageLog<'_>,
-    exactness: crate::analysis::type_expand::ExpansionExactness,
-    execution_status: crate::analysis::type_expand::ExpansionExecutionStatus,
-    diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
+    execution_status: verter_session_query::analysis::type_expand::ExpansionExecutionStatus,
+    diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
     env: Option<&EvalEnv>,
 ) {
     type_expand_debug(|| {
@@ -1117,36 +1119,6 @@ fn narrow_decl_header_type_params(
             })
             .collect(),
     }
-}
-
-/// Narrow a SIGNATURE-scoped type-parameter list (a function declaration's /
-/// method's own `<T extends C>` list) to name + ordinal facts. Signature-scoped
-/// bounds live ON the signature's authored position: the closed path vocabulary
-/// addresses type-parameter bounds only on TYPE-space declaration headers
-/// (a value / method signature's bound is recovered whole-signature when the
-/// signature position is demanded), so no independent bound slot exists to
-/// mint — deliberately NOT a fabricated locator.
-pub(crate) fn narrow_signature_type_params(params: &[TypeParam]) -> Arc<[NarrowTypeParam]> {
-    params
-        .iter()
-        .enumerate()
-        .filter_map(|(index, param)| {
-            let ordinal = u32::try_from(index).ok()?;
-            Some(NarrowTypeParam {
-                name: param.name.clone(),
-                ordinal,
-                // `TypeParamBound` is a type-space DECL-HEADER first-step-only
-                // position — not addressable for a signature-scoped parameter.
-                // Honest typed miss: an authored `extends` / `=` bound here is
-                // recovered whole-signature on demand, never through a fabricated
-                // slot.
-                constraint: None,
-                default: None,
-                is_const: param.is_const,
-                variance: TypeParamVariance::Unannotated,
-            })
-        })
-        .collect()
 }
 
 /// Mint the stored [`TypeDeclInfo`] from transient type-decl parts: the
@@ -5927,23 +5899,6 @@ pub struct BindingExpansionEntry {
     pub owner: TopLevelOwnerId,
 }
 
-/// Path segment for [`FieldExpansionContext::output_path`] — a path from
-/// the parent macro shell (e.g. `Props<T>`) to the specific field the
-/// closure is being invoked for. The session-side closure converts this
-/// into a `verter_session::semantic_query::PathSegment` slice when
-/// constructing the dispatch projection query (plan Step 1 / D1.1).
-///
-/// `Member` is the only variant required for Step 1 — `defineProps`,
-/// `defineEmits`, and `defineSlots` all expose fields at named members
-/// of the macro's parent type. Future variants (`Index`, `KeyOf`) are
-/// deferred until a consumer needs them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum PathSegment {
-    /// Named-member hop, e.g. `[Member("items")]` for the `items` prop
-    /// field of `defineProps<Props>()`.
-    Member(std::sync::Arc<str>),
-}
-
 /// Closure invocation context for
 /// [`expand_macro_types_impl_with_expander`]'s `expand_field_expr`
 /// callback (plan Step 1 / D1.1).
@@ -5972,25 +5927,25 @@ pub struct FieldExpansionContext {
 }
 
 fn publication_exactness(
-    exactness: crate::analysis::type_expand::ExpansionExactness,
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
 ) -> verter_type_expr::ResolutionExactness {
     match exactness {
-        crate::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete => {
             verter_type_expr::ResolutionExactness::ExactConcrete
         }
-        crate::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
             verter_type_expr::ResolutionExactness::ExactSymbolic
         }
-        crate::analysis::type_expand::ExpansionExactness::Incomplete => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete => {
             verter_type_expr::ResolutionExactness::Incomplete
         }
     }
 }
 
 fn publication_diagnostic_kind(
-    reason: crate::analysis::type_expand::ExpansionStopReason,
+    reason: verter_session_query::analysis::type_expand::ExpansionStopReason,
 ) -> verter_type_expr::ResolutionDiagnosticKind {
-    use crate::analysis::type_expand::ExpansionStopReason as Source;
+    use verter_session_query::analysis::type_expand::ExpansionStopReason as Source;
     use verter_type_expr::ResolutionDiagnosticKind as Target;
     match reason {
         Source::BudgetExceeded => Target::BudgetExceeded,
@@ -6013,8 +5968,8 @@ fn publication_diagnostic_kind(
 
 fn expanded_field_authority(
     source: SemanticTypeSource,
-    exactness: crate::analysis::type_expand::ExpansionExactness,
-    diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
+    diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> verter_type_expr::ResolvedTypeAuthority {
     let diagnostics: Arc<[verter_type_expr::ResolutionDiagnostic]> = diagnostics
         .iter()
@@ -6040,16 +5995,16 @@ pub fn expand_macro_types_impl_with_expander<F>(
     debug_env: Option<&mut EvalEnv>,
     scope: MacroExpansionScope,
     mut expand_field_expr: F,
-) -> crate::analysis::type_expand::ExpandedComponentTypes
+) -> verter_session_query::analysis::type_expand::ExpandedComponentTypes
 where
     F: FnMut(
         FieldExpansionContext,
         Option<&verter_type_expr::locators::MacroPayloadLocator>,
-    ) -> crate::analysis::type_expand::ExpansionResult<
-        crate::analysis::type_expand::ExpandedNormalizedExpr,
+    ) -> verter_session_query::analysis::type_expand::ExpansionResult<
+        verter_session_query::analysis::type_expand::ExpandedNormalizedExpr,
     >,
 {
-    use crate::analysis::type_expand::{ExpandedComponentTypes, ExpandedField};
+    use verter_session_query::analysis::type_expand::{ExpandedComponentTypes, ExpandedField};
 
     let mut result = ExpandedComponentTypes::default();
     let started = Instant::now();
@@ -6360,7 +6315,9 @@ where
     result
 }
 
-pub fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObjectShape) -> bool {
+pub fn has_named_shape_surface(
+    shape: &verter_session_query::analysis::type_expand::ExpandedObjectShape,
+) -> bool {
     !shape.properties.is_empty() || !shape.call_signatures.is_empty()
 }
 

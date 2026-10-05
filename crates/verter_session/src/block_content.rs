@@ -376,7 +376,7 @@ impl SuppliedBlockScope<'_> {
 }
 
 pub(crate) struct CompilerStyleContentCapture {
-    pub(crate) analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
+    pub(crate) analyses: Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
     pub(crate) v_bind_vars: Vec<String>,
     pub(crate) usage_complete: bool,
     analyses_changed: bool,
@@ -699,7 +699,8 @@ pub(crate) fn native_language(content_class: BlockContentClass, lang: &str) -> b
         // Stylus to the carrier parse and the rewrite pipeline alike — was
         // classified as needing an external tool by this route alone.
         BlockContentClass::Style => {
-            verter_semantic::analysis::StyleAnalysisLang::from_lang(lang).is_natively_parsed()
+            verter_session_query::analysis::style::StyleAnalysisLang::from_lang(lang)
+                .is_natively_parsed()
         }
         BlockContentClass::Custom => false,
     }
@@ -714,7 +715,7 @@ pub(crate) fn optional_native_style_preprocessor(
     lang: &str,
 ) -> bool {
     matches!(role, SectionRole::Style { .. })
-        && verter_semantic::analysis::StyleAnalysisLang::from_lang(lang)
+        && verter_session_query::analysis::style::StyleAnalysisLang::from_lang(lang)
             .requires_external_preprocessing()
         && named_attr(inventory, syntax, "src").is_none()
 }
@@ -1355,8 +1356,8 @@ impl VerterHost {
     pub(crate) fn hydrate_style_content(
         &self,
         canonical_id: &str,
-        styles: &Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
-    ) -> Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> {
+        styles: &Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
+    ) -> Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>> {
         let default_profile = CompileProfile::default();
         let captured = self.capture_compiler_style_content(
             canonical_id,
@@ -1373,7 +1374,7 @@ impl VerterHost {
     pub(crate) fn capture_compiler_style_content(
         &self,
         canonical_id: &str,
-        styles: &[verter_semantic::analysis::StyleBlockAnalysis],
+        styles: &[verter_session_query::analysis::style::StyleBlockAnalysis],
         scope: SuppliedBlockScope<'_>,
     ) -> CompilerStyleContentCapture {
         let mut hydrated = styles.to_vec();

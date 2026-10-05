@@ -21,7 +21,9 @@ use verter_type_expr::{ConstructorBindingOutcome, DeclBindingKey, TopLevelOwnerI
 
 /// Parse `source` as an ordinary (single-owner) TS module and run the full
 /// production analysis path.
-fn analyze_ordinary(source: &str) -> crate::analysis::types::ScriptAnalysisSnapshot {
+fn analyze_ordinary(
+    source: &str,
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
     assert!(!parsed.fatal_error, "fixture must parse: {source}");
@@ -38,7 +40,9 @@ fn analyze_ordinary(source: &str) -> crate::analysis::types::ScriptAnalysisSnaps
 
 /// Parse `source` as a classic (sloppy, non-module) script — the dialect
 /// `with`/Annex-B fixtures need.
-fn analyze_sloppy_script(source: &str) -> crate::analysis::types::ScriptAnalysisSnapshot {
+fn analyze_sloppy_script(
+    source: &str,
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::cjs()).parse();
     assert!(!parsed.fatal_error, "fixture must parse: {source}");
@@ -58,7 +62,9 @@ fn analyze_sloppy_script(source: &str) -> crate::analysis::types::ScriptAnalysis
 /// and therefore strict): TypeScript type wrappers (`as` / `satisfies` /
 /// `!` / type assertion) only parse under a TS source type, and sloppy
 /// direct-eval `var` leak is only observable in a non-strict script.
-fn analyze_sloppy_ts_script(source: &str) -> crate::analysis::types::ScriptAnalysisSnapshot {
+fn analyze_sloppy_ts_script(
+    source: &str,
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     let source_type = SourceType::script().with_typescript(true);
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
@@ -79,7 +85,9 @@ fn analyze_sloppy_ts_script(source: &str) -> crate::analysis::types::ScriptAnaly
 /// function at load time and so never aliases the true global object. Only
 /// `ModuleKind::Script`'s outermost scope is Annex-B global-object-aliased
 /// (`function`/`var` declared there ARE properties of `globalThis`).
-fn analyze_classic_script(source: &str) -> crate::analysis::types::ScriptAnalysisSnapshot {
+fn analyze_classic_script(
+    source: &str,
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::script()).parse();
     assert!(!parsed.fatal_error, "fixture must parse: {source}");
@@ -100,7 +108,7 @@ fn analyze_classic_script(source: &str) -> crate::analysis::types::ScriptAnalysi
 fn analyze_with_owners(
     source: &str,
     per_statement_owner: &[TopLevelOwnerId],
-) -> crate::analysis::types::ScriptAnalysisSnapshot {
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
     assert!(!parsed.fatal_error, "fixture must parse: {source}");
@@ -125,7 +133,7 @@ fn analyze_with_owners(
 }
 
 fn only_macro_prop_bindings(
-    snap: &crate::analysis::types::ScriptAnalysisSnapshot,
+    snap: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
 ) -> Vec<ConstructorBindingOutcome> {
     let mac = snap
         .macros
@@ -348,7 +356,7 @@ fn ambiguous_module_owner_topology_is_indeterminate() {
 }
 
 fn only_expose_referenced_binding(
-    snap: &crate::analysis::types::ScriptAnalysisSnapshot,
+    snap: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
 ) -> Option<DeclBindingKey> {
     let mac = snap
         .macros

@@ -1,6 +1,6 @@
 //! Graph-native exactness classification for component-meta surfaces.
 
-use verter_semantic::analysis::type_expand::ExpansionExactness;
+use verter_session_query::analysis::type_expand::ExpansionExactness;
 
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId};

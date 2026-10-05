@@ -1,11 +1,11 @@
 use super::*;
 use crate::documents::carrier_structure::{test_carrier_blocks, test_structure};
 use crate::documents::line_index::LineIndex;
-use verter_semantic::analysis::template::{
+use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };
-use verter_session::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::ImportBindingKind;
 
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {

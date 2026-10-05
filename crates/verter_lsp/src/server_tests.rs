@@ -4952,7 +4952,7 @@ async fn initialized_returns_before_background_configure_paths_completes() {
 
 #[test]
 fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
-    let analysis = verter_semantic::analysis::ScriptAnalysisSnapshot {
+    let analysis = verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
         imports: vec![
             verter_session_query::analysis::types::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),

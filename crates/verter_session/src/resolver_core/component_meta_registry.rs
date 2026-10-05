@@ -87,7 +87,7 @@ impl RegistryProducerScope {
     }
 
     pub(crate) fn for_field(
-        field: &verter_semantic::analysis::type_expand::ExpandedField,
+        field: &verter_session_query::analysis::type_expand::ExpandedField,
         explicit_resolution_scope: &Self,
     ) -> Self {
         field
@@ -200,7 +200,7 @@ pub(crate) fn observe_component_meta_registry_source(
 pub(crate) fn upsert_component_meta_registry_entry(
     owner_canonical: &str,
     resolved_type_registry: &mut Vec<
-        verter_semantic::analysis::component_meta::ResolvedTypeAnalysis,
+        verter_session_query::analysis::component_meta::ResolvedTypeAnalysis,
     >,
     resolved_type_registry_meta: &mut Vec<crate::resolver_core::ResolvedTypeRegistryMeta>,
     published_names: &mut rustc_hash::FxHashSet<String>,
@@ -398,7 +398,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
         );
     }
     resolved_type_registry.push(
-        verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+        verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
             name: name.clone(),
             type_source: verter_type_expr::facts::SourcePosition::Present(type_source),
             type_expansion: None,
@@ -690,7 +690,7 @@ pub(crate) fn collect_component_meta_registry_public_field_refs(
     ctx: &dyn ResolverContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     snapshot: &FileAnalysisSnapshot,
-    field: &verter_semantic::analysis::type_expand::ExpandedField,
+    field: &verter_session_query::analysis::type_expand::ExpandedField,
     published_names: &rustc_hash::FxHashSet<String>,
     queued_names: &mut RegistryQueuedNames,
     output: &mut VecDeque<PendingComponentMetaRegistryRef>,

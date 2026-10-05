@@ -106,7 +106,7 @@ pub fn resolve_under_audit(
     host: Arc<VerterHost>,
     canonical: &str,
 ) -> (
-    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     verter_session::meta_resolve::ResolvedComponentMetaState,
     RequestAuditRecord,
 ) {

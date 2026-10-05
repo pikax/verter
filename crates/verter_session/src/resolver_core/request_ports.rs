@@ -435,7 +435,8 @@ pub struct AugmenterArtifactAnswer {
 
 pub struct TerminalMacroInventory {
     pub(crate) origin_whole_hash: Option<verter_session_query::analysis::types::Hash16>,
-    pub(crate) script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
+    pub(crate) script_analysis:
+        Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
 }
 pub trait OwnedLowering {
     fn member_presence_for_observed_content(
@@ -566,7 +567,7 @@ pub trait OwnedLowering {
     fn ordered_sfc_structure(
         &self,
         canonical: &str,
-    ) -> Option<verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis>;
+    ) -> Option<verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis>;
 
     fn parse_fact_for_observed_content(
         &self,

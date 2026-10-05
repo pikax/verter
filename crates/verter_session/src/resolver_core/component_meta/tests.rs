@@ -523,16 +523,16 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
         imported_surface_calls: std::cell::Cell::new(0),
         eval_outputs: ComponentMetaEvalOutputs {
             evaluated_types: Some(
-                verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+                verter_session_query::analysis::type_expand::ExpandedComponentTypes {
                     props: Vec::new(),
                     define_props: Vec::new(),
                     define_emits: vec![
-                        verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                        verter_session_query::analysis::type_expand::ExpandedMacroObjectShape {
                             macro_index: 0,
-                            result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                                verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                            result: verter_session_query::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                verter_session_query::analysis::type_expand::ExpandedObjectShape {
                                     properties: vec![
-                                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                                        verter_session_query::analysis::type_expand::ExpandedProperty {
                                             name: "save".to_string(),
                                             ty: verter_type_expr::facts::SourcePosition::Present(verter_type_expr::facts::SemanticTypeSource::Synthesized(
                                                 verter_type_expr::facts::ResolvedLocalShape::Tuple(
@@ -1046,14 +1046,14 @@ type Props = Pick<ImportedBase, 'href'>
             (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs {
-            evaluated_types: Some(verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+            evaluated_types: Some(verter_session_query::analysis::type_expand::ExpandedComponentTypes {
                 define_props: vec![
-                    verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                    verter_session_query::analysis::type_expand::ExpandedMacroProps {
                         macro_index: 0,
-                        result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                            verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                        result: verter_session_query::analysis::type_expand::ExpansionResult::exact_symbolic(
+                            verter_session_query::analysis::type_expand::ExpandedObjectShape {
                                 properties: vec![
-                                    verter_semantic::analysis::type_expand::ExpandedProperty {
+                                    verter_session_query::analysis::type_expand::ExpandedProperty {
                                         name: "href".to_string(),
                                         ty: verter_type_expr::facts::SourcePosition::Present(
                                             verter_type_expr::facts::SemanticTypeSource::Closed(

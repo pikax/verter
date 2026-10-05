@@ -205,7 +205,7 @@ defineProps<{
         .macro_field_value_node(
             "/src/App.vue",
             0,
-            &[verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from("title"))],
+            &[verter_session_query::analysis::field_path::PathSegment::Member(Arc::from("title"))],
         )
         .expect("title field value node");
     let fast = engine
@@ -301,7 +301,7 @@ defineProps<{
             "/src/App.vue",
             0,
             &[
-                verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from(
+                verter_session_query::analysis::field_path::PathSegment::Member(Arc::from(
                     "content",
                 )),
             ],
@@ -389,7 +389,7 @@ defineProps<{
             "/src/App.vue",
             0,
             &[
-                verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from(
+                verter_session_query::analysis::field_path::PathSegment::Member(Arc::from(
                     "contentId",
                 )),
             ],

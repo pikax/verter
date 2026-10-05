@@ -1,7 +1,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 
 /// Detects DOM query calls (`querySelector`, `getElementById`, etc.) at setup scope.
 /// There is no DOM on the server, so these always fail during SSR.
@@ -46,7 +46,7 @@ impl LintRule for NoDomQueryInSetup {
 mod tests {
     use super::*;
     use crate::test_support::{run_script_rule, run_script_rule_ssr};
-    use verter_semantic::analysis::types::DomQueryCallSite;
+    use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
     use verter_session_query::analysis::types::DomQueryKind;
     use verter_span::Span;
 

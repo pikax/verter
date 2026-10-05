@@ -55,7 +55,7 @@ fn upsert(host: &VerterHost, id: &str, src: &str, lang: FileLanguage) {
 }
 
 fn prop_names(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Vec<String> {
     let mut names: Vec<String> = meta.props.iter().map(|p| p.name.clone()).collect();
     names.sort_unstable();

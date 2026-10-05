@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use verter_compiler::compile_transaction::{CompileAttempt, TypeInfoRouteFailure};
 use verter_macro_dto::RuntimePropType;
-use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_semantic::type_info::{
     ObservedMacroSurface, ObservedSurfaceMember, MISSING_PROOF_VUE_MACRO,
 };
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::{
     AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, TypeResolutionSource,
 };

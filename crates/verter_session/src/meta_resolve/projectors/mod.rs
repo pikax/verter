@@ -34,8 +34,10 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::{
     ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
 };
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
@@ -167,8 +169,8 @@ pub(crate) use output_sink::{
 /// the dispatch path didn't surface still appear in the published
 /// analysis.
 fn merge_projected_fields_by_name(
-    target: &mut Vec<verter_semantic::analysis::type_expand::ExpandedField>,
-    projected: Vec<verter_semantic::analysis::type_expand::ExpandedField>,
+    target: &mut Vec<verter_session_query::analysis::type_expand::ExpandedField>,
+    projected: Vec<verter_session_query::analysis::type_expand::ExpandedField>,
 ) {
     for field in projected {
         if let Some(existing) = target.iter_mut().find(|t| t.name == field.name) {
@@ -222,7 +224,7 @@ pub(crate) fn project_evaluated_types(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     file: &str,
     snapshot: &FileAnalysisSnapshot,
-    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    evaluated_types: &mut verter_session_query::analysis::type_expand::ExpandedComponentTypes,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) {
     // Construct a `SurfaceProjection` per macro kind so each
@@ -323,7 +325,7 @@ pub(crate) fn project_evaluated_types(
                     .retain(|entry| entry.macro_index != macro_index);
                 if !fields.is_empty() {
                     evaluated_types.exposed.push(
-                        verter_semantic::analysis::type_expand::ExpandedMacroExposed {
+                        verter_session_query::analysis::type_expand::ExpandedMacroExposed {
                             macro_index,
                             fields,
                         },

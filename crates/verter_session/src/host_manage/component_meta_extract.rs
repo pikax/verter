@@ -59,10 +59,10 @@ pub(in crate::host_manage) fn collect_required_template_runtime_value_names(
 
 pub(in crate::host_manage) fn collect_required_root_fallthrough_runtime_value_names(
     snapshot: &FileAnalysisSnapshot,
-    root_reachability: &verter_semantic::analysis::component_meta::RootReachability,
+    root_reachability: &verter_session_query::analysis::component_meta::RootReachability,
 ) -> rustc_hash::FxHashSet<String> {
-    use verter_semantic::analysis::component_meta::{RootReachability, RootTargetRef};
-    use verter_semantic::analysis::template::BindingUsageKind;
+    use verter_session_query::analysis::component_meta::{RootReachability, RootTargetRef};
+    use verter_session_query::analysis::template::BindingUsageKind;
 
     let mut required = rustc_hash::FxHashSet::default();
     let Some(template) = snapshot.template.as_ref() else {
@@ -136,11 +136,11 @@ fn extract_component_meta_from_inputs(
     canonical_or_alias: &str,
     snapshot: &FileAnalysisSnapshot,
     resolved_macros: &[verter_semantic::analysis::component_meta::ResolvedMacroInput],
-    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
-    evaluated_types: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    resolved_type_registry: &[verter_session_query::analysis::component_meta::ResolvedTypeAnalysis],
+    evaluated_types: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_binding_reactivity = resolved_binding_reactivity(ctx, dispatch, snapshot);
@@ -355,11 +355,12 @@ pub(crate) fn resolve_ref_to_root_identity(
 }
 
 fn build_public_instance_slots_member(
-    _slots: &[verter_semantic::analysis::component_meta::SlotAnalysis],
-) -> verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
-    verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
+    _slots: &[verter_session_query::analysis::component_meta::SlotAnalysis],
+) -> verter_session_query::analysis::component_meta::PublicInstanceMemberAnalysis {
+    verter_session_query::analysis::component_meta::PublicInstanceMemberAnalysis {
         name: "$slots".to_string(),
-        kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
+        kind:
+            verter_session_query::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
         type_source: verter_type_expr::facts::SourcePosition::unannotated(),
         type_expansion: None,
         raw_type: None,
@@ -369,7 +370,7 @@ fn build_public_instance_slots_member(
 }
 
 pub(crate) fn populate_public_instance_sidecar(
-    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &mut verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) {
     let mut members = Vec::new();
 
@@ -378,9 +379,9 @@ pub(crate) fn populate_public_instance_sidecar(
     }
 
     members.extend(meta.props.iter().map(|prop| {
-        verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
+        verter_session_query::analysis::component_meta::PublicInstanceMemberAnalysis {
             name: prop.name.clone(),
-            kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Prop,
+            kind: verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Prop,
             type_source: prop.publication.source_position(),
             type_expansion: prop.type_expansion.clone(),
             raw_type: prop
@@ -393,9 +394,9 @@ pub(crate) fn populate_public_instance_sidecar(
     }));
 
     for exposed in &meta.exposed {
-        let next = verter_semantic::analysis::component_meta::PublicInstanceMemberAnalysis {
+        let next = verter_session_query::analysis::component_meta::PublicInstanceMemberAnalysis {
             name: exposed.name.clone(),
-            kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed,
+            kind: verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Exposed,
             type_source: exposed.type_source.clone(),
             type_expansion: exposed.type_expansion.clone(),
             raw_type: None,
@@ -413,10 +414,10 @@ pub(crate) fn populate_public_instance_sidecar(
         None
     } else {
         Some(
-            verter_semantic::analysis::component_meta::PublicInstanceAnalysis {
+            verter_session_query::analysis::component_meta::PublicInstanceAnalysis {
                 members,
                 completeness:
-                    verter_semantic::analysis::component_meta::PublicInstanceCompleteness::Partial,
+                    verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Partial,
             },
         )
     };
@@ -441,7 +442,7 @@ pub(crate) fn populate_public_instance_sidecar(
 /// wire DTO.
 pub(crate) struct ComponentMetaExtractOutcome {
     /// The projected component-meta analysis.
-    pub(crate) analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    pub(crate) analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     /// The fallthrough resolution's fact versions. Both the analysis and
     /// payload extraction entries publish this call-owned dependency lane so
     /// their caller can merge it into the resolved-state signature.
@@ -557,7 +558,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     // a genuinely props-less component stays `Exact`.
     if resolved.completeness.is_partial() || completeness.is_partial() {
         meta.accepted_surface_completeness =
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound;
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound;
     }
     ComponentMetaExtractOutcome {
         analysis: meta,
@@ -653,7 +654,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     // a PARTIAL compute cannot support the `Exact` accepted-surface claim.
     if resolved.completeness.is_partial() || completeness.is_partial() {
         meta.accepted_surface_completeness =
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound;
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound;
     }
     ComponentMetaExtractOutcome {
         analysis: meta,

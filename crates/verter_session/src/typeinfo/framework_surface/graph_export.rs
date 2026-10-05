@@ -1208,7 +1208,7 @@ mod tests {
         // the named-member wire shape) must NOT claim ExactResolved — it
         // downgrades to PARTIAL with a diagnostic whose message id indexes a
         // real string-table entry.
-        use verter_semantic::analysis::type_expand::ExpandedIndexSignature;
+        use verter_session_query::analysis::type_expand::ExpandedIndexSignature;
         let normalized = NormalizedSurfaces {
             surfaces: vec![NormalizedSurface {
                 kind: FrameworkSurfaceKind::Props,

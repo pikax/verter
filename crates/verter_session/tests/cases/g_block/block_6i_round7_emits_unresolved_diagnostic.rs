@@ -96,7 +96,7 @@ defineEmits<MissingEmits>()
         .filter(|d| {
             matches!(
                 d.macro_kind,
-                verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+                verter_session_query::analysis::component_meta::MacroExpansionKind::DefineEmits,
             )
         })
         .collect();

@@ -12,7 +12,7 @@
 //! The host method is the substrate that the
 //! `@verter/typeinfo` package's `listFileSymbols(file)` call lowers
 //! to. Spans come from the file's
-//! [`verter_semantic::analysis::types::ScriptAnalysisSnapshot::declaration_entries`]
+//! [`verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::declaration_entries`]
 //! when present; ambient declarations without analysis-snapshot spans
 //! surface with `span: None`.
 

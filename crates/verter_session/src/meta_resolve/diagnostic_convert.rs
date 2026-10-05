@@ -7,8 +7,10 @@
 //! inputs) without re-walking the graph.
 
 use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::{
     ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
 };
 

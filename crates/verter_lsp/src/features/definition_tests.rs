@@ -1,6 +1,12 @@
 use super::*;
 use crate::documents::carrier_structure::test_carrier_blocks;
 use verter_semantic::analysis::*;
+use verter_session_query::analysis::template::AnalyzedPropDefinition;
+use verter_session_query::analysis::template::ElementNamespace;
+use verter_session_query::analysis::template::SnippetDefinition;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateDirective;
+use verter_session_query::analysis::template::TemplateElement;
 use verter_session_query::analysis::types::AnalyzedBinding;
 use verter_session_query::analysis::types::AnalyzedBindingKind;
 use verter_session_query::analysis::types::AnalyzedImport;
@@ -1297,7 +1303,7 @@ fn test_go_to_component_definition_from_template() {
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
@@ -1421,8 +1427,7 @@ fn test_css_nav_template_class_to_style() {
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_semantic::analysis::style::*;
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     // Find the offsets for the style block content
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
@@ -1525,8 +1530,7 @@ fn test_css_nav_multi_class_attr() {
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_semantic::analysis::style::*;
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -1625,8 +1629,7 @@ fn test_css_nav_template_id_to_style() {
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_semantic::analysis::style::*;
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -1715,8 +1718,7 @@ fn test_css_nav_dynamic_class_object_key_navigates() {
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_semantic::analysis::style::*;
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (scs, _) = style_block.content_range();
@@ -1816,8 +1818,7 @@ fn test_css_nav_style_to_template() {
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_semantic::analysis::style::*;
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (style_content_start, _) = style_block.content_range();
@@ -2189,9 +2190,9 @@ fn test_path_alias_resolution_on_import_string() {
 
 #[test]
 fn test_dom_query_selector_navigates_to_element() {
-    use verter_semantic::analysis::style::*;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::script_snapshot::*;
+
+    use verter_session_query::analysis::template::*;
 
     let source = "<template>\n  <button class=\"btn\">Click</button>\n</template>\n\n<script setup>\ndocument.querySelector('.btn')\n</script>\n";
     let blocks = test_carrier_blocks(source);
@@ -2299,9 +2300,9 @@ fn test_dom_query_selector_navigates_to_element() {
 
 #[test]
 fn test_dom_query_selector_no_match() {
-    use verter_semantic::analysis::style::*;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::script_snapshot::*;
+
+    use verter_session_query::analysis::template::*;
 
     let source = "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\ndocument.querySelector('.missing')\n</script>\n";
     let blocks = test_carrier_blocks(source);
@@ -2381,9 +2382,9 @@ fn test_dom_query_selector_no_match() {
 
 #[test]
 fn test_dom_query_selector_falls_back_to_css() {
-    use verter_semantic::analysis::style::*;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::script_snapshot::*;
+
+    use verter_session_query::analysis::template::*;
 
     // Template has no .btn element, but style has .btn rule
     let source = "<template>\n  <div>hello</div>\n</template>\n\n<script setup>\ndocument.querySelector('.btn')\n</script>\n\n<style>\n.btn { color: red; }\n</style>\n";
@@ -2495,7 +2496,7 @@ fn test_path_alias_resolution_on_component_tag() {
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
@@ -2689,14 +2690,16 @@ fn test_go_to_definition_event_handler_click() {
                     content_end: 0,
                     ..Default::default()
                 }],
-                event_handlers: vec![verter_semantic::analysis::template::TemplateEventHandler {
-                    event_name: "click".into(),
-                    handler_binding: Some("handleClick".into()),
-                    is_inline: false,
-                    target_tag: "button".into(),
-                    // TemplateEventHandler.span is the ELEMENT span (set by extract_event_handlers)
-                    span: verter_span::Span::new(11, 60),
-                }],
+                event_handlers: vec![
+                    verter_session_query::analysis::template::TemplateEventHandler {
+                        event_name: "click".into(),
+                        handler_binding: Some("handleClick".into()),
+                        is_inline: false,
+                        target_tag: "button".into(),
+                        // TemplateEventHandler.span is the ELEMENT span (set by extract_event_handlers)
+                        span: verter_span::Span::new(11, 60),
+                    },
+                ],
                 ..Default::default()
             })
             .into(),
@@ -2808,14 +2811,16 @@ fn test_go_to_definition_inline_event_no_binding() {
                     content_end: 0,
                     ..Default::default()
                 }],
-                event_handlers: vec![verter_semantic::analysis::template::TemplateEventHandler {
-                    event_name: "click".into(),
-                    handler_binding: None, // inline expression, no binding
-                    is_inline: true,
-                    target_tag: "button".into(),
-                    // TemplateEventHandler.span is the ELEMENT span
-                    span: verter_span::Span::new(11, 55),
-                }],
+                event_handlers: vec![
+                    verter_session_query::analysis::template::TemplateEventHandler {
+                        event_name: "click".into(),
+                        handler_binding: None, // inline expression, no binding
+                        is_inline: true,
+                        target_tag: "button".into(),
+                        // TemplateEventHandler.span is the ELEMENT span
+                        span: verter_span::Span::new(11, 55),
+                    },
+                ],
                 ..Default::default()
             })
             .into(),
@@ -2847,7 +2852,7 @@ fn test_go_to_definition_inline_event_no_binding() {
 
 #[test]
 fn test_go_to_definition_component_event_name_defers_to_server() {
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     let source = "<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n\n<script setup>\nfunction handleCustom() {}\n</script>\n";
     let blocks = test_carrier_blocks(source);
@@ -3531,7 +3536,7 @@ fn test_component_tag_default_fallback() {
     let blocks = test_carrier_blocks(source);
     let line_index = LineIndex::new_utf16(source);
 
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::*;
 
     let analysis = FileAnalysisSnapshot {
         imports: vec![AnalyzedImport {
@@ -3710,8 +3715,8 @@ fn css_nav_element(
     el_span: verter_span::Span,
     parent_index: Option<u32>,
     nesting_depth: u16,
-) -> verter_semantic::analysis::template::TemplateElement {
-    use verter_semantic::analysis::template::*;
+) -> verter_session_query::analysis::template::TemplateElement {
+    use verter_session_query::analysis::template::*;
     TemplateElement {
         tag: tag.to_string(),
         namespace: ElementNamespace::Html,
@@ -3749,7 +3754,7 @@ fn css_class_definition_returns_all_declaring_rules_hierarchy_first() {
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![
                     css_nav_element(
                         "div",
@@ -3851,7 +3856,7 @@ fn css_class_definition_fails_closed_on_no_rule_despite_binding_collision() {
             used_in_style: false,
         }],
         template: Some(
-            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![css_nav_element(
                     "div",
                     "primary",
@@ -3909,7 +3914,7 @@ fn css_class_definition_reaches_deep_inner_class() {
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![css_nav_element(
                     "div",
                     "inner",
@@ -3971,7 +3976,7 @@ fn css_class_definition_reaches_nested_scss_class() {
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![css_nav_element(
                     "div",
                     "title",
@@ -3985,7 +3990,7 @@ fn css_class_definition_reaches_nested_scss_class() {
             .into(),
         ),
         styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
-            verter_semantic::analysis::StyleAnalysisLang::Scss,
+            verter_session_query::analysis::style::StyleAnalysisLang::Scss,
             style_css,
             verter_semantic::analysis::VueStyleInput::default(),
             true,
@@ -4035,7 +4040,7 @@ fn css_class_definition_kebab_token_at_hyphen_position() {
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![css_nav_element(
                     "div",
                     "my-card",
@@ -4107,7 +4112,7 @@ fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
             let mut pos = val_start;
             for word in source[val_start..val_end].split_whitespace() {
                 let ws = source[pos..val_end].find(word).unwrap() + pos;
-                tokens.push(verter_semantic::analysis::MarkupClassToken {
+                tokens.push(verter_session_query::analysis::template::MarkupClassToken {
                     name: word.to_string(),
                     span: verter_span::Span::new(ws as u32, (ws + word.len()) as u32),
                     from_directive: false,
@@ -4125,7 +4130,7 @@ fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
                 .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
                 .unwrap_or(source.len() - name_start);
         if (name_start as u32) < scs {
-            tokens.push(verter_semantic::analysis::MarkupClassToken {
+            tokens.push(verter_session_query::analysis::template::MarkupClassToken {
                 name: source[name_start..name_end].to_string(),
                 span: verter_span::Span::new(name_start as u32, name_end as u32),
                 from_directive: true,
@@ -4138,7 +4143,7 @@ fn svelte_css_analysis(source: &str) -> FileAnalysisSnapshot {
         template: None,
         markup_class_tokens: std::sync::Arc::new(tokens),
         styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
-            verter_semantic::analysis::StyleAnalysisLang::Css,
+            verter_session_query::analysis::style::StyleAnalysisLang::Css,
             style_css,
             verter_semantic::analysis::VueStyleInput::default(),
             true, // svelte: scoped by default
@@ -4293,7 +4298,7 @@ fn module_class_rule_is_not_a_same_file_definition_target() {
 
         let analysis = FileAnalysisSnapshot {
             template: Some(
-                (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+                (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                     elements: vec![css_nav_element(
                         "div",
                         "btn",
@@ -4362,7 +4367,7 @@ fn module_style_class_token_is_not_a_navigation_origin() {
 
     let analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![css_nav_element(
                     "div",
                     "btn",

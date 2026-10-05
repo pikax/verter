@@ -11,7 +11,7 @@ use crate::resolver_core::{
     FallthroughNodeKey, FallthroughOverrideIdentity, ResolverContext, ResolverCounters,
     ResolverDiagnostic, ValidatedFactCache,
 };
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedSurfaceCompleteness, FallthroughSurface,
 };
 use verter_session_query::facts::fact_cache::FactVersionRef;
@@ -43,7 +43,7 @@ impl Default for RootFollowResult {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::LowerBound,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
+                reason: verter_session_query::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
             },
             has_single_root: false,
             branches: Vec::new(),
@@ -98,7 +98,7 @@ impl Default for ChildSurfaceResult {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::LowerBound,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
+                reason: verter_session_query::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
             },
             inherited_prop_names: Vec::new(),
             inherited_event_names: Vec::new(),
@@ -113,7 +113,7 @@ pub struct ConsumedBindingsResult {
     pub listeners: Vec<String>,
     pub has_dynamic_attr_name: bool,
     pub has_dynamic_listener_name: bool,
-    pub partial_reasons: Vec<verter_semantic::analysis::component_meta::PartialBranchReason>,
+    pub partial_reasons: Vec<verter_session_query::analysis::component_meta::PartialBranchReason>,
     pub consumed_names: Vec<String>,
 }
 
@@ -134,7 +134,7 @@ impl Default for BranchUnionResult {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::LowerBound,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
+                reason: verter_session_query::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
             },
             branches: Vec::new(),
             all_resolved: false,

@@ -326,13 +326,13 @@ fn materialize_component_meta_output_types<'a>(
     dispatch: &ProjectSemanticDispatch<'_>,
     cap: &MetaResolveProjectorsOutputCap<'_, '_>,
     scope_canonical_id: &'a str,
-    analysis: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: &'a verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Result<
     crate::meta_resolve::MaterializedComponentMetaTypes,
     crate::meta_resolve::ComponentMetaOutputError,
 > {
     use crate::meta_resolve::ComponentMetaOutputLane as Lane;
-    use verter_semantic::analysis::component_meta::FallthroughSurface;
+    use verter_session_query::analysis::component_meta::FallthroughSurface;
 
     let mut memo = OutputSourceMemo::new();
     let scope: &'a str = scope_canonical_id;
@@ -590,8 +590,8 @@ fn effective_output_scope<'a>(owner: &'a str, row_scope: Option<&'a str>) -> &'a
 /// decision and runs HERE, in the session owner, BEFORE materialization —
 /// never in the wire converter.
 fn finalize_resolved_type_registry_overlay(
-    registry: &mut Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
-    resolved_entries: Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
+    registry: &mut Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis>,
+    resolved_entries: Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis>,
 ) {
     for resolved_entry in resolved_entries {
         if let Some(existing) = registry
@@ -637,7 +637,7 @@ pub(crate) fn build_component_meta_output(
     ctx: &dyn ResolverContext,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     scope_canonical_id: &str,
-    mut analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    mut analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     resolution: Option<crate::meta_resolve::output::ComponentMetaResolutionSeed>,
     completeness: crate::meta_resolve::PublishedCompleteness,
 ) -> Result<crate::meta_resolve::ComponentMetaOutput, crate::meta_resolve::ComponentMetaOutputError>

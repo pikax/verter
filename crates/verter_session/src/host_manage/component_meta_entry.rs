@@ -112,7 +112,7 @@ pub(super) struct ComponentMetaColdResult {
     /// The resolved state the analysis was extracted from.
     pub(super) resolved: crate::meta_resolve::ResolvedComponentMetaState,
     /// The projected analysis.
-    pub(super) analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    pub(super) analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     /// The merged resolve + extract completeness.
     pub(super) completeness: crate::meta_resolve::PublishedCompleteness,
     /// The admitted final result, when the cold publish produced one — the
@@ -246,7 +246,7 @@ impl VerterHost {
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes> {
+    ) -> Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes> {
         self.provenance
             .evaluate_types_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -278,7 +278,7 @@ impl VerterHost {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
         self.try_get_component_meta(canonical_or_alias)
             .ok()
             .flatten()
@@ -289,7 +289,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         crate::semantic_query::ExecutionAbort,
     > {
         self.provenance
@@ -662,7 +662,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
-    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
         // No caller-captured fixed view: the body takes its own store-view
         // reads and runs the per-call overlay pre-warm.
         self.get_component_meta_via_view_inner(canonical_or_alias, view, None)
@@ -689,7 +689,7 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         crate::semantic_query::ExecutionAbort,
     > {
         self.get_component_meta_via_view_inner(canonical_or_alias, view, Some(fixed))
@@ -701,7 +701,7 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
         fixed: Option<&crate::resolver_store::BatchFixedView>,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         crate::semantic_query::ExecutionAbort,
     > {
         self.provenance
@@ -984,7 +984,7 @@ impl VerterHost {
     fn try_component_meta_cache_hit(
         &self,
         canonical: &str,
-    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
         let shallow = self.shallow_file_state(canonical)?;
         let owner_whole_hash = shallow.whole_hash;
         let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
@@ -1053,7 +1053,7 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-    ) -> Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis> {
+    ) -> Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis> {
         self.try_component_meta_cache_entry_with_view(canonical, view, fixed)
             .map(|(_, entry)| entry.payload.analysis.clone())
     }
@@ -1278,7 +1278,7 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-        meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        meta: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
         final_completeness: crate::semantic_query::ResultCompleteness,
@@ -1359,7 +1359,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-        meta: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        meta: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
         final_completeness: crate::semantic_query::ResultCompleteness,

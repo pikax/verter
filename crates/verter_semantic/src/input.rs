@@ -5,10 +5,10 @@
 //! extraction and test code.
 
 // Script analysis input
-pub use crate::analysis::ScriptAnalysisSnapshot;
+pub use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 
 // Template analysis input
-pub use crate::analysis::TemplateAnalysisSnapshot;
+pub use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 // Macro types
 
@@ -24,13 +24,11 @@ pub use crate::analysis::TemplateAnalysisSnapshot;
 pub use crate::analysis::AnalysisScope;
 
 // Template component usage
-pub use crate::analysis::TemplateComponentUsage;
-pub use crate::analysis::TemplatePropUsage;
+pub use verter_session_query::analysis::template::TemplateComponentUsage;
+pub use verter_session_query::analysis::template::TemplatePropUsage;
 
 // Prop constness
-pub use crate::analysis::template::PropValueConstness;
 
 // Prop/emit/slot field types
 
 // Template component v-model
-pub use crate::analysis::template::TemplateComponentVModel;

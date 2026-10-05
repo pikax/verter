@@ -9,10 +9,10 @@
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
 use tower_lsp_server::ls_types::{InlayHint, InlayHintLabel};
-use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
-use verter_semantic::analysis::types::DomQueryCallSite;
 use verter_semantic::analysis::{match_selector, MatchResult};
 use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
+use verter_session_query::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
 use verter_session_query::analysis::types::{DomQueryKind, VueApiCallSite, VueApiClassification};
 
 /// Generate Verter-specific inlay hints for a Vue SFC.
@@ -216,7 +216,7 @@ fn format_element_hint(el: &TemplateElement, _index: usize, line_index: &LineInd
 mod tests {
     use super::*;
     use verter_semantic::analysis::style::parse_selector;
-    use verter_semantic::analysis::template::{TemplateAttribute, TemplateRef};
+    use verter_session_query::analysis::template::{TemplateAttribute, TemplateRef};
 
     fn make_line_index(source: &str) -> LineIndex {
         LineIndex::new(

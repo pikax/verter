@@ -435,7 +435,7 @@ fn gate4_absent_position_is_not_degraded() {
 fn published_surface_is_degraded(
     host: &VerterHost,
     owner_canonical: &str,
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> bool {
     let degraded = |position| source_position_is_degraded(host, owner_canonical, position);
     let props = meta.props.iter().any(|p| degraded(&p.type_source));

@@ -819,7 +819,7 @@ defineProps<SelectorProps>()
 "#;
 
 fn assert_authored_selector_fixture_exercised(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) {
     let actions = meta
         .props

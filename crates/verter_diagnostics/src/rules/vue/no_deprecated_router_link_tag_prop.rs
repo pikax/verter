@@ -9,7 +9,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateElement;
+use verter_session_query::analysis::template::TemplateElement;
 
 pub struct NoDeprecatedRouterLinkTagProp;
 
@@ -51,8 +51,9 @@ impl LintRule for NoDeprecatedRouterLinkTagProp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateAttribute;
 
-    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

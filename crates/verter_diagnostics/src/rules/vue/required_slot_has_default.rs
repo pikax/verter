@@ -104,8 +104,8 @@ impl LintRule for RequiredSlotHasDefault {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::template::{DefinedSlot, TemplateAnalysisSnapshot};
-    use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::template::{DefinedSlot, TemplateAnalysisSnapshot};
     use verter_session_query::analysis::types::AnalysisFlags;
     use verter_session_query::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, AnalyzedSlotField,

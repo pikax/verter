@@ -1124,7 +1124,7 @@ pub(crate) fn resolved_fallthrough_attr_names(
     host: &verter_session::VerterHost,
     canonical_id: &str,
 ) -> std::collections::HashSet<String> {
-    use verter_semantic::analysis::component_meta::MemberProvenance;
+    use verter_session_query::analysis::component_meta::MemberProvenance;
 
     let Some(resolution) = host.resolve_fallthrough_surface(canonical_id) else {
         return std::collections::HashSet::new();
@@ -1510,7 +1510,7 @@ pub(super) fn resolve_import_specifier_standalone(
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn collect_imported_carrier_priority_ids(
     classifier: &verter_session::framework::HostLanguageClassifier,
-    analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
+    analysis: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
 ) -> Vec<String> {
     collect_imported_carrier_priority_ids_from_imports(classifier, &analysis.imports)
 }

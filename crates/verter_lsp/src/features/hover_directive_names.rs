@@ -92,7 +92,7 @@ pub(crate) fn is_known_builtin_directive_pub(name: &str) -> bool {
 /// positions have their own resolution (child props/events/slots), never a
 /// directive-name hover.
 fn directive_name_region(
-    dir: &verter_semantic::analysis::template::TemplateDirective,
+    dir: &verter_session_query::analysis::template::TemplateDirective,
 ) -> (u32, u32) {
     let end = dir
         .arg_span

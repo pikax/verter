@@ -3337,7 +3337,7 @@ import Child from './Child.vue'
     assert!(
         matches!(
             resolution.fallthrough_surface,
-            verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
+            verter_session_query::analysis::component_meta::FallthroughSurface::Branches { .. }
         ),
         "sanity check: single native root should still produce a fallthrough branch"
     );
@@ -3446,7 +3446,7 @@ import { shared } from './shared'
     assert!(
         matches!(
             meta.fallthrough_surface,
-            verter_semantic::analysis::component_meta::FallthroughSurface::Branches { .. }
+            verter_session_query::analysis::component_meta::FallthroughSurface::Branches { .. }
         ),
         "button fallthrough should still resolve through the imported Link root",
     );
@@ -3528,10 +3528,12 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
         accepted_surface_completeness:
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
-        fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::None {
-            reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
-        },
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface:
+            verter_session_query::analysis::component_meta::FallthroughSurface::None {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
         fact_versions: Vec::new(),
     };
     crate::fact_signature_helpers::with_cacheability_scope(
@@ -8712,9 +8714,9 @@ fn a6_wire_composable_host(host: &VerterHost, owner: &str, composables: &str, dt
 }
 
 fn a6_binding<'a>(
-    meta: &'a verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &'a verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
-) -> &'a verter_semantic::analysis::component_meta::BindingAnalysis {
+) -> &'a verter_session_query::analysis::component_meta::BindingAnalysis {
     meta.bindings
         .iter()
         .find(|binding| binding.name == name)
@@ -9805,7 +9807,7 @@ fn persisted_raw_template(
     host: &VerterHost,
     canonical: &str,
 ) -> Option<(
-    Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     verter_session_query::facts::fact_cache::ReadSetSignature,
 )> {
     host.derived_raw_cache().get(canonical).and_then(|derived| {
@@ -19406,7 +19408,7 @@ defineProps<IconProps>()
     // generation, artifact token) legitimately changes with its edit and
     // is outside the comparison.
     let published_sources =
-        |meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis| {
+        |meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis| {
             meta.props
                 .iter()
                 .map(|prop| {

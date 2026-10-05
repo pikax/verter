@@ -8,7 +8,7 @@
 //! a const value AND no parent uses `v-bind` spread on the component.
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::template::PropValueConstness;
+use verter_session_query::analysis::template::PropValueConstness;
 
 use crate::shared::read_lock;
 use crate::VerterHost;
@@ -80,7 +80,7 @@ impl VerterHost {
         // Collect (parent_id, template_analysis) pairs from the appropriate source.
         let parent_templates: Vec<(
             String,
-            std::sync::Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+            std::sync::Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         )> = {
             self.scheduler
                 .node_ids()

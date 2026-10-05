@@ -31,8 +31,8 @@ pub(crate) fn type_expr_contains_boolean(expression: &verter_type_expr::TypeExpr
 }
 
 fn merge_semantic_prop_definitions(
-    native: &mut Vec<verter_semantic::analysis::AnalyzedPropDefinition>,
-    semantic: Vec<verter_semantic::analysis::AnalyzedPropDefinition>,
+    native: &mut Vec<verter_session_query::analysis::template::AnalyzedPropDefinition>,
+    semantic: Vec<verter_session_query::analysis::template::AnalyzedPropDefinition>,
 ) {
     let mut semantic = semantic
         .into_iter()
@@ -292,7 +292,7 @@ impl DocumentRegistry {
                                         .is_some_and(type_expr_contains_boolean);
                                     let type_annotation =
                                         publication.terminal_display().text().map(str::to_string);
-                                    verter_semantic::analysis::AnalyzedPropDefinition {
+                                    verter_session_query::analysis::template::AnalyzedPropDefinition {
                                         name: prop.name,
                                         callable_role: prop.callable_role,
                                         type_annotation,
@@ -326,7 +326,7 @@ impl DocumentRegistry {
                                     .iter()
                                     .map(|prop| {
                                         let materialized = prop.ty.publication.materialized_type();
-                                        verter_semantic::analysis::AnalyzedPropDefinition {
+                                        verter_session_query::analysis::template::AnalyzedPropDefinition {
                                             name: prop.name.to_string(),
                                             callable_role:
                                                 verter_type_expr::PropCallableRole::default(),
@@ -889,7 +889,7 @@ fn convert_analysis_spans_with_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::AnalyzedPropDefinition;
+    use verter_session_query::analysis::template::AnalyzedPropDefinition;
 
     fn prop(name: &str, span: verter_span::Span) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
@@ -957,11 +957,11 @@ mod tests {
         let source = "éééé{{ count === }}";
         let diag_start = source.find("count").unwrap() as u32;
         let diag_end = diag_start + "count ===".len() as u32;
-        let snapshot = verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+        let snapshot = verter_session_query::analysis::template::TemplateAnalysisSnapshot {
             expression_diagnostics: vec![
-                verter_semantic::analysis::template::TemplateExpressionDiagnostic {
+                verter_session_query::analysis::template::TemplateExpressionDiagnostic {
                     severity:
-                        verter_semantic::analysis::template::TemplateDiagnosticSeverity::Error,
+                        verter_session_query::analysis::template::TemplateDiagnosticSeverity::Error,
                     code: "XInvalidExpression".to_string(),
                     message: "invalid expression".to_string(),
                     span: verter_span::Span::new(diag_start, diag_end),

@@ -210,7 +210,8 @@ fn analysis_level_essential_runs_script_not_style() {
             !hd.parse.script_analysis.imports.is_empty(),
             "script analysis should be populated at AnalysisLevel::Essential"
         );
-        let empty_styles: Vec<verter_semantic::analysis::StyleBlockAnalysis> = Vec::new();
+        let empty_styles: Vec<verter_session_query::analysis::style::StyleBlockAnalysis> =
+            Vec::new();
         let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
         let style_analyses = analysis_snap
             .as_ref()
@@ -261,7 +262,8 @@ fn analysis_level_none_skips_all_analysis_in_upsert() {
             hd.parse.script_analysis.imports.is_empty(),
             "script analysis should not be populated at AnalysisLevel::None"
         );
-        let empty_styles: Vec<verter_semantic::analysis::StyleBlockAnalysis> = Vec::new();
+        let empty_styles: Vec<verter_session_query::analysis::style::StyleBlockAnalysis> =
+            Vec::new();
         let analysis_snap = host.scheduler.try_get_analysis("Comp.vue");
         assert!(
             analysis_snap.is_none(),
@@ -3467,7 +3469,7 @@ mod phase1_structural_tests {
     fn test_analysis_arcs_from_analysis() {
         // Build a ScriptAnalysisSnapshot with some data
         let sa =
-            verter_semantic::analysis::ScriptAnalysisSnapshot {
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
                 module_references:
                     vec![verter_session_query::analysis::types::AnalyzedModuleReference {
                 syntax: verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport,

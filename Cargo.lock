@@ -3755,6 +3755,7 @@ dependencies = [
  "verter_language",
  "verter_no_typeexpr",
  "verter_semantic",
+ "verter_session_query",
  "verter_span",
  "verter_type_expr",
 ]

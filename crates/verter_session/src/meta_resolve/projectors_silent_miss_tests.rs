@@ -95,7 +95,7 @@ defineProps<MissingImport>()
         .filter(|d| {
             matches!(
                 d.macro_kind,
-                verter_semantic::analysis::component_meta::MacroExpansionKind::DefineProps,
+                verter_session_query::analysis::component_meta::MacroExpansionKind::DefineProps,
             )
         })
         .collect();
@@ -139,7 +139,7 @@ defineEmits<MissingEmits>()
         .filter(|d| {
             matches!(
                 d.macro_kind,
-                verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits,
+                verter_session_query::analysis::component_meta::MacroExpansionKind::DefineEmits,
             )
         })
         .collect();
@@ -180,7 +180,7 @@ defineSlots<MissingSlots>()
         .filter(|d| {
             matches!(
                 d.macro_kind,
-                verter_semantic::analysis::component_meta::MacroExpansionKind::DefineSlots,
+                verter_session_query::analysis::component_meta::MacroExpansionKind::DefineSlots,
             )
         })
         .collect();

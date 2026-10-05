@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn extract_cache_query_component_surface_cycle() {
         use crate::extract::extract_component_surface;
-        use crate::input::ScriptAnalysisSnapshot;
+        use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
         use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
         let mut db = SemanticDb::new();
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn extract_cache_query_cross_file_cycle() {
         use crate::extract::{extract_component_surface, extract_import_graph};
-        use crate::input::ScriptAnalysisSnapshot;
+        use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
         use verter_session_query::analysis::types::{
             AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
             ImportBindingKind,
@@ -1075,8 +1075,8 @@ mod tests {
         use crate::extract::{
             extract_boundary_edges, extract_component_surface, extract_import_graph,
         };
-        use crate::input::ScriptAnalysisSnapshot;
-        use crate::input::TemplateAnalysisSnapshot;
+        use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+        use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
         use verter_session_query::analysis::types::{
             AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
             AnalyzedPropField, ImportBindingKind, TypeResolutionSource,
@@ -1147,32 +1147,37 @@ mod tests {
 
         // Simulate template with <Child unknown-prop />
         let mut template = TemplateAnalysisSnapshot::default();
-        template.components = vec![crate::input::TemplateComponentUsage {
-            name: "Child".into(),
-            import_source: Some("./child.vue".into()),
-            is_dynamic: false,
-            props: vec![crate::input::TemplatePropUsage {
-                name: "unknownProp".into(),
-                is_bound: false,
-                expression: None,
-                expression_locator: None,
-                constness: crate::input::PropValueConstness::Const,
-                referenced_bindings: vec![],
-                from_spread: false,
-                span: Span::new(100, 111),
-                name_span: Span::new(100, 111),
-                is_shorthand: false,
-            }],
-            has_spread: false,
-            slots_used: vec![],
-            static_classes: vec![],
-            has_dynamic_class: false,
-            dynamic_classes: vec![],
-            v_models: vec![],
-            bindings: vec![],
-            events: vec![],
-            span: Span::new(90, 130),
-        }];
+        template.components = vec![
+            verter_session_query::analysis::template::TemplateComponentUsage {
+                name: "Child".into(),
+                import_source: Some("./child.vue".into()),
+                is_dynamic: false,
+                props: vec![
+                    verter_session_query::analysis::template::TemplatePropUsage {
+                        name: "unknownProp".into(),
+                        is_bound: false,
+                        expression: None,
+                        expression_locator: None,
+                        constness:
+                            verter_session_query::analysis::template::PropValueConstness::Const,
+                        referenced_bindings: vec![],
+                        from_spread: false,
+                        span: Span::new(100, 111),
+                        name_span: Span::new(100, 111),
+                        is_shorthand: false,
+                    },
+                ],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_classes: vec![],
+                v_models: vec![],
+                bindings: vec![],
+                events: vec![],
+                span: Span::new(90, 130),
+            },
+        ];
 
         // Extract boundary edges
         let edges = extract_boundary_edges("/parent.vue", &template, &parent_graph);
@@ -1296,7 +1301,7 @@ mod tests {
         // Full pipeline: extract bindings → analyze reactive flow
         use crate::analyzers::reactive_flow::analyze_reactive_flow;
         use crate::extract::extract_bindings;
-        use crate::input::ScriptAnalysisSnapshot;
+        use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
         use verter_session_query::analysis::types::{
             AnalyzedBinding, AnalyzedBindingKind, ReactivityKind,
         };

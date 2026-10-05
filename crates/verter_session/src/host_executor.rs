@@ -113,7 +113,8 @@ pub struct AnalysisArcs {
     pub(crate) macros: Arc<Vec<verter_session_query::analysis::types::AnalyzedMacro>>,
     pub(crate) macro_type_deps: Arc<Vec<verter_session_query::analysis::types::MacroTypeDep>>,
     pub(crate) vue_api_calls: Arc<Vec<verter_session_query::analysis::types::VueApiCallSite>>,
-    pub(crate) dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
+    pub(crate) dom_query_calls:
+        Arc<Vec<verter_session_query::analysis::script_snapshot::DomQueryCallSite>>,
     pub(crate) css_var_manipulations:
         Arc<Vec<verter_session_query::analysis::types::CssVarManipulation>>,
     pub(crate) script_binding_occurrences:
@@ -124,7 +125,9 @@ pub struct AnalysisArcs {
 
 impl AnalysisArcs {
     /// Build Arc-wrapped caches from a script analysis snapshot.
-    pub(crate) fn from_analysis(sa: &verter_semantic::analysis::ScriptAnalysisSnapshot) -> Self {
+    pub(crate) fn from_analysis(
+        sa: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
+    ) -> Self {
         Self {
             module_references: Arc::new(sa.module_references.clone()),
             macros: Arc::new(sa.macros.clone()),
@@ -146,10 +149,12 @@ impl AnalysisArcs {
 #[derive(Debug)]
 #[allow(dead_code)] // arcs field is part of the get_analysis surface.
 pub struct HostAnalysisData {
-    pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
+    pub(crate) script_analysis:
+        Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
-    pub(crate) style_analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
-    pub(crate) markup_class_tokens: Arc<Vec<verter_semantic::analysis::MarkupClassToken>>,
+    pub(crate) style_analyses: Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
+    pub(crate) markup_class_tokens:
+        Arc<Vec<verter_session_query::analysis::template::MarkupClassToken>>,
     pub(crate) arcs: AnalysisArcs,
 }
 

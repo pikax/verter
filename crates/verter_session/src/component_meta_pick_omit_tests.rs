@@ -661,14 +661,14 @@ fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
     for diag in &resolution.synthesis_diagnostics {
         assert_eq!(
             diag.execution_status,
-            verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+            verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
             "no macro expansion may report a non-Completed (budget/cancel/hard-stop) status; \
              got {:?}",
             diag.execution_status
         );
         assert_ne!(
             diag.exactness,
-            verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete,
+            verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete,
             "no macro expansion may report Incomplete exactness (a partial surface)"
         );
     }

@@ -679,7 +679,7 @@ impl CompileOutputNodeFactValidatedSession {
         &self,
         profile_state: &ProfileState,
         profile_hash: u64,
-    ) -> Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot> {
         profile_state
             .compile_slot_for_node(profile_hash)
             .and_then(|slot| slot.products.template_analysis().cloned())

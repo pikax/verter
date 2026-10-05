@@ -35,7 +35,7 @@
 //!   time under the `(DeclIdentity, NormalizedTypeArgs)` cycle guard.
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
+use verter_session_query::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
 use verter_session_query::analysis::types::AnalyzedMacroKind;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 

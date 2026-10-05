@@ -215,8 +215,8 @@ impl VerterHost {
         framework_parse: Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
-        script_analysis: &verter_semantic::analysis::types::ScriptAnalysisSnapshot,
-    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+        script_analysis: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
+    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
         let imports = &script_analysis.imports;
         let macros = &script_analysis.macros;
         let bindings = &script_analysis.bindings;
@@ -453,7 +453,7 @@ impl VerterHost {
     pub(crate) fn persist_raw_template_analysis(
         &self,
         canonical: &str,
-        template: Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         admission: crate::types::RawTemplateSlotAdmission,
     ) {
         if admission.admitted_generation().is_none() {
@@ -485,7 +485,7 @@ impl VerterHost {
         &self,
         canonical: &str,
         source_generation: u64,
-    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
         // Cheap map short-circuits first; the shard guard ends with this
         // block. `ReadSetSignature` is an `Arc<[FactVersionRef]>` carrier,
         // so cloning it out is a refcount bump, not a fact-set copy.
@@ -889,7 +889,7 @@ impl VerterHost {
         &self,
         canonical_or_alias: &str,
         view: &dyn crate::session_view::SessionView,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes> {
+    ) -> Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes> {
         self.provenance
             .evaluate_types_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2546,7 +2546,7 @@ impl VerterHost {
     pub(crate) fn raw_template_analysis_for_file(
         &self,
         canonical: &str,
-    ) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
         {
             if self.is_canonical_evicted(canonical) {
                 return None;
@@ -2650,7 +2650,7 @@ impl VerterHost {
         canonical_or_alias: &str,
     ) -> Option<(
         FileLanguage,
-        Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
+        Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
         Vec<verter_session_query::analysis::types::ExportSignature>,
     )> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
@@ -2742,7 +2742,7 @@ impl VerterHost {
     /// Shared logic for finding an export span from analysis data.
     pub(super) fn find_export_span(
         file_language: &FileLanguage,
-        script_analysis: &verter_semantic::analysis::ScriptAnalysisSnapshot,
+        script_analysis: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
         export_signatures: &[verter_session_query::analysis::types::ExportSignature],
         binding_name: &str,
     ) -> Option<(u32, u32)> {

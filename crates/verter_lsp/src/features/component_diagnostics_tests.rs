@@ -1,5 +1,5 @@
 use super::*;
-use verter_semantic::analysis::template::{
+use verter_session_query::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };

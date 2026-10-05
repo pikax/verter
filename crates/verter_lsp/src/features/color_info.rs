@@ -2,8 +2,10 @@
 
 use tower_lsp_server::ls_types::*;
 
-use verter_semantic::analysis::style::{AnalyzedColorCandidate, ColorCandidateKind, NumericArg};
 use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::style::{
+    AnalyzedColorCandidate, ColorCandidateKind, NumericArg,
+};
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -427,7 +429,7 @@ mod tests {
     fn build_analysis_with(
         source: &str,
         blocks: &[CarrierBlockView],
-        perturb: impl FnOnce(&mut Vec<verter_semantic::analysis::style::StyleBlockAnalysis>),
+        perturb: impl FnOnce(&mut Vec<verter_session_query::analysis::style::StyleBlockAnalysis>),
     ) -> FileAnalysisSnapshot {
         let mut styles = Vec::new();
         for block in blocks.iter().filter(|b| b.tag_name == "style") {
@@ -512,7 +514,7 @@ mod tests {
     /// read off the analysis — never re-parsed out of the value's bytes.
     #[test]
     fn chip_color_dataflows_from_the_candidates_analysis_numeric_args() {
-        use verter_semantic::analysis::style::NumericArg;
+        use verter_session_query::analysis::style::NumericArg;
 
         let source = "<style>\n.foo { color: rgb(255, 0, 0); }\n</style>";
         let blocks = test_carrier_blocks(source);

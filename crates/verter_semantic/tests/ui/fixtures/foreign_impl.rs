@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_semantic::type_info::{
     NonFlowObservation, NonFlowObservationSnapshot, ObservedMacroSurface, TypeInfoCore,
 };

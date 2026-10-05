@@ -60,11 +60,12 @@ pub struct ResolvedComponentMetaState {
     pub resolved_macros: Vec<ResolvedMacroMeta>,
     /// Resolved type registry entries (populated in `Expanded` mode).
     pub resolved_type_registry:
-        Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
+        Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis>,
     /// Native declaration metadata for each resolved type-registry entry.
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
     /// Expanded types (populated in `Expanded` mode only).
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types:
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     /// Semantic fact versions consumed while producing this resolved state.
     pub fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     /// Non-semantic compute audit captured only when native audit is enabled.
@@ -92,7 +93,7 @@ pub struct ResolvedComponentMetaState {
     /// and projected onto the audit substrate via
     /// [`crate::host_audit_bridge::macro_expansion_to_audit_entries`].
     pub synthesis_diagnostics:
-        Vec<verter_semantic::analysis::component_meta::MacroExpansionDiagnostics>,
+        Vec<verter_session_query::analysis::component_meta::MacroExpansionDiagnostics>,
     /// Typed per-result completeness — `Complete` when this resolved state is
     /// the full surface, `Partial` (with its reason set) when a budget
     /// exhaustion / fatal `QueryError` / partial macro surface produced a

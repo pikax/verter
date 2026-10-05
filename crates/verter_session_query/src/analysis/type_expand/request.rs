@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use verter_session_query::type_solver::result::{ExecutionStatus, SolverExactness};
+use crate::type_solver::result::{ExecutionStatus, SolverExactness};
 use verter_type_expr::facts::{NarrowTypeParam, SemanticTypeSource, SourcePosition};
 use verter_type_expr::{
     AuthoredTypeEvidence, ResolutionDiagnostic, ResolutionDiagnosticKind, ResolutionProvenance,
@@ -103,7 +103,7 @@ pub struct ExpandedCallSignature {
     /// `constraint`/`default: Option<Arc<TypeExpr>>`. This mirrors how the
     /// sibling [`verter_type_expr::facts::FunctionSignatureFact`] carries a
     /// signature's type parameters and is produced by
-    /// [`crate::analysis::type_eval_build::narrow_signature_type_params`].
+    /// [`crate::analysis::signature_params::narrow_signature_type_params`].
     /// A signature-scoped bound has no addressable authored slot (bounds are
     /// recovered whole-signature on demand), so `constraint`/`default`
     /// fail closed to `None` — no producer emits a bound locator here.
@@ -272,12 +272,12 @@ impl<T> ExpansionResult<T> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn exact(value: T) -> Self {
         Self::exact_concrete(value)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn partial(value: T, diagnostics: Vec<ExpansionDiagnostic>) -> Self {
         Self::incomplete(value, ExecutionStatus::Completed, diagnostics)
     }
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn solver_diagnostic_converts_to_expansion_diagnostic_without_downgrading_exactness() {
-        use verter_session_query::type_solver::result::{SolverDiagnostic, SolverResult};
+        use crate::type_solver::result::{SolverDiagnostic, SolverResult};
 
         // A solver result that is exact but has a non-semantic diagnostic
         let mut solver_result = SolverResult::exact_concrete(SemanticTypeSource::Closed(
@@ -582,7 +582,7 @@ mod tests {
             return_type: SemanticTypeSource::Closed(ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
                 PrimitiveName::Void,
             ))),
-            type_parameters: crate::analysis::type_eval_build::narrow_signature_type_params(
+            type_parameters: crate::analysis::signature_params::narrow_signature_type_params(
                 &source_params,
             ),
         };

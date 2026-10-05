@@ -1,9 +1,9 @@
 //! Action provider trait and context.
 
 use verter_diagnostics::{DiagnosticSet, LintDiagnostic, SfcBlockFact};
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
-use verter_semantic::analysis::StyleBlockAnalysis;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::style::StyleBlockAnalysis;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 use crate::types::CodeAction;
 

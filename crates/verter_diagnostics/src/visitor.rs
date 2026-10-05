@@ -3,9 +3,9 @@
 use crate::context::LintContext;
 use crate::cross_file::CrossFileSnapshot;
 use crate::rules::{FileContext, LintRule};
-use verter_semantic::analysis::template::{BindingUsageKind, TemplateAnalysisSnapshot};
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
-use verter_semantic::analysis::StyleBlockAnalysis;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::style::StyleBlockAnalysis;
+use verter_session_query::analysis::template::{BindingUsageKind, TemplateAnalysisSnapshot};
 
 /// Visitor that runs all rules against analysis data in a single pass.
 pub struct LintVisitor<'a> {
@@ -110,7 +110,7 @@ mod tests {
         }
         fn check_element(
             &self,
-            el: &verter_semantic::analysis::template::TemplateElement,
+            el: &verter_session_query::analysis::template::TemplateElement,
             ctx: &mut LintContext,
         ) {
             if el.tag == "div" {
@@ -135,11 +135,11 @@ mod tests {
 
         let template = TemplateAnalysisSnapshot {
             elements: vec![
-                verter_semantic::analysis::template::TemplateElement {
+                verter_session_query::analysis::template::TemplateElement {
                     tag: "div".to_string(),
                     is_component: false,
                     is_self_closing: false,
-                    namespace: verter_semantic::analysis::template::ElementNamespace::Html,
+                    namespace: verter_session_query::analysis::template::ElementNamespace::Html,
                     attributes: vec![],
                     directives: vec![],
                     v_for: None,
@@ -163,11 +163,11 @@ mod tests {
                     content_end: 0,
                     ..Default::default()
                 },
-                verter_semantic::analysis::template::TemplateElement {
+                verter_session_query::analysis::template::TemplateElement {
                     tag: "span".to_string(),
                     is_component: false,
                     is_self_closing: false,
-                    namespace: verter_semantic::analysis::template::ElementNamespace::Html,
+                    namespace: verter_session_query::analysis::template::ElementNamespace::Html,
                     attributes: vec![],
                     directives: vec![],
                     v_for: None,

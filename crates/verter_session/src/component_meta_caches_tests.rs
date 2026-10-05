@@ -1889,7 +1889,7 @@ defineProps<{
     // any semantic release — verified by running this sequence with the
     // release hook disabled) is deliberately outside the comparison.
     let published_sources =
-        |meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis| {
+        |meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis| {
             meta.props
                 .iter()
                 .map(|prop| {

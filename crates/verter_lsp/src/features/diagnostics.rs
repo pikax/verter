@@ -25,11 +25,11 @@ pub fn map_diagnostics(snapshot: &DiagnosticsSnapshot, line_index: &LineIndex) -
 /// identity available at this boundary.
 pub(crate) fn map_projection_limit_diagnostics(
     macro_spans: &[verter_span::Span],
-    expansions: &[verter_semantic::analysis::component_meta::MacroExpansionDiagnostics],
+    expansions: &[verter_session_query::analysis::component_meta::MacroExpansionDiagnostics],
     line_index: &LineIndex,
 ) -> Vec<Diagnostic> {
     use std::collections::HashSet;
-    use verter_semantic::analysis::type_expand::ExpansionStopReason;
+    use verter_session_query::analysis::type_expand::ExpansionStopReason;
 
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     enum OperationalLimit {
@@ -235,10 +235,10 @@ mod tests {
 
     #[test]
     fn operational_projection_limits_map_to_stable_deduplicated_editor_diagnostics() {
-        use verter_semantic::analysis::component_meta::{
+        use verter_session_query::analysis::component_meta::{
             MacroExpansionDiagnostics, MacroExpansionKind,
         };
-        use verter_semantic::analysis::type_expand::{
+        use verter_session_query::analysis::type_expand::{
             ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
         };
 

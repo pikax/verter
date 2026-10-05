@@ -632,7 +632,7 @@ fn compat_checker_unchanged_calls_get_component_meta() {
     fn _signature_check(
         s: &MetaSession,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         verter_session::meta::MetaError,
     > {
         s.get_component_meta("x.vue")
@@ -649,7 +649,7 @@ fn benchmark_worker_unchanged_calls_get_component_meta() {
     fn _signature_check(
         s: &MetaSession,
     ) -> Result<
-        Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
         verter_session::meta::MetaError,
     > {
         s.get_component_meta("x.vue")

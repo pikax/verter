@@ -36,8 +36,8 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::MacroExpansionDiagnostics;
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::component_meta::MacroExpansionDiagnostics;
+use verter_session_query::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedObjectShape,
     ExpandedProperty, ExpansionExecutionStatus, ExpansionResult,
 };
@@ -475,7 +475,7 @@ pub(crate) fn slot_field_function_source(
 /// typed `RequiredSourceUnavailable` error).
 fn fail_shape_result_on_failed_member(
     properties: &[ExpandedProperty],
-    index_signatures: &[verter_semantic::analysis::type_expand::ExpandedIndexSignature],
+    index_signatures: &[verter_session_query::analysis::type_expand::ExpandedIndexSignature],
     exactness: &mut SolverExactness,
     execution_status: &mut ExecutionStatus,
 ) {

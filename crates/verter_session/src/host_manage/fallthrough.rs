@@ -282,7 +282,7 @@ impl VerterHost {
         fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
         visiting: &mut rustc_hash::FxHashSet<String>,
     ) -> Option<crate::types::FallthroughResolution> {
-        use verter_semantic::analysis::component_meta::*;
+        use verter_session_query::analysis::component_meta::*;
         // Root reachability is a TEMPLATE fact, and `AnalysisScope::BUILD`
         // deliberately carries no template flag — one bit there materialises the
         // WHOLE template snapshot (elements, binding occurrences, slots, refs,
@@ -693,7 +693,9 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
-        root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
+        root_reachability: Option<
+            &verter_session_query::analysis::component_meta::RootReachability,
+        >,
     ) -> Option<FallthroughEvalInputs> {
         component_meta_trace_custom!(
             "build_fallthrough_eval_env_lightweight",
@@ -782,7 +784,9 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
-        root_reachability: Option<&verter_semantic::analysis::component_meta::RootReachability>,
+        root_reachability: Option<
+            &verter_session_query::analysis::component_meta::RootReachability,
+        >,
     ) -> std::collections::BTreeSet<crate::resolver_core::ValueDeclIdentity> {
         use verter_session_query::analysis::types::ImportBindingKind;
 
@@ -967,17 +971,17 @@ impl VerterHost {
         canonical_id: &str,
         snapshot: &FileAnalysisSnapshot,
         element_index: u32,
-        base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
+        base: &verter_session_query::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
         ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> ResolvedConsumedBindings {
-        use verter_semantic::analysis::component_meta::PartialBranchReason;
+        use verter_session_query::analysis::component_meta::PartialBranchReason;
 
         let mut resolved = ResolvedConsumedBindings {
-            bindings: verter_semantic::analysis::component_meta::ConsumedRootBindings {
+            bindings: verter_session_query::analysis::component_meta::ConsumedRootBindings {
                 attrs: base.attrs.clone(),
                 listeners: base.listeners.clone(),
                 has_dynamic_attr_name: base.has_dynamic_attr_name,
@@ -1220,7 +1224,7 @@ impl VerterHost {
         result: &crate::types::FallthroughResolution,
     ) -> Vec<crate::resolver_core::fallthrough_resolver::FallthroughBranchResult> {
         match &result.fallthrough_surface {
-            verter_semantic::analysis::component_meta::FallthroughSurface::Branches { branches } => branches
+            verter_session_query::analysis::component_meta::FallthroughSurface::Branches { branches } => branches
                 .iter()
                 .map(
                     |branch| crate::resolver_core::fallthrough_resolver::FallthroughBranchResult {
@@ -1237,12 +1241,12 @@ impl VerterHost {
                             .collect(),
                         resolved: !matches!(
                             branch.status,
-                            verter_semantic::analysis::component_meta::BranchStatus::Unresolved { .. }
+                            verter_session_query::analysis::component_meta::BranchStatus::Unresolved { .. }
                         ),
                     },
                 )
                 .collect(),
-            verter_semantic::analysis::component_meta::FallthroughSurface::None { .. } => Vec::new(),
+            verter_session_query::analysis::component_meta::FallthroughSurface::None { .. } => Vec::new(),
         }
     }
 
@@ -1260,7 +1264,7 @@ impl VerterHost {
                     fallthrough_surface: result.fallthrough_surface.clone(),
                     all_resolved: matches!(
                         result.accepted_surface_completeness,
-                        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+                        verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
                     ),
                     branches,
                 },
@@ -1284,7 +1288,7 @@ impl VerterHost {
                     fallthrough_surface: result.fallthrough_surface.clone(),
                     has_single_root: matches!(
                         result.fallthrough_surface,
-                        verter_semantic::analysis::component_meta::FallthroughSurface::Branches { ref branches } if branches.len() == 1,
+                        verter_session_query::analysis::component_meta::FallthroughSurface::Branches { ref branches } if branches.len() == 1,
                     ),
                     branches,
                 },
@@ -1317,7 +1321,7 @@ impl VerterHost {
                         .collect(),
                     resolved: matches!(
                         result.accepted_surface_completeness,
-                        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+                        verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
                     ),
                 },
             ),
@@ -1465,7 +1469,7 @@ impl VerterHost {
             crate::resolver_core::fallthrough_resolver::FallthroughNodeValue::ConsumedBindings(
                 consumed,
             ) => Some(ResolvedConsumedBindings {
-                bindings: verter_semantic::analysis::component_meta::ConsumedRootBindings {
+                bindings: verter_session_query::analysis::component_meta::ConsumedRootBindings {
                     attrs: consumed.attrs,
                     listeners: consumed.listeners,
                     has_dynamic_attr_name: consumed.has_dynamic_attr_name,

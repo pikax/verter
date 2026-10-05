@@ -23,7 +23,7 @@
 //!   order-aligned with the analysis — never name-keyed maps (names repeat
 //!   across duplicate events, slots, fallthrough branches, registry rows).
 
-use verter_semantic::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
+use verter_session_query::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
 use verter_type_expr::facts::{SemanticSourceFailure, SourcePosition};
 use verter_type_expr::{PublicationResult, TypeExpr};
 
@@ -360,7 +360,7 @@ pub struct MaterializedComponentMetaTypeLanes {
 #[derive(Debug, Clone)]
 pub struct MaterializedEventOccurrence {
     /// Complete occurrence-derived semantic event row.
-    pub event: verter_semantic::analysis::component_meta::EventAnalysis,
+    pub event: verter_session_query::analysis::component_meta::EventAnalysis,
     /// Materialized payload publication owned by this occurrence.
     pub payload: MaterializedTypePublication,
     /// Materialized callable return, or implicit `void` for property/runtime

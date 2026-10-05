@@ -57,7 +57,7 @@ use crate::analysis::macros::{
     stamp_macro_payload_locators, try_extract_macro_from_expr, try_extract_macro_from_var_decl,
 };
 use crate::analysis::scope::AnalysisScope;
-use crate::analysis::types::*;
+use verter_session_query::analysis::script_snapshot::*;
 use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
 
 /// Whether `statements` declare a `TSInterfaceDeclaration` named exactly

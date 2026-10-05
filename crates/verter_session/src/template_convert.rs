@@ -10,8 +10,8 @@ use verter_compiler::framework_common::carrier_compiler::{
     RuntimeDiagnostic, RuntimeDiagnosticSeverity,
 };
 use verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct;
-use verter_semantic::analysis::macro_usage::MacroUsageFacts;
-use verter_semantic::analysis::template::{
+use verter_session_query::analysis::macro_usage::MacroUsageFacts;
+use verter_session_query::analysis::template::{
     AnalyzedEmitDefinition, AnalyzedPropDefinition, AnalyzedSlotDeclaration, BindingUsageKind,
     CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace, IfChain,
     PropValueConstness, SnippetDefinition, SvelteDirectiveInfo, TemplateAnalysisSnapshot,
@@ -498,23 +498,23 @@ pub(crate) fn convert_raw_to_analysis(
             }
 
             // Extract CSS variables from :style bindings (e.g., { '--color': val })
-            let dynamic_style_vars: Vec<verter_semantic::analysis::template::DynamicStyleVar> = e
-                .attributes
-                .iter()
-                .filter(|a| a.is_dynamic && a.name == "style")
-                .filter_map(|a| a.value.as_deref())
-                .chain(bind_style_expressions.iter().copied())
-                .flat_map(verter_semantic::analysis::template::extract_dynamic_style_vars)
-                .collect();
+            let dynamic_style_vars: Vec<verter_session_query::analysis::template::DynamicStyleVar> =
+                e.attributes
+                    .iter()
+                    .filter(|a| a.is_dynamic && a.name == "style")
+                    .filter_map(|a| a.value.as_deref())
+                    .chain(bind_style_expressions.iter().copied())
+                    .flat_map(verter_semantic::analysis::template::extract_dynamic_style_vars)
+                    .collect();
 
             // Extract CSS variables from static style attributes (e.g., style="--color: red")
-            let static_style_vars: Vec<verter_semantic::analysis::template::StaticStyleVar> = e
-                .attributes
-                .iter()
-                .filter(|a| !a.is_dynamic && a.name == "style")
-                .filter_map(|a| a.value.as_deref())
-                .flat_map(verter_semantic::analysis::template::extract_static_style_vars)
-                .collect();
+            let static_style_vars: Vec<verter_session_query::analysis::template::StaticStyleVar> =
+                e.attributes
+                    .iter()
+                    .filter(|a| !a.is_dynamic && a.name == "style")
+                    .filter_map(|a| a.value.as_deref())
+                    .flat_map(verter_semantic::analysis::template::extract_static_style_vars)
+                    .collect();
 
             let component_usage_index = if e.is_component {
                 let pascal_tag = to_pascal_case(&e.tag);

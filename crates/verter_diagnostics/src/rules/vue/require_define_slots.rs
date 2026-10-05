@@ -99,8 +99,11 @@ mod tests {
     use crate::config::LintConfig;
     use crate::rules::FileContext;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::script_snapshot::*;
+    use verter_session_query::analysis::template::BindingUsageKind;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateBindingOccurrence;
+
     use verter_session_query::analysis::types::AnalyzedMacro;
     use verter_span::Span;
 

@@ -73,8 +73,6 @@ pub mod style;
 mod style_syntax;
 pub mod template;
 pub mod type_eval_build;
-pub mod type_expand;
-pub mod types;
 
 #[cfg(test)]
 #[path = "type_expr_tests.rs"]
@@ -123,19 +121,6 @@ pub use style::{
     build_css_style_analysis, build_external_src_style_analysis, build_incomplete_style_analysis,
     build_preprocessor_style_analysis, build_scanned_style_analysis,
     build_scanned_style_analysis_from_ir, compute_structured_specificity, parse_selector,
-    parse_style_ir_for_analysis, AnalyzedSelector, AttributeOperator, AttributeSelector,
-    BlockContentAvailability, CompoundSelector, SelectorCombinator, SelectorPseudoClass,
-    SpecialPseudoInput, SpecialPseudoKind, StructuredSelector, StyleAnalysisFlags,
-    StyleAnalysisLang, StyleBlockAnalysis, StyleLangDialect, VBindInput, VueStyleInput,
+    parse_style_ir_for_analysis, SpecialPseudoInput, StyleLangDialect, VBindInput, VueStyleInput,
 };
-pub use template::{
-    extract_dynamic_class_names, extract_dynamic_class_names_rich, AnalyzedEmitDefinition,
-    AnalyzedMacroUsage, AnalyzedPropDefinition, BindingUsageKind, CommentDirective,
-    CommentDirectiveKind, DefinedSlot, DynamicClassName, ElementNamespace, IfChain, MacroKind,
-    MarkupClassToken, PropValueConstness, SnippetDefinition, SvelteDirectiveInfo,
-    TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage,
-    TemplateDirective, TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
-    TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
-};
-
-pub use types::{DomQueryCallSite, ScriptAnalysisSnapshot};
+pub use template::{extract_dynamic_class_names, extract_dynamic_class_names_rich};

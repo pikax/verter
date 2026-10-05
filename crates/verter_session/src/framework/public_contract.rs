@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 use verter_type_expr::{
     PrimitiveName, PublicationResult, ResolutionDiagnostic, ResolutionExactness,
     ResolutionProvenance, TypeExpr, TypedResolutionFailure,

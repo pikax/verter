@@ -192,7 +192,7 @@ fn shadowed_pick_is_userland_not_intrinsic() {
 pub(crate) fn render_pair(
     host: &verter_session::VerterHost,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> (String, String) {
     let source = prop
         .publication

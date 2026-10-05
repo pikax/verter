@@ -72,7 +72,7 @@ pub(crate) enum WasmCompiledProduct {
     },
     IdeCompanion(FfiIdeResponse),
     Analysis {
-        analysis: Box<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        analysis: Box<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     },
 }
 

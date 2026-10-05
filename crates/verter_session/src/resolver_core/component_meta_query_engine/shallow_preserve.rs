@@ -45,9 +45,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         macro_index: usize,
-        output_path: &[verter_semantic::analysis::type_eval_build::PathSegment],
+        output_path: &[verter_session_query::analysis::field_path::PathSegment],
     ) -> bool {
-        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+        use verter_session_query::analysis::field_path::PathSegment as MacroPathSegment;
 
         let Some(product) = self
             .dispatch
@@ -280,7 +280,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         dispatch,
                         member_node.node(),
                     ) {
-                        verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                        verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete => {
                             FastShallowFieldExprExactness::Concrete
                         }
                         _ => FastShallowFieldExprExactness::Symbolic,
@@ -332,7 +332,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                             dispatch,
                                             body_node.node(),
                                         ) {
-                                            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+                                            verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete => {
                                                 FastShallowFieldExprExactness::Concrete
                                             }
                                             _ => FastShallowFieldExprExactness::Symbolic,
@@ -380,9 +380,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         &mut self,
         scope_canonical_id: &str,
         macro_index: usize,
-        output_path: &[verter_semantic::analysis::type_eval_build::PathSegment],
+        output_path: &[verter_session_query::analysis::field_path::PathSegment],
     ) -> Option<crate::semantic_query::HotTypeRef> {
-        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+        use verter_session_query::analysis::field_path::PathSegment as MacroPathSegment;
 
         let [MacroPathSegment::Member(field_name)] = output_path else {
             return None;

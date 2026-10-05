@@ -1935,16 +1935,17 @@ pub struct FileAnalysisSnapshot {
     /// Bitflags representing script characteristics (see `verter_semantic::analysis::ScriptFlags`).
     pub script_flags: u32,
     /// Per-style-block analysis (scoped, modules, v-bind usage).
-    pub styles: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
+    pub styles: Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
     /// Template analysis (components, bindings, slots, refs, events).
     /// Present after compilation when template analysis scope flags are active.
-    pub template: Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
+    pub template: Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>>,
     /// Vue API call sites (lifecycle hooks, watchers, provide/inject, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
     pub vue_api_calls: Arc<Vec<verter_session_query::analysis::types::VueApiCallSite>>,
     /// DOM query call sites (querySelector, getElementById, etc.).
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub dom_query_calls: Arc<Vec<verter_semantic::analysis::types::DomQueryCallSite>>,
+    pub dom_query_calls:
+        Arc<Vec<verter_session_query::analysis::script_snapshot::DomQueryCallSite>>,
 
     /// CSS variable manipulations via DOM style APIs.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
@@ -1958,7 +1959,7 @@ pub struct FileAnalysisSnapshot {
     /// Script-side usage facts for macro-declared members (unused-declaration
     /// diagnostics). `None` for files without Vue macros.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub macro_usage: Option<verter_semantic::analysis::macro_usage::MacroUsageFacts>,
+    pub macro_usage: Option<verter_session_query::analysis::macro_usage::MacroUsageFacts>,
 
     /// Root identifiers referenced by `<style>` `v-bind()` expressions —
     /// style `v-bind()` resolves PROPS by bare name, so prop-member liveness
@@ -1969,7 +1970,7 @@ pub struct FileAnalysisSnapshot {
     /// Resolvable class-name tokens in carrier markup, for carriers WITHOUT a
     /// template element IR (Svelte). Empty for Vue.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
-    pub markup_class_tokens: Arc<Vec<verter_semantic::analysis::MarkupClassToken>>,
+    pub markup_class_tokens: Arc<Vec<verter_session_query::analysis::template::MarkupClassToken>>,
 
     /// Export signatures extracted from the file's script block.
     #[serde(default, skip_serializing_if = "arc_vec_is_empty")]
@@ -2143,7 +2144,7 @@ pub enum BlockContentClass {
     Custom,
 }
 
-pub use verter_semantic::analysis::BlockContentAvailability;
+pub use verter_session_query::analysis::style::BlockContentAvailability;
 
 macro_rules! block_content_nominal_token {
     ($name:ident) => {
@@ -3010,16 +3011,17 @@ pub(crate) struct ParseSnapshot {
     /// override-aware `effective_file_state` read and the analysis-snapshot
     /// reuse path bump a refcount instead of deep-copying ~18 owned vectors
     /// for callers that read one or two scalar fields.
-    pub(crate) script_analysis: Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
+    pub(crate) script_analysis:
+        Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
-    pub(crate) style_analyses: Vec<verter_semantic::analysis::StyleBlockAnalysis>,
+    pub(crate) style_analyses: Vec<verter_session_query::analysis::style::StyleBlockAnalysis>,
     /// Prepared style IRs retained beside this snapshot, inventory order.
     /// Not a field on public `StyleBlockAnalysis`.
     pub(crate) prepared_styles: Vec<Option<verter_compiler::style_planner::PreparedStyleIr>>,
     /// Resolvable class-name tokens in carrier markup, for carriers WITHOUT a
     /// template element IR (Svelte `class="x"` entries + `class:x` directives).
     /// Empty for Vue (its template element tree carries class facts).
-    pub(crate) markup_class_tokens: Vec<verter_semantic::analysis::MarkupClassToken>,
+    pub(crate) markup_class_tokens: Vec<verter_session_query::analysis::template::MarkupClassToken>,
     /// Blocks that need external preprocessing (non-native `lang` attributes).
     pub(crate) preprocessor_requests: Vec<PendingPreprocessorRequest>,
     /// The source's script parse, or the walk-stack lease of its walks, was
@@ -3102,7 +3104,7 @@ pub enum CompiledProduct {
     /// The IDE companion projection.
     Ide(IdeResponse),
     /// The host analysis payload.
-    Analysis(Box<verter_semantic::analysis::template::TemplateAnalysisSnapshot>),
+    Analysis(Box<verter_session_query::analysis::template::TemplateAnalysisSnapshot>),
 }
 
 /// The result of executing one caller-supplied canonical compile request.
@@ -3371,7 +3373,8 @@ pub(crate) enum CompileProducts {
         tsx: Option<CachedTsx>,
         /// Template analysis extracted during compilation. Populated when
         /// the analysis scope includes template flags (TPL_COMPONENTS, etc.).
-        template_analysis: Option<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        template_analysis:
+            Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     },
     /// The carrier fail-closed on the runtime surface this request asked for.
     /// The reason is carried STRUCTURALLY, so no consumer recovers it by
@@ -3452,7 +3455,7 @@ impl CompileProducts {
     /// The committed template analysis; `None` on a refusal.
     pub(crate) fn template_analysis(
         &self,
-    ) -> Option<&verter_semantic::analysis::template::TemplateAnalysisSnapshot> {
+    ) -> Option<&verter_session_query::analysis::template::TemplateAnalysisSnapshot> {
         match self {
             Self::Produced {
                 template_analysis, ..
@@ -3531,7 +3534,8 @@ pub(crate) struct CompileInput {
     pub(crate) script_bindings: Vec<verter_session_query::analysis::types::AnalyzedBinding>,
     /// Script-side macro-member usage facts from the effective script analysis.
     /// Feeds the unused-declaration inventories during template conversion.
-    pub(crate) script_macro_usage: Option<verter_semantic::analysis::macro_usage::MacroUsageFacts>,
+    pub(crate) script_macro_usage:
+        Option<verter_session_query::analysis::macro_usage::MacroUsageFacts>,
     /// Vue API call sites from the effective script analysis (the `useSlots()`
     /// fail-open gate for unused-slot diagnostics).
     pub(crate) script_vue_api_calls: Vec<verter_session_query::analysis::types::VueApiCallSite>,
@@ -3722,7 +3726,7 @@ impl ProfileState {
 /// and the next coherent compute replaces it.
 #[derive(Debug)]
 pub(crate) struct RawTemplateAnalysisEntry {
-    pub(crate) template: Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+    pub(crate) template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     /// Scheduler node generation of the source read the template's
     /// inputs were captured from.
     pub(crate) source_generation: u64,
@@ -3918,7 +3922,7 @@ impl DerivedRawState {
     /// newer-generation compute already installed.
     pub(crate) fn install_raw_template_analysis(
         &mut self,
-        template: Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>,
+        template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         admission: RawTemplateSlotAdmission,
     ) {
         let Some(source_generation) = admission.admitted_generation() else {
@@ -3973,7 +3977,8 @@ pub(crate) struct EffectiveFileState {
     /// Shared immutable script analysis — an `Arc::clone` of the snapshot the
     /// scheduler (or the content override) holds. Reading it is a refcount
     /// bump; consumers that need an owned copy call `.as_ref().clone()`.
-    pub(crate) script_analysis: std::sync::Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>,
+    pub(crate) script_analysis:
+        std::sync::Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
     pub(crate) framework_parse:
         Option<std::sync::Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     /// The source snapshot's plain-script parse identity
@@ -4052,14 +4057,14 @@ pub(crate) struct CachedMetaPayload {
 #[derive(Debug, Clone)]
 pub struct FallthroughResolution {
     /// Accepted props: declared props + inherited attrs.
-    pub accepted_props: Vec<verter_semantic::analysis::component_meta::AcceptedPropAnalysis>,
+    pub accepted_props: Vec<verter_session_query::analysis::component_meta::AcceptedPropAnalysis>,
     /// Accepted events: declared emits + inherited listeners.
-    pub accepted_events: Vec<verter_semantic::analysis::component_meta::AcceptedEventAnalysis>,
+    pub accepted_events: Vec<verter_session_query::analysis::component_meta::AcceptedEventAnalysis>,
     /// Whether the accepted surface is exact or a lower bound.
     pub accepted_surface_completeness:
-        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness,
+        verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness,
     /// Branch-structured inherited surface.
-    pub fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface,
+    pub fallthrough_surface: verter_session_query::analysis::component_meta::FallthroughSurface,
     /// Semantic fact versions consumed while producing this resolution.
     pub fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
 }

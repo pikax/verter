@@ -7,8 +7,10 @@
 //! from the parser-side payload locator and type annotation when available
 //! (preserves section 7.4b parity).
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::ExpandedField;
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::ExpandedField;
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
 use crate::resolver_core::ResolverContext;

@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 
 use crate::types::HostConfig;
 use crate::{FileLanguage, UpsertRequest, VerterHost};

@@ -1622,10 +1622,10 @@ fn component_prop_completions(
 fn slot_owner_component<'a>(
     offset: usize,
     markup_facts: Option<&[MarkupOpenTagFact]>,
-    template: &'a verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &'a verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     tag_name: &str,
     is_component: bool,
-) -> Option<&'a verter_semantic::analysis::template::TemplateComponentUsage> {
+) -> Option<&'a verter_session_query::analysis::template::TemplateComponentUsage> {
     if is_component && tag_name != "template" {
         return template.components.iter().find(|component| {
             component.name == tag_name

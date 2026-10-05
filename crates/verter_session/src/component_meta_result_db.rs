@@ -286,9 +286,10 @@ pub struct ResolutionTemplate {
     pub whole_hash: Hash16,
     pub resolved_macros: Vec<crate::meta_resolve::ResolvedMacroMeta>,
     pub resolved_type_registry:
-        Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
+        Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis>,
     pub resolved_type_registry_meta: Vec<crate::meta_resolve::ResolvedTypeRegistryMeta>,
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types:
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     pub fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     pub surface_identities: Option<crate::meta_resolve::SurfaceNodeIdentities>,
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
@@ -309,7 +310,7 @@ pub struct ResolutionTemplate {
 /// both halves without rerunning the cold resolver.
 #[derive(Debug, Clone)]
 pub struct CachedComponentMetaResult {
-    pub analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    pub analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     pub resolution_template: ResolutionTemplate,
     /// Owner canonical id used to reload `snapshot` via
     /// [`ProjectTypeStore::indexed()`] on rehydrate.

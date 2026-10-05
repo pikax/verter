@@ -133,7 +133,7 @@ defineEmits<Emits>()
 fn demand_prop_type(
     host: &VerterHost,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> verter_type_expr::TypeExpr {
     let source = prop
         .publication

@@ -1,13 +1,13 @@
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::component_meta::{
+use verter_semantic::analysis::html_intrinsics::{
+    html_intrinsic_catalog, IntrinsicMemberKind, IntrinsicTypeShape,
+};
+use verter_session_query::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedEventKind, AcceptedPropAnalysis, AcceptedPropKind,
     AcceptedSurfaceCompleteness, BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings,
     FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry, FallthroughSurface,
     InheritedSource, MemberAvailability, MemberProvenance, PartialBranchReason, ResolvedRootStep,
     RootReachability, RootTargetRef, UnresolvedBranchReason,
-};
-use verter_semantic::analysis::html_intrinsics::{
-    html_intrinsic_catalog, IntrinsicMemberKind, IntrinsicTypeShape,
 };
 use verter_session_query::analysis::types::AnalyzedImport;
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource, SourcePosition};
@@ -1729,15 +1729,15 @@ mod tests {
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
-    use verter_semantic::analysis::component_meta::{
+    use verter_semantic::analysis::html_intrinsics::{
+        html_intrinsic_catalog, intrinsic_listeners_for_tag, owned_intrinsic_members_for_tag,
+        IntrinsicMemberKind, IntrinsicTypeShape,
+    };
+    use verter_session_query::analysis::component_meta::{
         AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedPropKind, AcceptedSurfaceCompleteness,
         BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings, FallthroughBranch,
         FallthroughSurface, InheritedSource, MemberAvailability, MemberProvenance,
         ResolvedRootStep, RootBranch, RootReachability, RootTargetRef,
-    };
-    use verter_semantic::analysis::html_intrinsics::{
-        html_intrinsic_catalog, intrinsic_listeners_for_tag, owned_intrinsic_members_for_tag,
-        IntrinsicMemberKind, IntrinsicTypeShape,
     };
     use verter_session_query::analysis::types::{
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
@@ -1922,7 +1922,8 @@ mod tests {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             },
             macro_expansion_diagnostics: Vec::new(),
             options_api: false,
@@ -2442,7 +2443,7 @@ mod tests {
             FallthroughBranch {
                 branch_key: "0".to_string(),
                 condition_text: None,
-                props: vec![verter_semantic::analysis::component_meta::FallthroughPropEntry {
+                props: vec![verter_session_query::analysis::component_meta::FallthroughPropEntry {
                     name: "id".to_string(),
                     callable_role: verter_type_expr::PropCallableRole::default(),
                     publication: crate::test_only::type_publication_fixture(
@@ -2475,7 +2476,7 @@ mod tests {
                 root_chain: vec![],
                 status: BranchStatus::Unresolved {
                     reason:
-                        verter_semantic::analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
+                        verter_session_query::analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
                 },
             },
         ];
@@ -2966,7 +2967,7 @@ mod tests {
                 }],
                 accepted_events: vec![],
                 fallthrough_surface: FallthroughSurface::None {
-                    reason: verter_semantic::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
+                    reason: verter_session_query::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
                 },
                 fact_versions: vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id: "/Child.vue".to_string(),
@@ -3173,8 +3174,8 @@ mod tests {
 
     fn resolved_branch(
         key: &str,
-        props: Vec<verter_semantic::analysis::component_meta::FallthroughPropEntry>,
-        events: Vec<verter_semantic::analysis::component_meta::FallthroughEventEntry>,
+        props: Vec<verter_session_query::analysis::component_meta::FallthroughPropEntry>,
+        events: Vec<verter_session_query::analysis::component_meta::FallthroughEventEntry>,
     ) -> FallthroughBranch {
         FallthroughBranch {
             branch_key: key.to_string(),
@@ -3190,8 +3191,8 @@ mod tests {
         name: &str,
         source: Option<SemanticTypeSource>,
         origin: &str,
-    ) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
-        verter_semantic::analysis::component_meta::FallthroughPropEntry {
+    ) -> verter_session_query::analysis::component_meta::FallthroughPropEntry {
+        verter_session_query::analysis::component_meta::FallthroughPropEntry {
             name: name.to_string(),
             callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
@@ -3215,8 +3216,8 @@ mod tests {
         name: &str,
         payload: Option<SemanticTypeSource>,
         origin: &str,
-    ) -> verter_semantic::analysis::component_meta::FallthroughEventEntry {
-        verter_semantic::analysis::component_meta::FallthroughEventEntry {
+    ) -> verter_session_query::analysis::component_meta::FallthroughEventEntry {
+        verter_session_query::analysis::component_meta::FallthroughEventEntry {
             name: name.to_string(),
             payload: payload
                 .map(SourcePosition::Present)
@@ -3554,7 +3555,7 @@ mod tests {
     /// unconditionally, every `None` assert below fails RED.
     #[test]
     fn producer_scope_attaches_only_to_scope_relative_inherited_sources() {
-        use verter_semantic::analysis::component_meta::AcceptedEventKind;
+        use verter_session_query::analysis::component_meta::AcceptedEventKind;
 
         let prop_row = |name: &str,
                         source: Option<SemanticTypeSource>,

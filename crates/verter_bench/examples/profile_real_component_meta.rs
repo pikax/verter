@@ -171,7 +171,7 @@ fn resolve_target_file(project_root: &Path, token: &str) -> io::Result<PathBuf> 
 fn print_profile(
     run_index: usize,
     target_id: &str,
-    analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     resolved: &verter_session::meta_resolve::ResolvedComponentMetaState,
     elapsed: std::time::Duration,
 ) {

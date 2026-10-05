@@ -396,7 +396,8 @@ The shared Rust pipeline owns all fallthrough and root inheritance semantics. `v
 
 | File | Purpose |
 | --- | --- |
-| `crates/verter_semantic/src/analysis/component_meta.rs` | Types + root extraction |
+| `crates/verter_session_query/src/analysis/component_meta.rs` | Types |
+| `crates/verter_semantic/src/analysis/component_meta.rs` | Root extraction |
 | `crates/verter_semantic/src/analysis/html_intrinsics.rs` | Native intrinsic catalog |
 | `crates/verter_session/src/host_manage.rs` | Resolver + cache |
 | `crates/verter_session/src/host_resolve/fallthrough_props.rs` | Projection of the resolved surface onto the parent-facing props type (issue #97) |

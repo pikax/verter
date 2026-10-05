@@ -3,8 +3,8 @@ use crate::documents::carrier_structure::{
     authored_component_attribute_name_context, project_carrier_blocks, test_carrier_blocks,
     test_structure,
 };
-use verter_semantic::analysis::template::*;
 use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::template::*;
 use verter_span::Span;
 
 // =============================================================================
@@ -304,9 +304,9 @@ fn vbind_analysis_for(
     start: u32,
     end: u32,
     block_ref: Option<verter_language::parse_artifact::carrier_inventory::ArtifactBlockRef>,
-) -> verter_semantic::analysis::StyleBlockAnalysis {
-    verter_semantic::analysis::StyleBlockAnalysis {
-        v_binds: vec![verter_semantic::analysis::style::AnalyzedVBind {
+) -> verter_session_query::analysis::style::StyleBlockAnalysis {
+    verter_session_query::analysis::style::StyleBlockAnalysis {
+        v_binds: vec![verter_session_query::analysis::style::AnalyzedVBind {
             expression: expression.to_string(),
             quoted: false,
             start,
@@ -366,7 +366,7 @@ fn test_style_vbind_joins_by_sealed_block_ref_not_ordinal() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![
             vbind_analysis_for("color", vb_start, vb_end, Some(style_refs[1].clone())),
-            verter_semantic::analysis::StyleBlockAnalysis {
+            verter_session_query::analysis::style::StyleBlockAnalysis {
                 block_ref: Some(style_refs[0].clone()),
                 ..Default::default()
             },

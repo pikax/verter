@@ -8444,7 +8444,7 @@ pub enum SemanticQueryKey {
     /// = the SFC file path, `merged_symbol_name` per repo convention).
     /// `macro_index` is the stable index into `ScriptAnalysisSnapshot.macros`
     /// per `macro_kind` is the semantic-level
-    /// [`AnalyzedMacroKind`], NOT [`verter_semantic::analysis::template::MacroKind`].
+    /// [`AnalyzedMacroKind`], NOT [`verter_session_query::analysis::template::MacroKind`].
     /// `type_args` carries the macro's type arguments (already lowered to
     /// `SemanticNodeId`s by the caller). `context.mode` selects the
     /// projection mode for downstream type lowering inside the macro body.

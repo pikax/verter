@@ -211,8 +211,8 @@ pub struct VerterMcpServer {
 
 fn build_script_snapshot(
     analysis: &verter_session::FileAnalysisSnapshot,
-) -> verter_semantic::analysis::types::ScriptAnalysisSnapshot {
-    verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
+    verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
         imports: analysis.imports.clone(),
         module_references: analysis.module_references.to_vec(),
         bindings: analysis.bindings.clone(),
@@ -2939,7 +2939,7 @@ impl VerterMcpServer {
         let analyses = batch_analysis_with_template(&self.host, &vue_ids);
         let template_components: Vec<(
             String,
-            Vec<verter_semantic::analysis::TemplateComponentUsage>,
+            Vec<verter_session_query::analysis::template::TemplateComponentUsage>,
         )> = analyses
             .iter()
             .filter_map(|(id, a)| {
@@ -3942,7 +3942,7 @@ const count = ref(0)
     #[test]
     fn scoring_uses_prop_fields_not_type_references() {
         // Construct a script snapshot with many type_references but few prop_fields
-        let script = verter_semantic::analysis::types::ScriptAnalysisSnapshot {
+        let script = verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
             module_references: Vec::new(),
             macros: vec![verter_session_query::analysis::types::AnalyzedMacro {
                 edit_anchors: Default::default(),

@@ -105,7 +105,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
-    field: &verter_semantic::analysis::type_expand::ExpandedField,
+    field: &verter_session_query::analysis::type_expand::ExpandedField,
     define_props_roots: &rustc_hash::FxHashSet<String>,
 ) -> bool {
     use crate::semantic_query::{IndexKey, SemanticNodeData};

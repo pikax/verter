@@ -1,9 +1,9 @@
 //! Scoring engine: a11y, quality, and template complexity metrics.
 
 use verter_diagnostics::{LintConfig, LintPreset, Linter, Severity};
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
-use verter_semantic::analysis::StyleBlockAnalysis;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::style::StyleBlockAnalysis;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 use verter_session_query::analysis::types::{AnalysisFlags, VueApiClassification};
 
 /// Template complexity metrics computed from existing analysis data.

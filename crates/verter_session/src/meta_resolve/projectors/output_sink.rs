@@ -37,8 +37,10 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::{ExpandedField, ExpansionExecutionStatus};
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::{ExpandedField, ExpansionExecutionStatus};
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 use verter_type_expr::{TypeExpr, UnknownValue};
 

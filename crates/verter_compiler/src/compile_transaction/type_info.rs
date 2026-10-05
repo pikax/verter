@@ -17,13 +17,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use verter_macro_dto::RuntimePropType;
-use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_semantic::type_info::{
     ExposeSurfaceProjection, ImportedComponentResolution, ImportedComponentSurface,
     NonFlowObservationKey, NonFlowObservationSnapshot, NonFlowOperation, NonFlowOutcome,
     NonFlowPayload, ObservedMacroSurface, RuntimeEmitsProjection, RuntimeModelProjection,
     RuntimePropsProjection, TypeInfoCore, VueMacroSemanticInput,
 };
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::resolution::ResolutionBasis;
 
 /// How a type-info route can fail. The proof id is the operation's

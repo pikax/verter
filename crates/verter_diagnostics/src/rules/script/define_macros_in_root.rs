@@ -7,7 +7,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 
 /// Require compiler macros to be at the root level of `<script setup>`.
 pub struct DefineMacrosInRoot;
@@ -46,7 +46,7 @@ impl LintRule for DefineMacrosInRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
     use verter_session_query::analysis::types::NestedMacroCall;
     use verter_span::Span;
 

@@ -101,8 +101,10 @@ mod tests {
     use crate::config::LintConfig;
     use crate::rules::FileContext;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::script_snapshot::*;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateRef;
+
     use verter_session_query::analysis::types::AnalyzedBinding;
     use verter_session_query::analysis::types::AnalyzedBindingKind;
     use verter_session_query::analysis::types::ReactivityKind;

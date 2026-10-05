@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
+use verter_session_query::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
@@ -228,7 +228,8 @@ mod collect_local_constructor_binding_keys_tests {
 
 #[derive(Debug, Clone, Default)]
 pub struct ComponentMetaEvalOutputs {
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types:
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     pub tracked_dependencies: BTreeSet<String>,
     /// Step 9.1 / D32: surface-id sidecar captured during the
     /// `expand_macro_types_impl_with_expander` closure run. None when
@@ -304,7 +305,8 @@ pub struct ResolvedComponentMetaParts {
     pub resolved_macros: Vec<ResolvedMacroMeta>,
     pub resolved_type_registry: Vec<ResolvedTypeAnalysis>,
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types:
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     pub tracked_dependencies: BTreeSet<String>,
     pub fact_versions: Vec<FactVersionRef>,
     /// Step 9.1 / D32: surface-id sidecar. Populated when audit is on
@@ -514,8 +516,8 @@ pub(crate) fn component_meta_resolved_macros(
 }
 
 pub fn component_meta_type_registry(
-    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
-) -> Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis> {
+    resolved_type_registry: &[verter_session_query::analysis::component_meta::ResolvedTypeAnalysis],
+) -> Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis> {
     let mut seen = FxHashSet::default();
     let mut registry = Vec::new();
 

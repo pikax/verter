@@ -1,7 +1,7 @@
-use verter_session_query::analysis::types::deserialize_analysis_flags;
-use verter_session_query::analysis::types::is_false;
-use verter_session_query::analysis::types::serialize_analysis_flags;
-use verter_session_query::analysis::types::{
+use crate::analysis::types::deserialize_analysis_flags;
+use crate::analysis::types::is_false;
+use crate::analysis::types::serialize_analysis_flags;
+use crate::analysis::types::{
     AnalysisFlags, AnalyzedBinding, AnalyzedExportedFunction, AnalyzedImport, AnalyzedMacro,
     AnalyzedModuleReference, AnalyzedOptionsApi, CssVarManipulation, DomQueryKind,
     LocalDeclarationEntry, MacroTypeDep, NestedMacroCall, ScriptBindingOccurrence,
@@ -280,11 +280,11 @@ mod analyzed_macro_serde_tests {
     //! — discriminating because if the deserializer's `Wire` struct were
     //! to drop `#[serde(default)]` on the field, the test would fail with
     //! "missing field" error.
-    use std::sync::Arc;
-    use verter_session_query::analysis::types::{
+    use crate::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, MacroAnchor, MacroAnchorUnsupported, MacroEditAnchors,
         MemberListAnchor,
     };
+    use std::sync::Arc;
     use verter_span::Span;
     use verter_type_expr::locators::{
         AuthoredAnchor, LocatorSymbolSpace, MacroPayloadLocator, MacroPayloadPosition,

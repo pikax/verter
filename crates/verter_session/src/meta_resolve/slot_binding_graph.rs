@@ -23,8 +23,10 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedField, ExpansionDiagnostic, ExpansionExactness,
     ExpansionExecutionStatus, ExpansionStopReason,
 };
@@ -2041,7 +2043,7 @@ mod publish_order_tests {
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use rustc_hash::FxHashSet;
-    use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+    use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
     use verter_type_expr::facts::SemanticTypeSource;
     use verter_type_expr::TopLevelOwnerId;
 
@@ -2745,7 +2747,7 @@ mod synthesis_claim_tests {
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use std::sync::Arc;
-    use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+    use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
 
     const OWNER: &str = "/src/Comp.vue";
 

@@ -16,8 +16,10 @@
 //! authoritative source. This projector therefore returns
 //! `Vec::new()` when the macro lacks a `parsed_type_argument`.
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::ExpandedField;
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::ExpandedField;
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
 use crate::resolver_core::ResolverContext;

@@ -194,8 +194,10 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateElement;
+
     use verter_session_query::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, TypeResolutionSource,
     };

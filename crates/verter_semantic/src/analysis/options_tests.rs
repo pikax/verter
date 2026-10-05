@@ -1,7 +1,7 @@
 use crate::analysis::build_script_analysis;
-use crate::analysis::types::ScriptAnalysisSnapshot;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::AnalysisFlags;
 
 fn analyze(source: &str) -> ScriptAnalysisSnapshot {

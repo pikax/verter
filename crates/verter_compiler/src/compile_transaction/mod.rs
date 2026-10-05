@@ -40,8 +40,8 @@ use std::sync::Arc;
 
 use verter_identity::identity::InputBasisId;
 use verter_macro_dto::RuntimePropType;
-use verter_semantic::analysis::ScriptAnalysisSnapshot;
 use verter_semantic::type_info::{ImportedComponentResolution, ObservedMacroSurface};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::resolution::ResolutionBasis;
 
 pub use verter_session_query::resolution::ProjectIdentity;

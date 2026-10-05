@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
     NoFallthroughReason, PropAnalysis, ResolvedTypeAnalysis, RootReachability, SlotAnalysis,
     SlotBindingAnalysis,

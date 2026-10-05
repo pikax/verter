@@ -81,7 +81,7 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::script_snapshot::*;
     use verter_session_query::analysis::types::VueApiCallSite;
     use verter_span::Span;
 

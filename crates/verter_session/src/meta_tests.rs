@@ -4,7 +4,7 @@ use crate::types::HostConfig;
 use crate::VerterHost;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use verter_semantic::analysis::type_expand::ExpandedComponentTypes;
+use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
 use verter_session_query::facts::store_view::StoreView;
 use verter_type_expr::{LiteralValue, ObjectMember, PrimitiveName, TypeExpr, UnknownValue};
 
@@ -36,7 +36,7 @@ fn event_occurrence_publications(
 }
 
 fn replace_event_payload(
-    event: &mut verter_semantic::analysis::component_meta::EventAnalysis,
+    event: &mut verter_session_query::analysis::component_meta::EventAnalysis,
     payload: verter_type_expr::facts::SourcePosition,
 ) {
     event.payload = payload;
@@ -3061,7 +3061,7 @@ defineProps<P>()
     let meta = get_meta(&project, "/src/AcceptedMissing.vue");
     assert_eq!(
         meta.accepted_surface_completeness,
-        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound,
+        verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound,
         "a partial props resolution must demote the accepted-surface claim: \
          `Exact` says every accepted member is known, and the declared props \
          that would subtract from the accepted set are unknown"
@@ -3081,7 +3081,7 @@ defineProps<P>()
     let meta = get_meta(&project, "/src/AcceptedPropless.vue");
     assert_eq!(
         meta.accepted_surface_completeness,
-        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
         "a genuinely props-less component keeps the Exact accepted claim"
     );
 }
@@ -3751,7 +3751,7 @@ fn fallthrough_only_budget_partial_does_not_warm_component_meta_result_db() {
     assert!(
         matches!(
             meta1.accepted_surface_completeness,
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
         ),
         "the budget-tripped fallthrough surface is a lower bound"
     );
@@ -3863,7 +3863,7 @@ fn lower_bound_complete_fallthrough_surface_still_warms_component_meta_result_db
     assert!(
         matches!(
             meta1.accepted_surface_completeness,
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
         ),
         "the inexact union spread yields a lower-bound SURFACE (distinct from compute completeness)"
     );
@@ -3983,7 +3983,7 @@ fn lower_bound_complete_fallthrough_surface_still_warms_cached_meta_payload() {
     assert!(
         matches!(
             meta1.accepted_surface_completeness,
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound
         ),
         "the inexact union spread yields a lower-bound SURFACE (distinct from compute completeness)"
     );
@@ -8263,7 +8263,7 @@ defineSlots<OpenMappedSlots<T>>()
     assert!(
         matches!(
             evaluated.define_slots[0].result.execution_status,
-            verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed
+            verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed
         ),
         "the carrier-stopped slots payload must complete (not storm / trip a budget), got {:?}",
         evaluated.define_slots[0].result.execution_status
@@ -9960,15 +9960,15 @@ defineProps<Props<T>>()
 
     assert_eq!(
         value_key.execution_status,
-        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+        verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
     );
     assert!(
         matches!(
             value_key.exactness,
-            verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic,
+            verter_session_query::analysis::type_expand::ExpansionExactness::ExactSymbolic,
         ) || matches!(
             value_key.exactness,
-            verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete,
+            verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete,
         ),
         "valueKey should resolve without hanging, got {:?}",
         value_key.exactness
@@ -15529,7 +15529,7 @@ onMounted(() => {
             member.name == "$slots"
                 && matches!(
                     member.kind,
-                    verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
+                    verter_session_query::analysis::component_meta::PublicInstanceMemberKind::SlotContainer,
                 )
         }),
         "$slots should be tagged as a public-instance slot container"
@@ -21692,7 +21692,7 @@ defineProps<ButtonProps>()
 // Phase 3: Fallthrough inheritance resolver
 // ===========================================================================
 
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedEventKind, AcceptedPropKind, AcceptedSurfaceCompleteness, BranchStatus,
     FallthroughSurface, MemberAvailability, MemberProvenance, PartialBranchReason,
     ResolvedRootStep, UnresolvedBranchReason,
@@ -21705,7 +21705,7 @@ use verter_semantic::analysis::component_meta::{
 fn assert_no_degraded_props(
     host: &VerterHost,
     canonical: &str,
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) {
     for p in &meta.props {
         let Some(source) = p.publication.result().selected_source() else {
@@ -21725,7 +21725,7 @@ fn assert_no_degraded_props(
 fn get_meta(
     project: &Arc<MetaProject>,
     canonical_id: &str,
-) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     let session = project.open_session_batch().unwrap();
     session
         .get_component_meta(canonical_id)
@@ -22713,7 +22713,7 @@ fn static_is_global_component_name_is_a_component_target_not_a_native_tag() {
 
 /// Every root-chain step reachable from a resolved fallthrough surface.
 fn root_chain_steps(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Vec<ResolvedRootStep> {
     match &meta.fallthrough_surface {
         FallthroughSurface::Branches { branches } => branches
@@ -24120,7 +24120,7 @@ fn root_spread_with_cross_file_type_still_resolves_after_eval_caching() {
     // Regression test for Fix 3: when cached eval inputs are threaded through
     // to fallthrough resolution, root v-bind="importedObj" must still resolve
     // the spread keys correctly and not degrade to UnknownSpread.
-    use verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness;
+    use verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness;
 
     let project = make_project();
     project
@@ -24706,7 +24706,7 @@ defineProps<FinalType>()
 fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
     let types = ExpandedComponentTypes {
         props: vec![
-            verter_semantic::analysis::type_expand::ExpandedField::from_source_position(
+            verter_session_query::analysis::type_expand::ExpandedField::from_source_position(
                 "label".to_string(),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 verter_type_expr::facts::SourcePosition::Present(
@@ -24718,11 +24718,11 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
                 ),
                 None,
                 false,
-                verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete,
-                verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete,
+                verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 vec![
-                    verter_semantic::analysis::type_expand::ExpansionDiagnostic {
-                        reason: verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
+                    verter_session_query::analysis::type_expand::ExpansionDiagnostic {
+                        reason: verter_session_query::analysis::type_expand::ExpansionStopReason::BudgetExceeded,
                         context: "symbolic work limit reached".to_string(),
                         property_name: None,
                     },
@@ -24742,30 +24742,34 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
 
 #[test]
 fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
-    let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
-        props: vec![verter_semantic::analysis::component_meta::PropAnalysis {
-            name: "label".to_string(),
-            callable_role: verter_type_expr::PropCallableRole::default(),
-            publication: crate::test_only::type_publication_fixture(
-                verter_type_expr::facts::SourcePosition::Present(
-                    verter_type_expr::facts::SemanticTypeSource::Closed(
-                        verter_type_expr::facts::ClosedTypeFact::Leaf(
-                            verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
+    let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        props: vec![
+            verter_session_query::analysis::component_meta::PropAnalysis {
+                name: "label".to_string(),
+                callable_role: verter_type_expr::PropCallableRole::default(),
+                publication: crate::test_only::type_publication_fixture(
+                    verter_type_expr::facts::SourcePosition::Present(
+                        verter_type_expr::facts::SemanticTypeSource::Closed(
+                            verter_type_expr::facts::ClosedTypeFact::Leaf(
+                                verter_type_expr::facts::LeafTypeFact::Primitive(
+                                    PrimitiveName::String,
+                                ),
+                            ),
                         ),
                     ),
+                    verter_type_expr::ResolutionExactness::ExactConcrete,
+                    Some("string".to_string()),
+                    None,
                 ),
-                verter_type_expr::ResolutionExactness::ExactConcrete,
-                Some("string".to_string()),
-                None,
-            ),
-            type_expansion: None,
-            required: true,
-            has_default: false,
-            default_value: None,
-            description: None,
-            tags: Vec::new(),
-            declared_in_macro_type_arg: false,
-        }],
+                type_expansion: None,
+                required: true,
+                has_default: false,
+                default_value: None,
+                description: None,
+                tags: Vec::new(),
+                declared_in_macro_type_arg: false,
+            },
+        ],
         events: Vec::new(),
         slots: Vec::new(),
         models: Vec::new(),
@@ -24779,18 +24783,21 @@ fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
         bindings: Vec::new(),
         vue_api_calls: Vec::new(),
         styles: Vec::new(),
-        flags: verter_semantic::analysis::component_meta::ComponentMetaFlags::default(),
+        flags: verter_session_query::analysis::component_meta::ComponentMetaFlags::default(),
         root_reachability:
-            verter_semantic::analysis::component_meta::RootReachability::NoFallthrough {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            verter_session_query::analysis::component_meta::RootReachability::NoFallthrough {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             },
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
         accepted_surface_completeness:
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
-        fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::None {
-            reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
-        },
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface:
+            verter_session_query::analysis::component_meta::FallthroughSurface::None {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
         macro_expansion_diagnostics: Vec::new(),
         options_api: false,
         file_path: "/src/App.vue".to_string(),
@@ -28145,7 +28152,7 @@ defineExpose<PanelApi>()
         .expect("sidecar must carry the exposed member");
     assert_eq!(
         sidecar_open.kind,
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Exposed
     );
     assert_eq!(sidecar_open.description.as_deref(), Some("Open the panel."));
 }
@@ -28232,7 +28239,7 @@ defineExpose<LocalApi>()
         .expect("sidecar must carry the exposed member");
     assert_eq!(
         sidecar_focus.kind,
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Exposed
     );
     assert_eq!(
         sidecar_focus.description.as_deref(),
@@ -28412,7 +28419,7 @@ defineExpose<LocalApi>({
         .expect("sidecar must carry the type-argument-only exposed member");
     assert_eq!(
         sidecar_select_all.kind,
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Exposed
     );
     assert_eq!(
         sidecar_select_all.description.as_deref(),
@@ -28425,7 +28432,7 @@ defineExpose<LocalApi>({
         .expect("sidecar must carry the literal exposed member");
     assert_eq!(
         sidecar_focus.kind,
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Exposed
     );
 }
 
@@ -28557,7 +28564,7 @@ defineExpose<ImportedApi>({
         .expect("sidecar must carry the imported type-argument-only exposed member");
     assert_eq!(
         sidecar_select_all.kind,
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Exposed
     );
     assert_eq!(
         sidecar_select_all.description.as_deref(),
@@ -28570,7 +28577,7 @@ defineExpose<ImportedApi>({
         .expect("sidecar must carry the literal exposed member");
     assert_eq!(
         sidecar_focus.kind,
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Exposed
     );
 }
 
@@ -29230,8 +29237,9 @@ defineEmits<{ first: [id: number]; dup: [a: string]; dup: [b: boolean]; last: []
 
 /// A blank analysis carrier for the synthetic lane tests: every lane empty,
 /// no template, `Exact` accepted surface.
-fn blank_output_analysis() -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
-    use verter_semantic::analysis::component_meta as cm;
+fn blank_output_analysis() -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis
+{
+    use verter_session_query::analysis::component_meta as cm;
     cm::ComponentMetaAnalysis {
         props: Vec::new(),
         events: Vec::new(),
@@ -29657,7 +29665,7 @@ const cond = true
     );
 
     // ── Lanes 10-11: MULTIPLE fallthrough branches, per-branch rows. ──
-    let verter_semantic::analysis::component_meta::FallthroughSurface::Branches { branches } =
+    let verter_session_query::analysis::component_meta::FallthroughSurface::Branches { branches } =
         &analysis.fallthrough_surface
     else {
         panic!("fixture premise: v-if/v-else roots produce fallthrough branches");
@@ -29977,7 +29985,7 @@ fn with_resolution_cold_resolve_is_pinned_to_the_captured_store_view() {
 /// (The registry lane is structurally excluded: its source is non-optional.)
 #[test]
 fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     let project = make_project();
     project
         .upsert_base("/App.vue", "<template><div /></template>")
@@ -30163,7 +30171,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
 /// members. The whole request stays `Ok`.
 #[test]
 fn component_meta_output_exposed_unraisable_source_degrades_per_member() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     let project = make_project();
     project
         .upsert_base("/App.vue", "<template><div /></template>")
@@ -30243,7 +30251,7 @@ fn component_meta_output_exposed_unraisable_source_degrades_per_member() {
 /// fails the whole output; the per-member degrade does not swallow it.
 #[test]
 fn component_meta_output_exposed_required_source_unavailable_still_fails_closed() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     let project = make_project();
     project
         .upsert_base("/App.vue", "<template><div /></template>")
@@ -30307,13 +30315,12 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
 
     // Nested lane 1: slot bindings (outer = slot index, inner = binding row).
     let mut analysis = blank_output_analysis();
-    analysis
-        .slots
-        .push(verter_semantic::analysis::component_meta::SlotAnalysis {
+    analysis.slots.push(
+        verter_session_query::analysis::component_meta::SlotAnalysis {
             name: "s".to_string(),
             is_scoped: true,
             bindings: vec![
-                verter_semantic::analysis::component_meta::SlotBindingAnalysis {
+                verter_session_query::analysis::component_meta::SlotBindingAnalysis {
                     name: "ok".to_string(),
                     publication: crate::test_only::type_publication_fixture(
                         verter_type_expr::facts::SourcePosition::unannotated(),
@@ -30323,7 +30330,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
                     ),
                     type_expansion: None,
                 },
-                verter_semantic::analysis::component_meta::SlotBindingAnalysis {
+                verter_session_query::analysis::component_meta::SlotBindingAnalysis {
                     name: "bad".to_string(),
                     publication: crate::test_only::type_publication_fixture(
                         verter_type_expr::facts::SourcePosition::Present(bad_source.clone()),
@@ -30341,7 +30348,8 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
             description: None,
             tags: Vec::new(),
             declared_in_macro_type_arg: true,
-        });
+        },
+    );
 
     let fixture_dispatch_16 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let err = crate::meta_resolve::projectors::build_component_meta_output(
@@ -30371,21 +30379,21 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
     // Nested lane 2: fallthrough props (outer = branch, inner = row).
     let mut analysis = blank_output_analysis();
     analysis.fallthrough_surface =
-        verter_semantic::analysis::component_meta::FallthroughSurface::Branches {
+        verter_session_query::analysis::component_meta::FallthroughSurface::Branches {
             branches: vec![
-                verter_semantic::analysis::component_meta::FallthroughBranch {
+                verter_session_query::analysis::component_meta::FallthroughBranch {
                     branch_key: "0".to_string(),
                     condition_text: None,
                     props: Vec::new(),
                     events: Vec::new(),
                     root_chain: Vec::new(),
-                    status: verter_semantic::analysis::component_meta::BranchStatus::Resolved,
+                    status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
                 },
-                verter_semantic::analysis::component_meta::FallthroughBranch {
+                verter_session_query::analysis::component_meta::FallthroughBranch {
                     branch_key: "1".to_string(),
                     condition_text: None,
                     props: vec![
-                        verter_semantic::analysis::component_meta::FallthroughPropEntry {
+                        verter_session_query::analysis::component_meta::FallthroughPropEntry {
                             name: "bad".to_string(),
                             callable_role: verter_type_expr::PropCallableRole::default(),
                             publication: crate::test_only::type_publication_fixture(
@@ -30402,7 +30410,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
                     ],
                     events: Vec::new(),
                     root_chain: Vec::new(),
-                    status: verter_semantic::analysis::component_meta::BranchStatus::Resolved,
+                    status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
                 },
             ],
         };
@@ -30439,9 +30447,8 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
 
     let dep_source = authored_decl_body_source("/dep.ts", "DepType");
     let mut analysis = blank_output_analysis();
-    analysis
-        .props
-        .push(verter_semantic::analysis::component_meta::PropAnalysis {
+    analysis.props.push(
+        verter_session_query::analysis::component_meta::PropAnalysis {
             name: "p".to_string(),
             callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
@@ -30457,7 +30464,8 @@ fn component_meta_output_recovers_after_missing_dependency_is_available() {
             description: None,
             tags: Vec::new(),
             declared_in_macro_type_arg: false,
-        });
+        },
+    );
 
     let fixture_dispatch_17 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let err = crate::meta_resolve::projectors::build_component_meta_output(
@@ -30514,9 +30522,8 @@ fn build_output_with_prop_source(
 ) -> Result<crate::meta_resolve::ComponentMetaOutput, crate::meta_resolve::ComponentMetaOutputError>
 {
     let mut analysis = blank_output_analysis();
-    analysis
-        .props
-        .push(verter_semantic::analysis::component_meta::PropAnalysis {
+    analysis.props.push(
+        verter_session_query::analysis::component_meta::PropAnalysis {
             name: "p".to_string(),
             callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
@@ -30532,7 +30539,8 @@ fn build_output_with_prop_source(
             description: None,
             tags: Vec::new(),
             declared_in_macro_type_arg: false,
-        });
+        },
+    );
 
     let fixture_dispatch_18 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     crate::meta_resolve::projectors::build_component_meta_output(
@@ -31123,7 +31131,7 @@ fn warm_output_materializes_under_the_validated_capture_not_a_fresh_view() {
     /// the declaration under the request view (view-dependent, unlike the
     /// closed leaf carriers the prop lanes publish).
     fn sentinel_registry_member(
-        analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+        analysis: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
         lanes: &crate::meta_resolve::MaterializedComponentMetaTypeLanes,
     ) -> TypeExpr {
         let idx = analysis
@@ -31367,7 +31375,7 @@ defineEmits<{ e: [n: number] }>()
 /// materialize `ParentTerminal` and the child-identity asserts fail RED.
 #[test]
 fn cross_owner_nested_scope_relative_ref_raises_under_producing_scope() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     use verter_type_expr::facts::{FactOrLocator, LeafTypeFact, ResolvedLocalShape};
 
     let project = make_project();
@@ -31540,9 +31548,8 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
     let distinct = closed_ref_source("DistinctAlias");
     let mut analysis = blank_output_analysis();
     for name in ["a", "b"] {
-        analysis
-            .props
-            .push(verter_semantic::analysis::component_meta::PropAnalysis {
+        analysis.props.push(
+            verter_session_query::analysis::component_meta::PropAnalysis {
                 name: name.to_string(),
                 callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
@@ -31558,11 +31565,11 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
                 description: None,
                 tags: Vec::new(),
                 declared_in_macro_type_arg: false,
-            });
+            },
+        );
     }
-    analysis
-        .events
-        .push(verter_semantic::analysis::component_meta::EventAnalysis {
+    analysis.events.push(
+        verter_session_query::analysis::component_meta::EventAnalysis {
             name: "e".to_string(),
             payload: verter_type_expr::facts::SourcePosition::Present(shared.clone()),
             publication: crate::test_only::type_publication_fixture(
@@ -31577,9 +31584,10 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
             raw_signature: None,
             description: None,
             tags: Vec::new(),
-        });
+        },
+    );
     analysis.accepted_props.push(
-        verter_semantic::analysis::component_meta::AcceptedPropAnalysis {
+        verter_session_query::analysis::component_meta::AcceptedPropAnalysis {
             name: "ap".to_string(),
             callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
@@ -31590,9 +31598,10 @@ fn output_materialization_dedupes_repeated_sources_across_lanes() {
             ),
             type_source_scope: None,
             required: false,
-            provenance: verter_semantic::analysis::component_meta::MemberProvenance::Declared,
-            availability: verter_semantic::analysis::component_meta::MemberAvailability::Always,
-            kind: verter_semantic::analysis::component_meta::AcceptedPropKind::DeclaredProp,
+            provenance: verter_session_query::analysis::component_meta::MemberProvenance::Declared,
+            availability:
+                verter_session_query::analysis::component_meta::MemberAvailability::Always,
+            kind: verter_session_query::analysis::component_meta::AcceptedPropKind::DeclaredProp,
         },
     );
 
@@ -31672,9 +31681,8 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
     let mut analysis = blank_output_analysis();
     for i in 0..LANES {
         let source = if i < LANES / 2 { &large } else { &distinct };
-        analysis
-            .props
-            .push(verter_semantic::analysis::component_meta::PropAnalysis {
+        analysis.props.push(
+            verter_session_query::analysis::component_meta::PropAnalysis {
                 name: format!("p{i}"),
                 callable_role: verter_type_expr::PropCallableRole::default(),
                 publication: crate::test_only::type_publication_fixture(
@@ -31690,7 +31698,8 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
                 description: None,
                 tags: Vec::new(),
                 declared_in_macro_type_arg: false,
-            });
+            },
+        );
     }
 
     let fixture_dispatch_21 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
@@ -31735,7 +31744,7 @@ fn output_memo_hash_work_is_one_traversal_per_lane_slot() {
 /// S)`, the scope asserts fail RED, and the memo probe materializes TWICE.
 #[test]
 fn closed_inherited_sources_share_one_output_memo_entry_across_children() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
 
     let project = make_project();
     project
@@ -31886,7 +31895,7 @@ fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
     let mut analysis = blank_output_analysis();
     for name in ["Alpha", "Beta"] {
         analysis.type_registry.push(
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+            verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
                 name: name.to_string(),
                 type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref_source(
                     name,
@@ -31897,14 +31906,14 @@ fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
     }
     let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed {
         resolved_type_registry: vec![
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+            verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Alpha".to_string(),
                 type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref_source(
                     "ResolvedAlpha",
                 )),
                 type_expansion: None,
             },
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+            verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Gamma".to_string(),
                 type_source: verter_type_expr::facts::SourcePosition::Present(closed_ref_source(
                     "ResolvedGamma",

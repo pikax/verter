@@ -1,7 +1,8 @@
 use super::*;
 use crate::provider::ActionContext;
 use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
-use verter_semantic::analysis::template::*;
+use verter_session_query::analysis::template::TemplateDirective;
+use verter_session_query::analysis::template::VForDirective;
 use verter_session_query::analysis::types::AnalyzedBinding;
 use verter_session_query::analysis::types::AnalyzedBindingKind;
 use verter_session_query::analysis::types::AnalyzedImport;

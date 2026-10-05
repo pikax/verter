@@ -307,7 +307,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             styles: (vec![css]).into(),
             template: Some(
-                (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                     elements: vec![el],
                     ..Default::default()
                 })
@@ -340,7 +340,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             styles: (vec![css]).into(),
             template: Some(
-                (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                     elements: vec![el],
                     ..Default::default()
                 })
@@ -368,27 +368,29 @@ mod tests {
         tag: &str,
         classes: &[&str],
         _id: Option<&str>,
-    ) -> verter_semantic::analysis::TemplateElement {
+    ) -> verter_session_query::analysis::template::TemplateElement {
         let mut attrs = Vec::new();
         if !classes.is_empty() {
             let class_val = classes.join(" ");
             let pattern = format!("class=\"{}\"", class_val);
             let start = source.find(&pattern).unwrap_or(0) as u32;
             let end = start + pattern.len() as u32;
-            attrs.push(verter_semantic::analysis::TemplateAttribute {
-                name: "class".into(),
-                value: Some(class_val),
-                is_dynamic: false,
-                span: verter_span::Span::new(start, end),
-                name_end: 0,
-                value_span: None,
-            });
+            attrs.push(
+                verter_session_query::analysis::template::TemplateAttribute {
+                    name: "class".into(),
+                    value: Some(class_val),
+                    is_dynamic: false,
+                    span: verter_span::Span::new(start, end),
+                    name_end: 0,
+                    value_span: None,
+                },
+            );
         }
-        verter_semantic::analysis::TemplateElement {
+        verter_session_query::analysis::template::TemplateElement {
             tag: tag.into(),
             is_component: false,
             is_self_closing: false,
-            namespace: verter_semantic::analysis::ElementNamespace::Html,
+            namespace: verter_session_query::analysis::template::ElementNamespace::Html,
             attributes: attrs,
             directives: vec![],
             v_for: None,
@@ -416,7 +418,7 @@ mod tests {
     fn build_style(
         source: &str,
         blocks: &[CarrierBlockView],
-    ) -> verter_semantic::analysis::StyleBlockAnalysis {
+    ) -> verter_session_query::analysis::style::StyleBlockAnalysis {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         let (content_start, content_end) = style_block.content_range();
         let css_content = &source[content_start as usize..content_end as usize];
@@ -483,20 +485,21 @@ mod tests {
         let id_pattern = "id=\"app\"";
         let id_start = source.find(id_pattern).unwrap_or(0) as u32;
         let id_end = id_start + id_pattern.len() as u32;
-        el.attributes
-            .push(verter_semantic::analysis::TemplateAttribute {
+        el.attributes.push(
+            verter_session_query::analysis::template::TemplateAttribute {
                 name: "id".into(),
                 value: Some("app".into()),
                 is_dynamic: false,
                 span: verter_span::Span::new(id_start, id_end),
                 name_end: 0,
                 value_span: None,
-            });
+            },
+        );
 
         let analysis = FileAnalysisSnapshot {
             styles: (vec![css]).into(),
             template: Some(
-                (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                     elements: vec![el],
                     ..Default::default()
                 })
@@ -530,7 +533,7 @@ mod tests {
         let analysis = FileAnalysisSnapshot {
             styles: (vec![css]).into(),
             template: Some(
-                (verter_semantic::analysis::TemplateAnalysisSnapshot {
+                (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                     elements: vec![el],
                     ..Default::default()
                 })

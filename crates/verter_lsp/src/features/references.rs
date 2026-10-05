@@ -248,7 +248,7 @@ fn css_references_at_position(
 pub(crate) fn markup_class_token_at(
     offset: usize,
     analysis: &FileAnalysisSnapshot,
-) -> Option<&verter_semantic::analysis::MarkupClassToken> {
+) -> Option<&verter_session_query::analysis::template::MarkupClassToken> {
     analysis
         .markup_class_tokens
         .iter()
@@ -320,7 +320,7 @@ pub(crate) fn collect_css_ref_spans(
 pub(crate) fn collect_template_css_ref_spans(
     target: &CssRefTarget,
     source: &str,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
 ) -> Vec<(u32, u32)> {
     let mut spans = Vec::new();
     {
@@ -440,7 +440,7 @@ pub(crate) fn collect_template_css_ref_spans(
 pub(crate) fn find_css_target_in_template_refs(
     offset: usize,
     source: &str,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<CssRefTarget> {
     find_css_target_in_template_refs_with_element(offset, source, template).map(|(t, _)| t)
 }
@@ -450,7 +450,7 @@ pub(crate) fn find_css_target_in_template_refs(
 pub(crate) fn find_css_target_in_template_refs_with_element(
     offset: usize,
     source: &str,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
 ) -> Option<(CssRefTarget, usize)> {
     for (element_idx, element) in template.elements.iter().enumerate() {
         for attr in &element.attributes {
@@ -618,6 +618,10 @@ mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
     use verter_semantic::analysis::*;
+    use verter_session_query::analysis::template::ElementNamespace;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateAttribute;
+    use verter_session_query::analysis::template::TemplateElement;
     use verter_session_query::analysis::types::AnalyzedBinding;
     use verter_session_query::analysis::types::AnalyzedBindingKind;
     use verter_session_query::analysis::types::AnalyzedImport;
@@ -746,26 +750,29 @@ mod tests {
         let line_index = LineIndex::new_utf16(source);
 
         let class_attr_start = source.find("class=\"btn\"").unwrap() as u32;
-        let mut template = verter_semantic::analysis::template::TemplateAnalysisSnapshot::default();
+        let mut template =
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot::default();
         template
             .elements
-            .push(verter_semantic::analysis::template::TemplateElement {
+            .push(verter_session_query::analysis::template::TemplateElement {
                 tag: "div".to_string(),
                 span: verter_span::Span::new(
                     source.find("<div").unwrap() as u32,
                     source.find("</div>").unwrap() as u32 + 6,
                 ),
-                attributes: vec![verter_semantic::analysis::template::TemplateAttribute {
-                    name: "class".to_string(),
-                    value: Some("btn".to_string()),
-                    is_dynamic: false,
-                    span: verter_span::Span::new(class_attr_start, class_attr_start + 11),
-                    name_end: class_attr_start + 5,
-                    value_span: Some(verter_span::Span::new(
-                        class_attr_start + 7,
-                        class_attr_start + 10,
-                    )),
-                }],
+                attributes: vec![
+                    verter_session_query::analysis::template::TemplateAttribute {
+                        name: "class".to_string(),
+                        value: Some("btn".to_string()),
+                        is_dynamic: false,
+                        span: verter_span::Span::new(class_attr_start, class_attr_start + 11),
+                        name_end: class_attr_start + 5,
+                        value_span: Some(verter_span::Span::new(
+                            class_attr_start + 7,
+                            class_attr_start + 10,
+                        )),
+                    },
+                ],
                 ..Default::default()
             });
         let analysis = FileAnalysisSnapshot {
@@ -918,7 +925,7 @@ mod tests {
     fn build_style(
         source: &str,
         blocks: &[CarrierBlockView],
-    ) -> verter_semantic::analysis::StyleBlockAnalysis {
+    ) -> verter_session_query::analysis::style::StyleBlockAnalysis {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         let (content_start, content_end) = style_block.content_range();
         let css_content = &source[content_start as usize..content_end as usize];

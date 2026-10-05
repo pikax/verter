@@ -1861,7 +1861,7 @@ impl VerterHost {
     fn source_bound_file_analysis_snapshot(
         parse: &crate::ParseSnapshot,
         export_signatures: Arc<Vec<verter_session_query::analysis::types::ExportSignature>>,
-        template: Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>>,
+        template: Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>>,
     ) -> crate::types::FileAnalysisSnapshot {
         let sa = parse.script_analysis.as_ref();
         crate::types::FileAnalysisSnapshot {

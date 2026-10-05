@@ -23,8 +23,8 @@ use verter_macro_dto::{
     TscScriptOwner, TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason,
     UnsupportedReason,
 };
-use verter_semantic::analysis::component_meta::MacroExpansionKind;
-use verter_semantic::analysis::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::component_meta::MacroExpansionKind;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 use verter_session_query::analysis::types::{
     AnalyzedMacro, AnalyzedMacroKind, LocalDeclarationKind,
 };

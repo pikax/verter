@@ -94,7 +94,7 @@ pub(super) fn is_direct_local_macro_type_reference(
 }
 
 fn macro_has_authoritative_evaluated_surface(
-    evaluated: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_kind: AnalyzedMacroKind,
     macro_index: usize,
 ) -> bool {
@@ -130,7 +130,7 @@ fn macro_has_authoritative_evaluated_surface(
 
 pub(super) fn macro_has_authoritative_owner_surface(
     mac: &AnalyzedMacro,
-    evaluated: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
 ) -> bool {
     if macro_has_authoritative_evaluated_surface(evaluated, mac.kind, macro_index) {

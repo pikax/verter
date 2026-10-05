@@ -243,7 +243,7 @@ impl VerterLanguageServer {
     pub(super) fn component_import_binding_name(
         &self,
         analysis: &verter_session::FileAnalysisSnapshot,
-        component: &verter_semantic::analysis::template::TemplateComponentUsage,
+        component: &verter_session_query::analysis::template::TemplateComponentUsage,
     ) -> Option<String> {
         let import_source = component.import_source.as_ref()?;
         let import = analysis
@@ -266,7 +266,7 @@ impl VerterLanguageServer {
         &self,
         parent_uri: &Uri,
         parent_analysis: &verter_session::FileAnalysisSnapshot,
-        component: &verter_semantic::analysis::template::TemplateComponentUsage,
+        component: &verter_session_query::analysis::template::TemplateComponentUsage,
     ) -> Option<ResolvedComponentDocument> {
         let import_source = component.import_source.as_ref()?;
         let binding_name = self.component_import_binding_name(parent_analysis, component);

@@ -61,7 +61,7 @@ fn workspace_project(files: &[(&str, &str)]) -> Arc<MetaProject> {
 fn prop_type(
     host: &verter_session::VerterHost,
     owner: &str,
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) -> TypeExpr {
     let source = meta

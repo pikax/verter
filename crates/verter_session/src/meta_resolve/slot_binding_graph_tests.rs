@@ -38,8 +38,8 @@ use std::sync::Arc;
 #[cfg(feature = "external-corpus")]
 use std::time::Instant;
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
-use verter_semantic::analysis::type_expand::ExpansionExactness;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::type_expand::ExpansionExactness;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
 use crate::audited_request::AuditedRequest;
@@ -90,7 +90,7 @@ fn slot_binding<'a>(
     meta: &'a ComponentMetaAnalysis,
     slot: &str,
     binding: &str,
-) -> Option<&'a verter_semantic::analysis::component_meta::SlotBindingAnalysis> {
+) -> Option<&'a verter_session_query::analysis::component_meta::SlotBindingAnalysis> {
     meta.slots
         .iter()
         .find(|s| s.name == slot)?
@@ -104,7 +104,7 @@ fn slot_binding<'a>(
 fn shallow_binding_type(
     host: &VerterHost,
     owner: &str,
-    binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
+    binding: &verter_session_query::analysis::component_meta::SlotBindingAnalysis,
 ) -> TypeExpr {
     crate::test_only::semantic_source_probe::shallow_type_expr(
         host,
@@ -130,7 +130,7 @@ fn shallow_binding_type(
 fn demand_binding_type(
     host: &VerterHost,
     owner: &str,
-    binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
+    binding: &verter_session_query::analysis::component_meta::SlotBindingAnalysis,
 ) -> TypeExpr {
     crate::test_only::semantic_source_probe::demand_type_expr(
         host,
@@ -2093,7 +2093,7 @@ defineSlots<Slots>()
         envelope.diagnostics.iter().any(|d| {
             matches!(
                 d.reason,
-                verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded
+                verter_session_query::analysis::type_expand::ExpansionStopReason::BudgetExceeded
             )
         })
     });
@@ -2353,7 +2353,7 @@ defineSlots<Slots>()
 // `verter::dispatch::walk` target.
 #[test]
 fn walker_warn_event_on_cap_fire() {
-    use verter_semantic::analysis::type_expand::ExpansionStopReason;
+    use verter_session_query::analysis::type_expand::ExpansionStopReason;
 
     let mut config = HostConfig::default();
     // Override the production 10_000-node cap with a small value so a

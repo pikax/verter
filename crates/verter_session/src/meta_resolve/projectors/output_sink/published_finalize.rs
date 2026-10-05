@@ -33,7 +33,7 @@ use crate::semantic_query::ProjectionMode;
 pub(crate) fn reduce_published_field_types(
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
-    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    evaluated_types: &mut verter_session_query::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
     verter_audit::attribute_scope!(PublishFieldTypes);

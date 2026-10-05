@@ -945,7 +945,9 @@ fn build_svelte_snapshot_from_eval_source(
         parse_diagnostics: owner_error.map_or_else(DiagnosticsSnapshot::default, |error| {
             DiagnosticsSnapshot::from_vec(vec![script_owner_index_diagnostic(error, source)])
         }),
-        script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
+        script_analysis: Arc::new(
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default(),
+        ),
         export_signatures: Vec::new(),
         style_analyses: Vec::new(),
         prepared_styles: Vec::new(),
@@ -1094,7 +1096,7 @@ fn build_svelte_snapshot_from_eval_source(
 pub(crate) fn collect_svelte_markup_class_tokens(
     source: &str,
     nodes: &[verter_compiler::svelte::parser::SvelteNode],
-) -> Vec<verter_semantic::analysis::MarkupClassToken> {
+) -> Vec<verter_session_query::analysis::template::MarkupClassToken> {
     use verter_compiler::svelte::parser::{
         SvelteAttributeKind, SvelteAttributeValue, SvelteDirectiveKind, SvelteNode,
     };
@@ -1102,7 +1104,7 @@ pub(crate) fn collect_svelte_markup_class_tokens(
     fn walk(
         source: &str,
         nodes: &[SvelteNode],
-        out: &mut Vec<verter_semantic::analysis::MarkupClassToken>,
+        out: &mut Vec<verter_session_query::analysis::template::MarkupClassToken>,
     ) {
         for node in nodes {
             match node {
@@ -1131,7 +1133,7 @@ pub(crate) fn collect_svelte_markup_class_tokens(
                                     while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
                                         i += 1;
                                     }
-                                    out.push(verter_semantic::analysis::MarkupClassToken {
+                                    out.push(verter_session_query::analysis::template::MarkupClassToken {
                                         name: text[start..i].to_string(),
                                         span: verter_span::Span::new(
                                             value_span.start + start as u32,
@@ -1154,7 +1156,7 @@ pub(crate) fn collect_svelte_markup_class_tokens(
                                 if source.get(start as usize..end as usize)
                                     == Some(dir.local.as_str())
                                 {
-                                    out.push(verter_semantic::analysis::MarkupClassToken {
+                                    out.push(verter_session_query::analysis::template::MarkupClassToken {
                                         name: dir.local.clone(),
                                         span: verter_span::Span::new(start, end),
                                         from_directive: true,
@@ -1726,9 +1728,9 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         }
         VueScriptProgram::SharedFatal => VueScriptOutputs {
             export_signatures: Vec::new(),
-            script_analysis: analysis_scope
-                .needs_script_analysis()
-                .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            script_analysis: analysis_scope.needs_script_analysis().then(
+                verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default,
+            ),
             panic_diags: Vec::new(),
             refused: None,
         },
@@ -1859,7 +1861,7 @@ fn build_preprocessor_requests(
 /// served snapshots keep sharing the stored `Arc` unchanged.
 pub(crate) fn attach_style_block_tokens(
     structure: &crate::carrier_publication_store::RegisteredFileStructure,
-    styles: &mut [verter_semantic::analysis::StyleBlockAnalysis],
+    styles: &mut [verter_session_query::analysis::style::StyleBlockAnalysis],
 ) {
     let inventory = structure.inventory();
     for style in styles.iter_mut() {
@@ -1887,7 +1889,7 @@ fn build_style_analyses_from_inventory(
     canonical_id: &str,
     vue_style_semantics: bool,
 ) -> (
-    Vec<verter_semantic::analysis::StyleBlockAnalysis>,
+    Vec<verter_session_query::analysis::style::StyleBlockAnalysis>,
     Vec<Option<verter_compiler::style_planner::PreparedStyleIr>>,
 ) {
     use verter_language::parse_artifact::carrier_inventory::{
@@ -1926,8 +1928,9 @@ fn build_style_analyses_from_inventory(
     fn analysis_lang(
         dialect: &StyleDialect,
         authored: Option<&str>,
-    ) -> verter_semantic::analysis::StyleAnalysisLang {
-        use verter_semantic::analysis::{StyleAnalysisLang, StyleLangDialect};
+    ) -> verter_session_query::analysis::style::StyleAnalysisLang {
+        use verter_semantic::analysis::StyleLangDialect;
+        use verter_session_query::analysis::style::StyleAnalysisLang;
         match authored {
             None => match dialect {
                 StyleDialect::Css => StyleAnalysisLang::Css,
@@ -2141,7 +2144,8 @@ fn vue_oxc_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
 struct VueScriptOutputs {
     export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
     /// `None` when the caller did not request script analysis.
-    script_analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot>,
+    script_analysis:
+        Option<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
     /// Panic diagnostics in production order: parse, export walk,
     /// analysis walk.
     panic_diags: Vec<HostDiagnostic>,
@@ -2206,7 +2210,7 @@ fn vue_script_walks_from_program(
     .unwrap_or_else(|refused| VueScriptOutputs {
         export_signatures: Vec::new(),
         script_analysis: needs_script_analysis
-            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            .then(verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default),
         panic_diags: Vec::new(),
         refused: Some(refused),
     })
@@ -2224,7 +2228,7 @@ fn vue_script_walks_under_lease(
     let mut outputs = VueScriptOutputs {
         export_signatures: Vec::new(),
         script_analysis: needs_script_analysis
-            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            .then(verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default),
         panic_diags: Vec::new(),
         refused: None,
     };
@@ -2291,8 +2295,9 @@ fn vue_script_walks_for_sfc(
         ),
         Err(error) => VueScriptOutputs {
             export_signatures: Vec::new(),
-            script_analysis: needs_script_analysis
-                .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            script_analysis: needs_script_analysis.then(
+                verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default,
+            ),
             panic_diags: vec![script_owner_index_diagnostic(&error, script_source)],
             refused: None,
         },
@@ -2329,7 +2334,7 @@ fn build_vue_script_outputs(
     let mut outputs = VueScriptOutputs {
         export_signatures: Vec::new(),
         script_analysis: needs_script_analysis
-            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            .then(verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default),
         panic_diags: Vec::new(),
         refused: None,
     };
@@ -2392,7 +2397,7 @@ fn build_vue_script_outputs(
 pub(crate) fn build_script_analysis_from_source(
     source: &str,
     provenance: &crate::meta_provenance::MetaProvenance,
-) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     // On-demand Vue re-parse routes through the Vue carrier producer (the
     // counted chokepoint) so the artifact stays the one post-parse
     // representation.
@@ -2406,7 +2411,7 @@ pub(crate) fn build_script_analysis_from_parsed(
     source: &str,
     eval_source: &str,
     provenance: &crate::meta_provenance::MetaProvenance,
-) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
+) -> Option<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot> {
     let outputs = build_vue_script_outputs(
         parsed,
         source,
@@ -2434,7 +2439,7 @@ pub(crate) fn build_style_analyses_from_source(
     source: &str,
     canonical_id: &str,
     provenance: &crate::meta_provenance::MetaProvenance,
-) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+) -> Vec<verter_session_query::analysis::style::StyleBlockAnalysis> {
     // On-demand Vue re-parse routes through the Vue carrier producer (the
     // counted chokepoint) so the artifact stays the one post-parse
     // representation.
@@ -2450,7 +2455,7 @@ pub(crate) fn build_script_analysis_for_artifact(
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     source: &str,
     provenance: &crate::meta_provenance::MetaProvenance,
-) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
+) -> Option<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot> {
     let artifact = framework_parse?;
     let eval_source = catalog_eval_source(artifact, source)?;
     let parsed = crate::typeinfo::adapters::vue::vue_parse(artifact)?;
@@ -2464,7 +2469,7 @@ pub(crate) fn build_style_analyses_for_artifact(
     source: &str,
     canonical_id: &str,
     _provenance: &crate::meta_provenance::MetaProvenance,
-) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+) -> Vec<verter_session_query::analysis::style::StyleBlockAnalysis> {
     framework_parse.map_or_else(Vec::new, |artifact| {
         build_style_analyses_from_inventory(
             artifact.inventory(),
@@ -2625,7 +2630,9 @@ fn fatal_script_snapshot(
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
+        script_analysis: Arc::new(
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default(),
+        ),
         export_signatures: Vec::new(),
         style_analyses: Vec::new(),
         prepared_styles: Vec::new(),
@@ -3845,7 +3852,7 @@ watch(count, (value, oldValue) => {
         let style = &snap.style_analyses[0];
         assert_eq!(
             style.lang,
-            verter_semantic::analysis::StyleAnalysisLang::Scss
+            verter_session_query::analysis::style::StyleAnalysisLang::Scss
         );
         let css = style
             .css
@@ -4010,7 +4017,7 @@ watch(count, (value, oldValue) => {
         let global = style
             .special_pseudos
             .iter()
-            .find(|p| p.kind == verter_semantic::analysis::SpecialPseudoKind::Global)
+            .find(|p| p.kind == verter_session_query::analysis::style::SpecialPseudoKind::Global)
             .expect(":global recorded");
         assert_eq!(
             &source[global.start as usize..global.end as usize],
@@ -4232,7 +4239,7 @@ onMounted(() => { console.log('mounted') })
             .expect("catalog hit must analyse the script");
         assert_ne!(
             hit,
-            verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default(),
             "catalog hit must not be an empty snapshot (so miss-None is distinct from empty success)"
         );
         assert!(

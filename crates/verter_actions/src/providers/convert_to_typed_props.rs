@@ -105,7 +105,7 @@ mod tests {
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
     };
     use verter_semantic::analysis::build_script_analysis;
-    use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
     use verter_session_query::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, TypeResolutionSource,
     };

@@ -4265,8 +4265,8 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     };
     let owner_whole_hash = [0xCDu8; 16];
     let gen0 = store.current_project_generation();
-    let analysis: verter_semantic::analysis::component_meta::ComponentMetaAnalysis = {
-        use verter_semantic::analysis::component_meta::{
+    let analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis = {
+        use verter_session_query::analysis::component_meta::{
             AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags,
             FallthroughSurface, NoFallthroughReason, RootReachability,
         };

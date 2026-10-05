@@ -8,9 +8,8 @@
 
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
-use verter_semantic::analysis::{
-    build_script_analysis_with_scope, AnalysisScope, ScriptAnalysisSnapshot,
-};
+use verter_semantic::analysis::{build_script_analysis_with_scope, AnalysisScope};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
 
 use crate::documents::carrier_structure::test_carrier_blocks;
 

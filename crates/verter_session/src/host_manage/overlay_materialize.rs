@@ -969,7 +969,7 @@ impl VerterHost {
             verter_session_query::analysis::types::AnalysisFlags::DECLARES_INTERFACE_APP_CONFIG,
         );
         let script_analysis = Some(Arc::new(
-            verter_semantic::analysis::ScriptAnalysisSnapshot {
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
                 imports: snapshot.imports.clone(),
                 module_references: snapshot.module_references.as_ref().clone(),
                 bindings: snapshot.bindings.clone(),
