@@ -33,33 +33,13 @@ use verter_session_query::analysis::type_expand::{
 use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
+use crate::project_semantic_dispatch::symbolic_root::{
+    emit_slot_binding_graph_dispatch_facts, slot_param_root_is_symbolic_only,
+};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::component_meta::ResolvedMacroMeta;
 use crate::resolver_core::component_meta_query_engine::ComponentMetaQueryEngine;
 use crate::resolver_core::ResolverContext;
-
-/// Fact-tracer emission helper for dispatch reads in this file.
-///
-/// The slot-binding-graph traversal has no result cache of its own, so its
-/// dispatch reads contribute evidence directly to the request-level tracer
-/// that owns the reusable component-meta signature. The local counter lets
-/// behavioral tests prove this traversal contributed evidence.
-fn emit_slot_binding_graph_dispatch_facts<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-    sig: &crate::semantic_query::DepSignature,
-) {
-    use std::sync::atomic::Ordering::Relaxed;
-    if !sig.is_empty() {
-        crate::request_observers::record_dep_signature_merge();
-    }
-
-    let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
-    crate::fact_signature_helpers::observe_fact_signature(&bridged);
-    if let Some(prov) = dispatch.graph().provenance() {
-        prov.slot_binding_graph_fact_tracer_emissions
-            .fetch_add(1, Relaxed);
-    }
-}
 use crate::semantic_query::{
     DeclIdentity, DepSignature, DepVersion, PathSegment, ProjectionMode, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
@@ -141,12 +121,12 @@ pub(crate) struct ResolvedSlotBinding {
 /// (or OR away) the claim at the publication sink.
 #[derive(Debug, Default)]
 pub(crate) struct SuppressionLedger {
-    reasons: Option<crate::typeinfo::surface_resolution::NonEmptyReasons>,
+    reasons: Option<crate::semantic_query::surface_resolution::NonEmptyReasons>,
 }
 
 impl SuppressionLedger {
     /// Record a typed suppression reason (unions with any prior record).
-    fn suppress(&mut self, reasons: crate::typeinfo::surface_resolution::NonEmptyReasons) {
+    fn suppress(&mut self, reasons: crate::semantic_query::surface_resolution::NonEmptyReasons) {
         self.reasons = Some(match self.reasons {
             Some(acc) => acc.union(reasons),
             None => reasons,
@@ -160,7 +140,7 @@ impl SuppressionLedger {
     /// policy explicitly as the downstream `Propagated` class rather than
     /// normalizing silently inside the claim type.
     fn suppress_partial_read(&mut self, classes: crate::semantic_query::PartialReasonSet) {
-        use crate::typeinfo::surface_resolution::NonEmptyReasons;
+        use crate::semantic_query::surface_resolution::NonEmptyReasons;
         self.suppress(NonEmptyReasons::new(classes).unwrap_or_else(|| {
             NonEmptyReasons::of(crate::semantic_query::PartialReason::Propagated)
         }));
@@ -185,7 +165,7 @@ pub(crate) enum SynthesisCompleteness {
     Complete,
     /// A fatal / partial read suppressed warm promotion, with the typed
     /// non-empty reasons the walk recorded.
-    Suppressed(crate::typeinfo::surface_resolution::NonEmptyReasons),
+    Suppressed(crate::semantic_query::surface_resolution::NonEmptyReasons),
 }
 
 /// Result of [`resolve_slot_bindings_graph_native`].
@@ -468,246 +448,6 @@ fn accumulate_lowered_node_carrier_deps(
     emit_slot_binding_graph_dispatch_facts(dispatch, &signature);
 }
 
-/// Read the [`SurfaceView`] members backing `node`, if `node` resolves
-/// to a `SemanticNodeData::Object` shell. Empty for any other variant
-/// — callers treat the empty surface as "no enumerable members".
-/// Returns `true` when the slot-param's underlying shape is one that
-/// the synthesis must NOT enumerate as a concrete object surface,
-/// because the shape's binding identity depends on a generic /
-/// indexed / mapped / conditional context that has not been resolved.
-///
-/// Walks through `Alias` and `InstantiationRef` (Skeleton-instantiated
-/// body) hops to reach an effective root. Returns `true` for:
-///
-/// - `Conditional` (open or deferred — branch identity is undetermined
-///   so neither branch's bindings are authoritative)
-/// - `IndexedAccess` (e.g. `T["slot-name"]` — the indexed root has
-///   not been resolved to a concrete shape)
-/// - `Mapped`, `KeyOf`, `TemplateLiteral` (key-space transformations
-///   with symbolic source)
-/// - `TypeParam`, `Infer` (open generics)
-///
-/// Returns `false` for `Object`, `Function`, `Primitive`, `Literal`,
-/// `Union`, `Intersection`, `Tuple`, `Array`, etc. — these are
-/// directly enumerable by the empty-path Shallow walker.
-///
-/// The root is read one successor at a time — an alias's target, a concrete
-/// conditional's reduction, an instantiated carrier's body — however long
-/// the chain; a chain that returns to a node it passed is enumerable.
-///
-/// `pub(crate)` so the DTO slot-binding extractor
-/// (`typeinfo::framework_surface::vue_exec::binding_fields_from_param_node` via
-/// `VerterHost::project_shallow_surface_from_base`) can apply the SAME
-/// open-vs-concrete gate before materialising a slot-param object surface —
-/// otherwise an open generic slot param (`SlotProps<M>` in a `generic="M"`
-/// component) would reduce to a committed branch and the DTO path would invent a
-/// phantom binding that the graph-native path correctly declined.
-pub(crate) fn slot_param_root_is_symbolic_only<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &ProjectSemanticDispatch<'_, C>,
-    root: SemanticNodeId,
-) -> bool {
-    let mut node = root;
-    let mut passed: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    while passed.insert(node) {
-        match slot_param_root_step(dispatch, node) {
-            SlotRootStep::Symbolic(symbolic) => return symbolic,
-            SlotRootStep::Next(next) => node = next,
-        }
-    }
-    false
-}
-
-/// One read of [`slot_param_root_is_symbolic_only`]: the node's own
-/// answer, or the node it stands for.
-enum SlotRootStep {
-    Symbolic(bool),
-    Next(SemanticNodeId),
-}
-
-fn slot_param_root_step<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &ProjectSemanticDispatch<'_, C>,
-    node: SemanticNodeId,
-) -> SlotRootStep {
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) else {
-        return SlotRootStep::Symbolic(false);
-    };
-    SlotRootStep::Symbolic(match data.as_ref() {
-        SemanticNodeData::Alias(inner) => return SlotRootStep::Next(*inner),
-        // A Conditional is symbolic-only ONLY when it is genuinely OPEN — i.e.
-        // its CHECK still contains a free `TypeParam` / `Infer` shell, so the
-        // branch identity is undetermined. The distinction:
-        //
-        // - FREE generic (`[M] extends ['hover']` in a `generic="M extends Mode"`
-        //   component): the check carries the free `TypeParam` `M`, so the
-        //   conditional is OPEN. Neither branch's bindings are authoritative —
-        //   classify symbolic. (A `Published(Shallow)` reduction WOULD commit to
-        //   a branch here via `M`'s constraint, inventing a phantom binding —
-        //   which is exactly the bug this guard prevents.)
-        // - CONCRETE substitution (`{ id: string } extends { id: infer U }`): the
-        //   check is fully concrete (no free `TypeParam`), so the conditional is
-        //   DECIDABLE. Reduce it through an empty-path `Published(Shallow)`
-        //   `ProjectPath` (the projection walker applies inference-binding +
-        //   decidable-conditional reduction that a bare `SemanticQueryKey::
-        //   Conditional` dispatch leaves deferred for an `infer`-bearing extends
-        //   clause) and classify the reduced terminal.
-        SemanticNodeData::Conditional { check, .. } => {
-            use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-            let check = *check;
-            drop(data);
-            // Open check (free TypeParam / Infer) → genuinely symbolic.
-            if node_contains_free_type_param(dispatch, check) {
-                return SlotRootStep::Symbolic(true);
-            }
-            // Concrete check → reduce the conditional and classify the result.
-            let empty_path: Arc<[crate::semantic_query::PathSegment]> =
-                Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice());
-            let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
-                base: node,
-                path: empty_path,
-                context: crate::semantic_query::ProjectionReductionContext::published(
-                    ProjectionMode::Shallow,
-                ),
-            });
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_slot_binding_graph_dispatch_facts(dispatch, &read.dep_signature);
-            match read.value {
-                // Decidable: reduced to a concrete terminal — classify it (a
-                // concrete branch root is enumerable, not symbolic).
-                QueryResult::Value(reduced) if reduced != node => {
-                    return SlotRootStep::Next(reduced)
-                }
-                // Stayed the deferred conditional shell (open / undecidable) —
-                // genuinely symbolic-only.
-                _ => true,
-            }
-        }
-        SemanticNodeData::IndexedAccess { .. }
-        | SemanticNodeData::Mapped { .. }
-        | SemanticNodeData::KeyOf { .. }
-        | SemanticNodeData::TemplateLiteral { .. }
-        | SemanticNodeData::TypeParam { .. }
-        | SemanticNodeData::Infer { .. }
-        | SemanticNodeData::InferRef { .. } => true,
-        SemanticNodeData::InstantiationRef { base, args } => {
-            // Skeleton-instantiate the carrier under its OWN `(base, args)` so the
-            // substitution actually binds — but unbound parameters become
-            // `TypeParam` SHELLS, never their declared DEFAULT. This is the
-            // distinction the generic slot-param gate turns on:
-            //
-            // - CONCRETE substitution (`SlotProps<{ id: string }>`): the args
-            //   bind, so the body's Conditional / Mapped check is concrete and
-            //   the Conditional arm below reduces it to a concrete root (bindings
-            //   enumerated). The earlier EMPTY-args instantiation erased the
-            //   substitution and left every such body an OPEN Conditional, so the
-            //   rows were silently dropped.
-            // - FREE generic (`SlotProps<M>` in a `generic="M extends Mode"`
-            //   component): `M` stays a `TypeParam` shell (Skeleton does NOT
-            //   apply the `= Mode` default), so the body's Conditional check is
-            //   open and the recursion classifies it symbolic — declining to
-            //   invent bindings from an undetermined generic context. (A
-            //   `Published(Shallow)` projection of the carrier WOULD apply the
-            //   default and wrongly commit to a branch — hence Skeleton, not
-            //   ProjectPath, on the carrier.)
-            use crate::semantic_query::{ProjectionMode, QueryResult, SemanticQueryKey};
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                dispatch.type_slot_for(
-                    Arc::clone(&base.canonical_id),
-                    base.owner,
-                    Arc::clone(&base.decl_name),
-                ),
-                Arc::clone(args),
-                dispatch.instantiate_context_for(
-                    &base.canonical_id,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        ProjectionMode::Skeleton,
-                    ),
-                ),
-            ));
-            let read = dispatch.execute_read(key);
-            // Dual-emit: legacy accumulator + fact-tracer fan-out.
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            emit_slot_binding_graph_dispatch_facts(dispatch, &read.dep_signature);
-            match read.value {
-                QueryResult::Value(body_id) if body_id != node => {
-                    return SlotRootStep::Next(body_id)
-                }
-                // Did not instantiate past the carrier shell (or errored) —
-                // an unresolvable carrier has no concrete enumerable root.
-                _ => true,
-            }
-        }
-        _ => false,
-    })
-}
-
-/// Returns `true` when `node`'s structure still contains a FREE `TypeParam` or
-/// `Infer` shell — i.e. the type is NOT fully concrete. Used by the slot-param
-/// gate to decide whether a Conditional's check is decidable: a check carrying
-/// a free type parameter (`[M] extends ['hover']` in a generic component) is
-/// OPEN and must stay symbolic, while a fully-concrete check
-/// (`{ id: string } extends { id: infer U }`) is decidable and may reduce.
-///
-/// Walks the compound shapes a substituted check can take (Tuple / Array /
-/// Union / Intersection / Object members / KeyOf / IndexedAccess), resolving
-/// one-level `Alias` hops, and descends the `type_args` of the structural
-/// carriers (`BareRef` / `TypeOf` / `ImportType`) — a free `TypeParam` inside a
-/// carrier's applied arguments keeps the check open. `Infer` shells inside the
-/// conditional's EXTENDS clause are intentionally NOT inspected here (this
-/// predicate is applied to the CHECK only) — an `infer U` in `extends` is the
-/// binding mechanism, not an open check parameter. The lazy declaration carriers
-/// (`DeclRef` / `InstantiationRef`) are treated as NOT-free (they are concrete
-/// declaration references, resolved elsewhere). Every node is read once,
-/// whatever the nesting.
-fn node_contains_free_type_param<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &ProjectSemanticDispatch<'_, C>,
-    node: SemanticNodeId,
-) -> bool {
-    use crate::graph_walk::Reach;
-    crate::graph_walk::reaches(node, |node| {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        else {
-            return Reach::Parts(Vec::new());
-        };
-        Reach::Parts(match data.as_ref() {
-            SemanticNodeData::TypeParam { .. }
-            | SemanticNodeData::Infer { .. }
-            | SemanticNodeData::InferRef { .. } => return Reach::Hit,
-            SemanticNodeData::Alias(inner) => vec![*inner],
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                composite
-                    .composite_members()
-                    .expect("composite arm")
-                    .iter()
-                    .copied()
-                    .collect()
-            }
-            SemanticNodeData::Array { element, .. } => vec![*element],
-            SemanticNodeData::Tuple { elements, .. } => {
-                elements.iter().map(|element| element.value).collect()
-            }
-            SemanticNodeData::Object(view) => view
-                .positive_members()
-                .iter()
-                .map(|member| member.value)
-                .collect(),
-            SemanticNodeData::KeyOf { base } => vec![*base],
-            SemanticNodeData::IndexedAccess { object, .. } => vec![*object],
-            // A `BareRef` / `TypeOf` / `ImportType` carrier applies its
-            // arguments at the reference site; a free `TypeParam` inside
-            // those args makes the node contain a free param (the check
-            // stays open). Descend the args via the shared accessor
-            // (args-only; the carrier head is not resolved).
-            SemanticNodeData::BareRef(_)
-            | SemanticNodeData::TypeOf(_)
-            | SemanticNodeData::TypeOfNominal(_)
-            | SemanticNodeData::ImportType(_) => data.carrier_type_args().to_vec(),
-            // Primitives, literals, functions, opaque, etc. carry no free
-            // open parameter on the check path.
-            _ => Vec::new(),
-        })
-    })
-}
-
 /// Compute the exactness flag for a synthesised binding's value node.
 ///
 /// Thin wrapper around the shared
@@ -833,9 +573,11 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // producer). The carrier stays a lazy shell — the shallow walker
         // materialises the surface when the dispatch reads it downstream.
         if consume_synthesis_step(&mut synthesis_steps_executed) {
-            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-                crate::semantic_query::PartialReason::BudgetExceeded,
-            ));
+            ledger.suppress(
+                crate::semantic_query::surface_resolution::NonEmptyReasons::of(
+                    crate::semantic_query::PartialReason::BudgetExceeded,
+                ),
+            );
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -868,9 +610,11 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 
         // Step 2: ResolveMacroPayload. USE execute_read; ACCUMULATE deps.
         if consume_synthesis_step(&mut synthesis_steps_executed) {
-            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-                crate::semantic_query::PartialReason::BudgetExceeded,
-            ));
+            ledger.suppress(
+                crate::semantic_query::surface_resolution::NonEmptyReasons::of(
+                    crate::semantic_query::PartialReason::BudgetExceeded,
+                ),
+            );
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -924,7 +668,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
             QueryResult::Error(e) => {
                 if is_fatal_query_error(&e) {
                     ledger.suppress(
-                        crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                        crate::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&e),
                     );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
@@ -1057,9 +801,11 @@ pub(crate) fn compute_bindings_via_graph(
 
     // Step 3: empty-path Shallow surface for slot names.
     if consume_step(synthesis_steps_executed) {
-        ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-            crate::semantic_query::PartialReason::BudgetExceeded,
-        ));
+        ledger.suppress(
+            crate::semantic_query::surface_resolution::NonEmptyReasons::of(
+                crate::semantic_query::PartialReason::BudgetExceeded,
+            ),
+        );
         diag_sink.push(macro_expansion_for_budget_exceeded(
             owner_macro.macro_index,
             MacroExpansionKind::DefineSlots,
@@ -1105,7 +851,9 @@ pub(crate) fn compute_bindings_via_graph(
         QueryResult::Error(e) => {
             if is_fatal_query_error(&e) {
                 ledger.suppress(
-                    crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                    crate::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(
+                        &e,
+                    ),
                 );
             }
             diag_sink.push(macro_expansion_for_query_error(
@@ -1116,28 +864,31 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
     };
-    let slot_members =
-        match super::projectors::read_positive_surface_members(ctx, dispatch, slot_surface) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
-                members.into_inner()
-            }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
-            // An unresolvable slot-surface member read suppresses warm promotion
-            // and records its typed reason; the usable subset still publishes.
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-                ledger.suppress(incomplete.non_empty_reasons());
-                diag_sink.push(macro_expansion_for_query_error(
-                    owner_macro.macro_index,
-                    MacroExpansionKind::DefineSlots,
-                    format!(
-                        "slot-surface-members-unresolved::{:?}",
-                        incomplete.reasons()
-                    ),
-                ));
-                incomplete.into_recorded_partial().unwrap_or_default()
-            }
-        };
+    let slot_members = match super::projectors::read_positive_surface_members(
+        ctx,
+        dispatch,
+        slot_surface,
+    ) {
+        crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(members)
+        | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(members) => {
+            members.into_inner()
+        }
+        crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
+        // An unresolvable slot-surface member read suppresses warm promotion
+        // and records its typed reason; the usable subset still publishes.
+        crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+            ledger.suppress(incomplete.non_empty_reasons());
+            diag_sink.push(macro_expansion_for_query_error(
+                owner_macro.macro_index,
+                MacroExpansionKind::DefineSlots,
+                format!(
+                    "slot-surface-members-unresolved::{:?}",
+                    incomplete.reasons()
+                ),
+            ));
+            incomplete.into_recorded_partial().unwrap_or_default()
+        }
+    };
 
     for slot_member in slot_members.iter() {
         // Public-only publication: a `private` / `protected` class member
@@ -1154,7 +905,7 @@ pub(crate) fn compute_bindings_via_graph(
         // carry a non-Function shell (Alias / Conditional /
         // InstantiationRef / DeclRef carriers) that the publication
         // terminal `Published(Shallow)` chose not to reduce.
-        // [`crate::meta_resolve::dispatch_helpers::realize_callable_member`]
+        // [`crate::project_semantic_dispatch::callable_view::realize_callable_member`]
         // normalises through the carrier chain (relation-engine
         // Conditional reduction, transit-mode Instantiate,
         // ResolveDecl unwrap) so a decidable callable surfaces as a
@@ -1164,32 +915,37 @@ pub(crate) fn compute_bindings_via_graph(
         // miss, a failed decl resolve mid-chain) suppresses warm promotion
         // and records its typed reason — the missing binding row is then
         // partial, never byte-identical to a genuinely non-callable member.
-        let realized = match crate::meta_resolve::dispatch_helpers::realize_callable_member(
-            dispatch,
-            slot_member.value,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
-        ) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
-                id.into_inner()
-            }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
-                slot_member.value
-            }
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-                ledger.suppress(incomplete.non_empty_reasons());
-                diag_sink.push(macro_expansion_for_query_error(
-                    owner_macro.macro_index,
-                    MacroExpansionKind::DefineSlots,
-                    format!(
-                        "slot-callable-unresolved::{slot_name}::{:?}",
-                        incomplete.reasons()
-                    ),
-                ));
-                let _ = incomplete.into_recorded_partial();
-                continue;
-            }
-        };
+        let realized =
+            match crate::project_semantic_dispatch::callable_view::realize_callable_member(
+                dispatch,
+                slot_member.value,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Shallow,
+                ),
+            ) {
+                crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
+                | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                    id.into_inner()
+                }
+                crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                    slot_member.value
+                }
+                crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                    incomplete,
+                ) => {
+                    ledger.suppress(incomplete.non_empty_reasons());
+                    diag_sink.push(macro_expansion_for_query_error(
+                        owner_macro.macro_index,
+                        MacroExpansionKind::DefineSlots,
+                        format!(
+                            "slot-callable-unresolved::{slot_name}::{:?}",
+                            incomplete.reasons()
+                        ),
+                    ));
+                    let _ = incomplete.into_recorded_partial();
+                    continue;
+                }
+            };
 
         // Step 4: read Function.params[0].ty. CALL kind only — a construct
         // signature is not a callable slot shape and synthesizes no
@@ -1231,9 +987,11 @@ pub(crate) fn compute_bindings_via_graph(
 
         // Empty-path Shallow on param0_ty.
         if consume_step(synthesis_steps_executed) {
-            ledger.suppress(crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-                crate::semantic_query::PartialReason::BudgetExceeded,
-            ));
+            ledger.suppress(
+                crate::semantic_query::surface_resolution::NonEmptyReasons::of(
+                    crate::semantic_query::PartialReason::BudgetExceeded,
+                ),
+            );
             diag_sink.push(macro_expansion_for_budget_exceeded(
                 owner_macro.macro_index,
                 MacroExpansionKind::DefineSlots,
@@ -1279,7 +1037,7 @@ pub(crate) fn compute_bindings_via_graph(
             QueryResult::Error(e) => {
                 if is_fatal_query_error(&e) {
                     ledger.suppress(
-                        crate::typeinfo::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                        crate::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&e),
                     );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
@@ -1292,14 +1050,18 @@ pub(crate) fn compute_bindings_via_graph(
         };
         let binding_members =
             match super::projectors::read_positive_surface_members(ctx, dispatch, param_surface) {
-                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(members)
-                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(members) => {
-                    members.into_inner()
+                crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(members)
+                | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
+                    members,
+                ) => members.into_inner(),
+                crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                    Vec::new()
                 }
-                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => Vec::new(),
                 // An unresolvable binding-surface read suppresses warm promotion
                 // and records its typed reason; the usable subset still publishes.
-                crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                    incomplete,
+                ) => {
                     ledger.suppress(incomplete.non_empty_reasons());
                     diag_sink.push(macro_expansion_for_query_error(
                         owner_macro.macro_index,

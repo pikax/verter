@@ -15,7 +15,7 @@
 //! than type; trybuild would turn red on this fixture.
 
 use verter_session::semantic_query::PartialReasonSet;
-use verter_session::typeinfo::surface_resolution::{NonEmptyReasons, SurfaceProof};
+use verter_session::semantic_query::surface_resolution::{NonEmptyReasons, SurfaceProof};
 
 fn main() {
     let _empty_reason: Option<NonEmptyReasons> = NonEmptyReasons::new(PartialReasonSet::empty());

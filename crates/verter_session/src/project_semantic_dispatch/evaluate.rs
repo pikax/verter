@@ -757,7 +757,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Demand-point structural-fact normalizer for node-domain fact readers
-    /// (e.g. [`CallableNodeView`](crate::meta_resolve::callable_view::CallableNodeView)).
+    /// (e.g. [`CallableNodeView`](crate::project_semantic_dispatch::callable_view::CallableNodeView)).
     ///
     /// Resolves a node to its concrete STRUCTURAL BODY at a GENUINE fact demand:
     /// first evaluate deferred shells
@@ -779,7 +779,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `InstantiationRef` materialisation in `relation::record_target_shape`) to
     /// BOTH residual carriers. It is NOT a second resolver: every resolution step
     /// delegates to the existing shared `ResolveDecl` / `Instantiate` queries
-    /// (the callable realizer [`realize_callable_member`](crate::meta_resolve::dispatch_helpers::realize_callable_member)
+    /// (the callable realizer [`realize_callable_member`](crate::project_semantic_dispatch::callable_view::realize_callable_member)
     /// classifies over exactly this primitive), records their dep-signature facts into the active tracer, and
     /// folds their partial / suppress signals — so a node-domain reader's
     /// cache-validity signature observes exactly the facts the resolution
@@ -816,7 +816,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// [`Self::normalize_node_for_structural_fact_demand`] for readers that must
     /// reach an UNINSTANTIATED `InstantiationRef` carrier (e.g. the validated
     /// Svelte-snippet positional reader
-    /// [`CallableNodeView::validated_snippet_positional_params`](crate::meta_resolve::callable_view::CallableNodeView),
+    /// [`CallableNodeView::validated_snippet_positional_params`](crate::project_semantic_dispatch::callable_view::CallableNodeView),
     /// and the Vue slot-binding `Pick` source-root read).
     ///
     /// It is [`Self::normalize_node_for_structural_fact_demand`] MINUS the

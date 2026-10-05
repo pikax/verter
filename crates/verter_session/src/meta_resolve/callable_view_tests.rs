@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use verter_type_expr::{MemberVisibility, PrimitiveName, TypeExpr};
 
-use super::{ArmCombineNode, CallableNodeView};
-use crate::meta_resolve::dispatch_helpers::realize_callable_member;
+use crate::project_semantic_dispatch::callable_view::{
+    realize_callable_member, ArmCombineNode, CallableNodeView, CALLABLE_VIEW_DEPTH_FUSE,
+};
 use crate::project_semantic_dispatch::{
     node_data_for, ProjectSemanticDispatch, StructuralFactDemandOutcome,
 };
@@ -26,6 +27,7 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
+use crate::typeinfo::shallow_surface::callable_first_param_object_surface;
 use crate::types::HostConfig;
 use crate::VerterHost;
 
@@ -1142,9 +1144,7 @@ fn first_param_object_surface_projects_param_members() {
         void,
     );
 
-    let view = CallableNodeView::new(&dispatch, f);
-    let surface = view
-        .first_param_object_surface(&host, shallow())
+    let surface = callable_first_param_object_surface(&dispatch, &host, f, shallow())
         .expect("the first-param object projects a one-level surface");
     let mut names: Vec<&str> = surface
         .members
@@ -2193,13 +2193,13 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
     // The shallow surface still projects the one-level members, and is
     // context-invariant (Shallow regardless of the caller's mode).
     let names = |context| -> Vec<String> {
-        let mut n: Vec<String> = CallableNodeView::new(&dispatch, onprops)
-            .first_param_object_surface(&ctx, context)
-            .expect("the first-param object projects a one-level surface")
-            .members
-            .iter()
-            .map(|m| m.string_name().expect("string-key fixture").to_string())
-            .collect();
+        let mut n: Vec<String> =
+            callable_first_param_object_surface(&dispatch, &ctx, onprops, context)
+                .expect("the first-param object projects a one-level surface")
+                .members
+                .iter()
+                .map(|m| m.string_name().expect("string-key fixture").to_string())
+                .collect();
         n.sort();
         n
     };
@@ -2857,7 +2857,7 @@ fn event_names_over_deep_nested_union_trips_collect_fuse() {
     // (each a distinct interned single-arm union, so the recursion truly
     // descends one level per hop and trips the fuse).
     let mut buried = string_literal(&graph, "deep");
-    for _ in 0..(super::CALLABLE_VIEW_DEPTH_FUSE + 5) {
+    for _ in 0..(CALLABLE_VIEW_DEPTH_FUSE + 5) {
         buried = union(&graph, vec![buried]);
     }
     // `present` is FIRST so it is collected BEFORE the buried arm trips the fuse
@@ -3784,7 +3784,7 @@ fn realize_of_derived_union_collapses_duplicate_realized_arms() {
 /// never an incomplete realization.
 #[test]
 fn a_builtin_nominal_carrier_realizes_to_a_complete_non_callable() {
-    use crate::typeinfo::surface_resolution::SurfaceResolution;
+    use crate::semantic_query::surface_resolution::SurfaceResolution;
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3803,7 +3803,7 @@ fn a_builtin_nominal_carrier_realizes_to_a_complete_non_callable() {
 /// event and is DECIDED: the enumeration stays complete.
 #[test]
 fn event_names_builtin_nominal_first_param_is_a_complete_non_contributor() {
-    use crate::typeinfo::surface_resolution::SurfaceResolution;
+    use crate::semantic_query::surface_resolution::SurfaceResolution;
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());

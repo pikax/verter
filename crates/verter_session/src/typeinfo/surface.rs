@@ -390,7 +390,7 @@ impl TypeInfoSurface {
         graph: &SemanticGraphStore,
         formula: &crate::semantic_query::ObjectProjectionFormula,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<Self> {
+    ) -> crate::semantic_query::surface_resolution::SurfaceResolution<Self> {
         use crate::semantic_query::{
             AuthoredPropertyKey, ObjectSignatureKind, PositiveKeyPresence, ProjectionEvidence,
             PropertyKey,
@@ -419,13 +419,13 @@ impl TypeInfoSurface {
         if let [only] = alternatives {
             if let Some(closed) = only.closed() {
                 let Some(view) = closed.to_closed_surface_view() else {
-                    return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(
-                        crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+                    return crate::semantic_query::surface_resolution::SurfaceResolution::incomplete(
+                        crate::semantic_query::surface_resolution::NonEmptyReasons::of(
                             crate::semantic_query::PartialReason::SemanticQueryFault,
                         ),
                     );
                 };
-                return crate::typeinfo::surface_resolution::SurfaceResolution::resolved(
+                return crate::semantic_query::surface_resolution::SurfaceResolution::resolved(
                     Self::build(graph, &view),
                 );
             }
@@ -571,7 +571,7 @@ impl TypeInfoSurface {
             })
             .collect();
         let has_index_signature = !index_signatures.is_empty();
-        crate::typeinfo::surface_resolution::SurfaceResolution::open_presence(
+        crate::semantic_query::surface_resolution::SurfaceResolution::open_presence(
             Self::from_ordered_entries(
                 members
                     .into_iter()

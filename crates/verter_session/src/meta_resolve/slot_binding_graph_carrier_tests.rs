@@ -140,7 +140,9 @@ fn node_contains_free_type_param_descends_carrier_args() {
     for kind in 0u8..3 {
         let carrier = carrier_wrapping(&graph, free_param, kind);
         assert!(
-            super::node_contains_free_type_param(&dispatch, carrier),
+            crate::project_semantic_dispatch::symbolic_root::node_contains_free_type_param(
+                &dispatch, carrier
+            ),
             "a free TypeParam inside a carrier's type_args (kind {kind}) must make the node \
              contain a free param; carrier {:?}",
             graph.node_data(carrier).as_deref()
@@ -156,7 +158,9 @@ fn node_contains_free_type_param_descends_carrier_args() {
     for kind in 0u8..3 {
         let carrier = carrier_wrapping(&graph, concrete, kind);
         assert!(
-            !super::node_contains_free_type_param(&dispatch, carrier),
+            !crate::project_semantic_dispatch::symbolic_root::node_contains_free_type_param(
+                &dispatch, carrier
+            ),
             "a carrier whose only arg is a concrete primitive (kind {kind}) must NOT be free"
         );
     }
@@ -213,7 +217,9 @@ fn free_param(graph: &crate::semantic_query_memo::SemanticGraphStore) -> Semanti
 #[test]
 fn a_free_param_is_found_at_any_depth() {
     assert!(under_nested_arrays(free_param, |dispatch, node| {
-        super::node_contains_free_type_param(dispatch, node)
+        crate::project_semantic_dispatch::symbolic_root::node_contains_free_type_param(
+            dispatch, node,
+        )
     }));
 }
 

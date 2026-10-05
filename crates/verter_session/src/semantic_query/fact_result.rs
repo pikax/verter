@@ -42,7 +42,7 @@
 //! compose with it.
 
 use super::{PartialReasonSet, ResultCompleteness};
-use crate::typeinfo::surface_resolution::NonEmptyReasons;
+use crate::semantic_query::surface_resolution::NonEmptyReasons;
 
 /// The result of one demanded fact.
 #[must_use]

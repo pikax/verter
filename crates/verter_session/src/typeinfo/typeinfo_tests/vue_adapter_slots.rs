@@ -890,7 +890,7 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
     // The FOLD is a node-domain fact: realize the slot member's RETURN NODE
     // through the SAME `CallableNodeView` route the DTO sink uses and mint it
     // once through the test output cap.
-    use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
+    use crate::project_semantic_dispatch::callable_view::{ArmCombineNode, CallableNodeView};
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     let dispatch = ProjectSemanticDispatch::new(&*host);
     let context = crate::semantic_query::ProjectionReductionContext::published(

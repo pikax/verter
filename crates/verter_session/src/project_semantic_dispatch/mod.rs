@@ -182,6 +182,7 @@ mod inference;
 // products and the ONE join route every merge point folds through. The
 // flow evaluator holds its whole semantic state here — the products ARE
 // the live value path.
+pub(crate) mod callable_view;
 pub(crate) mod flow_products;
 pub mod interior_source;
 mod object_spread_program_lowering;
@@ -220,6 +221,7 @@ pub(crate) mod semantic_source_leaf_facts;
 mod signature_instantiation;
 pub(crate) mod substitute;
 pub(crate) mod symbol_identity;
+pub(crate) mod symbolic_root;
 mod template_relation;
 pub(crate) mod walk;
 

@@ -225,7 +225,7 @@ Best-architecture target for component-meta:
 `navigate_param_to_object_surface`, `realize_callable_member` /
 `CallableNodeView::realized_callable_root`, `read_positive_surface_members`,
 `TypeInfoSurface::from_spread_projection`) returns
-`crate::typeinfo::surface_resolution::SurfaceResolution` — `Resolved(surface)`
+`crate::semantic_query::surface_resolution::SurfaceResolution` — `Resolved(surface)`
 (closed complete domain), `OpenPresence(surface)` (positive presence-only
 projection of an open domain; complete-as-a-result, warm-capable),
 `NoSurface` (the complete negative answer), or `Incomplete` carrying a

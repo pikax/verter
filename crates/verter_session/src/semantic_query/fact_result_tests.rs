@@ -3,7 +3,7 @@
 
 use super::fact_result::summarize;
 use super::{FactResult, FactStatus, MemberDomain, PartialReason, ResultCompleteness};
-use crate::typeinfo::surface_resolution::{NonEmptyReasons, SurfaceResolution};
+use crate::semantic_query::surface_resolution::{NonEmptyReasons, SurfaceResolution};
 
 fn budget() -> NonEmptyReasons {
     NonEmptyReasons::of(PartialReason::BudgetExceeded)

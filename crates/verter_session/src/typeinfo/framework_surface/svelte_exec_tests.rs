@@ -769,7 +769,7 @@ fn realized_snippet_call_signature_is_this_plus_rest_tuple() {
         .find(|m| m.string_name().expect("string-key fixture") == "row")
         .expect("the `row` member is present");
     let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
-    let realized = crate::meta_resolve::dispatch_helpers::realize_callable_member(
+    let realized = crate::project_semantic_dispatch::callable_view::realize_callable_member(
         &dispatch,
         row_member.value,
         crate::semantic_query::ProjectionReductionContext::published(

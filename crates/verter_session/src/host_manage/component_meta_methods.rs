@@ -981,10 +981,12 @@ impl VerterHost {
             verter_session_query::analysis::component_meta::MacroExpansionDiagnostics,
         > = Vec::new();
         let mut synthesis_suppression: Option<
-            crate::typeinfo::surface_resolution::NonEmptyReasons,
+            crate::semantic_query::surface_resolution::NonEmptyReasons,
         > = None;
         let fold_synthesis_claim =
-            |suppression: &mut Option<crate::typeinfo::surface_resolution::NonEmptyReasons>,
+            |suppression: &mut Option<
+                crate::semantic_query::surface_resolution::NonEmptyReasons,
+            >,
              result: slot_binding_graph::SynthesisResult| {
                 match result.completeness() {
                     slot_binding_graph::SynthesisCompleteness::Complete => {}

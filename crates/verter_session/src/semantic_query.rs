@@ -170,6 +170,11 @@ pub(crate) mod checker_policy;
 /// channel.
 pub(crate) mod compat_spelling;
 
+/// Typed outcome of every resolution-to-surface producer: the proof-bearing
+/// success arms, the explicit complete-negative claim and the non-empty
+/// reason-bearing incomplete claim.
+pub mod surface_resolution;
+
 /// The sealed index-composed callable carrier: an
 /// [`SemanticNodeData::DeferredCallable`] payload with no return-type slot,
 /// readable only by the `ResolveOverloadSet` / `ResolveCall` consumers.

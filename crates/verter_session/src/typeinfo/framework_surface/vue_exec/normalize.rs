@@ -22,8 +22,8 @@ use verter_type_expr::{
 };
 
 use super::{member_jsdoc_from_spans, raise_member_value, signature_jsdoc_from_spans};
-use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::output_sinks::OutputProjector;
+use crate::project_semantic_dispatch::callable_view::CallableNodeView;
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::semantic_query::{
@@ -776,12 +776,14 @@ pub(crate) fn emits_from_typeinfo_surface<C: crate::session_attachment::SessionC
         // published emit-metadata lane, so the deleted authored names make the
         // result PARTIAL, never an empty complete emit set.
         let names = match view.event_names(context) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
+            crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(names)
+            | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(names) => {
                 names.into_inner()
             }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+            crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
+            crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                incomplete,
+            ) => {
                 let _ = incomplete.into_recorded_partial();
                 continue;
             }

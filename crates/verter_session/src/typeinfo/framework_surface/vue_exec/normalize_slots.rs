@@ -10,8 +10,8 @@ use verter_session_query::analysis::types::{AnalyzedSlotField, AnalyzedSlotField
 use verter_type_expr::{LiteralValue, TypeExpr, UnknownValue};
 
 use super::{member_jsdoc_from_spans, raise_member_value, slice_canonical_span};
-use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
 use crate::output_sinks::OutputProjector;
+use crate::project_semantic_dispatch::callable_view::{ArmCombineNode, CallableNodeView};
 use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 use crate::resolver_core::surface_projector::render_type_expr_display;
 use crate::semantic_query::{
@@ -103,14 +103,14 @@ pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionC
             // missing slot is a PARTIAL surface, never byte-identical to a
             // surface that legitimately has no such slot.
             let realized_root = match view.realized_callable_root(context) {
-                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
-                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
+                | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
                 }
-                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
                     return None
                 }
-                crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
                     let _ = incomplete.into_recorded_partial();
                     return None;
                 }
@@ -194,8 +194,8 @@ pub(crate) fn slot_member_types_from_typeinfo_surface<
             })?;
             let view = CallableNodeView::new(dispatch, member.value);
             let node = match view.realized_callable_root(context) {
-                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
-                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
+                | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
                 }
                 _ => member.value,
@@ -342,16 +342,19 @@ fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilit
     // reason: zero bindings over a type whose imported dependency did not
     // resolve is a PARTIAL surface, not a binding-less slot. A LOCAL
     // authored-reference mirror passes through — the projection resolves it.
-    if let Some(reasons) = crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
-        ctx,
-        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), first_param).as_deref(),
-    ) {
+    if let Some(reasons) =
+        crate::semantic_query::surface_resolution::stable_member_carrier_partiality(
+            ctx,
+            crate::project_semantic_dispatch::node_data_for(dispatch.graph(), first_param)
+                .as_deref(),
+        )
+    {
         crate::request_context::fold_result_completeness(
             crate::semantic_query::ResultCompleteness::partial(reasons.get()),
         );
         return Vec::new();
     }
-    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
+    if crate::project_semantic_dispatch::symbolic_root::slot_param_root_is_symbolic_only(
         dispatch,
         first_param,
     ) {
@@ -373,12 +376,14 @@ fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilit
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     ) {
-        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+        crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(surface)
+        | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
             surface.into_inner()
         }
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => return Vec::new(),
-        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+        crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+            return Vec::new()
+        }
+        crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
             match incomplete.into_recorded_partial() {
                 Some(surface) => surface,
                 None => return Vec::new(),

@@ -696,17 +696,19 @@ impl ExecutorResolveCtx<'_> {
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         ) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+            crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(surface)
+            | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
                 ResolvedOutcome::Resolved(surface.into_inner())
             }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+            crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
                 ResolvedOutcome::Missing
             }
             // A failed projection is PARTIAL on the wire — its typed reason is
             // recorded and the usable subset (if any) rides the partial arm;
             // it never encodes as an absent surface.
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+            crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                incomplete,
+            ) => {
                 let diagnostics = vec![format!(
                     "shallow-surface-unresolved::{:?}",
                     incomplete.reasons()

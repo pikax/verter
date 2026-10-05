@@ -4,7 +4,7 @@ error[E0624]: associated function `new` is private
 21 |     let _empty_reason: Option<NonEmptyReasons> = NonEmptyReasons::new(PartialReasonSet::empty());
    |                                                                   ^^^ private associated function
    |
-  ::: src/typeinfo/surface_resolution.rs
+  ::: src/semantic_query/surface_resolution.rs
    |
    |     pub(crate) fn new(set: PartialReasonSet) -> Option<Self> {
    |     -------------------------------------------------------- private associated function defined here
@@ -16,7 +16,7 @@ error[E0423]: cannot initialize a tuple struct which contains private fields
    |                                       ^^^^^^^^^^^^
    |
 note: constructor is not visible here due to private fields
-  --> src/typeinfo/surface_resolution.rs
+  --> src/semantic_query/surface_resolution.rs
    |
    | pub struct SurfaceProof(());
    |                         ^^ private field

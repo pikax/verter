@@ -16,7 +16,7 @@ error[E0624]: associated function `incomplete` is private
 36 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
    |                                                                  ^^^^^^^^^^ private associated function
    |
-  ::: src/typeinfo/surface_resolution.rs
+  ::: src/semantic_query/surface_resolution.rs
    |
    |     pub(crate) fn incomplete(reason: NonEmptyReasons) -> Self {
    |     --------------------------------------------------------- private associated function defined here
@@ -42,7 +42,7 @@ error[E0308]: mismatched types
    = note: expected struct `Witnessed<TypeInfoSurface>`
               found struct `TypeInfoSurface`
 note: tuple variant defined here
-  --> src/typeinfo/surface_resolution.rs
+  --> src/semantic_query/surface_resolution.rs
    |
    |     Resolved(Witnessed<T>),
    |     ^^^^^^^^
@@ -53,7 +53,7 @@ error[E0624]: associated function `resolved` is private
 40 |         SurfaceResolution::resolved(TypeInfoSurface::empty());
    |                            ^^^^^^^^ private associated function
    |
-  ::: src/typeinfo/surface_resolution.rs
+  ::: src/semantic_query/surface_resolution.rs
    |
    |     pub(crate) fn resolved(value: T) -> Self {
    |     ---------------------------------------- private associated function defined here
@@ -64,7 +64,7 @@ error[E0624]: associated function `no_surface` is private
 41 |     let _sealed_no_surface: SurfaceResolution<TypeInfoSurface> = SurfaceResolution::no_surface();
    |                                                                                     ^^^^^^^^^^ private associated function
    |
-  ::: src/typeinfo/surface_resolution.rs
+  ::: src/semantic_query/surface_resolution.rs
    |
    |     pub(crate) fn no_surface() -> Self {
    |     ---------------------------------- private associated function defined here

@@ -42,8 +42,8 @@ use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
 use crate::framework::script_facts::ScriptFactEvidence;
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
-use crate::meta_resolve::callable_view::{CallableNodeView, PositionalParamNode};
 use crate::output_sinks::OutputProjector;
+use crate::project_semantic_dispatch::callable_view::{CallableNodeView, PositionalParamNode};
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
     DisplayNeeds, PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult,
@@ -602,8 +602,8 @@ fn resolve_runes_props(
     // from an imported base reports THAT base's file, not the props_type's.
     let surface = navigate_param_to_object_surface(ctx, dispatch, owner, props_type);
     let (mut fields, prop_origins) = match surface {
-        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+        crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(surface)
+        | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
             let surface = surface.into_inner();
             let prop_origins = prop_origins_from_surface(owner, &surface);
 
@@ -644,14 +644,14 @@ fn resolve_runes_props(
         // A props type that RESOLVES to no object surface (a primitive /
         // open generic) still establishes a PRESENT props surface —
         // supported-empty, never a Missing.
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+        crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
             (Vec::new(), Vec::new())
         }
         // An UNRESOLVABLE `$props()` type is NOT a supported-empty surface:
         // record the typed reason (the enclosing cold-compute scope turns the
         // outcome PARTIAL on the wire and refuses store admission) and
         // publish the usable positive subset the producer still built.
-        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+        crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
             match incomplete.into_recorded_partial() {
                 Some(surface) => {
                     let prop_origins = prop_origins_from_surface(owner, &surface);
@@ -1066,9 +1066,9 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                     .as_deref()
                     {
                         Some(SemanticNodeData::Union(_)) => {
-                            crate::meta_resolve::callable_view::ArmCombineNode::Union
+                            crate::project_semantic_dispatch::callable_view::ArmCombineNode::Union
                         }
-                        _ => crate::meta_resolve::callable_view::ArmCombineNode::Intersection,
+                        _ => crate::project_semantic_dispatch::callable_view::ArmCombineNode::Intersection,
                     };
                     view.slot_param_and_return_by_arm(combine, context)
                 })

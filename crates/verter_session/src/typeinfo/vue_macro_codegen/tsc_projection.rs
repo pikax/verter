@@ -1272,17 +1272,17 @@ pub(super) fn tsc_emit_rows(
         // surface is published from this lane, hence no completeness claim to
         // gate). A complete no-name signature contributes no row.
         let names = match callable.event_names(context) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
+            crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(names)
+            | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(names) => {
                 names.into_inner()
             }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-                match incomplete.into_authored_fallback() {
-                    Some(names) => names,
-                    None => continue,
-                }
-            }
+            crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
+            crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                incomplete,
+            ) => match incomplete.into_authored_fallback() {
+                Some(names) => names,
+                None => continue,
+            },
         };
         let Some(signature) = callable.signature(context) else {
             continue;

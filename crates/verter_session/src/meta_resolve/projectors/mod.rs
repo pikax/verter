@@ -438,8 +438,8 @@ pub(crate) fn read_positive_surface_members<C: crate::resolver_core::ResolverCap
     ctx: &dyn ResolverContext<C>,
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     surface_node: SemanticNodeId,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
-    use crate::typeinfo::surface_resolution::SurfaceResolution;
+) -> crate::semantic_query::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
+    use crate::semantic_query::surface_resolution::SurfaceResolution;
 
     /// Join per-arm resolutions under the given member-join rule: the joined
     /// positive members always publish, and ANY incomplete arm makes the
@@ -447,15 +447,15 @@ pub(crate) fn read_positive_surface_members<C: crate::resolver_core::ResolverCap
     /// joined subset is usable but never passes as the complete evidence.
     fn join_arms<C: crate::resolver_core::ResolverCapabilities>(
         dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-        arms: &[crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>>],
+        arms: &[crate::semantic_query::surface_resolution::SurfaceResolution<Vec<SurfaceMember>>],
         join: impl FnOnce(
             &crate::semantic_query_memo::SemanticGraphStore,
             &[Vec<SurfaceMember>],
             &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
         ) -> Vec<SurfaceMember>,
-    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
-        use crate::typeinfo::surface_resolution::SurfaceResolution;
-        let mut incomplete = None::<crate::typeinfo::surface_resolution::NonEmptyReasons>;
+    ) -> crate::semantic_query::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
+        use crate::semantic_query::surface_resolution::SurfaceResolution;
+        let mut incomplete = None::<crate::semantic_query::surface_resolution::NonEmptyReasons>;
         let mut per_arm: Vec<Vec<SurfaceMember>> = Vec::with_capacity(arms.len());
         for arm in arms {
             match arm {
@@ -498,7 +498,7 @@ pub(crate) fn read_positive_surface_members<C: crate::resolver_core::ResolverCap
                 crate::semantic_query::QueryResult::Value(formula) => formula,
                 crate::semantic_query::QueryResult::Recursive(_) => {
                     return SurfaceResolution::incomplete(
-                        crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+                        crate::semantic_query::surface_resolution::NonEmptyReasons::of(
                             crate::semantic_query::PartialReason::SamePathRecursion,
                         ),
                     );
@@ -506,7 +506,7 @@ pub(crate) fn read_positive_surface_members<C: crate::resolver_core::ResolverCap
                 // A stable / well-formed open marker contributes no members
                 // and stays COMPLETE; only an operational fault is partial.
                 crate::semantic_query::QueryResult::Error(error) => {
-                    return match crate::typeinfo::surface_resolution::stable_query_error_partiality(
+                    return match crate::semantic_query::surface_resolution::stable_query_error_partiality(
                         &error,
                     ) {
                         Some(reasons) => SurfaceResolution::incomplete(reasons),
@@ -587,8 +587,9 @@ pub(crate) fn read_positive_surface_members<C: crate::resolver_core::ResolverCap
         // the walker's well-formed `OpenSurface` marker) genuinely
         // contribute no positive member evidence — the complete answer.
         other => {
-            match crate::typeinfo::surface_resolution::stable_member_carrier_partiality(ctx, other)
-            {
+            match crate::semantic_query::surface_resolution::stable_member_carrier_partiality(
+                ctx, other,
+            ) {
                 Some(reasons) => SurfaceResolution::incomplete(reasons),
                 None => SurfaceResolution::resolved(Vec::new()),
             }
@@ -934,7 +935,7 @@ pub(crate) fn resolve_payload_surface(
     expansion_kind: MacroExpansionKind,
     provenance: crate::semantic_query::SurfaceProvenanceContext,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<SemanticNodeId> {
+) -> crate::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
     // The empty-path `ProjectPath` carries the macro's surface
     // provenance (by design): for a props payload that
     // resolved to a `DeclRef` carrier (`defineProps<FooProps>()`), the
@@ -974,7 +975,7 @@ pub(crate) fn resolve_payload_surface(
     }
     match surface_read.value {
         QueryResult::Value(id) => {
-            crate::typeinfo::surface_resolution::SurfaceResolution::resolved(id)
+            crate::semantic_query::surface_resolution::SurfaceResolution::resolved(id)
         }
         QueryResult::Recursive(_) => {
             // Cycles are NON-FATAL by rule: they bound the publish surface
@@ -985,7 +986,7 @@ pub(crate) fn resolve_payload_surface(
                 expansion_kind,
                 "cyclic-macro-payload-surface".to_string(),
             ));
-            crate::typeinfo::surface_resolution::SurfaceResolution::no_surface()
+            crate::semantic_query::surface_resolution::SurfaceResolution::no_surface()
         }
         QueryResult::Error(e) => {
             diag_sink.push(macro_expansion_for_query_error(
@@ -997,11 +998,13 @@ pub(crate) fn resolve_payload_surface(
             // complete no-surface answer; an OPERATIONAL fault (budget /
             // cancellation / torn state) is an INCOMPLETE resolution with
             // its typed reason on the returned claim.
-            match crate::typeinfo::surface_resolution::stable_query_error_partiality(&e) {
+            match crate::semantic_query::surface_resolution::stable_query_error_partiality(&e) {
                 Some(reasons) => {
-                    crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(reasons)
+                    crate::semantic_query::surface_resolution::SurfaceResolution::incomplete(
+                        reasons,
+                    )
                 }
-                None => crate::typeinfo::surface_resolution::SurfaceResolution::no_surface(),
+                None => crate::semantic_query::surface_resolution::SurfaceResolution::no_surface(),
             }
         }
     }

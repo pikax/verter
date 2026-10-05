@@ -1939,7 +1939,7 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
             property("x", number, false),
         ],
     );
-    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) =
+    let crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) =
         shallow(open)
     else {
         panic!("an open program joins a PRESENCE-ONLY shallow surface (never a closed claim)");
@@ -1956,7 +1956,8 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
             [surface_member("a", number, false)],
         ))],
     );
-    let crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface) = shallow(closed)
+    let crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(surface) =
+        shallow(closed)
     else {
         panic!("the single closed witness resolves the exact COMPLETE surface");
     };
@@ -1971,7 +1972,7 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([left, right])),
     ));
     let correlated = program(graph, [ObjectConstructionEffect::Spread(union)]);
-    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) =
+    let crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) =
         shallow(correlated)
     else {
         panic!("joining correlated branches yields PRESENCE-ONLY evidence, never a closed claim");
@@ -3645,7 +3646,8 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );
-    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) = surface
+    let crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) =
+        surface
     else {
         panic!("an open carrier joins a PRESENCE-ONLY typeinfo surface (never a closed claim)");
     };
@@ -4185,7 +4187,8 @@ fn typeinfo_join_collapses_dual_spelling_members() {
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );
-    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) = surface
+    let crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) =
+        surface
     else {
         panic!(
             "a correlated program joins a PRESENCE-ONLY typeinfo surface (never a closed claim)"
@@ -4420,7 +4423,8 @@ fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );
-    let crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) = surface
+    let crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) =
+        surface
     else {
         panic!("an open program joins a PRESENCE-ONLY typeinfo surface (never a closed claim)");
     };

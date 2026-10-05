@@ -856,7 +856,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .raise_projected_callable_params(callable, first_param, ctx)
                 .into();
         }
-        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
+        let view =
+            crate::project_semantic_dispatch::callable_view::CallableNodeView::new(self, callable);
         let return_node = if occurrence.is_root() {
             match view.signature(context).and_then(|sig| sig.return_type()) {
                 Some(node) => node,
@@ -872,9 +873,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             let combine = match super::node_data_for(self.graph(), realized_root).as_deref() {
                 Some(SemanticNodeData::Union(_)) => {
-                    crate::meta_resolve::callable_view::ArmCombineNode::Union
+                    crate::project_semantic_dispatch::callable_view::ArmCombineNode::Union
                 }
-                _ => crate::meta_resolve::callable_view::ArmCombineNode::Intersection,
+                _ => crate::project_semantic_dispatch::callable_view::ArmCombineNode::Intersection,
             };
             match view
                 .slot_param_and_return_by_arm(combine, context)
@@ -910,7 +911,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// element (the consumer re-resolves it on demand — validation never
     /// replaces the published shallow form with the resolved body).
     ///
-    /// [`CallableNodeView`]: crate::meta_resolve::callable_view::CallableNodeView
+    /// [`CallableNodeView`]: crate::project_semantic_dispatch::callable_view::CallableNodeView
     fn raise_projected_callable_params(
         &self,
         callable: SemanticNodeId,
@@ -919,7 +920,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<HotTypeRef> {
         let realize_context =
             ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Navigate);
-        let view = crate::meta_resolve::callable_view::CallableNodeView::new(self, callable);
+        let view =
+            crate::project_semantic_dispatch::callable_view::CallableNodeView::new(self, callable);
         let signature = view.signature(realize_context)?;
         let params = signature.raw_params();
         // `first_param` past the parameter list is bounds drift — fail

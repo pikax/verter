@@ -176,7 +176,7 @@ impl VerterHost {
         walker_diagnostics: Option<
             &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
         >,
-    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+    ) -> crate::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
         project_shallow_surface_graph_only(ctx, dispatch, base, path, context, walker_diagnostics)
     }
 }
@@ -188,8 +188,8 @@ pub(crate) fn project_shallow_surface_graph_only<C: crate::resolver_core::Resolv
     path: Arc<[PathSegment]>,
     context: ProjectionReductionContext,
     walker_diagnostics: Option<&mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>>,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<TypeInfoSurface> {
-    use crate::typeinfo::surface_resolution::{
+) -> crate::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+    use crate::semantic_query::surface_resolution::{
         unresolved_node_partiality, NonEmptyReasons, SurfaceResolution,
     };
     verter_debug_assert_eq!(
@@ -418,7 +418,7 @@ pub(crate) fn project_shallow_surface_from_base<C: crate::resolver_core::Resolve
     path: Arc<[PathSegment]>,
     context: ProjectionReductionContext,
     walker_diagnostics: Option<&mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>>,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+) -> crate::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
     let resolution =
         project_shallow_surface_graph_only(ctx, dispatch, base, path, context, walker_diagnostics);
 
@@ -439,4 +439,60 @@ pub(crate) fn project_shallow_surface_from_base<C: crate::resolver_core::Resolve
                 .map(|serve| Arc::clone(&serve.indexed.raw_source))
         })
     })
+}
+
+/// Project a callable's realized FIRST-param node to its span-rich one-level
+/// [`TypeInfoSurface`] in the NODE domain — reusing the shared symbolic-only
+/// gate and shallow-surface synthesiser the DTO slot-binding path uses. The
+/// first param is taken from the realized signature node directly; it is NOT
+/// re-materialized to a `TypeExpr` and re-navigated.
+///
+/// SCOPING RULE: unlike the callable view's fact readers, this projection MUST
+/// NOT carrier-resolve the first-param root. It is a SHALLOW PUBLICATION
+/// reader, not a structural-fact reader: the surface projection is ALWAYS
+/// one-level `Shallow` and KEEPS the first-param root carrier-shaped.
+/// Resolving a `DeclRef(AppProps)` subject here would break the symbolic
+/// indexed-access preservation policy (`AppProps['avatar']`) the Vue
+/// slot-binding shallow publication relies on. `context` governs ONLY the
+/// signature realization (which callable arm) — the surface itself is
+/// invariant in `Shallow`.
+///
+/// `None` when the root is not a single callable, has no first parameter, or
+/// the first-param root is symbolic-only (an open Conditional / mapped /
+/// indexed / free `TypeParam`).
+// Verified-unconsumed completeness projection — no normalizer currently
+// demands it; pending a delete-or-wire decision.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn callable_first_param_object_surface<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    callable: SemanticNodeId,
+    context: ProjectionReductionContext,
+) -> Option<TypeInfoSurface> {
+    let view =
+        crate::project_semantic_dispatch::callable_view::CallableNodeView::new(dispatch, callable);
+    let signature = view.signature(context)?;
+    let first_param = signature.first_param()?;
+    // Open-generic gate: a symbolic-only param root must NOT be materialised
+    // into a committed object surface — the SAME gate
+    // `navigate_param_to_object_surface` applies, keeping both binding paths
+    // in agreement.
+    if crate::project_semantic_dispatch::symbolic_root::slot_param_root_is_symbolic_only(
+        dispatch,
+        first_param,
+    ) {
+        return None;
+    }
+    project_shallow_surface_from_base(
+        ctx,
+        dispatch,
+        first_param,
+        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        ProjectionReductionContext::published(ProjectionMode::Shallow),
+        None,
+    )
+    // An INCOMPLETE projection records its typed reason before the
+    // no-surface answer; a failed resolution never reads as "the param has
+    // no object surface".
+    .recorded()
 }

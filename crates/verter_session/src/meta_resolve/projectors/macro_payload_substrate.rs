@@ -12,7 +12,7 @@
 //! Silent-miss failure semantics (an unresolved `DeclRef` / `Opaque`
 //! carrier reached under publication demand) live on the MANDATORY typed
 //! resolution outcome the value path itself returns
-//! (`crate::typeinfo::surface_resolution::SurfaceResolution`) — there is
+//! (`crate::semantic_query::surface_resolution::SurfaceResolution`) — there is
 //! no second, diagnostic-only dispatch.
 //!
 //! - [`PayloadSurfaceScope`] + [`resolve_payload_surface_with_scope`]
@@ -251,8 +251,8 @@ pub(crate) fn resolve_payload_surface_with_scope(
     expansion_kind: MacroExpansionKind,
     scope: PayloadSurfaceScope,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<SemanticNodeId> {
-    use crate::typeinfo::surface_resolution::{NonEmptyReasons, SurfaceResolution};
+) -> crate::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
+    use crate::semantic_query::surface_resolution::{NonEmptyReasons, SurfaceResolution};
     if matches!(scope, PayloadSurfaceScope::Default) {
         return super::resolve_payload_surface(
             dispatch,
@@ -443,7 +443,9 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     Ok(Some(members))
                 }
                 other => {
-                    match crate::typeinfo::surface_resolution::unresolved_node_partiality(other) {
+                    match crate::semantic_query::surface_resolution::unresolved_node_partiality(
+                        other,
+                    ) {
                         Some(reasons) => Err(reasons),
                         None => Ok(None),
                     }
@@ -597,7 +599,7 @@ pub(crate) enum MemberValueRole {
     Field,
     /// Callable-slot role. Slot members — the pipeline realizes the
     /// member's value through
-    /// [`crate::meta_resolve::dispatch_helpers::realize_callable_member`]
+    /// [`crate::project_semantic_dispatch::callable_view::realize_callable_member`]
     /// (carrier-shell normalization + conditional re-dispatch) FIRST,
     /// then caches/classifies/raises the realized function node.
     CallableSlot,

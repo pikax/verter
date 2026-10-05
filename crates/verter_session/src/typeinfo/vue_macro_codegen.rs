@@ -30,8 +30,8 @@ use verter_session_query::analysis::types::{
 };
 
 use crate::locator_identity::BroadRuntimeSubjectLocator;
-use crate::meta_resolve::callable_view::CallableNodeView;
 use crate::meta_resolve::projectors::{build_owner_decl_identity, resolve_macro_payload};
+use crate::project_semantic_dispatch::callable_view::CallableNodeView;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{
@@ -1697,12 +1697,16 @@ impl VerterHost {
             // A complete no-name signature (`NoSurface`) genuinely
             // contributes no event.
             let names = match CallableNodeView::new(dispatch, signature.node).event_names(context) {
-                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(names)
-                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(names) => {
-                    names.into_inner()
+                crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(names)
+                | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
+                    names,
+                ) => names.into_inner(),
+                crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                    continue
                 }
-                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
-                crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                    incomplete,
+                ) => {
                     let _ = incomplete.into_recorded_partial();
                     continue;
                 }
@@ -1807,17 +1811,17 @@ impl VerterHost {
 /// surface-less failure routes to the lane's `NonObjectRoot` failure exactly
 /// as a genuinely non-object root does.
 fn authored_fallback_surface(
-    resolution: crate::typeinfo::surface_resolution::SurfaceResolution<
+    resolution: crate::semantic_query::surface_resolution::SurfaceResolution<
         crate::typeinfo::surface::TypeInfoSurface,
     >,
 ) -> Option<crate::typeinfo::surface::TypeInfoSurface> {
     match resolution {
-        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+        crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(surface)
+        | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
             Some(surface.into_inner())
         }
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => None,
-        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+        crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => None,
+        crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
             incomplete.into_authored_fallback()
         }
     }

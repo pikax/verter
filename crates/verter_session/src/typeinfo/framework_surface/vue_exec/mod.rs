@@ -658,7 +658,7 @@ pub(crate) fn navigate_param_to_object_surface<C: crate::resolver_core::Resolver
     dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     scope_canonical: &str,
     payload: &verter_type_expr::locators::AuthoredTypePayloadRef,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+) -> crate::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
     let scope_owner = match &payload.locator {
         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => slot.anchor.owner,
         verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(body) => {
@@ -693,8 +693,8 @@ pub(crate) fn navigate_param_to_object_surface<C: crate::resolver_core::Resolver
         .at_optional_boundary()
         .map(|raised| raised.node())
     else {
-        return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(
-            crate::typeinfo::surface_resolution::NonEmptyReasons::of(
+        return crate::semantic_query::surface_resolution::SurfaceResolution::incomplete(
+            crate::semantic_query::surface_resolution::NonEmptyReasons::of(
                 crate::semantic_query::PartialReason::MissingDependency,
             ),
         );
@@ -710,16 +710,20 @@ pub(crate) fn navigate_param_to_object_surface<C: crate::resolver_core::Resolver
     // fault carrier) is an INCOMPLETE resolution with its typed reason. A
     // LOCAL authored-reference mirror passes through — the projection's
     // carrier-head resolution resolves it (or classifies its own terminal).
-    if let Some(reasons) = crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
-        ctx,
-        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), base).as_deref(),
-    ) {
-        return crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(reasons);
+    if let Some(reasons) =
+        crate::semantic_query::surface_resolution::stable_member_carrier_partiality(
+            ctx,
+            crate::project_semantic_dispatch::node_data_for(dispatch.graph(), base).as_deref(),
+        )
+    {
+        return crate::semantic_query::surface_resolution::SurfaceResolution::incomplete(reasons);
     }
-    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(dispatch, base) {
+    if crate::project_semantic_dispatch::symbolic_root::slot_param_root_is_symbolic_only(
+        dispatch, base,
+    ) {
         // The open-generic gate DECLINES a committed surface by design — a
         // complete negative answer, not a failure.
-        return crate::typeinfo::surface_resolution::SurfaceResolution::no_surface();
+        return crate::semantic_query::surface_resolution::SurfaceResolution::no_surface();
     }
     crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
         ctx,

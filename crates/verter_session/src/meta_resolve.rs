@@ -44,7 +44,6 @@ pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 // sub-module split — siblings live in `crates/verter_session/src/meta_resolve/`.
 // The shell re-exports the moved `pub(crate)` surface so existing
 // `crate::meta_resolve::*` paths keep working without callsite churn.
-pub(crate) mod callable_view;
 mod dep_signature;
 pub(crate) mod diagnostic_convert;
 pub(crate) mod dispatch_helpers;
@@ -68,13 +67,6 @@ mod slot_binding_graph_tests;
 #[path = "meta_resolve/typed_ir_consumer_tests.rs"]
 mod typed_ir_consumer_tests;
 pub(crate) use dep_signature::emit_dispatch_dep_signature_facts;
-// Consumed by the Vue/Svelte normalizers in §5a SP2/SP3; the re-export lands now
-// (substrate-first) but has no production caller yet, so the import is unused on
-// the lib build until each method is wired.
-#[allow(unused_imports)]
-pub(crate) use callable_view::{
-    ArmCombineNode, CallableNodeView, PositionalParamNode, SignatureNodeView, SlotCallableNodeParts,
-};
 pub(crate) use dispatch_helpers::{
     arg_preserving_member_use_site_slot, project_expr_class_a_node_via_dispatch_threaded,
     project_expr_class_a_via_dispatch,
@@ -140,3 +132,6 @@ pub(crate) use scoring::compare_type_expr_improvement;
 #[cfg(test)]
 #[path = "meta_resolve_tests.rs"]
 mod meta_resolve_tests;
+
+#[cfg(test)]
+mod callable_view_tests;

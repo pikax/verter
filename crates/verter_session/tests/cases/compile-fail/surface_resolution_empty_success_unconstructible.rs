@@ -25,7 +25,7 @@
 //! back nothing; trybuild would turn red on this fixture.
 
 use verter_session::typeinfo::surface::TypeInfoSurface;
-use verter_session::typeinfo::surface_resolution::SurfaceResolution;
+use verter_session::semantic_query::surface_resolution::SurfaceResolution;
 
 fn discharge(outcome: SurfaceResolution<Vec<u8>>) -> Vec<u8> {
     outcome.unwrap_or_default()
