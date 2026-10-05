@@ -2961,8 +2961,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // every query-time type resolution in the request.
         verter_audit::attribute_scope!(SemanticDispatch);
         #[cfg(feature = "test-support")]
-        let _family =
-            crate::for_tests::signature_kernel_bench_support::cancel_trace::enter_family(key.tag());
+        let _family = crate::cancel_trace::enter_family(key.tag());
         if let SemanticQueryKey::Relate { .. } = &key {
             let relate = crate::semantic_query::RelateMemoKey::from_query_key(&key);
             if !self.relation_raw_key_has_exact_inference_context(&relate) {

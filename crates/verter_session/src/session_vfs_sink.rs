@@ -29,7 +29,8 @@ use std::sync::{Arc, Weak};
 use verter_workspace::audit_sink::{VfsAuditSink, VfsReadEvent};
 
 use crate::component_meta_audit::VfsLayer;
-use crate::component_meta_audit::{RequestFootprintAccumulator, VfsReadRecord};
+use crate::component_meta_audit::VfsReadRecord;
+use crate::request_footprint::RequestFootprintAccumulator;
 
 /// Session-owned VFS audit sink. Filters fan-out events by
 /// `request_id` and forwards matches to the accumulator as
@@ -88,7 +89,7 @@ impl VfsAuditSink for SessionVfsSink {
         // flag is on (read via TLS by `current_timing_enabled`). The
         // accumulator stores the ledger entry for `FileAudit` build
         // at request finalisation.
-        acc.push_file_read_timing(crate::component_meta_audit::accumulator::FileReadTiming {
+        acc.push_file_read_timing(crate::request_footprint::FileReadTiming {
             canonical_id: Arc::clone(&event.canonical_id),
             layer: crate::session_vfs_sink::vfs_layer_from_workspace(event.layer),
             cache_hit: event.cache_hit,

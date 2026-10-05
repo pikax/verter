@@ -18264,9 +18264,9 @@ export type Props = { render: typeof Button }
 #[cfg(test)]
 mod imported_root_trace_dedup_tests {
     use super::*;
-    use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
     use crate::component_meta_audit::structured_event::StructuredAuditEvent;
     use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::request_footprint::RequestFootprintAccumulator;
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
     fn host_with_props_ts() -> Arc<VerterHost> {
@@ -18368,8 +18368,8 @@ mod imported_root_trace_dedup_tests {
 #[cfg(test)]
 mod trace_laziness_tests {
     use super::*;
-    use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
     use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::request_footprint::RequestFootprintAccumulator;
     use crate::request_observers::component_meta_trace_custom;
     use std::cell::Cell;
 

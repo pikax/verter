@@ -211,7 +211,7 @@ fn compile_many_upsert_batch_captures_calling_thread_request_context() {
     let host = new_host();
     let canonical = "/ctx-capture.vue";
 
-    let accumulator = Arc::new(crate::component_meta_audit::RequestFootprintAccumulator::new());
+    let accumulator = Arc::new(crate::request_footprint::RequestFootprintAccumulator::new());
     let ctx = RequestContext::with_kind_and_timing(
         4242,
         Arc::from(canonical),

@@ -7,7 +7,7 @@
 //! passive-observer pipeline the component-meta entry uses
 //! (`install_component_meta_audit_scope` → accumulator → `SessionVfsSink` →
 //! drain → `build_file_audit_vec` → `mine_footprint`): one per-request
-//! [`crate::component_meta_audit::RequestFootprintAccumulator`] is planted on
+//! [`crate::request_footprint::RequestFootprintAccumulator`] is planted on
 //! the [`crate::request_context::RequestContext`], the workspace VFS audit
 //! sink attributes this request's reads to it, and after the request body
 //! completes the drained state is mined into the footprint + per-file
@@ -31,7 +31,7 @@ use crate::VerterHost;
 /// The sink holds a `Weak` to the accumulator, so late fan-out events no-op
 /// once this scope (and the context's accumulator `Arc`) drops.
 pub(crate) struct TypeinfoFootprintScope {
-    accumulator: Option<Arc<crate::component_meta_audit::RequestFootprintAccumulator>>,
+    accumulator: Option<Arc<crate::request_footprint::RequestFootprintAccumulator>>,
     _sink_handle: Option<verter_workspace::audit_sink::SinkHandle>,
 }
 
@@ -43,7 +43,7 @@ impl TypeinfoFootprintScope {
     pub(crate) fn install(host: &VerterHost, request_id: u64, footprint_capture: bool) -> Self {
         let accumulator = if footprint_capture {
             Some(Arc::new(
-                crate::component_meta_audit::RequestFootprintAccumulator::with_caps(
+                crate::request_footprint::RequestFootprintAccumulator::with_caps(
                     host.config.audit_caps.clone(),
                 ),
             ))
@@ -64,7 +64,7 @@ impl TypeinfoFootprintScope {
     /// (`None` when capture is off).
     pub(crate) fn accumulator(
         &self,
-    ) -> Option<Arc<crate::component_meta_audit::RequestFootprintAccumulator>> {
+    ) -> Option<Arc<crate::request_footprint::RequestFootprintAccumulator>> {
         self.accumulator.clone()
     }
 }

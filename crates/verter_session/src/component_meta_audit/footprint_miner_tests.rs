@@ -6,7 +6,7 @@
 //! readable.
 
 use super::*;
-use crate::component_meta_audit::accumulator::{DerivationEdgeRaw, RequestFootprintAccumulator};
+use crate::request_footprint::{DerivationEdgeRaw, RequestFootprintAccumulator};
 use crate::semantic_query::{NodeScopeId, OriginEdge};
 
 fn make_ctx(id: u64) -> Arc<RequestContext> {

@@ -495,7 +495,7 @@ impl HostStageExecutor {
         if timing_on {
             let total_ns = parse_start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
             if let Some(acc) = crate::request_context::current_accumulator() {
-                acc.push_file_parse_timing(crate::component_meta_audit::FileParseTiming {
+                acc.push_file_parse_timing(crate::request_footprint::FileParseTiming {
                     canonical_id: Arc::from(canonical_id),
                     parse_ns: total_ns,
                     lower_ns: 0,

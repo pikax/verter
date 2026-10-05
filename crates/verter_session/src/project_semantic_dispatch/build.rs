@@ -171,7 +171,7 @@ fn emit_module_augmentation_stitched_event(
         };
 
     crate::request_observers::push_structured_event(
-        crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationStitched {
+        verter_audit::structured_event::StructuredAuditEvent::ModuleAugmentationStitched {
             target_kind_tag,
             external_specifier,
             resolved_relative_canonical,

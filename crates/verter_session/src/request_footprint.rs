@@ -17,12 +17,13 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{
-    AliasResolveRecord, ConditionalRecord, IndexedReadyBuildRecord, InstantiationRecord,
-    MaterializationRecord, ProjectionRecord, SharedLoadReuseRecord, StructuredAuditEvent,
-    SubstitutionRecord, VfsReadRecord,
-};
 use crate::semantic_query::{OriginEdge, OriginEdgeKind, SemanticNodeId};
+use verter_audit::footprint::{
+    AliasResolveRecord, ConditionalRecord, IndexedReadyBuildRecord, InstantiationRecord,
+    MaterializationRecord, ProjectionRecord, SharedLoadReuseRecord, SubstitutionRecord,
+    VfsReadRecord,
+};
+use verter_audit::structured_event::StructuredAuditEvent;
 use verter_audit::{AuditCaps, TruncationCounters};
 
 /// Raw derivation-edge entry captured during a request. The miner
@@ -97,7 +98,7 @@ pub struct FileReadTiming {
     /// Canonical id of the file the timing entry attributes.
     pub canonical_id: Arc<str>,
     /// Which VFS layer served the read.
-    pub layer: super::VfsLayer,
+    pub layer: verter_audit::origin_graph::VfsLayer,
     /// `true` when the read resolved from an in-memory cache.
     pub cache_hit: bool,
     /// Number of bytes returned (0 for negative / missing reads).
@@ -351,7 +352,8 @@ impl RequestFootprintAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component_meta_audit::{VfsLayer, VfsReadRecord};
+    use verter_audit::footprint::VfsReadRecord;
+    use verter_audit::origin_graph::VfsLayer;
 
     #[test]
     fn accumulator_push_indexed_ready_build_appends() {

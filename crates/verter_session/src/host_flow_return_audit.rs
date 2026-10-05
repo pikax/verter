@@ -137,7 +137,7 @@ impl VerterHost {
             // from a degraded member return carries a typed degradation.
             let (step, partial) = dispatch.execute_flow_return_observing_degraded_read(key);
             #[cfg(feature = "test-support")]
-            crate::for_tests::signature_kernel_bench_support::cancel_trace::mark("evaluated");
+            crate::cancel_trace::mark("evaluated");
             match step {
                 crate::semantic_query::FlowReturnStep::Complete(result) => {
                     Ok(Arc::new(if partial {
@@ -266,7 +266,7 @@ impl VerterHost {
             }
         };
         #[cfg(feature = "test-support")]
-        crate::for_tests::signature_kernel_bench_support::cancel_trace::mark("released");
+        crate::cancel_trace::mark("released");
         // A cancelled request's incomplete answer IS the cancellation: the
         // evaluation stops at its next check with a budget trip, or a nested
         // read stops and degrades the value it feeds. Neither says anything

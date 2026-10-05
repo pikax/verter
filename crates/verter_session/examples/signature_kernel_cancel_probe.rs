@@ -56,7 +56,7 @@ use std::sync::{Arc, Barrier, OnceLock};
 use std::time::{Duration, Instant};
 
 use verter_execution::cancellation::CancellationToken;
-use verter_session::for_tests::signature_kernel_bench_support::cancel_trace::{self, CancelTrace};
+use verter_session::cancel_trace::{self, CancelTrace};
 use verter_session::host_flow_return_audit::FlowReturnError;
 use verter_session::semantic_query::ReturnProjectionDemand;
 use verter_session::{HostConfig, UpsertRequest, VerterHost};

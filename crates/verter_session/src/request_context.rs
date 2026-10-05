@@ -29,8 +29,8 @@ use verter_execution::request_context::{
     CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
 
-use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
 pub use crate::request_budget::RequestBudget;
+use crate::request_footprint::RequestFootprintAccumulator;
 
 /// Return the request-scoped projection budget carried by the active
 /// [`RequestContext`].
@@ -1569,9 +1569,7 @@ impl RequestContext {
         let cancelled = self.cancellation.is_cancelled();
         #[cfg(feature = "test-support")]
         if cancelled {
-            crate::for_tests::signature_kernel_bench_support::cancel_trace::observed(
-                std::panic::Location::caller(),
-            );
+            crate::cancel_trace::observed(std::panic::Location::caller());
         }
         cancelled
     }

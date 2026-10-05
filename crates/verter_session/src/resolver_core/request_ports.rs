@@ -394,9 +394,7 @@ impl CancellationCheckpoint {
         let cancelled = self.token().is_some_and(|token| token.is_cancelled());
         #[cfg(feature = "test-support")]
         if cancelled {
-            crate::for_tests::signature_kernel_bench_support::cancel_trace::observed(
-                std::panic::Location::caller(),
-            );
+            crate::cancel_trace::observed(std::panic::Location::caller());
         }
         cancelled
     }

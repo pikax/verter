@@ -44,7 +44,7 @@ impl VerterHost {
             // Wire `HostConfig::audit_caps` through to the accumulator so
             // per-host cap overrides take effect on every raw push lane.
             Some(std::sync::Arc::new(
-                crate::component_meta_audit::RequestFootprintAccumulator::with_caps(
+                crate::request_footprint::RequestFootprintAccumulator::with_caps(
                     self.config.audit_caps.clone(),
                 ),
             ))

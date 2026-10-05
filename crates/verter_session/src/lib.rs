@@ -345,6 +345,9 @@ mod test_worker_pools;
 
 #[cfg(test)]
 mod artifact_root_retention_tests;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod cancel_trace;
 pub(crate) mod compile_output_node;
 pub mod component_meta_cached_result;
 pub mod input_basis;
@@ -379,6 +382,7 @@ mod public_api_batch_fixed_view_tests;
 pub mod query_host_port;
 mod request_budget;
 pub mod request_context;
+pub mod request_footprint;
 pub mod request_observers;
 pub(crate) mod request_route_memo;
 pub mod resolver_core;

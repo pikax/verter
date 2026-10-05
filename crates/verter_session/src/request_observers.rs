@@ -24,7 +24,7 @@ pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
 
 /// Push a structured event into the active request's accumulator.
 /// No-op when no request context is installed.
-pub fn push_structured_event(event: crate::component_meta_audit::StructuredAuditEvent) {
+pub fn push_structured_event(event: verter_audit::structured_event::StructuredAuditEvent) {
     if let Some(acc) = crate::request_context::current_accumulator() {
         acc.push_structured_event(event);
     }
@@ -43,7 +43,7 @@ pub fn push_structured_event(event: crate::component_meta_audit::StructuredAudit
 /// serialisable.
 pub fn push_cache_drained_at_upsert(layer: &'static str, canonical_id: &str) {
     push_structured_event(
-        crate::component_meta_audit::StructuredAuditEvent::CacheDrainedAtUpsert {
+        verter_audit::structured_event::StructuredAuditEvent::CacheDrainedAtUpsert {
             layer: std::sync::Arc::<str>::from(layer),
             canonical_id: std::sync::Arc::<str>::from(canonical_id),
         },
@@ -130,10 +130,9 @@ pub(crate) fn push_structured_custom(name: &'static str, detail: impl Into<Strin
     // Custom justified: single construction site for `Custom`
     // across the session crate — see the rationale in the
     // `push_structured_custom` doc comment above.
-    push_structured_event(crate::component_meta_audit::StructuredAuditEvent::Custom {
-        name,
-        detail,
-    });
+    push_structured_event(
+        verter_audit::structured_event::StructuredAuditEvent::Custom { name, detail },
+    );
 }
 
 /// Push a typed `StructuredAuditEvent` variant into the

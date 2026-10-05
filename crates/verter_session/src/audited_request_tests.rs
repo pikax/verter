@@ -150,7 +150,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         let footprint_capture = host.config.footprint_capture && host.config.audit_enabled;
         let accumulator = if footprint_capture {
             Some(Arc::new(
-                crate::component_meta_audit::RequestFootprintAccumulator::new(),
+                crate::request_footprint::RequestFootprintAccumulator::new(),
             ))
         } else {
             None

@@ -35,10 +35,11 @@ use std::sync::Arc;
 use verter_audit::{AuditCaps, MaterializationSubject};
 
 use crate::component_meta_audit::{
-    accumulator::RequestFootprintAccumulator, AliasResolveRecord, ConditionalRecord,
-    IndexedReadyBuildRecord, InstantiationRecord, MaterializationRecord, ProjectionRecord,
-    StructuredAuditEvent, SubstitutionRecord, VfsLayer, VfsReadRecord,
+    AliasResolveRecord, ConditionalRecord, IndexedReadyBuildRecord, InstantiationRecord,
+    MaterializationRecord, ProjectionRecord, StructuredAuditEvent, SubstitutionRecord, VfsLayer,
+    VfsReadRecord,
 };
+use crate::request_footprint::RequestFootprintAccumulator;
 use crate::semantic_query::SemanticNodeId;
 
 /// Construct an `AuditCaps` with every category set to a tight `cap`

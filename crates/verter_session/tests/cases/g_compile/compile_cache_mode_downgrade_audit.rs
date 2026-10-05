@@ -17,9 +17,9 @@
 use std::sync::Arc;
 
 use verter_audit::payloads::tags::{CompileCacheModeTag, DowngradeReasonTag};
-use verter_session::component_meta_audit::accumulator::RequestFootprintAccumulator;
 use verter_session::component_meta_audit::StructuredAuditEvent;
 use verter_session::request_context::{RequestContext, RequestContextGuard};
+use verter_session::request_footprint::RequestFootprintAccumulator;
 use verter_session::{
     CompileCacheMode, CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost,
     VirtualNodeKind, VirtualQuery,

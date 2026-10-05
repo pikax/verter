@@ -34,7 +34,6 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use xxhash_rust::xxh3::xxh3_128;
 
-use super::accumulator::AccumulatorState;
 use super::{
     AliasResolveRecord, CacheOutcomeTally, ConditionalBranch, ConditionalRecord,
     DerivationEdgeRecord, DerivationSubgraph, GraphCompletenessReport, IndexedReadyBuildRecord,
@@ -43,6 +42,7 @@ use super::{
     SemanticNodeKind, StructuredAuditEvent, SubstitutionRecord,
 };
 use crate::request_context::RequestContext;
+use crate::request_footprint::AccumulatorState;
 use crate::semantic_query::{
     BranchSelection, IndexKey, OriginEdgeKind as CoreOriginEdgeKind, OriginMeta, PathSegment,
     PropertyKey, SemanticNodeData, SemanticNodeId,
@@ -705,7 +705,7 @@ fn edge_kind_discriminant(kind: OriginEdgeKind) -> u32 {
 // ──────────────────────────────────────────────────────────────────────
 
 fn translate_edge(
-    raw: &super::accumulator::DerivationEdgeRaw,
+    raw: &crate::request_footprint::DerivationEdgeRaw,
     id_map: &FxHashMap<SemanticNodeId, NodeId>,
 ) -> DerivationEdgeRecord {
     let result = id_map.get(&raw.result).copied().unwrap_or(NodeId(u32::MAX));

@@ -493,8 +493,8 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
 /// trace entries for the warm-prefix steps and this test fails.
 #[test]
 fn audit_mining_traces_dropped_prefix_edges() {
-    use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
     use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::request_footprint::RequestFootprintAccumulator;
     use crate::semantic_query::{OriginEdgeKind, OriginMeta};
     use crate::semantic_query_memo::SemanticGraphStore;
 

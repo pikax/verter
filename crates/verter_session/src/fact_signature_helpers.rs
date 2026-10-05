@@ -87,7 +87,7 @@ use verter_session_query::facts::{
 /// Installs a fresh [`verter_session_query::facts::fact_read_set::FactReadSetCell`] onto the
 /// TLS tracer stack, runs `f`, pops the tracer, and finalises the
 /// observation set. On [`FactReadSetFinalise::Overflow`] emits a
-/// [`crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow`]
+/// [`verter_audit::structured_event::StructuredAuditEvent::FactSignatureOverflow`]
 /// and increments the host's per-host
 /// [`crate::VerterHost::signature_overflow_at_install`] counter.
 ///
@@ -135,7 +135,7 @@ fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClock
     // across each nesting level.
     if matches!(finalise, FactReadSetFinalise::Overflow) {
         crate::request_observers::push_structured_event(
-            crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
+            verter_audit::structured_event::StructuredAuditEvent::FactSignatureOverflow {
                 candidate_size: (FACT_SIGNATURE_CAP as u32).saturating_add(1),
                 cap: FACT_SIGNATURE_CAP as u32,
             },
@@ -586,7 +586,7 @@ where
     let finalise = read_set.finalise();
     if matches!(finalise, FactReadSetFinalise::Overflow) {
         crate::request_observers::push_structured_event(
-            crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
+            verter_audit::structured_event::StructuredAuditEvent::FactSignatureOverflow {
                 candidate_size: (FACT_SIGNATURE_CAP as u32).saturating_add(1),
                 cap: FACT_SIGNATURE_CAP as u32,
             },

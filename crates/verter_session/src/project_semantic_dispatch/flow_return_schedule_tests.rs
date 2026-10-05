@@ -1958,10 +1958,7 @@ fn a_tripped_demand_discovers_no_further_callee() {
         let context = crate::request_context::RequestContext::new(1, Arc::from(PATH), false, None);
         let _installed = crate::request_context::RequestContextGuard::install(Arc::clone(&context));
         let _cancel = cancel_at.map(|nth| {
-            crate::for_tests::signature_kernel_bench_support::cancel_trace::cancel_at_family_entry(
-                context.cancellation_token(),
-                nth,
-            )
+            crate::cancel_trace::cancel_at_family_entry(context.cancellation_token(), nth)
         });
         with_dispatch(host, |dispatch| {
             dispatch.set_connected_limits_for_tests(work, MAX_CONNECTED_QUERY_DEPTH);
@@ -2113,11 +2110,7 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
         let host = host_with(&[(PATH, source.as_str())]);
         let token = CancellationToken::new();
         let got = {
-            let _cancel =
-                crate::for_tests::signature_kernel_bench_support::cancel_trace::cancel_at_family_entry(
-                    token.clone(),
-                    nth,
-                );
+            let _cancel = crate::cancel_trace::cancel_at_family_entry(token.clone(), nth);
             answer(&host, token)
         };
         cancelled += usize::from(check(&host, got, &format!("family {nth}")));

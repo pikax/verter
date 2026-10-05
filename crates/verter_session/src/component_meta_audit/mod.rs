@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use crate::instant::Instant;
 
-pub mod accumulator;
 pub mod assertions;
 pub mod audit_records_store;
 #[cfg(test)]
@@ -32,9 +31,6 @@ pub mod structured_event;
 #[cfg(test)]
 mod mod_tests;
 
-pub use accumulator::{
-    AccumulatorState, FileParseTiming, FileReadTiming, RequestFootprintAccumulator,
-};
 pub use assertions::{
     render_chain_text, AssertionDiff, ChainTermination, ProvenanceChain, ProvenanceStep,
     WALKER_DEPTH_CAP,
@@ -97,7 +93,7 @@ pub fn projection_mode_audit_from(
 }
 
 /// Record one `MaterializationRecord` against the currently-installed
-/// [`RequestFootprintAccumulator`].
+/// [`crate::request_footprint::RequestFootprintAccumulator`].
 ///
 /// No-op when no accumulator is installed (the synthetic-record path
 /// and unaudited callers). Producers that materialise a payload of
@@ -597,7 +593,7 @@ impl Drop for RequestAuditGuard {
 /// therefore receive `triggered_by_this_request = false` and all
 /// `*_ms = None`.
 pub fn build_file_audit_vec(
-    state: &accumulator::AccumulatorState,
+    state: &crate::request_footprint::AccumulatorState,
     entry_canonical_id: &str,
     direct_import_canonicals: &rustc_hash::FxHashSet<String>,
     timing_capture_on: bool,

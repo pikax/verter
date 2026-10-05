@@ -14,12 +14,12 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use verter_session::component_meta_audit::accumulator::RequestFootprintAccumulator;
 use verter_session::component_meta_audit::{
     CacheOutcomeKind, MaterializationScopeAudit, MaterializeSkipReason, ProjectionModeAudit,
     StructuredAuditEvent,
 };
 use verter_session::request_context::{RequestContext, RequestContextGuard};
+use verter_session::request_footprint::RequestFootprintAccumulator;
 use verter_session::request_observers::{
     push_structured_event, record_dep_signature_intern_hit, record_dep_signature_merge,
     record_family_map_lock_acquisition, record_node_arena_lock_acquisition,
