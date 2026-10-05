@@ -11,6 +11,7 @@
 //! `crate::host_manage::*`; this file contributes a continuation
 //! `impl VerterHost { … }` block.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;

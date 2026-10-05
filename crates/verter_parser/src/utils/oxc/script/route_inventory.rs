@@ -18,19 +18,19 @@ pub enum RouteCapability {
     TypeAndValue,
 }
 
-impl RouteCapability {
-    const fn from_import_kind(kind: ImportOrExportKind) -> Self {
-        match kind {
-            ImportOrExportKind::Type => Self::TypeOnly,
-            ImportOrExportKind::Value => Self::TypeAndValue,
-        }
+/// The routing capability an import's kind grants.
+const fn route_capability_from_import_kind(kind: ImportOrExportKind) -> RouteCapability {
+    match kind {
+        ImportOrExportKind::Type => RouteCapability::TypeOnly,
+        ImportOrExportKind::Value => RouteCapability::TypeAndValue,
     }
+}
 
-    const fn from_export_kind(kind: ImportOrExportKind) -> Self {
-        match kind {
-            ImportOrExportKind::Type => Self::TypeOnly,
-            ImportOrExportKind::Value => Self::TypeAndValue,
-        }
+/// The routing capability an export's kind grants.
+const fn route_capability_from_export_kind(kind: ImportOrExportKind) -> RouteCapability {
+    match kind {
+        ImportOrExportKind::Type => RouteCapability::TypeOnly,
+        ImportOrExportKind::Value => RouteCapability::TypeAndValue,
     }
 }
 
@@ -285,7 +285,7 @@ where
                                 local: specifier.local.name.to_string(),
                                 source: declaration.source.value.to_string(),
                                 form: RouteImportForm::Default,
-                                capability: RouteCapability::from_import_kind(
+                                capability: route_capability_from_import_kind(
                                     declaration.import_kind,
                                 ),
                                 imported: RouteImportedName::Name("default".to_string()),
@@ -297,7 +297,7 @@ where
                                 local: specifier.local.name.to_string(),
                                 source: declaration.source.value.to_string(),
                                 form: RouteImportForm::Namespace,
-                                capability: RouteCapability::from_import_kind(
+                                capability: route_capability_from_import_kind(
                                     declaration.import_kind,
                                 ),
                                 imported: RouteImportedName::Namespace,
@@ -316,7 +316,7 @@ where
                         local: declaration.id.name.to_string(),
                         source: reference.expression.value.to_string(),
                         form: RouteImportForm::ImportEquals,
-                        capability: RouteCapability::from_import_kind(declaration.import_kind),
+                        capability: route_capability_from_import_kind(declaration.import_kind),
                         imported: RouteImportedName::Namespace,
                     });
                 }
@@ -366,7 +366,7 @@ where
                 inventory.wildcard_reexports.push(ScriptWildcardRoute {
                     owner,
                     source: declaration.source.value.to_string(),
-                    capability: RouteCapability::from_export_kind(declaration.export_kind),
+                    capability: route_capability_from_export_kind(declaration.export_kind),
                     exported_namespace: declaration
                         .exported
                         .as_ref()

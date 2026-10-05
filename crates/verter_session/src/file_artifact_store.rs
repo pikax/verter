@@ -100,23 +100,6 @@ pub(crate) fn source_parse_identity_derivations_for_tests() -> usize {
 }
 
 impl FileArtifactKey {
-    /// Builds the exact key for an already-materialized artifact.
-    pub(crate) fn for_indexed(
-        canonical: Arc<str>,
-        indexed: &IndexedReady,
-        parse_env_hash: Hash16,
-    ) -> Self {
-        Self::for_source_identity(
-            canonical,
-            indexed.whole_hash,
-            indexed.raw_source.as_ref(),
-            indexed.file_language.clone(),
-            indexed.framework_parse.as_deref(),
-            parse_env_hash,
-        )
-        .expect("IndexedReady retains a compatible runtime language and parse artifact")
-    }
-
     /// [`Self::for_source_identity`] for a plain script whose parse identity
     /// the source stage already derived: no pass over the source bytes.
     pub(crate) fn for_script_parse_identity(
@@ -135,43 +118,6 @@ impl FileArtifactKey {
                 crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
             file_language_id,
         }
-    }
-
-    /// Builds an exact key from the source-stage identity that produced an artifact.
-    pub(crate) fn for_source_identity(
-        canonical: Arc<str>,
-        content_hash: Hash16,
-        source: &str,
-        file_language_id: FileLanguage,
-        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
-        parse_env_hash: Hash16,
-    ) -> Option<Self> {
-        let parse_key = match framework_parse {
-            Some(artifact) => {
-                if artifact.adapter_id() != file_language_id.adapter_id()?
-                    || Some(artifact.language_id()) != file_language_id.carrier_language_id()
-                {
-                    return None;
-                }
-                artifact.parse_key().clone()
-            }
-            None => {
-                #[cfg(test)]
-                SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
-                verter_language::default_parse_identity_for(source, &file_language_id)
-                    .ok()?
-                    .1
-            }
-        };
-        Some(Self {
-            canonical,
-            content_hash,
-            parse_env_hash,
-            parse_key,
-            build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
-            file_language_id,
-        })
     }
 
     /// Extension-derived language for explicitly synthetic, source-less test
@@ -4000,3 +3946,71 @@ mod file_artifact_store_tests;
 #[cfg(test)]
 #[path = "route_surface_generation_tests.rs"]
 mod route_surface_generation_tests;
+
+/// FileArtifactKey operations that read session-owned state.
+pub(crate) trait FileArtifactKeySource: Sized {
+    /// Builds the exact key for an already-materialized artifact.
+    fn for_indexed(canonical: Arc<str>, indexed: &IndexedReady, parse_env_hash: Hash16) -> Self;
+
+    /// Builds an exact key from the source-stage identity that produced an artifact.
+    fn for_source_identity(
+        canonical: Arc<str>,
+        content_hash: Hash16,
+        source: &str,
+        file_language_id: FileLanguage,
+        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
+        parse_env_hash: Hash16,
+    ) -> Option<Self>;
+}
+
+impl FileArtifactKeySource for FileArtifactKey {
+    /// Builds the exact key for an already-materialized artifact.
+    fn for_indexed(canonical: Arc<str>, indexed: &IndexedReady, parse_env_hash: Hash16) -> Self {
+        Self::for_source_identity(
+            canonical,
+            indexed.whole_hash,
+            indexed.raw_source.as_ref(),
+            indexed.file_language.clone(),
+            indexed.framework_parse.as_deref(),
+            parse_env_hash,
+        )
+        .expect("IndexedReady retains a compatible runtime language and parse artifact")
+    }
+
+    /// Builds an exact key from the source-stage identity that produced an artifact.
+    fn for_source_identity(
+        canonical: Arc<str>,
+        content_hash: Hash16,
+        source: &str,
+        file_language_id: FileLanguage,
+        framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
+        parse_env_hash: Hash16,
+    ) -> Option<Self> {
+        let parse_key = match framework_parse {
+            Some(artifact) => {
+                if artifact.adapter_id() != file_language_id.adapter_id()?
+                    || Some(artifact.language_id()) != file_language_id.carrier_language_id()
+                {
+                    return None;
+                }
+                artifact.parse_key().clone()
+            }
+            None => {
+                #[cfg(test)]
+                SOURCE_PARSE_IDENTITY_DERIVATIONS.with(|count| count.set(count.get() + 1));
+                verter_language::default_parse_identity_for(source, &file_language_id)
+                    .ok()?
+                    .1
+            }
+        };
+        Some(Self {
+            canonical,
+            content_hash,
+            parse_env_hash,
+            parse_key,
+            build_toolchain_fingerprint:
+                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            file_language_id,
+        })
+    }
+}

@@ -9,6 +9,7 @@
 //! Public surface remains rooted at `crate::host_manage::*`; this file
 //! contributes a continuation `impl VerterHost { … }` block.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
 use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;

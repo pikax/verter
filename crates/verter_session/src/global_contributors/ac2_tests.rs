@@ -1,5 +1,6 @@
 //! Coherence of global contributor snapshots under concurrent publication.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 

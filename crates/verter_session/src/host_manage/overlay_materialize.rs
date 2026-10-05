@@ -18,6 +18,7 @@
 //! [`crate::resolver_core::ResolverContext::materialize_overlay_indexed_ready`];
 //! the impl on [`crate::VerterHost`] delegates here.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
 use verter_semantic::analysis::script_shallow_index::build_script_shallow_index_with_owners;

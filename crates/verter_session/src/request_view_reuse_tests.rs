@@ -31,6 +31,7 @@
 //! Together the four tests discriminate per-call rebuilding, lost
 //! currentness, and overlay re-rooting errors.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use crate::resolver_core::request_ports::IndexedInputs;
 use crate::resolver_core::StoreView;
 use std::sync::Arc;

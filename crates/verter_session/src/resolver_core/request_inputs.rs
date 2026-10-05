@@ -1,6 +1,7 @@
 //! Owned input records shared by request ports. Source work stays private to
 //! session-owned artifact leases; these records contain only immutable data.
 use super::shallow_file_state::ShallowInputRecord;
+use crate::file_artifact_store::FileArtifactKeySource;
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, OnceLock};
 

@@ -27,6 +27,7 @@
 //! assertion that a count is zero is paired with a control proving the
 //! count moves when work does run.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
 use crate::resolver_core::StoreView;

@@ -4,6 +4,7 @@
 //! non-admission, warm-hit identity, content-version keying, and the
 //! empty-fact-rail pin (no slice identity in `ReadSetSignature.facts`).
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 

@@ -1,5 +1,6 @@
 //! `FileArtifactStore` unit tests.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
 use verter_session_query::analysis::types::Hash16;

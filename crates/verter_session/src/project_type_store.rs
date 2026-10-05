@@ -20,6 +20,7 @@
 //! subsequent phases of the project-global overhaul — this module introduces
 //! the foundation without rewiring the hot path yet.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
