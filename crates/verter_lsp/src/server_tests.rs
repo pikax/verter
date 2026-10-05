@@ -35430,6 +35430,54 @@ async fn hover_recomputes_until_the_diagnostics_generation_stops_moving() {
     }
 }
 
+/// Background settlement advances a document's diagnostics generation at any
+/// instant, including just after a request's answer was checked against an
+/// unmoved basis. That move is later than the answer: the checked hover is the
+/// reply. Reading the generation a second time before replying turned such a
+/// move into `ContentModified`, which an editor shows as no hover at all.
+#[tokio::test]
+async fn hover_answer_checked_against_an_unmoved_basis_survives_a_later_generation_move() {
+    let source = "<script setup lang=\"ts\">\nconst width = 10\n</script>\n<template><div>{{ width }}</div></template>\n";
+    let canonical = "/workspace/src/App.vue";
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(server, canonical, source);
+    server.ensure_current_file_synced(&uri).await;
+    let position = find_document_position(server, &uri, "{{ width }}", 3);
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "const width: number");
+    let documents = Arc::clone(&server.documents);
+    let moves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_moves = Arc::clone(&moves);
+    server.after_settlement_observed(move || {
+        observed_moves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        documents.host().bump_diagnostics_generation(canonical);
+    });
+
+    let hover = server
+        .hover(hover_params(&uri, position))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("a generation move after the answer was checked must not fail it: {error:?}")
+        })
+        .expect("the checked hover answers");
+
+    assert_eq!(
+        moves.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the move lands once, after the only settlement"
+    );
+    let HoverContents::Markup(contents) = hover.contents else {
+        panic!("expected markup");
+    };
+    assert!(
+        contents.value.contains("width: number"),
+        "the reply is the checked provider hover: {}",
+        contents.value
+    );
+}
+
 /// Definition settles its provider leg against a basis captured after its
 /// repair. Generation-only moves during the provider await (several, as when
 /// imported files open back to back) recompute that leg instead of answering

@@ -947,7 +947,14 @@ impl RealProviderTestSession {
         }
     }
 
-    /// Get hover text at a position.
+    /// Get hover text at a position: `None` only when the server answered with
+    /// no hover.
+    ///
+    /// A failed request panics with its error instead. The RPC failures this
+    /// harness can see — its own request deadline elapsing, a
+    /// `ContentModified` — are not a server that answered without content, and
+    /// reporting them as `None` blames the feature under test for a request
+    /// that never produced an answer.
     pub(crate) async fn hover_text(&self, uri: &Uri, position: Position) -> Option<String> {
         let params = HoverParams {
             text_document_position_params: TextDocumentPositionParams {
@@ -956,6 +963,7 @@ impl RealProviderTestSession {
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
+        let started = std::time::Instant::now();
         match self.server().hover(params).await {
             Ok(Some(hover)) => match hover.contents {
                 HoverContents::Markup(m) => Some(m.value),
@@ -973,10 +981,13 @@ impl RealProviderTestSession {
                 ),
             },
             Ok(None) => None,
-            Err(e) => {
-                eprintln!("hover error: {e}");
-                None
-            }
+            Err(error) => panic!(
+                "hover request at {}:{} in {} failed after {:?}: {error}",
+                position.line,
+                position.character,
+                uri.as_str(),
+                started.elapsed(),
+            ),
         }
     }
 

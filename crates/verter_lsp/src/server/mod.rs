@@ -598,6 +598,10 @@ pub struct ServerCore {
     /// the commit fence is still held.
     #[cfg(test)]
     completion_final_recompute_hook: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Runs once a settled request route has observed its basis current, before
+    /// it replies.
+    #[cfg(test)]
+    settlement_observed_hook: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Handle for the background workspace scanner. Receives priority signals
     /// from `did_open` to reorder the scan queue. `None` until `initialized()`.
     /// Arc-wrapped so background init can install the scanner without &self.
@@ -762,11 +766,18 @@ impl VerterLanguageServer {
                 return first.settle(&self.documents, uri, response);
             }
             let settlement = retry.as_ref().unwrap_or(&first);
-            if response.is_none()
-                || settlement.is_current(&self.documents, uri)
-                || recomputations == GENERATION_ONLY_RECOMPUTE_LIMIT
-            {
-                return settlement.settle(&self.documents, uri, response);
+            // One observation of the basis decides the reply. Background
+            // settlement can move the generation right after it; that move is
+            // later than this answer, so the basis is not read a second time.
+            if response.is_none() || settlement.is_current(&self.documents, uri) {
+                #[cfg(test)]
+                self.run_settlement_observed_hook();
+                return Ok(response);
+            }
+            if recomputations == GENERATION_ONLY_RECOMPUTE_LIMIT {
+                return Err(tower_lsp_server::jsonrpc::Error::new(
+                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                ));
             }
             drop(response);
             recomputations += 1;
@@ -874,6 +885,19 @@ impl VerterLanguageServer {
     #[cfg(test)]
     fn run_final_completion_recompute_hook(&self) {
         let hook = self.completion_final_recompute_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
+    fn after_settlement_observed(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.settlement_observed_hook.lock() = Some(Arc::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_settlement_observed_hook(&self) {
+        let hook = self.settlement_observed_hook.lock().clone();
         if let Some(hook) = hook {
             hook();
         }
@@ -1300,6 +1324,8 @@ impl VerterLanguageServer {
             completion_final_snapshot_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]
             completion_final_recompute_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            settlement_observed_hook: parking_lot::Mutex::new(None),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ownership_generation_fence: Arc::new(
