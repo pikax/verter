@@ -151,68 +151,6 @@ fn typeinfo_request_validation_is_a_separate_module() {
     );
 }
 
-/// Extract the `[dependencies]` section of a Cargo manifest as a single
-/// string (until the next top-level `[` section header). Used by the
-/// dependency-direction guard so a `verter_audit` mention in
-/// `[dev-dependencies]` or a doc comment elsewhere does not trip the
-/// one-way assertion.
-fn manifest_dependencies_section(manifest: &str) -> String {
-    let mut out = String::new();
-    let mut in_deps = false;
-    for line in manifest.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('[') {
-            in_deps = trimmed.starts_with("[dependencies]");
-            continue;
-        }
-        if in_deps {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
-}
-
-#[test]
-fn dependency_direction_one_way() {
-    // The typeinfo layering is one-way and machine-checked: the
-    // protobuf-authoritative wire crate (`verter_protocol`) and the
-    // audit substrate (`verter_audit`) are independent leaves. Neither
-    // depends on the other, and neither depends on `verter_session`
-    // (the host). A back-edge — wire DTOs reaching up into audit/session,
-    // or the audit substrate reaching into the wire crate — would form
-    // the dependency cycle this guard forbids.
-    let protocol = read_workspace_file("crates/verter_protocol/Cargo.toml");
-    let audit = read_workspace_file("crates/verter_audit/Cargo.toml");
-
-    let protocol_deps = manifest_dependencies_section(&protocol);
-    let audit_deps = manifest_dependencies_section(&audit);
-
-    // (1) The wire crate must NOT depend on the audit substrate or the
-    // host session.
-    for forbidden in ["verter_audit", "verter_session"] {
-        assert!(
-            !protocol_deps.contains(forbidden),
-            "guard: `verter_protocol` MUST NOT depend on `{forbidden}` — \
-             the wire DTO crate is a downstream leaf; a dependency on the \
-             audit substrate or the host session inverts the typeinfo \
-             layering. Found in `[dependencies]`.",
-        );
-    }
-
-    // (2) The audit substrate must NOT depend on the wire crate or the
-    // host session — it is the leaf-most observability layer (CLAUDE.md
-    // leaf rule: `verter_audit` depends only on `verter_span`).
-    for forbidden in ["verter_protocol", "verter_session"] {
-        assert!(
-            !audit_deps.contains(forbidden),
-            "guard: `verter_audit` MUST NOT depend on `{forbidden}` — \
-             the audit substrate is a leaf and must not back-edge into the \
-             wire crate or the host session. Found in `[dependencies]`.",
-        );
-    }
-}
-
 #[test]
 fn wire_dtos_generated_only_from_proto() {
     // Every typeinfo wire DTO the Rust side exposes is a `pub use

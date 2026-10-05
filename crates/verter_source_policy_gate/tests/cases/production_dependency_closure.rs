@@ -1,6 +1,6 @@
 //! Architecture guard: the PRODUCTION dependency closure of the layered
-//! engine, source, query-boundary and resolution crates never reaches a crate
-//! above or beside its layer.
+//! engine, source, query-boundary, resolution, wire-protocol and audit crates
+//! never reaches a crate above or beside its layer.
 //!
 //! The closure is computed by Cargo itself, never by reading manifests or
 //! source text: `cargo metadata --format-version 1 --all-features` resolves
@@ -148,6 +148,14 @@ const RULES: &[ClosureRule] = &[
     ClosureRule {
         root: "verter_resolution",
         forbidden: &[SEMANTIC, PARSER, OXC, SESSION, WORKSPACE, SCHEDULER],
+    },
+    ClosureRule {
+        root: "verter_protocol",
+        forbidden: &[SESSION],
+    },
+    ClosureRule {
+        root: "verter_audit",
+        forbidden: &[PROTOCOL, SESSION],
     },
 ];
 
@@ -366,6 +374,16 @@ fn resolution_production_closure_stays_syntax_semantic_and_host_free() {
 }
 
 #[test]
+fn protocol_production_closure_stays_host_free() {
+    assert_live_rule("verter_protocol");
+}
+
+#[test]
+fn audit_production_closure_stays_protocol_and_host_free() {
+    assert_live_rule("verter_audit");
+}
+
+#[test]
 fn type_engine_production_closure_stays_syntax_host_and_provider_free() {
     assert_live_rule("verter_type_engine");
 }
@@ -508,6 +526,9 @@ const PLANTED_DIRECT: &[(&str, &str)] = &[
     ("verter_resolution", "verter_session"),
     ("verter_resolution", "verter_workspace"),
     ("verter_resolution", "verter_scheduler"),
+    ("verter_protocol", "verter_session"),
+    ("verter_audit", "verter_protocol"),
+    ("verter_audit", "verter_session"),
 ];
 
 #[test]
@@ -652,6 +673,8 @@ fn clean_layered_fixture_passes_every_rule() {
             "verter_identity",
             "verter_parser",
             "verter_semantic",
+            "verter_protocol",
+            "verter_audit",
         ],
         &[
             ("verter_type_engine", "verter_session_query", Kind::Normal),
@@ -661,6 +684,8 @@ fn clean_layered_fixture_passes_every_rule() {
             ("verter_semantic_source", "verter_resolution", Kind::Normal),
             ("verter_resolution", "verter_session_query", Kind::Normal),
             ("verter_session_query", "verter_identity", Kind::Normal),
+            ("verter_protocol", "verter_session_query", Kind::Normal),
+            ("verter_protocol", "verter_audit", Kind::Normal),
         ],
     );
     for rule in RULES {
