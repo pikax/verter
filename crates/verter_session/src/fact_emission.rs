@@ -38,19 +38,20 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use verter_session_query::analysis::types::hash_16;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::declarations::header_index::MemberHeader;
 use verter_session_query::facts::{
-    compute_member_presence_hash, compute_member_shape_hash, CrossDeclLens, CrossDeclRef, Fact,
-    FactKey, FactRegistry, HashOutcome, MemberKind, SymbolSpace,
+    compute_member_presence_hash, compute_member_shape_hash, Fact, FactKey, FactRegistry,
+    HashOutcome, MemberKind, SymbolSpace,
 };
 
 use crate::decl_body_memo::{DeclBodyMemo, LoweredValueDecl};
 use crate::file_artifact_store::{FileFacts, InternedName, InternedSpecifier};
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::shallow_file_state::ShallowFileState;
+use crate::source_lens::{RouteLens, ShallowLens};
 use verter_session_query::inputs::shallow::ExportTarget;
 use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
@@ -309,7 +310,7 @@ pub(crate) fn emit_parse_facts_counting_inventory(
     let shallow = &*indexed.shallow_state;
     let view = FactEmissionView::new(shallow);
     // The ONE shared shallow lens: built once at `ShallowFileState`
-    // construction (`ShallowLens::from_shallow`) and installed on the
+    // construction (`build_shallow_lens`) and installed on the
     // declaration-body memo — the SAME `Arc` the lowering-time body
     // fingerprint consults, so fact emission and the memo hash site can
     // never diverge on reference identity.
@@ -423,7 +424,7 @@ impl LazyBodyFactSource {
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     name.as_ref(),
                 );
-                let backing = self.lens.local_export_targets.get(&key)?;
+                let backing = self.lens.local_export_target(&key)?;
                 (backing.clone(), *space)
             }
             // `LocalDecl` answers only for non-exported names — mirroring
@@ -434,7 +435,7 @@ impl LazyBodyFactSource {
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     name.as_ref(),
                 );
-                if self.lens.exported.contains(&key) {
+                if self.lens.is_exported(&key) {
                     return None;
                 }
                 (
@@ -519,201 +520,76 @@ pub(crate) fn compat_value_body_hash_input(lowered: &LoweredValueDecl) -> HashOu
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Lens — maps `Ref(name)` sites to cross-decl reference identities
-// (R12 parse-domain — NO resolved_canonical).
+// Lens builders — the single construction of the shared lenses from a
+// finished shallow file state.
 // ──────────────────────────────────────────────────────────────────
 
-/// Resolve `name` against the shallow state's local-symbol +
-/// import-binding tables (header data). Falls back to `Unresolved` for
-/// free references.
-#[derive(Debug)]
-pub(crate) struct ShallowLens {
-    locals: FxHashSet<verter_type_expr::DeclBindingKey>,
-    value_locals: FxHashSet<verter_type_expr::DeclBindingKey>,
-    exported: FxHashSet<verter_type_expr::DeclBindingKey>,
-    /// Maps a public exported name to its backing LOCAL declaration name
-    /// for `export { Foo as Bar }` / `export { Foo }` (the latter maps a
-    /// name to itself). Built ONLY from `ExportTarget::Local` entries —
-    /// reexports are excluded, so they never compute body facts through
-    /// the lazy path. The lazy `Export(Bar, …)` fact preserves the public
-    /// key `Bar` while lowering/hashing the backing local `Foo`.
-    local_export_targets:
-        FxHashMap<verter_type_expr::DeclBindingKey, verter_type_expr::DeclBindingKey>,
-    /// Maps `local_binding_name → source_specifier`.
-    import_targets: FxHashMap<verter_type_expr::DeclBindingKey, Arc<str>>,
-}
-
-impl ShallowLens {
-    /// The SOLE `ShallowLens` builder — called exactly once per
-    /// `ShallowFileState` (at construction), which installs the resulting
-    /// `Arc` on the declaration-body memo; every consumer (the lowering-time
-    /// body fingerprint, the lazy body-fact source) shares that one instance.
-    pub(crate) fn from_shallow(shallow: &ShallowFileState) -> Self {
-        Self {
-            locals: shallow.headers.type_headers.keys().cloned().collect(),
-            value_locals: shallow.headers.value_headers.keys().cloned().collect(),
-            exported: shallow
-                .exports
-                .keys()
-                .map(|name| {
+/// The SOLE `ShallowLens` builder — called exactly once per
+/// `ShallowFileState` (at construction), which installs the resulting
+/// `Arc` on the declaration-body memo; every consumer (the lowering-time
+/// body fingerprint, the lazy body-fact source) shares that one instance.
+pub(crate) fn build_shallow_lens(shallow: &ShallowFileState) -> ShallowLens {
+    ShallowLens::new(
+        shallow.headers.type_headers.keys().cloned().collect(),
+        shallow.headers.value_headers.keys().cloned().collect(),
+        shallow
+            .exports
+            .keys()
+            .map(|name| {
+                verter_type_expr::DeclBindingKey::new(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    name.as_str(),
+                )
+            })
+            .collect(),
+        shallow
+            .exports
+            .iter()
+            .filter_map(|(public_name, target)| match target {
+                ExportTarget::Local { owner, symbol_name } => Some((
                     verter_type_expr::DeclBindingKey::new(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        name.as_str(),
-                    )
-                })
-                .collect(),
-            local_export_targets: shallow
-                .exports
-                .iter()
-                .filter_map(|(public_name, target)| match target {
-                    ExportTarget::Local { owner, symbol_name } => Some((
-                        verter_type_expr::DeclBindingKey::new(
-                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                            public_name.as_str(),
-                        ),
-                        verter_type_expr::DeclBindingKey::new(*owner, symbol_name.as_str()),
-                    )),
-                    ExportTarget::Reexport { .. } => None,
-                })
-                .collect(),
-            import_targets: shallow
-                .owner_import_targets
-                .iter()
-                .map(|(local, target)| {
-                    (
-                        local.clone(),
-                        Arc::<str>::from(target.source_specifier.as_str()),
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    pub(crate) fn for_owner(
-        &self,
-        owner: verter_type_expr::TopLevelOwnerId,
-    ) -> OwnedShallowLens<'_> {
-        OwnedShallowLens { base: self, owner }
-    }
-
-    fn resolve_in(
-        &self,
-        owner: verter_type_expr::TopLevelOwnerId,
-        name: &str,
-        space: SymbolSpace,
-    ) -> Option<CrossDeclRef> {
-        let key = verter_type_expr::DeclBindingKey::new(owner, name);
-        if let Some(specifier) = self.import_targets.get(&key) {
-            return Some(CrossDeclRef::ImportRef {
-                specifier: Arc::clone(specifier),
-                binding: Arc::from(name),
-                space,
-            });
-        }
-        if self.locals.contains(&key) || self.value_locals.contains(&key) {
-            return Some(CrossDeclRef::LocalDecl {
-                name: Arc::from(name),
-                space,
-            });
-        }
-        Some(CrossDeclRef::Unresolved {
-            name: Arc::from(name),
-            space,
-        })
-    }
+                        public_name.as_str(),
+                    ),
+                    verter_type_expr::DeclBindingKey::new(*owner, symbol_name.as_str()),
+                )),
+                ExportTarget::Reexport { .. } => None,
+            })
+            .collect(),
+        shallow
+            .owner_import_targets
+            .iter()
+            .map(|(local, target)| {
+                (
+                    local.clone(),
+                    Arc::<str>::from(target.source_specifier.as_str()),
+                )
+            })
+            .collect(),
+    )
 }
 
-impl CrossDeclLens for ShallowLens {
-    fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef> {
-        self.resolve_in(
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name,
-            space,
-        )
-    }
-}
-
-pub(crate) struct OwnedShallowLens<'a> {
-    base: &'a ShallowLens,
-    owner: verter_type_expr::TopLevelOwnerId,
-}
-
-impl CrossDeclLens for OwnedShallowLens<'_> {
-    fn resolve(&self, name: &str, space: SymbolSpace) -> Option<CrossDeclRef> {
-        self.base.resolve_in(self.owner, name, space)
-    }
-}
-
-/// The route-fact producer's hash-free classification lens: the AUTHORED
-/// import target (specifier + imported name) plus header TYPE-symbol
-/// membership, derived once from the finished `ShallowFileState` beside the
-/// fingerprint [`ShallowLens`]. A SECOND view of the same shallow tables —
-/// NOT a fingerprint-lens widening: this lens never feeds a hash. Both views
-/// are pure parse domain; no resolved canonical is retained anywhere on the
-/// artifact.
-#[derive(Debug)]
-pub(crate) struct RouteLens {
-    canonical_id: Arc<str>,
-    type_symbols: FxHashSet<verter_type_expr::DeclBindingKey>,
-    import_targets:
-        FxHashMap<verter_type_expr::DeclBindingKey, verter_session_query::facts::ImportRouteTarget>,
-}
-
-impl RouteLens {
-    /// Built exactly once per `ShallowFileState`, at construction, from the
-    /// FINAL routed state (same lifecycle as [`ShallowLens::from_shallow`]).
-    pub(crate) fn from_shallow(shallow: &ShallowFileState) -> Self {
-        Self {
-            canonical_id: shallow.decl_bodies().canonical_id(),
-            type_symbols: shallow.headers.type_headers.keys().cloned().collect(),
-            import_targets: shallow
-                .owner_import_targets
-                .iter()
-                .map(|(local, target)| {
-                    (
-                        local.clone(),
-                        verter_session_query::facts::ImportRouteTarget {
-                            source_specifier: Arc::from(target.source_specifier.as_str()),
-                            imported_name: Arc::from(target.imported_name.as_str()),
-                        },
-                    )
-                })
-                .collect(),
-        }
-    }
-
-    pub(crate) fn for_owner(&self, owner: verter_type_expr::TopLevelOwnerId) -> OwnedRouteLens<'_> {
-        OwnedRouteLens { base: self, owner }
-    }
-}
-
-pub(crate) struct OwnedRouteLens<'a> {
-    base: &'a RouteLens,
-    owner: verter_type_expr::TopLevelOwnerId,
-}
-
-impl verter_session_query::facts::RouteFactLens for OwnedRouteLens<'_> {
-    fn resolve_import_route(
-        &self,
-        local: &str,
-        _space: SymbolSpace,
-    ) -> Option<verter_session_query::facts::ImportRouteTarget> {
-        self.base
-            .import_targets
-            .get(&verter_type_expr::DeclBindingKey::new(self.owner, local))
-            .cloned()
-    }
-    fn has_type_symbol(&self, name: &str) -> bool {
-        self.base
-            .type_symbols
-            .contains(&verter_type_expr::DeclBindingKey::new(self.owner, name))
-    }
-    fn own_canonical_id(&self) -> Arc<str> {
-        Arc::clone(&self.base.canonical_id)
-    }
-    fn own_top_level_owner(&self) -> verter_type_expr::TopLevelOwnerId {
-        self.owner
-    }
+/// The SOLE `RouteLens` builder — built exactly once per `ShallowFileState`,
+/// at construction, from the FINAL routed state (same lifecycle as
+/// [`build_shallow_lens`]).
+pub(crate) fn build_route_lens(shallow: &ShallowFileState) -> RouteLens {
+    RouteLens::new(
+        shallow.decl_bodies().canonical_id(),
+        shallow.headers.type_headers.keys().cloned().collect(),
+        shallow
+            .owner_import_targets
+            .iter()
+            .map(|(local, target)| {
+                (
+                    local.clone(),
+                    verter_session_query::facts::ImportRouteTarget {
+                        source_specifier: Arc::from(target.source_specifier.as_str()),
+                        imported_name: Arc::from(target.imported_name.as_str()),
+                    },
+                )
+            })
+            .collect(),
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────

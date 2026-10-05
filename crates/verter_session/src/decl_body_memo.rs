@@ -76,8 +76,8 @@ use verter_type_expr::span_origins::DeclContributorAnchor;
 use verter_type_expr::{DeclBindingKey, ObjectExpr, TopLevelOwnerId, TypeExpr, TypeParam};
 
 use crate::decl_lowering::{DeclLoweringService, SnapshotLease};
-use crate::fact_emission::{RouteLens, ShallowLens};
 use crate::meta_provenance::MetaProvenance;
+use crate::source_lens::{RouteLens, ShallowLens};
 use crate::typeof_dependencies::collect_typeof_roots;
 use verter_session_query::source::snapshot::SnapshotKey;
 
@@ -428,7 +428,7 @@ pub struct DeclBodyMemo {
     header_index: Arc<DeclHeaderIndex>,
     provenance: Arc<MetaProvenance>,
     /// The ONE shared shallow cross-decl lens, built ONCE per state by
-    /// [`ShallowLens::from_shallow`] and installed at the end of
+    /// [`crate::fact_emission::build_shallow_lens`] and installed at the end of
     /// `ShallowFileState` construction (the lens derives from the FINISHED
     /// state, which owns this memo — so it cannot be a plain constructor
     /// argument). Consulted by the lowering-time body-fingerprint producer;

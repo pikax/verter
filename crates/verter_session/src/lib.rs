@@ -193,6 +193,7 @@ pub mod global_contributors;
 mod materialized_structure_equivalence_tests;
 pub(crate) mod rune_ambient;
 pub(crate) mod source_hash;
+pub(crate) mod source_lens;
 pub(crate) mod typeof_dependencies;
 #[cfg(test)]
 mod value_symbol_depth_equivalence_tests;

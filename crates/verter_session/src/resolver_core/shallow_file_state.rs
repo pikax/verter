@@ -665,12 +665,10 @@ impl ShallowFileState {
     /// the one the memo serves forever, which is why assembly never
     /// installs early.)
     fn install_shallow_lens_from_final_state(&self) {
-        self.decl_bodies.install_shallow_lens(Arc::new(
-            crate::fact_emission::ShallowLens::from_shallow(self),
-        ));
-        self.decl_bodies.install_route_fact_lens(Arc::new(
-            crate::fact_emission::RouteLens::from_shallow(self),
-        ));
+        self.decl_bodies
+            .install_shallow_lens(Arc::new(crate::fact_emission::build_shallow_lens(self)));
+        self.decl_bodies
+            .install_route_fact_lens(Arc::new(crate::fact_emission::build_route_lens(self)));
     }
 
     // -----------------------------------------------------------------------
