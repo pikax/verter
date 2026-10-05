@@ -476,7 +476,7 @@ impl VerterHost {
     /// resolves against a file the requester cannot see.
     pub(crate) fn resolve_value_export_route_identity_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         dep_canonical_id: &str,
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
@@ -946,7 +946,9 @@ impl VerterHost {
     /// reused as-is; uncaptured compute clones `IndexedReady.eval_source`.
     /// Catalog lookup stays on the IndexedReady producer.
     pub(crate) fn clone_owner_eval_source_arc(
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         captured: Option<&Arc<str>>,
     ) -> Option<Arc<str>> {
@@ -964,8 +966,13 @@ impl VerterHost {
     /// candidates for cross-file macro-argument-type expansion.
     pub(crate) fn compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         owner_eval_source: Option<&str>,
@@ -1001,7 +1008,9 @@ impl VerterHost {
     /// dropping the binding.
     fn component_meta_binding_type_entries(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         requested_bindings: &std::collections::BTreeSet<verter_type_expr::DeclBindingKey>,
     ) -> BindingAdmissionResult {
@@ -1104,8 +1113,13 @@ impl VerterHost {
     /// session view carries them.
     pub(crate) fn compute_evaluated_types_from_owner_context_with_ctx(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         eval_source: &str,
@@ -1979,7 +1993,9 @@ impl crate::VerterHost {
     /// its own already-view-correct path.
     fn resolve_binding_import_origin(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         local_name: &str,

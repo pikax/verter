@@ -39,7 +39,7 @@ pub(crate) fn project_emits(
         return Vec::new();
     }
 
-    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
     // See `project_props` for the PublishedField origin-edge rationale —
     // recorded uniformly inside `admit_published_member`.
     let admitted: Vec<AdmittedPublishedMember<'_>> = {

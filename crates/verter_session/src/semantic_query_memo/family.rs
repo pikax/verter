@@ -171,7 +171,10 @@ impl MemoEntry {
     /// same-canonical content edit on any self-root canonical, or a
     /// self-root canonical the live store view no longer tracks, fails
     /// validation and the warm read recomputes.
-    pub(super) fn validate(&self, ctx: &dyn crate::resolver_core::ResolverContext) -> bool {
+    pub(super) fn validate(
+        &self,
+        ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
+    ) -> bool {
         // Test-only process-global probe, serialised across test
         // threads via [`super::VALIDATE_RUNNING_PROBE_TEST_LOCK`].
         // Invoked WHILE this `validate` call is running. The warm-read
@@ -1253,7 +1256,7 @@ pub(super) enum EvictionVictim {
 /// still-valid candidate is pure win.
 pub(super) fn select_eviction_victim(
     candidates: &CandidateList,
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
 ) -> EvictionVictim {
     // Reached only when the slot is at its family cap and a publish must
     // displace a candidate, so this counts genuine cap pressure.
@@ -1295,7 +1298,7 @@ pub(super) fn plan_family_slot_eviction(
     slot: ModeSlot,
     entry: &MemoEntry,
     cap: usize,
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
 ) -> EvictionVictim {
     let snapshot: Option<CandidateList> = {
         let entries = entries.lock();

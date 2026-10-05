@@ -232,7 +232,7 @@ enum UniqueSymbolMemberCertification {
     NamedType(Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>),
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// The declaring identity a terminal nominal (`unique symbol`) carrier
     /// records, or `None` for any other node. A single O(1) graph read: the
     /// identity was minted once at the carrier's build site from facts that

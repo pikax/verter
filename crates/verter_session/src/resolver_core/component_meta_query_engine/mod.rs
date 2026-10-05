@@ -195,7 +195,7 @@ pub(crate) use crate::semantic_query::compat_spelling::{
 /// (refuse shared-cache admission) when the observed version's
 /// parse-fact registry cannot be recovered.
 pub(crate) fn engine_fact_signature_for_exported_type(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     type_name: &str,
     observed_hash: verter_session_query::facts::store_view::ResolverHash16,
@@ -435,7 +435,7 @@ pub(crate) fn engine_fact_signature_for_materialize_memo(
 /// validity depends on both an active scope and a declaration source).
 #[allow(dead_code)]
 pub(crate) fn engine_dep_signature_for_two_canonicals(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_a: &str,
     canonical_b: &str,
 ) -> crate::semantic_query::DepSignature {
@@ -533,8 +533,11 @@ pub(crate) struct FastShallowFieldExpr {
 /// layer whose consolidation onto the ctx-owned cache substrate is the
 /// tracked debt noted above.
 pub struct ComponentMetaQueryEngine<'a> {
-    pub(crate) ctx: &'a dyn ResolverContext,
-    pub(crate) dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
+    pub(crate) ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    pub(crate) dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        'a,
+        crate::resolver_core::HostCapabilities,
+    >,
     // The caches below are read-through views over the host-owned
     // typed DBs on `ProjectTypeStore` (see `crate::component_meta_caches`).
     // Each engine field is a per-request **non-authoritative read-through
@@ -915,8 +918,11 @@ pub(crate) fn await_imported_registry_winner_park_for_tests(canonical_id: &str) 
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn new(
-        ctx: &'a dyn ResolverContext,
-        dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
+        ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            'a,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Self {
         // Bump `bare_engine_constructions` whenever the engine is
         // bound to a non-request-bound ctx. Final-state invariant:
@@ -1010,7 +1016,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 }
 
 fn local_type_symbol_metadata_for_known_source(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_source: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     resolved_name: &str,
@@ -1030,7 +1036,7 @@ fn local_type_symbol_metadata_for_known_source(
 }
 
 struct DirectPreparedDeclarationResolver<'a> {
-    ctx: &'a dyn ResolverContext,
+    ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
 }
 
 impl DeclarationMetadataResolver for DirectPreparedDeclarationResolver<'_> {

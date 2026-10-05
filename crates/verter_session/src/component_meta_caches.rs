@@ -222,10 +222,10 @@ impl ImportedRegistryDb {
         )
     }
     #[cfg(test)]
-    pub(crate) fn fixture<'a>(
+    pub(crate) fn fixture<'a, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &'a self,
-        ctx: &'a dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self> {
+        ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
+    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
         crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
     }
 
@@ -408,10 +408,10 @@ impl DeclarationLookupDb {
         )
     }
     #[cfg(test)]
-    pub(crate) fn fixture<'a>(
+    pub(crate) fn fixture<'a, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &'a self,
-        ctx: &'a dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self> {
+        ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
+    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
         crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
     }
 
@@ -492,10 +492,10 @@ impl ResolvabilityDb {
         )
     }
     #[cfg(test)]
-    pub(crate) fn fixture<'a>(
+    pub(crate) fn fixture<'a, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &'a self,
-        ctx: &'a dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self> {
+        ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
+    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
         crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
     }
 
@@ -595,10 +595,10 @@ impl OwnerCollectionDb {
         )
     }
     #[cfg(test)]
-    pub(crate) fn fixture<'a>(
+    pub(crate) fn fixture<'a, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &'a self,
-        ctx: &'a dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self> {
+        ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
+    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
         crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
     }
 
@@ -1071,10 +1071,10 @@ impl ShapeCacheDb {
         )
     }
     #[cfg(test)]
-    pub(crate) fn fixture<'a>(
+    pub(crate) fn fixture<'a, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &'a self,
-        ctx: &'a dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self> {
+        ctx: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
+    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self, W> {
         crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, ctx)
     }
 
@@ -1440,8 +1440,10 @@ impl crate::invalidation_domain::InvalidationByCanonical for ShapeCacheDb {
 /// gated by the explicit `test-support` feature); gated to match so the
 /// producer is absent from every ordinary production build.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn app_config_no_override_proof_get_or_compute(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(crate) fn app_config_no_override_proof_get_or_compute<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
 ) -> Option<Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
     crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)

@@ -28,7 +28,10 @@ fn materializer_context(
 /// sentinels before classifying the root. Mapped carriers publish unless their
 /// value is the typed semantic-miss carrier.
 fn node_root_is_published_operator(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: crate::semantic_query::SemanticNodeId,
 ) -> bool {
     use crate::project_semantic_dispatch::raise::node_root_is_published_operator_with_dispatch;
@@ -42,7 +45,10 @@ fn node_root_is_published_operator(
 /// therefore uses `Published(Navigate)`. Other `Navigate` roots remain
 /// structural transit; all other modes publish directly.
 pub(crate) fn node_materialize_reduction_context(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: crate::semantic_query::SemanticNodeId,
     mode: crate::semantic_query::ProjectionMode,
 ) -> crate::semantic_query::ProjectionReductionContext {
@@ -58,7 +64,10 @@ pub(crate) fn node_materialize_reduction_context(
 /// Reduce a settled member node through the single semantic dispatch and emit
 /// the complete dependency signature to both active fact channels.
 pub(crate) fn reduce_member_value_graph_native_with_context(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     _scope_canonical_id: &str,
     member_value: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
@@ -75,7 +84,7 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
 /// cache fence. A missing hash makes the verdict non-cacheable; the keyed owner
 /// is already rooted separately and is not duplicated here.
 fn push_decl_scope_fence(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical: &str,
     scope_canonical_id: &str,
     fence: &mut Vec<(std::sync::Arc<str>, crate::semantic_query::DepVersion)>,

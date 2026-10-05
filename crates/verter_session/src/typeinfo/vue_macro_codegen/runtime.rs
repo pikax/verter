@@ -12,7 +12,7 @@ use super::*;
 /// MEMBER-tier dependencies; this walk only follows the transparent shapes
 /// that participate in broad constructor inference.
 pub(super) fn direct_member_dependency_is_missing(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: crate::semantic_query::SemanticNodeId,
     dependency_names: &FxHashSet<&str>,
 ) -> bool {
@@ -221,7 +221,7 @@ pub(super) fn direct_member_dependency_is_missing(
 }
 
 fn is_definitely_non_object_root(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     mut subject: crate::semantic_query::SemanticNodeId,
 ) -> bool {
     let mut visited = FxHashSet::default();
@@ -345,7 +345,7 @@ fn is_definitely_non_object_root(
 /// missing root/surface arm. A `true` result is authoritative and retains any
 /// partiality encountered while reaching the non-object terminal.
 pub(super) fn probe_definitely_non_object_root(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: crate::semantic_query::SemanticNodeId,
 ) -> bool {
     let probe_scope = crate::request_context::ColdComputeCompletenessScope::enter();
@@ -364,7 +364,7 @@ pub(super) struct RuntimeClassification {
 }
 
 pub(super) fn classify_runtime(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: BroadRuntimeSubjectLocator,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
@@ -439,7 +439,7 @@ fn runtime_constructor(kind: BroadRuntimeKind) -> RuntimeConstructor {
 /// scalar/object/array payloads cannot satisfy Vue's tuple/function payload
 /// contract and invalidate the enclosing macro.
 pub(super) fn emits_surface_has_invalid_member(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     surface: &TypeInfoSurface,
     context: ProjectionReductionContext,
 ) -> bool {

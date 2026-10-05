@@ -118,7 +118,10 @@ fn evaluated_in<R: Send + 'static>(
     options: &'static str,
     source: String,
     probe: String,
-    read: impl FnOnce(&super::ProjectSemanticDispatch<'_>, crate::semantic_query::SemanticNodeId) -> R
+    read: impl FnOnce(
+            &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+            crate::semantic_query::SemanticNodeId,
+        ) -> R
         + Send
         + 'static,
 ) -> R {

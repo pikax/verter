@@ -96,7 +96,7 @@ crate::project_semantic_dispatch::output_materialization::define_output_capabili
 /// consumer reads node facts off it (e.g. the root-sentinel gate) instead of
 /// re-materialising.
 fn raise_node_to_sealed_carrier(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     dep_signature: crate::semantic_query::DepSignature,
 ) -> MaterializedOutputTypeExpr {
@@ -135,8 +135,11 @@ fn raise_node_to_sealed_carrier(
 /// Typed-domain only: the owner's analyzed import bindings + the shared
 /// shallow export-target resolver — no raw-text recovery.
 fn authored_package_alias_for_carrier(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     node: SemanticNodeId,
 ) -> Option<String> {
@@ -301,7 +304,7 @@ fn member_shape_peek_or_compute(
             // arbitrary / unadmitted `SemanticNodeId` cannot be routed through the
             // sealed shape subject.
             let member_value = admitted.member().value;
-            let ctx: &dyn ResolverContext = query_engine.ctx;
+            let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
             // Publication sink: one dispatch for the cold-path raise and every
             // sealed-carrier assembly below. The capability mint + unwrap are the
             // module-private primitives of this terminal `output_sink` sink — they
@@ -627,10 +630,14 @@ fn merge_gate_fence_into_materialized(
 /// `MaterializedOutputTypeExpr` it computed — admission is best-effort. Refusal
 /// is CACHE-ONLY: the shape stays `Complete` and is never marked `Partial`.
 fn admit_member_shape_if_possible(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     key: &crate::component_meta_caches::ShapeCacheKey,
     value: crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
-    owner_scope: &crate::project_semantic_dispatch::memo::ShapeCacheOwnerScope<'_, '_>,
+    owner_scope: &crate::project_semantic_dispatch::memo::ShapeCacheOwnerScope<
+        '_,
+        '_,
+        crate::resolver_store::WorkspaceSlotClocks,
+    >,
 ) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     // The producing compute consumed a non-cacheable read (or overflowed its
     // signature): serve the value, publish nothing. `package_backed_fence_opt` —
@@ -933,7 +940,7 @@ pub(crate) fn surface_member_to_expanded_field(
 /// unconditionally so the final-result cache observes the same
 /// revalidation surface as the projector's other dispatches.
 fn resolve_member_value_for_classification(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value: SemanticNodeId,
     carrier_mode: bool,
 ) -> SemanticNodeId {
@@ -1196,8 +1203,8 @@ fn missing_source_output_type_expr() -> TypeExpr {
 ///   position absent; an opaque failure inside a dereferenced body carries
 ///   no equivalent proof.
 fn materialize_output_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     source: &verter_type_expr::facts::SemanticTypeSource,

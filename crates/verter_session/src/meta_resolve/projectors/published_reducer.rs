@@ -55,7 +55,10 @@ fn peel_alias_root(
 /// triad. Parity-checked field-for-field against the `TypeExpr` predicates on
 /// `raise(node)`.
 pub(crate) fn classify_node_reduction_gates(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> NodeReductionGateFacts {
     let graph = dispatch.graph();

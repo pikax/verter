@@ -201,7 +201,7 @@ fn lit_matches(expected: &Lit, got: &LiteralValue) -> bool {
 /// Order-insensitive exact set equality: every expected node claims a
 /// distinct measured constituent and the counts must match.
 fn set_matches(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     measured: &[SemanticNodeId],
     expected: &[ExpectedNode],
     depth: usize,
@@ -210,7 +210,7 @@ fn set_matches(
         return false;
     }
     fn assign(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         measured: &[SemanticNodeId],
         expected: &[ExpectedNode],
         used: &mut [bool],
@@ -238,7 +238,7 @@ fn set_matches(
 /// Whether `node` matches `expected`, recursively. Silent; [`check_node`]
 /// wraps it with a rendered report.
 pub(crate) fn node_matches(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     expected: &ExpectedNode,
     depth: usize,
@@ -385,7 +385,7 @@ pub(crate) fn node_matches(
 /// set (name, presence, `readonly`, method kind, value). A fact whose
 /// facets or value are `Indeterminate` matches nothing.
 fn spread_arms_match(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     arms: &[ExpectedSpreadArm],
     alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
     depth: usize,
@@ -394,7 +394,7 @@ fn spread_arms_match(
         return false;
     }
     fn arm_matches(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         alternative: &crate::semantic_query::ObjectProjectionAlternative,
         expected: &ExpectedSpreadArm,
         depth: usize,
@@ -408,7 +408,7 @@ fn spread_arms_match(
             return false;
         }
         fn assign(
-            dispatch: &ProjectSemanticDispatch<'_>,
+            dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
             facts: &[&crate::semantic_query::PositiveKeyFact],
             members: &[ExpectedSpreadMember],
             used: &mut [bool],
@@ -459,7 +459,7 @@ fn spread_arms_match(
         assign(dispatch, &facts, expected.members, &mut used, 0, depth)
     }
     fn assign_arms(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
         arms: &[ExpectedSpreadArm],
         used: &mut [bool],
@@ -487,7 +487,7 @@ fn spread_arms_match(
 /// Render a graph node recursively, compactly, for dump mode and failure
 /// reports. Depth-capped; the cap renders as `…`.
 pub(crate) fn render_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     depth: usize,
 ) -> String {
@@ -664,7 +664,7 @@ pub(crate) fn render_node(
 /// failure list (empty on match). The failure carries both trees plus
 /// the oracle/profile stamps, so the report needs no re-derivation.
 pub(crate) fn check_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     expected: &ExpectedNode,
 ) -> Vec<String> {
@@ -1056,7 +1056,10 @@ pub(crate) fn with_live_flow_node<R>(
     id: &str,
     script: &str,
     function: &str,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>, Option<SemanticNodeId>) -> R,
+    f: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        Option<SemanticNodeId>,
+    ) -> R,
 ) -> R {
     with_live_flow_node_with_lib(aux, "", id, script, function, f)
 }
@@ -1069,7 +1072,10 @@ pub(crate) fn with_live_flow_node_with_lib<R>(
     id: &str,
     script: &str,
     function: &str,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>, Option<SemanticNodeId>) -> R,
+    f: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        Option<SemanticNodeId>,
+    ) -> R,
 ) -> R {
     let host = make_audit_host_with_lib("/wb", lib);
     let dir = "/wb";
@@ -2078,7 +2084,7 @@ pub(crate) mod checker_syntax {
     /// checker form, under the canonical comparison rules above. No
     /// alias deref, mirroring [`node_matches`].
     pub(crate) fn matches_node(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         node: SemanticNodeId,
         expected: &CheckerType,
         depth: usize,
@@ -2234,7 +2240,7 @@ pub(crate) mod checker_syntax {
                     return false;
                 }
                 fn arm_matches(
-                    dispatch: &ProjectSemanticDispatch<'_>,
+                    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
                     arm: &crate::semantic_query::PrintedUnionArm,
                     expected: &CheckerType,
                     depth: usize,
@@ -2249,7 +2255,7 @@ pub(crate) mod checker_syntax {
                     }
                 }
                 fn assign(
-                    dispatch: &ProjectSemanticDispatch<'_>,
+                    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
                     measured: &[crate::semantic_query::PrintedUnionArm],
                     expected: &[CheckerType],
                     used: &mut [bool],
@@ -2371,7 +2377,7 @@ pub(crate) mod checker_syntax {
     /// the same kind (type predicate vs assertion) about the same subject
     /// POSITION with an equal target.
     fn predicate_matches(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         live: Option<crate::semantic_query::SignaturePredicate>,
         expected: Option<&CheckerPredicate>,
         depth: usize,
@@ -2415,7 +2421,7 @@ pub(crate) mod checker_syntax {
     /// arguments, which no recorded declared return carries — rides
     /// [`matches_node`] unchanged.
     pub(crate) fn matches_node_ordered(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         node: SemanticNodeId,
         expected: &CheckerType,
         depth: usize,
@@ -2449,7 +2455,7 @@ pub(crate) mod checker_syntax {
     /// The shared signature clause, once the kind matched: arity is
     /// exact; parameter types are ordered.
     fn function_matches(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         got_params: &[crate::semantic_query::FunctionParam],
         return_type: SemanticNodeId,
         params: &[CheckerType],
@@ -2467,7 +2473,7 @@ pub(crate) mod checker_syntax {
     /// Whether one live member satisfies one printed member. Accessor
     /// and elided prints match nothing (see [`CheckerMember`]).
     fn member_matches(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         member: &LiveMember<'_>,
         expected: &CheckerMember,
         depth: usize,
@@ -2564,7 +2570,7 @@ pub(crate) mod checker_syntax {
     /// printed names claim distinct live members), mirroring the union
     /// set rule.
     fn object_members_match(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         members: &[LiveMember<'_>],
         exp: &[CheckerMember],
         depth: usize,
@@ -2573,7 +2579,7 @@ pub(crate) mod checker_syntax {
             return false;
         }
         fn assign(
-            dispatch: &ProjectSemanticDispatch<'_>,
+            dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
             members: &[LiveMember<'_>],
             exp: &[CheckerMember],
             used: &mut [bool],
@@ -2606,7 +2612,7 @@ pub(crate) mod checker_syntax {
     /// other printed form against a spread program is a cross-variant
     /// pair and fails closed.
     fn spread_formula_matches(
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         node: SemanticNodeId,
         expected: &CheckerType,
         depth: usize,
@@ -2645,7 +2651,7 @@ pub(crate) mod checker_syntax {
                     return false;
                 }
                 fn assign(
-                    dispatch: &ProjectSemanticDispatch<'_>,
+                    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
                     arms: &[ObjectProjectionAlternative],
                     printed: &[&Vec<CheckerMember>],
                     used: &mut [bool],
@@ -3801,7 +3807,10 @@ mod expectation_controls {
     fn with_flow_node<R>(
         script: &str,
         function: &str,
-        f: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+        f: impl FnOnce(
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+            SemanticNodeId,
+        ) -> R,
     ) -> R {
         with_live_flow_node("", "prog", script, function, |dispatch, node| {
             let node = node
@@ -4207,11 +4216,14 @@ mod expectation_controls {
     fn a_construct_print_matches_only_the_lone_construct_signature() {
         const BOX: &str = "class Box { readonly tag = \"box\" }
 ";
-        let accepts = |dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, text: &str| {
-            let parsed = checker_syntax::parse(text)
-                .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
-            checker_syntax::matches_node(dispatch, node, &parsed, 0)
-        };
+        let accepts =
+            |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+             node: SemanticNodeId,
+             text: &str| {
+                let parsed = checker_syntax::parse(text)
+                    .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
+                checker_syntax::matches_node(dispatch, node, &parsed, 0)
+            };
         for (annotation, matching, rejected) in [
             (
                 "{ new (): Box }",
@@ -4364,7 +4376,10 @@ mod expectation_controls {
     #[test]
     fn checker_syntax_structural_clauses_fail_closed() {
         let accepts =
-            |dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, text: &str| -> bool {
+            |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+             node: SemanticNodeId,
+             text: &str|
+             -> bool {
                 let parsed = checker_syntax::parse(text)
                     .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
                 checker_syntax::matches_node(dispatch, node, &parsed, 0)
@@ -4580,7 +4595,10 @@ mod expectation_controls {
     #[test]
     fn extended_checker_prints_compare_deliberately() {
         let accepts =
-            |dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, text: &str| -> bool {
+            |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+             node: SemanticNodeId,
+             text: &str|
+             -> bool {
                 let parsed = super::checker_syntax::parse(text)
                     .unwrap_or_else(|err| panic!("`{text}` must parse: {err}"));
                 super::checker_syntax::matches_node(dispatch, node, &parsed, 0)

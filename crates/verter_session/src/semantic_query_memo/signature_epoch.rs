@@ -78,11 +78,11 @@ impl SemanticGraphStore {
     /// the caller's view. A candidate failing any gate is skipped without
     /// bubbling, and the caller recomputes.
     #[inline]
-    pub(super) fn warm_candidate_serves(
+    pub(super) fn warm_candidate_serves<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         entry: &MemoEntry,
         requested: &MaterializedPoint,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
     ) -> bool {
         cached_satisfies(&entry.satisfied_projection, requested)
             // A value naming a released node (a close's tombstone) is a miss

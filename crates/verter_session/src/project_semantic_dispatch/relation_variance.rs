@@ -102,7 +102,7 @@ enum DeclarationVariance {
     InProgress(RelationResult),
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Two references to one generic declaration relate by their type
     /// arguments under its parameters' variances (`structuredTypeRelatedTo`
     /// on two references to one target, before its structural
@@ -787,7 +787,7 @@ pub(super) enum MarkerPair {
     Relate(SemanticNodeId, SemanticNodeId),
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// A pair holding a variance marker, related as the checker relates
     /// its marker type parameters: the sub-marker to the super-marker of
     /// its parameter, a marker to the same marker; a marker source to any

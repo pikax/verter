@@ -276,7 +276,7 @@ fn run_batch(cap: usize, member_order: &[usize], flow_members: usize) -> (bool, 
     let pending_flow = pending_flow_members(&store, &flow_keys);
 
     let published = store.publish_scc_members_fenced(
-        None,
+        None::<&dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>>,
         &witness,
         &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         &Arc::from(Vec::<Arc<str>>::new()),
@@ -539,7 +539,9 @@ fn scc_batch_refuses_whole_on_a_proof_key_mismatch() {
         let mut pending_flow = pending_flow_members(&store, &flow_keys);
         pending_flow[1].result = pending_flow[0].result.clone();
         let published = store.publish_scc_members_fenced(
-            None,
+            None::<
+                &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+            >,
             &witness,
             &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             &Arc::from(Vec::<Arc<str>>::new()),
@@ -714,7 +716,9 @@ fn run_exact_fit_pressure_batch(
     );
     assert!(
         store.publish_scc_members_fenced(
-            None,
+            None::<
+                &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+            >,
             &witness,
             &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             &Arc::from(Vec::<Arc<str>>::new()),

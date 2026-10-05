@@ -68,7 +68,7 @@ enum Widening {
     },
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// `node` as the checker's widening of a value it types, with the
     /// union algebra of `nullability` for every rebuilt union.
     ///

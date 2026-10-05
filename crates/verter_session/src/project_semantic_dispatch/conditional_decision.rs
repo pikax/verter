@@ -92,28 +92,32 @@ struct ConditionalOperands {
 }
 
 /// How the decision procedure reaches a conditional's branches.
-trait ConditionalBranches {
+trait ConditionalBranches<C: crate::resolver_core::ResolverCapabilities> {
     /// The branch `take_true` names, ready to stand as the answer.
-    fn branch(&mut self, dispatch: &ProjectSemanticDispatch, take_true: bool) -> SemanticNodeId;
+    fn branch(
+        &mut self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        take_true: bool,
+    ) -> SemanticNodeId;
     /// Both branches, for a conditional kept whole; `None` when the
     /// request was cancelled between them.
     fn both(
         &mut self,
-        dispatch: &ProjectSemanticDispatch,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> Option<(SemanticNodeId, SemanticNodeId)>;
     /// The pending substitution the branches carry.
     fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>>;
     /// One member of a distributed check, decided without distribution.
     fn member(
         &mut self,
-        dispatch: &ProjectSemanticDispatch,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
         member: SemanticNodeId,
         extends: SemanticNodeId,
     ) -> super::walk::QueryBuildOutput;
     /// The selected branch's own inputs, recorded on the answer.
     fn committed(
         &self,
-        _dispatch: &ProjectSemanticDispatch,
+        _dispatch: &ProjectSemanticDispatch<'_, C>,
         _take_true: bool,
         _output: &mut super::walk::QueryBuildOutput,
     ) {
@@ -128,8 +132,14 @@ struct MaterializedBranches {
     pending: Option<Arc<ConditionalPendingSubstitution>>,
 }
 
-impl ConditionalBranches for MaterializedBranches {
-    fn branch(&mut self, dispatch: &ProjectSemanticDispatch, take_true: bool) -> SemanticNodeId {
+impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
+    for MaterializedBranches
+{
+    fn branch(
+        &mut self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        take_true: bool,
+    ) -> SemanticNodeId {
         dispatch.apply_conditional_branch_pending(
             if take_true {
                 self.true_branch
@@ -143,7 +153,7 @@ impl ConditionalBranches for MaterializedBranches {
 
     fn both(
         &mut self,
-        _dispatch: &ProjectSemanticDispatch,
+        _dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> Option<(SemanticNodeId, SemanticNodeId)> {
         Some((self.true_branch, self.false_branch))
     }
@@ -154,7 +164,7 @@ impl ConditionalBranches for MaterializedBranches {
 
     fn member(
         &mut self,
-        dispatch: &ProjectSemanticDispatch,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
         member: SemanticNodeId,
         extends: SemanticNodeId,
     ) -> super::walk::QueryBuildOutput {
@@ -174,7 +184,7 @@ impl ConditionalBranches for MaterializedBranches {
 
     fn committed(
         &self,
-        dispatch: &ProjectSemanticDispatch,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
         take_true: bool,
         output: &mut super::walk::QueryBuildOutput,
     ) {
@@ -208,14 +218,18 @@ struct LoweredBranches<'a> {
     lower_branch: &'a mut dyn FnMut(bool) -> SemanticNodeId,
 }
 
-impl ConditionalBranches for LoweredBranches<'_> {
-    fn branch(&mut self, _dispatch: &ProjectSemanticDispatch, take_true: bool) -> SemanticNodeId {
+impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for LoweredBranches<'_> {
+    fn branch(
+        &mut self,
+        _dispatch: &ProjectSemanticDispatch<'_, C>,
+        take_true: bool,
+    ) -> SemanticNodeId {
         (self.lower_branch)(take_true)
     }
 
     fn both(
         &mut self,
-        dispatch: &ProjectSemanticDispatch,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> Option<(SemanticNodeId, SemanticNodeId)> {
         let true_branch = (self.lower_branch)(true);
         if dispatch.cancellation.is_cancelled() {
@@ -230,7 +244,7 @@ impl ConditionalBranches for LoweredBranches<'_> {
 
     fn member(
         &mut self,
-        dispatch: &ProjectSemanticDispatch,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
         member: SemanticNodeId,
         extends: SemanticNodeId,
     ) -> super::walk::QueryBuildOutput {
@@ -238,7 +252,7 @@ impl ConditionalBranches for LoweredBranches<'_> {
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Conditional type (lazy-block evaluation +
     /// distributive-conditional authority), read from the materialized
     /// branch handles of a [`SemanticQueryKey::Conditional`].
@@ -335,7 +349,7 @@ impl ProjectSemanticDispatch<'_> {
         check: SemanticNodeId,
         extends: SemanticNodeId,
         distributive: bool,
-        branches: &mut dyn ConditionalBranches,
+        branches: &mut dyn ConditionalBranches<C>,
     ) -> super::walk::QueryBuildOutput {
         if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();

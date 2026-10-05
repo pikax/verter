@@ -676,7 +676,7 @@ impl VerterHost {
     /// base session path keeps its warm-bundle reuse.
     pub(crate) fn prepared_decl_bundle_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
@@ -844,7 +844,7 @@ impl VerterHost {
     ///   path's route-dep cache identity.
     fn materialize_prepared_decl_bundle_via_ctx(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         services: SourceRequestServices<'_>,
         identity: &crate::host_manage::overlay_materialize::OverlayArtifactIdentity,
     ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
@@ -961,7 +961,7 @@ impl VerterHost {
     /// path.
     fn prepared_decl_bundle_route_dep_edges_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         state: &crate::resolver_core::ShallowFileState,
     ) -> Option<rustc_hash::FxHashMap<String, String>> {
@@ -1521,7 +1521,7 @@ impl VerterHost {
 
     pub(crate) fn prepared_type_decl_in_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -1593,7 +1593,7 @@ impl VerterHost {
 
     pub(crate) fn prepared_value_decl_in_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -1807,7 +1807,7 @@ impl VerterHost {
     ///    contract.
     pub(crate) fn shallow_file_state_with_context(
         &self,
-        _ctx: &dyn crate::resolver_core::ResolverContext,
+        _ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
@@ -2857,7 +2857,7 @@ impl VerterHost {
 
     fn append_file_whole_and_route_fact_versions_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         known_shallow: Option<&verter_session_query::inputs::shallow::ShallowInputRecord>,
         facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
@@ -2895,7 +2895,7 @@ impl VerterHost {
 
     fn syntactic_route_interface_fact_for_indexed_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         indexed: &Arc<crate::resolver_core::request_inputs::IndexedInputRecord>,
     ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
@@ -2920,7 +2920,7 @@ impl VerterHost {
 
     pub(crate) fn resolve_direct_imported_type_root_fast_path_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
@@ -3212,7 +3212,7 @@ impl VerterHost {
     /// preserved.
     pub(crate) fn owner_import_surface_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         owner_canonical: &str,
@@ -3526,7 +3526,7 @@ impl VerterHost {
     /// [`Self::owner_import_surface_with_store_view`].
     pub(crate) fn resolve_owner_direct_import_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         owner_canonical: &str,

@@ -437,7 +437,7 @@ impl FallthroughResolverState {
     /// write surface is involved.
     pub(crate) fn compute_and_maybe_admit<R>(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         compute: impl FnOnce() -> (R, Option<(FallthroughNodeKey, FallthroughNodeResult)>),
     ) -> R {
         let supersession_before = ctx.current_external_supersession_fingerprint();
@@ -575,11 +575,13 @@ impl FallthroughResolverState {
     ///    cold-compute completeness scope. The typed completeness signal is the
     ///    no-poison rail shared with the component-meta materialiser, not a
     ///    fallthrough-private predicate.
-    pub(crate) fn admit_stable_node(
+    pub(crate) fn admit_stable_node<
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: FallthroughNodeKey,
         result: FallthroughNodeResult,
-        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_, W>,
     ) {
         if admission.non_cacheable() {
             return;

@@ -35,8 +35,8 @@ static LAST_SHALLOW_WALKER_MAX_FRAMES: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 #[doc(hidden)]
 #[must_use]
-pub fn probe_max_walker_frame_depth(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub fn probe_max_walker_frame_depth<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     key: &SemanticQueryKey,
 ) -> usize {
     LAST_SHALLOW_WALKER_MAX_FRAMES.store(0, Ordering::Relaxed);
@@ -89,8 +89,10 @@ pub(super) fn observe_typeof_internal_path_mode(mode: ProjectionMode) {
 #[cfg(test)]
 #[doc(hidden)]
 #[must_use]
-pub(crate) fn probe_walk_typeof_internal_path_mode(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn probe_walk_typeof_internal_path_mode<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
     path: Arc<[crate::semantic_query::PathSegment]>,
     context: crate::semantic_query::ProjectionReductionContext,
@@ -112,8 +114,8 @@ pub(crate) fn probe_walk_typeof_internal_path_mode(
 #[cfg(test)]
 #[doc(hidden)]
 #[must_use]
-pub(crate) fn probe_walk_typeof_resolved(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
     path: Arc<[crate::semantic_query::PathSegment]>,
     context: crate::semantic_query::ProjectionReductionContext,
@@ -1003,8 +1005,8 @@ pub(super) fn is_canonical_index_digits(key: &str) -> bool {
     }
 }
 
-pub(super) struct PathWalker<'a, 'b> {
-    dispatch: &'a ProjectSemanticDispatch<'b>,
+pub(super) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: &'a ProjectSemanticDispatch<'b, C>,
     /// The walker carries the full [`ProjectionReductionContext`]
     /// from its constructing caller — the `mode` field is preserved
     /// as a derived accessor ([`Self::mode`]) so the existing call
@@ -1088,7 +1090,7 @@ pub(super) struct PathWalker<'a, 'b> {
     origin_file: Option<Arc<str>>,
 }
 
-impl<'a> super::ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'a, C> {
     /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
     /// `Object` node. Each contributor's surface is extracted (an interface
     /// body is an `Object`; an interface-with-`extends` body is an
@@ -1405,9 +1407,9 @@ enum MappedKeyAdmission {
     Undecided,
 }
 
-impl<'a, 'b> PathWalker<'a, 'b> {
+impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C> {
     pub(super) fn new(
-        dispatch: &'a ProjectSemanticDispatch<'b>,
+        dispatch: &'a ProjectSemanticDispatch<'b, C>,
         context: crate::semantic_query::ProjectionReductionContext,
         fence: &'a DepSignature,
     ) -> Self {
@@ -9852,7 +9854,7 @@ enum ExpansionCombineKind {
     Union,
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Whether `node` provably excludes both `null` and `undefined`, so the
     /// checker's intersection of it with either is `never`: a literal, a
     /// non-nullish primitive (`object` included), an object, array, tuple

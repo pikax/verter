@@ -150,8 +150,11 @@ pub(crate) fn project_define_macro_shapes(
 /// macro resolved to no props" rather than "no macro". This distinguishes
 /// resolved-but-empty from unresolved/missing.
 fn define_props_shape(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
@@ -242,8 +245,11 @@ fn define_props_shape(
 /// No secondary evaluated/analyzer row participates: every occurrence owns
 /// its payload source and publication evidence.
 fn define_emits_shape(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
@@ -314,8 +320,11 @@ fn define_emits_shape(
 /// as the slot's `(props: { ... }) => RT` function expression. Per-slot
 /// bindings are published separately by `resolve_slot_bindings_graph_native`.
 fn define_slots_shape(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
@@ -372,8 +381,11 @@ fn define_slots_shape(
 /// flows through `ctx`, and the underlying dispatch queries are memoised in the
 /// shared `SemanticGraphStore`, so this shares the DTO path's reduction work.
 fn macro_surface_resolves(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,

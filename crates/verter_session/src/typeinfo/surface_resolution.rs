@@ -423,8 +423,8 @@ pub(crate) fn unresolved_node_partiality(
 /// `BareRef` whose name is an authored import of its authoring file, every
 /// `ImportType`), raw fallbacks, and operational faults (budget /
 /// cancellation / torn state / cycles) name a partial reason here.
-pub(crate) fn stable_member_carrier_partiality(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(crate) fn stable_member_carrier_partiality<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     data: Option<&SemanticNodeData>,
 ) -> Option<NonEmptyReasons> {
     match data {
@@ -462,8 +462,8 @@ pub(crate) fn stable_query_error_partiality(
 /// `MISSING_DEPENDENCY`. A non-import name (an undeclared local, a genuinely
 /// scope-less mirror) is the STABLE authored carrier — `None`. Reads the
 /// already-indexed shallow import table; no re-resolution.
-pub(crate) fn bare_ref_import_partiality(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(crate) fn bare_ref_import_partiality<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     data: &SemanticNodeData,
 ) -> Option<NonEmptyReasons> {
     let (name, scope) = data.bare_ref_head()?;

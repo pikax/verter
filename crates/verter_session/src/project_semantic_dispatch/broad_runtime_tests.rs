@@ -34,7 +34,7 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
 }
 
 fn classify(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: crate::semantic_query::SemanticNodeId,
 ) -> BroadRuntimeClassification {
     match dispatch.classify_broad_runtime_transient(subject).result {
@@ -44,7 +44,7 @@ fn classify(
 }
 
 fn macro_classifier_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     member: Option<&str>,
 ) -> SemanticQueryKey {
@@ -70,7 +70,7 @@ fn classification_from_output(
 }
 
 fn execute_classification(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     key: SemanticQueryKey,
 ) -> BroadRuntimeClassification {
     match dispatch.execute(key) {
@@ -82,7 +82,10 @@ fn execute_classification(
     }
 }
 
-fn file_scope(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str) -> NodeScopeId {
+fn file_scope(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+) -> NodeScopeId {
     let shallow = dispatch
         .ctx
         .shallow_file_state(canonical)

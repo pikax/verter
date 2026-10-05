@@ -1562,7 +1562,7 @@ impl VerterHost {
     /// form and is compiled out of a shipped build.
     pub(crate) fn observe_materialize_scope_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical: &str,
     ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
         let indexed = self

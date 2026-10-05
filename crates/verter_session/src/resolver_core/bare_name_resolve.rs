@@ -151,9 +151,9 @@ impl DeclarationScopePayload {
 ///
 /// Returns `None` when the name cannot be located through any
 /// ctx-owned state.
-pub(crate) fn resolve_bare_name_in_scope(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn resolve_bare_name_in_scope<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     scope_payload: Option<&DeclarationScopePayload>,
@@ -319,8 +319,8 @@ fn symbol_exists_in_facts(
 /// component-meta result remains well-formed (other props
 /// resolve), but any field whose type transitively depended on
 /// `Foo` carries the opaque sentinel.
-fn resolve_import_binding_from_facts(
-    ctx: &dyn ResolverContext,
+fn resolve_import_binding_from_facts<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     scope_payload: Option<&DeclarationScopePayload>,
@@ -360,9 +360,9 @@ fn resolve_import_binding_from_facts(
     resolve_imported_type_root_identity(ctx, &binding.canonical_id, &binding.exported_name)
 }
 
-fn resolve_namespace_member_from_facts(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn resolve_namespace_member_from_facts<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     scope_payload: Option<&DeclarationScopePayload>,
@@ -438,9 +438,9 @@ fn resolve_namespace_member_from_facts(
 /// declares, read from outside the namespace: a namespace member is its
 /// own declaration under its qualified name (`Ns.Inner.T`) in the
 /// namespace's file, and only an exported one is visible here.
-fn qualified_member_declaration(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn qualified_member_declaration<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     declaring: &ResolvedRootIdentity,
     member: &str,
 ) -> Option<ResolvedRootIdentity> {
@@ -476,8 +476,8 @@ fn qualified_member_declaration(
 /// named or default import. The returned canonical remains the namespace MODULE;
 /// [`resolve_namespace_member_from_facts`] sends the member through the shared
 /// type/value export resolvers, which own final re-export identity.
-fn resolve_namespace_import_canonical_from_facts(
-    ctx: &dyn ResolverContext,
+fn resolve_namespace_import_canonical_from_facts<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     prefix: &str,
@@ -496,8 +496,8 @@ fn resolve_namespace_import_canonical_from_facts(
     ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)
 }
 
-fn resolve_imported_type_root_identity(
-    ctx: &dyn ResolverContext,
+fn resolve_imported_type_root_identity<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     canonical_id: &str,
     exported_name: &str,
 ) -> Option<ResolvedRootIdentity> {
@@ -535,8 +535,8 @@ fn resolve_imported_type_root_identity(
 /// Used by the dispatch path (walker / build_instantiate) so dispatch
 /// does not need to construct a `SessionSolverHost` just to reach the
 /// prepared-decl cache.
-pub(crate) fn resolve_prepared_type_decl_via_host(
-    ctx: &dyn ResolverContext,
+pub(crate) fn resolve_prepared_type_decl_via_host<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     _scope_canonical_id: Option<&str>,
     _scope_payload: Option<&DeclarationScopePayload>,
     root_identity: &ResolvedRootIdentity,

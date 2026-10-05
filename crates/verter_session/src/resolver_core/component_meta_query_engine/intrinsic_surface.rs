@@ -241,7 +241,10 @@ impl ComponentMetaQueryEngine<'_> {
 /// object-shape extraction convention), declared index signatures, and the
 /// synthetic open placeholder for a GENUINELY OPEN surface.
 fn expanded_shape_from_surface_view(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     surface: &SurfaceView,
     parent: Option<&SemanticTypeSource>,
 ) -> ExpandedObjectShape {
@@ -331,7 +334,7 @@ fn expanded_shape_from_surface_view(
 /// `strictNullChecks` an indexed access of an optional member reads its type
 /// plus `undefined`, and a further hop through it would read off that union.
 fn member_value_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value: SemanticNodeId,
     name: &str,
     parent: Option<&SemanticTypeSource>,
@@ -370,7 +373,7 @@ fn member_value_source(
 /// `None`, matching the [`NarrowTypeParam`] producer contract). `None` for a
 /// non-`Function` signature node.
 fn expanded_call_signature_from_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<ExpandedCallSignature> {
     let data = node_data_for(dispatch.graph(), node)?;
@@ -420,7 +423,7 @@ fn expanded_call_signature_from_node(
 /// closed LEAF fact when the node is one, else the typed Unknown-leaf
 /// degradation.
 fn leaf_or_degraded_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> SemanticTypeSource {
     dispatch

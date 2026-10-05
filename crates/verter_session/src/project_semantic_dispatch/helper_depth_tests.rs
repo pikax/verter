@@ -19,7 +19,9 @@ const DEPTH: usize = 10_000;
 
 /// Run `probe` over a fresh dispatch on a 1 MiB thread.
 fn on_a_small_stack<R: Send + 'static>(
-    probe: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R + Send + 'static,
+    probe: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R
+        + Send
+        + 'static,
 ) -> R {
     std::thread::Builder::new()
         .stack_size(1 << 20)
@@ -42,13 +44,19 @@ fn element(value: SemanticNodeId, rest: bool) -> TupleElement {
     }
 }
 
-fn literal(dispatch: &ProjectSemanticDispatch<'_>, text: &str) -> SemanticNodeId {
+fn literal(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    text: &str,
+) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String(text.into()),
     ))
 }
 
-fn primitive(dispatch: &ProjectSemanticDispatch<'_>, kind: PrimitiveKind) -> SemanticNodeId {
+fn primitive(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    kind: PrimitiveKind,
+) -> SemanticNodeId {
     dispatch
         .graph()
         .intern_node(SemanticNodeData::Primitive(kind))
@@ -120,7 +128,8 @@ fn index_key_unions_enumerate_at_any_depth() {
 /// type; with `string` at the bottom they are not.
 #[test]
 fn base_type_intersections_validate_at_any_depth() {
-    let nest = |dispatch: &ProjectSemanticDispatch<'_>, bottom: PrimitiveKind| {
+    let nest = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+                bottom: PrimitiveKind| {
         let graph = dispatch.graph();
         let object = primitive(dispatch, PrimitiveKind::Object);
         let mut node = primitive(dispatch, bottom);
@@ -165,7 +174,8 @@ fn constituents_count_at_any_depth() {
 /// excludes `null` and `undefined`; over `unknown` it does not.
 #[test]
 fn non_nullish_proofs_read_intersections_at_any_depth() {
-    let nest = |dispatch: &ProjectSemanticDispatch<'_>, bottom: SemanticNodeId| {
+    let nest = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+                bottom: SemanticNodeId| {
         let graph = dispatch.graph();
         let unknown = primitive(dispatch, PrimitiveKind::Unknown);
         let mut node = bottom;
@@ -193,7 +203,8 @@ fn non_nullish_proofs_read_intersections_at_any_depth() {
 /// array type, which has no primitive part, may not.
 #[test]
 fn primitive_part_proofs_read_unions_at_any_depth() {
-    let nest = |dispatch: &ProjectSemanticDispatch<'_>, bottom: SemanticNodeId| {
+    let nest = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+                bottom: SemanticNodeId| {
         let graph = dispatch.graph();
         let mut node = bottom;
         for level in 0..DEPTH {

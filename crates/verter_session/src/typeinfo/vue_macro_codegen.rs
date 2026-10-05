@@ -148,7 +148,7 @@ pub(crate) struct VueMacroCodegenScheduleIdentity {
 }
 
 pub(crate) fn vue_macro_codegen_schedule_identity(
-    ctx: &(dyn ResolverContext + Sync),
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
     owner_canonical: &str,
     demand: VueMacroCodegenDemand,
 ) -> VueMacroCodegenScheduleIdentity {
@@ -567,7 +567,7 @@ fn refuse_rooting_on_abort(abort: ExecutionAbort) -> ExecutionAbort {
 /// not live `host_view_project_identity_for`: a republish between pin and
 /// callback must not bind a new `InputBasisId` onto the old snapshot.
 fn enter_vue_macro_semantic_attempt<'a>(
-    ctx: &(dyn ResolverContext + Sync),
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
     owner_canonical: &'a str,
 ) -> CompileAttempt<'a> {
     CompileAttempt::enter_semantic_for_project(
@@ -584,7 +584,7 @@ fn enter_vue_macro_semantic_attempt<'a>(
 /// the result is explicitly non-cacheable and is never published by the
 /// request-scoped scheduler rendezvous.
 fn terminal_partial_vue_macro_codegen_output(
-    ctx: &(dyn ResolverContext + Sync),
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
     owner_canonical: &str,
     demand: VueMacroCodegenDemand,
     completeness_reason: PartialReasonSet,
@@ -743,7 +743,7 @@ impl VerterHost {
     /// answer.
     pub(crate) fn produce_vue_macro_codegen_with_ctx(
         &self,
-        ctx: &(dyn ResolverContext + Sync),
+        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
@@ -806,7 +806,7 @@ impl VerterHost {
 
     fn compute_vue_macro_codegen_output(
         &self,
-        ctx: &(dyn ResolverContext + Sync),
+        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> VueMacroCodegenOutput {
@@ -877,7 +877,7 @@ impl VerterHost {
 
     fn produce_vue_macro_codegen_inner(
         &self,
-        ctx: &(dyn ResolverContext + Sync),
+        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> ProducerState {
@@ -1170,8 +1170,8 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     fn project_tsc_macro(
         &self,
-        ctx: &dyn ResolverContext,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         attempt: &mut CompileAttempt<'_>,
         payload: crate::semantic_query::SemanticNodeId,
         mac: &AnalyzedMacro,
@@ -1377,7 +1377,7 @@ impl VerterHost {
     /// authored-syntax-derived type (or `unknown`) for that member.
     fn project_expose_runtime_object(
         &self,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         attempt: &mut CompileAttempt<'_>,
         mac: &AnalyzedMacro,
         payload_index: usize,
@@ -1504,8 +1504,8 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     fn project_runtime_props(
         &self,
-        ctx: &dyn ResolverContext,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         attempt: &mut CompileAttempt<'_>,
         payload: crate::semantic_query::SemanticNodeId,
         runtime_subject: &BroadRuntimeSubjectLocator,
@@ -1646,8 +1646,8 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     fn project_runtime_emits(
         &self,
-        ctx: &dyn ResolverContext,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         attempt: &mut CompileAttempt<'_>,
         payload: crate::semantic_query::SemanticNodeId,
         owner_canonical: &str,
@@ -1755,7 +1755,7 @@ impl VerterHost {
     fn project_runtime_model(
         &self,
         attempt: &mut CompileAttempt<'_>,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         runtime_subject: BroadRuntimeSubjectLocator,
         owner_canonical: &str,
         payload_index: usize,

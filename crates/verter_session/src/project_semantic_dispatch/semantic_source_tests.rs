@@ -648,7 +648,9 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     /// and whose reduce resolves the reference head through
     /// `ensure_indexed_ready_serve` (so the fence has a serve to catch).
     fn intern_seed(host: &VerterHost) -> SemanticNodeId {
-        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let ctx: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = host;
         let whole_hash = ctx
             .get_whole_hash(SCOPE)
             .expect("the seed scope must have a live whole hash");
@@ -685,7 +687,9 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     }
 
     fn slot_warm(host: &VerterHost, carrier: &SyntheticCarrierKey) -> bool {
-        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let ctx: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = host;
         let key = ShapeCacheKey::synthetic_binding_whole_with_context(
             SyntheticBindingId::from_carrier_key(carrier),
             ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -700,7 +704,9 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     /// Raise the synthetic-binding source under an `Expanded` demand — the deepen
     /// route (a `Navigate` demand would intern the shallow carrier instead).
     fn drive(host: &VerterHost, carrier: &SyntheticCarrierKey) -> bool {
-        let ctx: &dyn crate::resolver_core::ResolverContext = host;
+        let ctx: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = host;
         let dispatch = ProjectSemanticDispatch::new(ctx);
         dispatch
             .raise_semantic_type_source_to_hot(

@@ -118,7 +118,7 @@ fn macro_owner(
 }
 
 fn node_data(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<SemanticNodeData> {
     dispatch.graph().node_data(node).map(|d| (*d).clone())
@@ -127,7 +127,7 @@ fn node_data(
 /// Drive a node through the dispatch as the base of an empty-path
 /// `ProjectPath` query in `mode`, returning the resolved subject node.
 fn resolve_subject(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     base: SemanticNodeId,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
@@ -147,7 +147,7 @@ fn resolve_subject(
 /// path (structural-transit Navigate), then resolve it through the empty-path
 /// terminal. This is the parity oracle the mirror re-entry must match.
 fn eager_resolved(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     expr: &TypeExpr,
     canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
@@ -166,7 +166,7 @@ fn eager_resolved(
 
 /// Resolve a mirror handle through the empty-path terminal in `mode`.
 fn mirror_resolved(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     handle: HotTypeRef,
     mode: ProjectionMode,
 ) -> SemanticNodeId {

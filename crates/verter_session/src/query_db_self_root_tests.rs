@@ -125,7 +125,7 @@ fn planted_self_root(canonical: &str) -> Arc<[FactVersionRef]> {
 /// store view — otherwise the lazy and strict arms are
 /// indistinguishable and the test would not discriminate.
 fn assert_untracked(host: &VerterHost, canonical: &str) {
-    let ctx: &dyn ResolverContext = host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host;
     let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         !StoreView::tracks_file(&view, canonical),
@@ -168,7 +168,7 @@ fn declaration_lookup_db_untracked_self_root_rejects_warm_entry() {
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/decl_never_loaded.ts";
     assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().declaration_db();
     let key = (
         Arc::<str>::from(c),
@@ -244,7 +244,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/imported_never_loaded.ts";
     assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
     let key = (
         Arc::<str>::from(c),
@@ -308,7 +308,7 @@ fn resolvability_db_untracked_self_root_rejects_warm_entry() {
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/resolvable_never_loaded.ts";
     assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().resolvable_db();
     let key = (
         Arc::<str>::from(c),
@@ -380,7 +380,7 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/owner_never_loaded.ts";
     assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().owner_collection_db();
     let key = (
         Arc::<str>::from(c),
@@ -445,7 +445,10 @@ fn empty_dep_signature() -> crate::semantic_query::DepSignature {
 /// this at cold-publish time to mirror the production producers, which
 /// observe the keyed canonical's content version once at the value
 /// source and thread it in.
-fn observed_whole_hash(ctx: &dyn ResolverContext, canonical: &str) -> [u8; 16] {
+fn observed_whole_hash(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+) -> [u8; 16] {
     ctx.shallow_file_state(canonical)
         .unwrap_or_else(|| {
             panic!(
@@ -463,7 +466,7 @@ fn observed_whole_hash(ctx: &dyn ResolverContext, canonical: &str) -> [u8; 16] {
 /// write-through, which observes the scope content version once and
 /// threads it in.
 fn observed_scope_export_set(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     scope: &str,
     observed_whole_hash: [u8; 16],
 ) -> verter_session_query::facts::fact_cache::ParseFactRef {
@@ -489,7 +492,10 @@ fn observed_scope_export_set(
 /// [`engine_fact_signature_for_materialize_memo`]. Tests call this so
 /// the keyed-scope `whole_hash` AND the keyed-scope parse fact descend
 /// from the SAME `IndexedReady`, matching the production write-through.
-fn observe_scope(ctx: &dyn ResolverContext, scope: &str) -> MaterializeScopeObservation {
+fn observe_scope(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    scope: &str,
+) -> MaterializeScopeObservation {
     ctx.observe_materialize_scope(scope).unwrap_or_else(|| {
         panic!(
             "fixture invariant: scope {scope} must have a tear-free materialize-scope \
@@ -513,7 +519,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/memo_never_loaded.ts";
     assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
@@ -574,7 +580,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/member_shape_never_loaded.ts";
     assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
     // Use a synthetic SemanticNodeId — the test exercises the cache's
     // self-root validation contract, not the production graph (the
@@ -645,7 +651,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/synthetic_binding_never_loaded.ts";
     assert_untracked(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
 
     // Content-free synthetic-binding identity rooted on the untracked
@@ -752,7 +758,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
         "fixture invariant: scope and dependency have distinct whole hashes",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
@@ -815,7 +821,7 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     );
     host.ensure_indexed_ready(dep).expect("dep re-indexed");
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let warm = db
         .fixture(ctx2)
@@ -916,7 +922,7 @@ fn load_tracked_keyed(host: &VerterHost, canonical: &str) {
         host.ensure_indexed_ready(canonical).is_some(),
         "IndexedReady must materialise for {canonical}",
     );
-    let ctx: &dyn ResolverContext = host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host;
     let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         StoreView::tracks_file(&view, canonical),
@@ -959,7 +965,7 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/self_root_e2e/decl.ts";
     load_tracked_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().declaration_db();
     let key = (
         Arc::<str>::from(c),
@@ -994,7 +1000,7 @@ fn declaration_lookup_db_self_root_sibling_edit_rejects_warm_entry() {
 
     sibling_body_edit(&host, c);
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let warm = db
         .fixture(ctx2)
@@ -1032,7 +1038,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/self_root_e2e/imported.ts";
     load_tracked_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
     let key = (
         Arc::<str>::from(c),
@@ -1068,7 +1074,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
 
     sibling_body_edit(&host, c);
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let warm = db
         .fixture(ctx2)
@@ -1110,7 +1116,7 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/self_root_e2e/resolvable.ts";
     load_tracked_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().resolvable_db();
     let key = (
         Arc::<str>::from(c),
@@ -1140,7 +1146,7 @@ fn resolvability_db_self_root_sibling_edit_rejects_warm_entry() {
 
     sibling_body_edit(&host, c);
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let warm = db
         .fixture(ctx2)
@@ -1177,7 +1183,7 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/self_root_e2e/owner.ts";
     load_tracked_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().owner_collection_db();
     let key = (
         Arc::<str>::from(c),
@@ -1207,7 +1213,7 @@ fn owner_collection_db_self_root_sibling_edit_rejects_warm_entry() {
 
     sibling_body_edit(&host, c);
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let warm = db
         .fixture(ctx2)
@@ -1261,7 +1267,7 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/self_root_owner_collection/owner.ts";
     load_tracked_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().owner_collection_db();
     let key = (
         Arc::<str>::from(c),
@@ -1410,7 +1416,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/self_root_e2e/memo.ts";
     load_tracked_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // The single tear-free scope observation taken at
     // materialisation/cold-publish time — `observe_materialize_scope`
     // pins the scope's current `IndexedReady`.
@@ -1446,7 +1452,7 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
 
     sibling_body_edit(&host, c);
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let warm = db
         .fixture(ctx2)
@@ -1528,7 +1534,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
         "dep IndexedReady materialises",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
@@ -1607,7 +1613,7 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // correct freshly-computed value — refusing shared-cache admission
     // does NOT change observable request output, it only forgoes the
     // memo. The cold closure runs because no entry was admitted.
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let value = db
         .fixture(ctx2)
@@ -1682,7 +1688,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
         "dep IndexedReady materialises",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
@@ -1777,7 +1783,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
          read must reject it on the ProjectGeneration fact alone",
     );
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let warm = db
         .fixture(ctx2)
@@ -1885,7 +1891,7 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     // carries the observed H1). A producer that re-reads `dep`'s
     // current content emits H2; one that preserves the observed hash
     // emits H1.
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // The scope canonical is untouched by the dependency edit, so its
     // tear-free observation (and the content-addressed artifact backing
     // its `SyntacticExportSet` parse fact) is still recoverable.
@@ -1978,7 +1984,7 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
         .expect("scope indexed at observed version")
         .whole_hash;
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // Capture the ONE tear-free scope observation NOW — before any
     // edit — mirroring the production publish site, which calls
     // `observe_materialize_scope` once at materialisation time. The
@@ -2090,7 +2096,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
         .expect("scope indexed at H1")
         .whole_hash;
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
@@ -2160,7 +2166,7 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
     );
 
     // A follow-up request cold-recomputes because no entry was admitted.
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let value = db
         .fixture(ctx2)
@@ -2210,7 +2216,7 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
     upsert(&host, scope, "export type Probe = number;\n");
     assert!(host.ensure_indexed_ready(scope).is_some(), "scope indexed",);
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // The single tear-free scope observation the publish site threads
     // into the builder.
     let observed_scope = observe_scope(ctx, scope);
@@ -2280,7 +2286,7 @@ fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
         .expect("other indexed")
         .whole_hash;
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // The observation describes the keyed `scope`, but the parse fact
     // passed alongside it describes `other` — a mismatched observation
     // that must refuse admission.
@@ -2381,7 +2387,7 @@ fn imported_registry_db_signature_builder_is_provenance_pure() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/provenance_qdb/imported.ts";
     let observed_h1 = load_and_observe_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     // Step 2 — anchor non-vacuity: observed == current builds `Some`
     // rooted on `H1`.
@@ -2403,7 +2409,7 @@ fn imported_registry_db_signature_builder_is_provenance_pure() {
     );
 
     // Step 4 — the STALE observed hash refuses admission.
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1)
             .into_cacheable()
@@ -2439,7 +2445,7 @@ fn declaration_lookup_db_signature_builder_is_provenance_pure() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/provenance_qdb/decl.ts";
     let observed_h1 = load_and_observe_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
         .into_cacheable()
@@ -2457,7 +2463,7 @@ fn declaration_lookup_db_signature_builder_is_provenance_pure() {
         "the edit must shift the whole hash"
     );
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1)
             .into_cacheable()
@@ -2488,7 +2494,7 @@ fn resolvability_db_signature_builder_is_provenance_pure() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/provenance_qdb/resolvable.ts";
     let observed_h1 = load_and_observe_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
         .into_cacheable()
@@ -2506,7 +2512,7 @@ fn resolvability_db_signature_builder_is_provenance_pure() {
         "the edit must shift the whole hash"
     );
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1)
             .into_cacheable()
@@ -2538,7 +2544,7 @@ fn owner_collection_db_signature_builder_is_provenance_pure() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/provenance_qdb/owner.ts";
     let observed_h1 = load_and_observe_keyed(&host, c);
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let anchored = engine_fact_signature_for_exported_type(ctx, c, "Probe", observed_h1)
         .into_cacheable()
@@ -2556,7 +2562,7 @@ fn owner_collection_db_signature_builder_is_provenance_pure() {
         "the edit must shift the whole hash"
     );
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         engine_fact_signature_for_exported_type(ctx2, c, "Probe", observed_h1)
             .into_cacheable()
@@ -2707,7 +2713,7 @@ fn resolvability_db_producer_overlay_discrimination() {
          overlay producer must resolve `Probe` as NOT resolvable",
     );
 
-    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
 
     let fixture_dispatch_1 =
         crate::project_semantic_dispatch::ProjectSemanticDispatch::new(base_ctx);
@@ -2840,7 +2846,7 @@ fn observe_materialize_scope_is_overlay_view_correct() {
     let (host, view, base_hash, overlay_hash) = overlay_disc_fixture(canonical);
 
     // Base-host observation — no overlay → the base content hash.
-    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     let base_observation = base_ctx
         .observe_materialize_scope(canonical)
         .expect("base-host observe_materialize_scope resolves the base artifact");
@@ -2931,7 +2937,7 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
         "scope IndexedReady materialises",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // Pre-eviction: `observe_materialize_scope` returns Some.
     assert!(
         ctx.observe_materialize_scope(scope).is_some(),
@@ -2998,7 +3004,7 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
         "no MaterializeMemoDb entry may be admitted when the scope observation is refused",
     );
 
-    let ctx2: &dyn ResolverContext = &host;
+    let ctx2: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let mut cold_ran = false;
     let value = db
         .fixture(ctx2)
@@ -3099,7 +3105,7 @@ fn observe_materialize_scope_refuses_stale_artifact_for_live_scheduler_scope() {
         "fixture invariant: the real content hash differs from the planted stale hash",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // Anchor non-vacuity: before planting, the live scope has a
     // tear-free observation rooted on the REAL hash.
     let pre_plant = ctx
@@ -3222,7 +3228,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         hash: base_hash,
     }]);
     {
-        let ctx: &dyn ResolverContext = host.as_ref();
+        let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
         let base_cold_ran = std::cell::Cell::new(false);
         let resolved = db
@@ -3322,7 +3328,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
     );
     // The base reader still sees its own symbol (the overlay candidate did
     // not displace it).
-    let ctx: &dyn ResolverContext = host.as_ref();
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     let base_again = db.fixture(ctx).peek(&key).flatten();
     assert_eq!(
         base_again.map(|s| s.exported_name.clone()),
@@ -3374,7 +3380,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         hash: base_hash,
     }]);
     {
-        let ctx: &dyn ResolverContext = host.as_ref();
+        let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let db = host.project_type_store().imported_registry_db();
         let _ = db
             .fixture(ctx)
@@ -3686,7 +3692,7 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
         "fixture invariant: canonical IndexedReady materialises",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
     let key: crate::component_meta_caches::ImportedRegistryKey = (
         Arc::from(canonical),
@@ -3794,7 +3800,7 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
         "fixture invariant: canonical IndexedReady materialises",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
     let key: crate::component_meta_caches::ImportedRegistryKey = (
         Arc::from(canonical),
@@ -3935,7 +3941,7 @@ fn component_meta_cache_live(host: &VerterHost) -> u64 {
 fn declaration_lookup_failed_revalidation_does_not_leak_live_counter() {
     let host = host_with_unrelated_file();
     let c = "/live_counter_qdb/declaration_lookup.ts";
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().declaration_db();
     let key = (
         Arc::<str>::from(c),
@@ -3985,7 +3991,7 @@ fn declaration_lookup_failed_revalidation_does_not_leak_live_counter() {
 fn resolvability_failed_revalidation_does_not_leak_live_counter() {
     let host = host_with_unrelated_file();
     let c = "/live_counter_qdb/resolvability.ts";
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().resolvable_db();
     let key = (
         Arc::<str>::from(c),
@@ -4026,7 +4032,7 @@ fn resolvability_failed_revalidation_does_not_leak_live_counter() {
 fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
     let host = host_with_unrelated_file();
     let c = "/live_counter_qdb/owner_collection.ts";
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().owner_collection_db();
     let key = (
         Arc::<str>::from(c),
@@ -4068,7 +4074,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
     use crate::semantic_query::SemanticNodeId;
     let host = host_with_unrelated_file();
     let c = "/live_counter_qdb/materialize_memo.ts";
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
     let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
         Arc::<str>::from(c),
@@ -4126,7 +4132,7 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
     use crate::semantic_query::SemanticNodeId;
 
     let host = host_with_unrelated_file();
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let store = host.project_type_store();
 
     // Sum of every component-meta cache map that contributes to the
@@ -4414,7 +4420,7 @@ fn relation_memo_get_relation_payload_rejects_entry_from_superseded_generation()
     use crate::semantic_query_memo::SemanticGraphStore;
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let store = SemanticGraphStore::new();
     let source: SemanticNodeId =
         store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4638,7 +4644,7 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     upsert(&host, c, "export type Probe = number;\n");
     host.ensure_indexed_ready(c)
         .expect("scope IndexedReady materialises");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let scope_hash = observed_whole_hash(ctx, c);
     let db = host.project_type_store().shape_cache_db();
 
@@ -5233,7 +5239,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
 
-    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     let db = host.project_type_store().shape_cache_db();
 
     let value = SemanticNodeId(7);
@@ -5680,7 +5686,7 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().declaration_db();
 
     // CONTROL — a STABLE view: the same production signature admits and serves.

@@ -117,6 +117,7 @@
 
 use std::cell::Cell;
 use std::sync::{Arc, OnceLock};
+use verter_session_query::source::demand::ExpressionSourceDemand;
 
 use rustc_hash::FxHashMap;
 use verter_type_expr::{FunctionExpr, LiteralValue, MappedModifier, ObjectMember, TypeExpr};
@@ -1385,8 +1386,8 @@ impl Clone for MacroHotMirror {
 /// range, the macro carries no `parsed_type_argument`, or the type argument
 /// has no faithful unresolved structural representation (a stable negative
 /// cell).
-pub(crate) fn macro_type_arg_hot_ref(
-    ctx: &dyn crate::resolver_core::request_ports::OwnedLowering,
+pub(crate) fn macro_type_arg_hot_ref<D: ExpressionSourceDemand + Clone>(
+    ctx: &dyn crate::resolver_core::request_ports::ExpressionSourceSelection<ExpressionDemand = D>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     selector: &crate::resolver_core::request_inputs::MacroMirrorSelector,
     owner_canonical: &str,
@@ -1396,8 +1397,8 @@ pub(crate) fn macro_type_arg_hot_ref(
         .map(|product| product.as_ref().clone())
 }
 
-fn macro_hot_product(
-    ctx: &dyn crate::resolver_core::request_ports::OwnedLowering,
+fn macro_hot_product<D: ExpressionSourceDemand + Clone>(
+    ctx: &dyn crate::resolver_core::request_ports::ExpressionSourceSelection<ExpressionDemand = D>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     selector: &crate::resolver_core::request_inputs::MacroMirrorSelector,
     owner_canonical: &str,
@@ -1462,7 +1463,7 @@ fn macro_hot_product(
     match build_macro_hot_ref(
         ctx,
         &serve,
-        source_demand.as_deref(),
+        source_demand.as_ref(),
         graph,
         owner_canonical,
         &indexed,
@@ -1510,7 +1511,7 @@ enum MacroHotRefOutcome {
 fn build_macro_hot_ref(
     ctx: &dyn crate::resolver_core::request_ports::OwnedLowering,
     serve: &crate::resolver_core::request_inputs::IndexedInputServe,
-    source_demand: Option<&dyn verter_session_query::source::demand::ExpressionSourceDemand>,
+    source_demand: Option<&impl ExpressionSourceDemand>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     owner_canonical: &str,
     indexed: &crate::resolver_core::request_inputs::IndexedInputRecord,

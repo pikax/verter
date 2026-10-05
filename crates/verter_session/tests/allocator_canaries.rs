@@ -925,6 +925,9 @@ mod construction_bytes_allocation;
 #[path = "allocation_cases/flow_literal_provenance.rs"]
 mod flow_literal_provenance_allocation;
 
+#[path = "allocation_cases/expression_source_selection.rs"]
+mod expression_source_selection_allocation;
+
 mod signature_kernel_warm_positional {
     //! Warm positional Empty/One read: no per-candidate `Arc` clone and no
     //! intern-shard lock. The counting allocator is process-global in this

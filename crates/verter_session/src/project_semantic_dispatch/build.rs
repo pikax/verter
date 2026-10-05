@@ -460,7 +460,7 @@ pub(super) struct InferScan {
     pub(super) binder_scope: bool,
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Collect the observed self-roots of a set of input `SemanticNodeId`s.
     ///
     /// A node kind keyed by already-interned input nodes (`ProjectPath` /
@@ -16868,9 +16868,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// so `project_path_prefix_peek_short_circuits_sibling_walk` can
 /// discriminate pre-fix (no helper / always None) vs post-fix (peek hits
 /// the warm prefix).
-fn find_longest_warm_prefix(
+fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     base: SemanticNodeId,
     path: &Arc<[PathSegment]>,
 ) -> Option<(SemanticNodeId, usize)> {

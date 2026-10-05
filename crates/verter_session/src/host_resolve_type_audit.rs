@@ -292,8 +292,9 @@ impl VerterHost {
                     &current_view,
                     overlay,
                 );
-                let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
-                    &host_ctx;
+                let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext<
+                    crate::resolver_core::HostCapabilities,
+                > = &host_ctx;
                 match registration.as_ref() {
                     AuditRequestRegistration::Active(_) => {
                         let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));

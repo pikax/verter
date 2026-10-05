@@ -841,7 +841,7 @@ struct ColdRead {
 /// Read `name` cold and compare its answer with the checker's print
 /// `expected` through the shared checker-syntax projection.
 fn cold_read(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     path: &str,
     name: &str,
     expected: &str,

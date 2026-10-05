@@ -41,7 +41,7 @@ enum RouteLayerNode {
 impl VerterHost {
     fn append_route_participant_fact_versions_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical: &str,
         facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
         seen: &mut rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef>,
@@ -130,7 +130,7 @@ impl VerterHost {
 
     pub(crate) fn resolve_route_type_edge_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         owner_canonical: &str,
         source_specifier: &str,
     ) -> Option<String> {
@@ -147,7 +147,7 @@ impl VerterHost {
 
     fn resolve_named_type_export_route_from_target(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         provider_canonical: &str,
         target: &verter_session_query::inputs::shallow::ExportTarget,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -323,7 +323,7 @@ impl VerterHost {
     /// lookup.
     pub(crate) fn routed_shallow_state_serve_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<RoutedShallowServe<verter_session_query::inputs::shallow::ShallowInputRecord>> {
         let mut route_shallow_cache = RouteShallowStateCache::default();
@@ -332,7 +332,7 @@ impl VerterHost {
 
     fn route_shallow_state_serve_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         route_shallow_cache: &mut RouteShallowStateCache<
             verter_session_query::inputs::shallow::ShallowInputRecord,
@@ -355,7 +355,7 @@ impl VerterHost {
 
     fn route_shallow_state_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         route_shallow_cache: &mut RouteShallowStateCache<
             verter_session_query::inputs::shallow::ShallowInputRecord,
@@ -433,7 +433,7 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     fn resolve_named_type_export_route_uncached(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         provider_canonical: &str,
         exported_name: &str,
         active: &mut rustc_hash::FxHashSet<(String, String)>,
@@ -618,7 +618,7 @@ impl VerterHost {
 
     pub(crate) fn build_named_type_export_route_entry_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         dep_canonical: &str,
         requested_name: &str,
     ) -> Option<(
@@ -728,7 +728,7 @@ impl VerterHost {
     /// direct-host convenience remains compile-fenced to tests.
     pub(super) fn resolve_named_type_export_target_uncached_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         requested_name: &str,
@@ -815,7 +815,7 @@ impl VerterHost {
     /// `HostResolverContext` / `SessionResolverContext` callers.
     pub(crate) fn resolve_named_type_export_target_shallow_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
         requested_name: &str,

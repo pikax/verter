@@ -168,8 +168,8 @@ impl VerterHost {
     /// JSDoc hydration, display rendering, or member-body expansion.
     pub(crate) fn project_shallow_surface_graph_only(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         base: SemanticNodeId,
         path: Arc<[PathSegment]>,
         context: ProjectionReductionContext,
@@ -181,9 +181,9 @@ impl VerterHost {
     }
 }
 
-pub(crate) fn project_shallow_surface_graph_only(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn project_shallow_surface_graph_only<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
     path: Arc<[PathSegment]>,
     context: ProjectionReductionContext,
@@ -411,9 +411,9 @@ pub(crate) fn project_shallow_surface_graph_only(
     resolution.with_read_partiality(read_partiality)
 }
 
-pub(crate) fn project_shallow_surface_from_base(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn project_shallow_surface_from_base<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
     path: Arc<[PathSegment]>,
     context: ProjectionReductionContext,

@@ -216,20 +216,22 @@ fn a_recursive_application_inside_a_branch_is_instantiated() {
 /// complete answer when a certified divergence decides it, a resource
 /// partial when the run's allowance did.
 fn assert_ts2589(source: &str, probe: &str, basis: RecoveryBasis) {
-    let check = |dispatch: &super::ProjectSemanticDispatch<'_>, node| {
-        let data = dispatch.graph().node_data(node);
-        assert!(
-            matches!(
-                data.as_deref(),
-                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
-                    diagnostic,
-                    basis: measured,
-                    origin: None,
-                })) if *diagnostic == TS2589 && *measured == basis
-            ),
-            "`{probe}` must be the {basis:?} TS2589 recovery, measured {data:?}"
-        );
-    };
+    let check =
+        |dispatch: &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+         node| {
+            let data = dispatch.graph().node_data(node);
+            assert!(
+                matches!(
+                    data.as_deref(),
+                    Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                        diagnostic,
+                        basis: measured,
+                        origin: None,
+                    })) if *diagnostic == TS2589 && *measured == basis
+                ),
+                "`{probe}` must be the {basis:?} TS2589 recovery, measured {data:?}"
+            );
+        };
     match basis {
         RecoveryBasis::Certified => super::checker_probe_lane_tests::with_probe_outcome_on_host(
             &super::checker_probe_lane_tests::default_probe_host(),

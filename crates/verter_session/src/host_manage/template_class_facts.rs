@@ -121,7 +121,7 @@ enum RequestedSubject {
 /// `HostResolverContext` and `SessionResolverContext` — makes a non-request
 /// binding a compile error.
 pub(crate) fn build_template_class_semantic_facts(
-    ctx: &dyn RequestBoundResolverContext,
+    ctx: &dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
     canonical: &str,
     whole_hash: verter_session_query::analysis::types::Hash16,
     script: TemplateClassScriptInputs<'_>,
@@ -366,7 +366,7 @@ fn select_requested_subjects(
 }
 
 fn join_subject(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     _canonical: &str,
     script: TemplateClassScriptInputs<'_>,
     requested: &RequestedSubject,
@@ -444,7 +444,7 @@ fn join_prop_field(
 }
 
 fn classify_binding(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     declaration: DeclBindingKey,
     subject: TemplateClassSubject,
@@ -494,7 +494,7 @@ fn classify_binding(
 }
 
 fn classify_prop(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     script: TemplateClassScriptInputs<'_>,
     payload: &verter_type_expr::locators::MacroPayloadLocator,
@@ -584,7 +584,7 @@ fn classify_prop(
 /// boundary is a ruled fail-closed negative, pinned by
 /// `template_class_imported_props_type_argument_fails_closed_with_local_control`.
 fn named_type_argument_member_head(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     script: TemplateClassScriptInputs<'_>,
     payload: &verter_type_expr::locators::MacroPayloadLocator,
@@ -606,7 +606,7 @@ fn named_type_argument_member_head(
 }
 
 fn classify_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     subject: TemplateClassSubject,
     candidate: Option<&WrapperCandidate>,
@@ -673,7 +673,7 @@ fn classify_node(
 }
 
 fn carrier_instantiation_args(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     visited: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<Arc<[SemanticNodeId]>> {
@@ -688,7 +688,7 @@ fn carrier_instantiation_args(
 }
 
 fn classify_closed_domain(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> ClosedLiteralDomain {
     let context =
@@ -707,7 +707,7 @@ fn classify_closed_domain(
 }
 
 fn classify_normalized_domain(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     visited: &mut FxHashSet<SemanticNodeId>,
     remaining: &mut usize,

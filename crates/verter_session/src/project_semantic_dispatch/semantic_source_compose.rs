@@ -22,7 +22,7 @@ use crate::semantic_query::{
     SemanticNodeId, SurfaceEntry, SurfaceMember, SurfaceView, TupleElement,
 };
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     // ── fact-shell composition (private) ─────────────────────────────────
 
     /// Lower one `TypeBodySlot` (a decl-body sub-position) through the

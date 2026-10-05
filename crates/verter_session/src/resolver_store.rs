@@ -5157,7 +5157,8 @@ mod resolve_env_asymmetry_tests;
 
 /// The host's live workspace slot as a clock source: each read selects the
 /// slot's current workspace, so a replacement is visible to the next read.
-pub(crate) struct WorkspaceSlotClocks(pub(crate) WorkspaceSlot);
+#[derive(Clone)]
+pub struct WorkspaceSlotClocks(WorkspaceSlot);
 
 /// The host's replaceable workspace slot.
 pub(crate) type WorkspaceSlot =
@@ -5173,9 +5174,9 @@ impl verter_session_query::facts::clocks::WorkspaceClocks for WorkspaceSlotClock
 impl crate::VerterHost {
     pub(crate) fn aggregate_clock_reader(
         &self,
-    ) -> verter_session_query::facts::clocks::AggregateClockReader {
+    ) -> verter_session_query::facts::clocks::AggregateClockReader<WorkspaceSlotClocks> {
         verter_session_query::facts::clocks::AggregateClockReader::new(
-            std::sync::Arc::clone(&self.workspace_clocks),
+            WorkspaceSlotClocks(std::sync::Arc::clone(&self.workspace)),
             self.project_type_store().project_generation_reader(),
             self.project_type_store()
                 .resolved_import_facts()

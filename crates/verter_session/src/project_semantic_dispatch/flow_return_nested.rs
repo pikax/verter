@@ -25,6 +25,7 @@
 
 use std::cell::{Cell, OnceCell};
 use std::sync::Arc;
+use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use super::contextual::ContextualSignature;
 use super::FlowDemandDriver;

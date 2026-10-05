@@ -14,11 +14,16 @@ use verter_session_query::facts::store_view::StoreView;
 /// the request driver's cacheability scope. Only the request driver can
 /// construct it, so a producer cannot compute first and open an empty tracer
 /// only at the store.
-pub(crate) struct FallthroughStableAdmission<'t> {
-    probe: &'t CacheabilityProbe<'t>,
+pub(crate) struct FallthroughStableAdmission<
+    't,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+> {
+    probe: &'t CacheabilityProbe<'t, W>,
 }
 
-impl FallthroughStableAdmission<'_> {
+impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    FallthroughStableAdmission<'_, W>
+{
     #[inline]
     pub(crate) fn non_cacheable(&self) -> bool {
         self.probe.non_cacheable()
@@ -26,8 +31,8 @@ impl FallthroughStableAdmission<'_> {
 
     #[cfg(test)]
     pub(crate) fn from_test_scope<'t>(
-        probe: &'t CacheabilityProbe<'t>,
-    ) -> FallthroughStableAdmission<'t> {
+        probe: &'t CacheabilityProbe<'t, W>,
+    ) -> FallthroughStableAdmission<'t, W> {
         FallthroughStableAdmission { probe }
     }
 }
@@ -41,7 +46,7 @@ pub(crate) trait FallthroughRequestHost {
     fn with_cacheability_context<R>(
         &self,
         fixed_store_view: Option<(&Self::View, u64, bool)>,
-        operation: impl FnOnce(&dyn ResolverContext) -> R,
+        operation: impl FnOnce(&dyn ResolverContext<crate::resolver_core::HostCapabilities>) -> R,
     ) -> R;
 
     fn generic_root_propagation(&self) -> bool;
@@ -102,16 +107,22 @@ pub(crate) trait FallthroughRequestHost {
     ///
     /// `admission` is minted only by [`run_fallthrough_request`] after its
     /// owner-opened scope has enclosed the complete request compute.
-    fn store_fallthrough_result(
+    fn store_fallthrough_result<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<&FallthroughPropOverrideSet>,
         result: &Self::Resolution,
-        admission: &FallthroughStableAdmission<'_>,
+        admission: &FallthroughStableAdmission<'_, W>,
     );
 }
 
-struct FallthroughRequestExecutor<'a, 'b, 'p, H: FallthroughRequestHost> {
+struct FallthroughRequestExecutor<
+    'a,
+    'b,
+    'p,
+    H: FallthroughRequestHost,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+> {
     host: &'a H,
     canonical_id: String,
     prop_type_overrides: Option<&'a FallthroughPropOverrideSet>,
@@ -122,7 +133,7 @@ struct FallthroughRequestExecutor<'a, 'b, 'p, H: FallthroughRequestHost> {
     /// it is admitting. That ordering is the whole rail: a scope that started
     /// at the store site would never see the compute's fenced serve / broken
     /// lease / unrootable route.
-    probe: &'p CacheabilityProbe<'p>,
+    probe: &'p CacheabilityProbe<'p, W>,
     /// A caller-owned snapshot to pin this request to, as
     /// `(view, captured_external_supersession_fingerprint, is_current)`.
     ///
@@ -176,13 +187,20 @@ struct FallthroughRequestExecutor<'a, 'b, 'p, H: FallthroughRequestHost> {
     max_attempts: usize,
 }
 
-impl<'a, 'b, 'p, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, 'p, H> {
+impl<
+        'a,
+        'b,
+        'p,
+        H: FallthroughRequestHost,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    > FallthroughRequestExecutor<'a, 'b, 'p, H, W>
+{
     fn new(
         host: &'a H,
         canonical_id: String,
         prop_type_overrides: Option<&'a FallthroughPropOverrideSet>,
         visiting: &'b mut FxHashSet<String>,
-        probe: &'p CacheabilityProbe<'p>,
+        probe: &'p CacheabilityProbe<'p, W>,
         max_attempts: usize,
     ) -> Self {
         Self {
@@ -207,8 +225,9 @@ impl<'a, 'b, 'p, H: FallthroughRequestHost> FallthroughRequestExecutor<'a, 'b, '
     }
 }
 
-impl<H> StableRequestExecutor<FallthroughNodeKey, Option<H::Resolution>>
-    for FallthroughRequestExecutor<'_, '_, '_, H>
+impl<H, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    StableRequestExecutor<FallthroughNodeKey, Option<H::Resolution>>
+    for FallthroughRequestExecutor<'_, '_, '_, H, W>
 where
     H: FallthroughRequestHost,
 {
@@ -403,7 +422,11 @@ where
     }
 }
 
-impl<H: FallthroughRequestHost> Drop for FallthroughRequestExecutor<'_, '_, '_, H> {
+impl<
+        H: FallthroughRequestHost,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    > Drop for FallthroughRequestExecutor<'_, '_, '_, H, W>
+{
     fn drop(&mut self) {
         // DISCARD the FINAL attempt's held scope (or the held scope left by a
         // prior attempt on a cache-served-final path) WITHOUT bubbling. The
@@ -461,7 +484,10 @@ where
     })
 }
 
-fn run_fallthrough_request_in_scope<H>(
+fn run_fallthrough_request_in_scope<
+    H,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
     host: &H,
     singleflight: &SingleflightGroup<
         FallthroughNodeKey,
@@ -472,7 +498,7 @@ fn run_fallthrough_request_in_scope<H>(
     prop_type_overrides: Option<&FallthroughPropOverrideSet>,
     visiting: &mut FxHashSet<String>,
     fixed_store_view: Option<(&H::View, u64, bool)>,
-    probe: &CacheabilityProbe<'_>,
+    probe: &CacheabilityProbe<'_, W>,
     max_attempts: usize,
 ) -> RequestRunResult<Option<H::Resolution>>
 where
@@ -589,7 +615,7 @@ mod tests {
         fn with_cacheability_context<R>(
             &self,
             _fixed_store_view: Option<(&Self::View, u64, bool)>,
-            operation: impl FnOnce(&dyn ResolverContext) -> R,
+            operation: impl FnOnce(&dyn ResolverContext<crate::resolver_core::HostCapabilities>) -> R,
         ) -> R {
             operation(test_cacheability_host())
         }
@@ -651,12 +677,14 @@ mod tests {
             Some(42)
         }
 
-        fn store_fallthrough_result(
+        fn store_fallthrough_result<
+            W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+        >(
             &self,
             canonical_id: &str,
             _prop_type_overrides: Option<&FallthroughPropOverrideSet>,
             _result: &Self::Resolution,
-            admission: &FallthroughStableAdmission<'_>,
+            admission: &FallthroughStableAdmission<'_, W>,
         ) {
             if !admission.non_cacheable() {
                 self.promotions.borrow_mut().push(canonical_id.to_string());
@@ -1025,7 +1053,9 @@ mod tests {
             fn with_cacheability_context<R>(
                 &self,
                 _fixed_store_view: Option<(&Self::View, u64, bool)>,
-                operation: impl FnOnce(&dyn ResolverContext) -> R,
+                operation: impl FnOnce(
+                    &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+                ) -> R,
             ) -> R {
                 operation(test_cacheability_host())
             }
@@ -1070,12 +1100,14 @@ mod tests {
                 }
                 Some(42)
             }
-            fn store_fallthrough_result(
+            fn store_fallthrough_result<
+                W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+            >(
                 &self,
                 canonical_id: &str,
                 _overrides: Option<&FallthroughPropOverrideSet>,
                 _result: &usize,
-                _admission: &FallthroughStableAdmission<'_>,
+                _admission: &FallthroughStableAdmission<'_, W>,
             ) {
                 // Production no-poison gate mirror: refuse a partial.
                 if crate::request_context::current_cold_compute_completeness().is_partial() {
@@ -1272,7 +1304,9 @@ mod tests {
             fn with_cacheability_context<R>(
                 &self,
                 _fixed_store_view: Option<(&Self::View, u64, bool)>,
-                operation: impl FnOnce(&dyn ResolverContext) -> R,
+                operation: impl FnOnce(
+                    &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+                ) -> R,
             ) -> R {
                 operation(test_cacheability_host())
             }
@@ -1319,12 +1353,14 @@ mod tests {
                     Some(2)
                 }
             }
-            fn store_fallthrough_result(
+            fn store_fallthrough_result<
+                W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+            >(
                 &self,
                 canonical_id: &str,
                 _overrides: Option<&FallthroughPropOverrideSet>,
                 _result: &usize,
-                _admission: &FallthroughStableAdmission<'_>,
+                _admission: &FallthroughStableAdmission<'_, W>,
             ) {
                 // Production no-poison gate mirror: refuse a partial.
                 if crate::request_context::current_cold_compute_completeness().is_partial() {

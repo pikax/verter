@@ -1838,7 +1838,7 @@ fn make_r5_host() -> Arc<VerterHost> {
 
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -1847,12 +1847,15 @@ fn with_dispatch<R>(
     f(&dispatch)
 }
 
-fn r5_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+fn r5_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> FlowReturnKey {
     r5_key_part(dispatch, name, FunctionPartIdentity::DeclarationBody)
 }
 
 fn r5_key_part(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     part: FunctionPartIdentity,
 ) -> FlowReturnKey {
@@ -1961,7 +1964,7 @@ fn assert_fails_closed(host: &Arc<VerterHost>, name: &str) {
 /// The shared fail-closed discriminator, over one dispatch outcome.
 #[track_caller]
 pub(crate) fn assert_flow_fails_closed(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     outcome: QueryResult<SemanticQueryOutput<SemanticQueryValue>>,
 ) {
@@ -3019,7 +3022,10 @@ fn decl_ref(name: &str) -> NodeShape {
     NodeShape::DeclRef(name.to_string())
 }
 
-fn node_shape(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> NodeShape {
+fn node_shape(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> NodeShape {
     let Some(data) = dispatch.graph().node_data(node) else {
         return NodeShape::Other("<no node>".to_string());
     };
@@ -3042,7 +3048,7 @@ fn node_shape(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> N
 /// The `object` of an `IndexedAccess` answer.
 #[track_caller]
 fn indexed_access_object(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
@@ -3056,7 +3062,7 @@ fn indexed_access_object(
 /// reaches this rail through.
 #[track_caller]
 fn project_member_path(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     base: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
@@ -3081,7 +3087,7 @@ fn project_member_path(
 /// The arms of a `Union` answer.
 #[track_caller]
 fn union_members(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Vec<SemanticNodeId> {
     match dispatch.graph().node_data(node).as_deref() {
@@ -3093,7 +3099,7 @@ fn union_members(
 /// One named member of an `Object` answer.
 #[track_caller]
 fn object_member(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
@@ -3111,7 +3117,10 @@ fn object_member(
 
 /// The `Array` element of an answer.
 #[track_caller]
-fn array_element(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> SemanticNodeId {
+fn array_element(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
         Some(SemanticNodeData::Array { element, .. }) => *element,
         other => panic!("expected an Array answer, got {other:?}"),
@@ -3121,7 +3130,7 @@ fn array_element(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -
 /// The `Conditional` CHECK type of an answer.
 #[track_caller]
 fn conditional_check(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
@@ -3138,7 +3147,10 @@ struct SigParts {
 }
 
 #[track_caller]
-fn signature_parts(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> SigParts {
+fn signature_parts(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> SigParts {
     match dispatch.graph().node_data(node).as_deref() {
         Some(SemanticNodeData::Signature {
             params,
@@ -3161,7 +3173,10 @@ fn r5_node<R>(
     host: &Arc<VerterHost>,
     name: &str,
     part: FunctionPartIdentity,
-    pick: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    pick: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     with_dispatch(host, |dispatch| {
         let key = r5_key_part(dispatch, name, part);
@@ -3194,7 +3209,10 @@ fn r5_node_unadmitted<R>(
     host: &Arc<VerterHost>,
     name: &str,
     part: FunctionPartIdentity,
-    pick: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    pick: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     with_dispatch(host, |dispatch| {
         let key = r5_key_part(dispatch, name, part);
@@ -4014,7 +4032,7 @@ fn flow_return_generic_direct_callee_never_publishes_the_callees_binder() {
 /// `unknown | CT` clean. This walks the tree the way a substitution
 /// would.
 fn reachable_type_param_names(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     root: SemanticNodeId,
 ) -> Vec<String> {
     let mut visited: std::collections::BTreeSet<SemanticNodeId> = Default::default();

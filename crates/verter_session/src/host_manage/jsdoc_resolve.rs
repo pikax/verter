@@ -40,13 +40,17 @@ use crate::meta_resolve::project_expr_class_a_via_dispatch;
 /// existing facade and captured private view at the type level.
 pub(crate) struct HostComponentMetaResolver<'a, E = ()> {
     pub(crate) host: &'a VerterHost,
-    pub(crate) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
+    pub(crate) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     pub(crate) engine: E,
 }
 
 pub(crate) struct ComponentMetaSemanticServices<'dispatch, 'request> {
-    pub(crate) dispatch:
-        &'dispatch crate::project_semantic_dispatch::ProjectSemanticDispatch<'request>,
+    pub(crate) dispatch: &'dispatch crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        'request,
+        crate::resolver_core::HostCapabilities,
+    >,
     pub(crate) session_view: Option<&'request dyn crate::session_view::SessionView>,
 }
 
@@ -651,7 +655,10 @@ fn absolutize_macro_payload_locator(
 /// Object MEMBERS, which encode "nested" deps. Visited-guarded (graph nodes
 /// may be shared or cyclic).
 fn node_has_direct_macro_reference(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
     needle: &str,
@@ -759,7 +766,9 @@ pub(crate) fn resolve_type_declaration(
     dep_canonical: &str,
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
-    let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = host;
+    let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
     resolve_type_declaration_with_context(
         host,
         base_ctx,
@@ -775,7 +784,9 @@ pub(crate) fn resolve_type_declaration(
 /// declaration walker dereferences cross-file types.
 pub(crate) fn resolve_type_declaration_with_context(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     dep_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     requested_name: &str,
@@ -794,7 +805,9 @@ pub(crate) fn resolve_type_declaration_with_context(
 }
 
 pub(crate) fn read_full_source(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_source: &str,
 ) -> Option<String> {
     // JSDoc is semantic output derived from the declaration file's exact
@@ -814,8 +827,13 @@ pub(crate) fn read_full_source(
 
 pub(crate) fn resolve_jsdoc_block(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_source: &str,
     span: verter_span::Span,
     mode: ProjectionMode,
@@ -853,8 +871,13 @@ pub(crate) fn resolve_jsdoc_block(
 
 pub(crate) fn map_jsdoc_tag(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_source: &str,
     mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
@@ -969,8 +992,13 @@ fn jsdoc_payload_spells_legacy_sentinel(raw: &str) -> bool {
 
 pub(crate) fn resolve_jsdoc_tag_type(
     _host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,

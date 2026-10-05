@@ -150,8 +150,8 @@ impl WorldSnapshot {
     /// the context's active store view. `overlay_identity` is the
     /// session identity the caller already has at the request entry
     /// boundary (`None` for a base request, `Some` for a session overlay).
-    pub(crate) fn from_request(
-        ctx: &dyn ResolverContext,
+    pub(crate) fn from_request<C: crate::resolver_core::ResolverCapabilities>(
+        ctx: &dyn ResolverContext<C>,
         dims: WorldSnapshotDims,
         overlay_identity: Option<OverlayIdentity>,
         public_api_mode_hash: Hash16,
@@ -514,7 +514,9 @@ mod tests {
         // `compat_token` through `(&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()`.
         // The inline test uses the compile-fenced direct-host fixture context.
         let host = VerterHost::new_standalone(HostConfig::default());
-        let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+        let ctx: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &host;
 
         let dims = WorldSnapshotDims {
             project_identity: [1u8; 16],
@@ -564,7 +566,9 @@ mod tests {
         // production callers (B2+) cannot drop one and have the
         // missing accessor silently compile.
         let host = VerterHost::new_standalone(HostConfig::default());
-        let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+        let ctx: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &host;
         let dims = WorldSnapshotDims {
             project_identity: [1u8; 16],
             parse_env_hash: [2u8; 16],

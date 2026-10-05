@@ -828,7 +828,7 @@ fn carrier_host() -> Arc<VerterHost> {
 
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -839,7 +839,7 @@ fn with_dispatch<R>(
 
 /// The full key, every axis explicit.
 fn key_full(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     owner: TopLevelOwnerId,
     name: &str,
@@ -864,7 +864,11 @@ fn key_full(
 
 /// The canonical production point of a top-level `function` declaration
 /// in an ordinary file.
-fn key_of(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str, name: &str) -> FlowReturnKey {
+fn key_of(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+    name: &str,
+) -> FlowReturnKey {
     key_full(
         dispatch,
         canonical,
@@ -899,7 +903,7 @@ enum Outcome {
 
 fn eval_key_on(
     host: &Arc<VerterHost>,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     key: FlowReturnKey,
 ) -> Outcome {
     match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))) {
@@ -1070,7 +1074,10 @@ enum NodeShape {
     Other(String),
 }
 
-fn node_shape(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> NodeShape {
+fn node_shape(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> NodeShape {
     let Some(data) = dispatch.graph().node_data(node) else {
         return NodeShape::Other("<no node>".to_string());
     };
@@ -1097,7 +1104,10 @@ fn flow_node<R>(
     host: &Arc<VerterHost>,
     canonical: &str,
     name: &str,
-    pick: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    pick: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     with_dispatch(host, |dispatch| {
         let key = key_of(dispatch, canonical, name);
@@ -1123,7 +1133,7 @@ fn flow_node<R>(
 /// The `check` node of a `Conditional` answer.
 #[track_caller]
 fn conditional_check(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
@@ -4011,7 +4021,10 @@ fn assert_unresolved_value(
     host: &Arc<VerterHost>,
     canonical: &str,
     name: &str,
-    probe: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId),
+    probe: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ),
 ) {
     match eval(host, canonical, name) {
         Outcome::Value {
@@ -5702,7 +5715,7 @@ export async function awaitRecInArray(r: Rec) { return [await r]; }
 
 /// The checker diagnostic a recovery carrier names, if `node` is one.
 fn checker_recovery_of(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<crate::semantic_query::CheckerDiagnostic> {
     match dispatch.graph().node_data(node).as_deref() {
@@ -5731,7 +5744,10 @@ fn async_payload<R>(
     host: &Arc<VerterHost>,
     name: &str,
     warm: bool,
-    pick: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    pick: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     with_dispatch(host, |dispatch| {
         let key = key_of(dispatch, RECURSIVE_THENABLE, name);
@@ -6691,7 +6707,10 @@ enum ClassProbeAdmission {
 fn with_class_probe<R>(
     name: &str,
     admission: ClassProbeAdmission,
-    check: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    check: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     let host = host_with(&[(CLASSES, CLASSES_SRC)]);
     with_dispatch(&host, |dispatch| {

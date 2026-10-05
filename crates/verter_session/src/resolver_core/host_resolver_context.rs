@@ -96,7 +96,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_decl_bundle(
         &self,
-        _ctx: &dyn ResolverContext,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<Arc<PreparedDeclBundle>> {
         self.inner.prepared_decl_bundle_with_store_view(
@@ -108,7 +108,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_type_decl(
         &self,
-        _ctx: &dyn ResolverContext,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -127,7 +127,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_value_decl(
         &self,
-        _ctx: &dyn ResolverContext,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -148,7 +148,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_bare_host_ctx_for_test<R>(
     host: &crate::VerterHost,
-    f: impl FnOnce(&(dyn ResolverContext + Sync)) -> R,
+    f: impl FnOnce(&(dyn ResolverContext<crate::resolver_core::HostCapabilities> + Sync)) -> R,
 ) -> R {
     let view = crate::VerterHost::resolver_store_view(host).into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());

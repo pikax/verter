@@ -180,7 +180,9 @@ mod projector {
     /// obtain the [`TypeExpr`] the sink publishes.
     pub(crate) trait OutputProjector: sealed::Sealed {
         /// The dispatch this capability projects through.
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_>;
+        /// The capability family of the dispatch this projector reads.
+        type Caps: crate::resolver_core::ResolverCapabilities;
+        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, Self::Caps>;
 
         /// Plain SHELL raise (no operator reduction): materialize `node` into
         /// a sealed [`OutputTypeExpr`]. `None` is the miss signal (the
@@ -253,59 +255,88 @@ mod projector {
     // entire reachable production module tree is output-only.
     // =====================================================================
 
-    impl sealed::Sealed for crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap<'_, '_> {}
-    impl OutputProjector for crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap<'_, '_> {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
+    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
+        for crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap<'_, '_, C>
+    {
+    }
+    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
+        for crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap<'_, '_, C>
+    {
+        type Caps = C;
+        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
             self.dispatch_for_projector()
         }
     }
 
-    impl sealed::Sealed for crate::meta_resolve::materialize::MetaResolveFieldTypesOutputCap<'_, '_> {}
-    impl OutputProjector for crate::meta_resolve::materialize::MetaResolveFieldTypesOutputCap<'_, '_> {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
+    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
+        for crate::meta_resolve::materialize::MetaResolveFieldTypesOutputCap<'_, '_, C>
+    {
+    }
+    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
+        for crate::meta_resolve::materialize::MetaResolveFieldTypesOutputCap<'_, '_, C>
+    {
+        type Caps = C;
+        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
             self.dispatch_for_projector()
         }
     }
 
-    impl sealed::Sealed for crate::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_> {}
-    impl OutputProjector for crate::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_> {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
+    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
+        for crate::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_, C>
+    {
+    }
+    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
+        for crate::typeinfo::raise::TypeinfoRaiseOutputCap<'_, '_, C>
+    {
+        type Caps = C;
+        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
             self.dispatch_for_projector()
         }
     }
 
-    impl sealed::Sealed
-        for crate::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap<'_, '_>
+    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
+        for crate::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap<
+            '_,
+            '_,
+            C,
+        >
     {
     }
-    impl OutputProjector
-        for crate::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap<'_, '_>
+    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
+        for crate::typeinfo::framework_surface::svelte_exec::TypeinfoSvelteSurfaceOutputCap<
+            '_,
+            '_,
+            C,
+        >
     {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
+        type Caps = C;
+        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
             self.dispatch_for_projector()
         }
     }
 
-    impl sealed::Sealed
-        for crate::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap<'_, '_>
+    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
+        for crate::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap<'_, '_, C>
     {
     }
-    impl OutputProjector
-        for crate::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap<'_, '_>
+    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
+        for crate::typeinfo::framework_surface::vue_exec::TypeinfoVueSurfaceOutputCap<'_, '_, C>
     {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
+        type Caps = C;
+        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
             self.dispatch_for_projector()
         }
     }
 
-    impl sealed::Sealed
-        for crate::resolver_core::component_meta_query_engine::MetaQuerySurfaceOutputCap<'_, '_>
+    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed
+        for crate::resolver_core::component_meta_query_engine::MetaQuerySurfaceOutputCap<'_, '_, C>
     {
     }
-    impl OutputProjector
-        for crate::resolver_core::component_meta_query_engine::MetaQuerySurfaceOutputCap<'_, '_>
+    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector
+        for crate::resolver_core::component_meta_query_engine::MetaQuerySurfaceOutputCap<'_, '_, C>
     {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
+        type Caps = C;
+        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
             self.dispatch_for_projector()
         }
     }
@@ -326,23 +357,24 @@ mod projector {
     /// Test-only `OutputProjector` capability. `#[cfg(test)]`-gated. See the
     /// note above for why it is not a fence hole.
     #[cfg(test)]
-    pub(crate) struct TestOutputCap<'disp, 'ctx> {
-        dispatch: &'disp ProjectSemanticDispatch<'ctx>,
+    pub(crate) struct TestOutputCap<'disp, 'ctx, C: crate::resolver_core::ResolverCapabilities> {
+        dispatch: &'disp ProjectSemanticDispatch<'ctx, C>,
     }
 
     #[cfg(test)]
-    impl<'disp, 'ctx> TestOutputCap<'disp, 'ctx> {
+    impl<'disp, 'ctx, C: crate::resolver_core::ResolverCapabilities> TestOutputCap<'disp, 'ctx, C> {
         /// Mint the test capability over `dispatch`.
-        pub(crate) fn new(dispatch: &'disp ProjectSemanticDispatch<'ctx>) -> Self {
+        pub(crate) fn new(dispatch: &'disp ProjectSemanticDispatch<'ctx, C>) -> Self {
             Self { dispatch }
         }
     }
 
     #[cfg(test)]
-    impl sealed::Sealed for TestOutputCap<'_, '_> {}
+    impl<C: crate::resolver_core::ResolverCapabilities> sealed::Sealed for TestOutputCap<'_, '_, C> {}
     #[cfg(test)]
-    impl OutputProjector for TestOutputCap<'_, '_> {
-        fn dispatch(&self) -> &ProjectSemanticDispatch<'_> {
+    impl<C: crate::resolver_core::ResolverCapabilities> OutputProjector for TestOutputCap<'_, '_, C> {
+        type Caps = C;
+        fn dispatch(&self) -> &ProjectSemanticDispatch<'_, C> {
             self.dispatch
         }
     }
@@ -774,18 +806,18 @@ pub(crate) fn wrap_degraded_output<P: OutputProjector + ?Sized>(
 macro_rules! define_output_capability {
     ($(#[$meta:meta])* $vis:vis struct $name:ident; mint: $mint_vis:vis) => {
         $(#[$meta])*
-        $vis struct $name<'disp, 'ctx> {
-            dispatch: &'disp $crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx>,
+        $vis struct $name<'disp, 'ctx, C: $crate::resolver_core::ResolverCapabilities> {
+            dispatch: &'disp $crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C>,
         }
 
-        impl<'disp, 'ctx> $name<'disp, 'ctx> {
+        impl<'disp, 'ctx, C: $crate::resolver_core::ResolverCapabilities> $name<'disp, 'ctx, C> {
             /// Mint the capability. Visible ONLY within this output-SINK module
             /// (`$mint_vis`) — a hot / session / non-sink module (INCLUDING a
             /// Kind-B bridge sibling that shares the subtree, or a non-sink
             /// helper sibling not reachable from the sink's mint scope) cannot
             /// call it, so it cannot obtain this output capability.
             $mint_vis fn new(
-                dispatch: &'disp $crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx>,
+                dispatch: &'disp $crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C>,
             ) -> Self {
                 Self { dispatch }
             }
@@ -797,7 +829,7 @@ macro_rules! define_output_capability {
             /// method would recurse).
             pub(crate) fn dispatch_for_projector(
                 &self,
-            ) -> &$crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx> {
+            ) -> &$crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C> {
                 self.dispatch
             }
         }

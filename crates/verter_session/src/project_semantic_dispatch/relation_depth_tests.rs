@@ -423,7 +423,7 @@ fn relating_wide_tuples_of_object_pairs_costs_the_same_per_element() {
             elements(width, "1"),
             elements(width, "number")
         );
-        let reductions = super::ProjectSemanticDispatch::relation_reductions_for_tests();
+        let reductions = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
         let (checks, answer) =
             super::checker_probe_lane_tests::with_probe("", &probe, |dispatch, node| {
                 (
@@ -436,7 +436,7 @@ fn relating_wide_tuples_of_object_pairs_costs_the_same_per_element() {
         assert_eq!(answer, "1", "the {width}-element relation holds");
         (
             checks,
-            super::ProjectSemanticDispatch::relation_reductions_for_tests() - reductions,
+            super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - reductions,
         )
     };
     let (at_500, at_1000, at_2000) = (work(500), work(1000), work(2000));
@@ -610,7 +610,7 @@ fn a_pair_every_union_member_reaches_is_related_once() {
 #[test]
 fn relating_doubling_unions_costs_the_same_per_level() {
     let work = |depth: usize| {
-        let reductions = super::ProjectSemanticDispatch::relation_reductions_for_tests();
+        let reductions = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
         let answer = super::checker_probe_lane_tests::with_probe(
             &doubling_unions(depth),
             &format!("[S{depth}] extends [T{depth}] ? 1 : 2"),
@@ -621,7 +621,7 @@ fn relating_doubling_unions_costs_the_same_per_level() {
             },
         );
         assert_eq!(answer, "1", "the {depth}-level relation holds");
-        super::ProjectSemanticDispatch::relation_reductions_for_tests() - reductions
+        super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - reductions
     };
     let (at_10, at_20, at_40) = (work(10), work(20), work(40));
     assert_eq!(
@@ -728,7 +728,7 @@ fn a_small_union_source_opens_no_frame_of_its_own() {
     for arm in ["literal", "alias", "generic"] {
         for (depth, expected) in [(99, "1"), (100, "2")] {
             let probe = format!("[S{depth}] extends [T{depth}] ? 1 : 2");
-            super::ProjectSemanticDispatch::take_most_open_frames_for_tests();
+            super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::take_most_open_frames_for_tests();
             failures.extend(
                 mismatches(
                     &small_union_chain(depth, arm),
@@ -737,7 +737,7 @@ fn a_small_union_source_opens_no_frame_of_its_own() {
                 .into_iter()
                 .map(|failure| format!("{arm} arms, depth {depth}: {failure}")),
             );
-            let frames = super::ProjectSemanticDispatch::take_most_open_frames_for_tests();
+            let frames = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::take_most_open_frames_for_tests();
             assert!(
                 frames <= depth + 8,
                 "relating {depth} levels of {arm} arms held {frames} obligation frames open at once"

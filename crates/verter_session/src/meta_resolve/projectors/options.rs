@@ -52,7 +52,7 @@ pub(crate) fn project_options(
         return Vec::new();
     }
 
-    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
     // Admission applies the public-visibility filter, the derived-kind/cursor
     // match, the `descend_published_member` gate, AND records the
     // published-field edge uniformly — previously the options projector

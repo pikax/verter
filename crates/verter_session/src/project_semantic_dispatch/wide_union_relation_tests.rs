@@ -79,14 +79,14 @@ fn equality_guard_chain(width: usize) -> String {
 /// `"k99"` over a 100-member one.
 #[test]
 fn an_equality_guard_chain_over_a_literal_union_reduces_no_relation() {
-    let before = super::ProjectSemanticDispatch::relation_reductions_for_tests();
+    let before = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
     let failures = mismatches(
         &equality_guard_chain(100),
         &[("ReturnType<typeof last>", "\"k99\"")],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     assert_eq!(
-        super::ProjectSemanticDispatch::relation_reductions_for_tests() - before,
+        super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before,
         0,
         "every relation a literal guard chain asks is a pair of literals"
     );

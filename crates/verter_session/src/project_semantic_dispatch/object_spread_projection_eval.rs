@@ -138,7 +138,7 @@ struct SpreadAlternative {
     residual: bool,
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     pub(crate) fn project_object_spread_for_consumer(
         &self,
         program: SemanticNodeId,

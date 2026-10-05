@@ -116,9 +116,9 @@ impl SemanticGraphStore {
     /// payloads are ever stored, so a hit is always a determinate
     /// judgement.
     #[must_use]
-    pub(crate) fn get_relation_payload(
+    pub(crate) fn get_relation_payload<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: &crate::semantic_query::RelateMemoKey,
     ) -> Option<crate::semantic_query::RelationPayload> {
         let family = FamilyKey::Relate {

@@ -1516,7 +1516,7 @@ fn imported_props_members_carry_an_import_member_declaration_origin() {
 /// `AnalyzedEmitField` is display + honest locator-less `None`s by contract).
 fn assert_callback_row_param_resolves_precisely(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical: &str,
     member_name: &str,
 ) {

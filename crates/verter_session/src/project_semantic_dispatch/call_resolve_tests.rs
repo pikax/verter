@@ -59,7 +59,7 @@ pub(super) fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
 }
 
 pub(super) fn signature(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     ordinal: u32,
     kind: SignatureKind,
@@ -81,7 +81,7 @@ pub(super) fn signature(
 
 #[allow(clippy::too_many_arguments)]
 fn signature_with_carrier(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     ordinal: u32,
     kind: SignatureKind,
@@ -221,7 +221,9 @@ fn relation_only_assumption_replays_but_own_return_assumption_refuses() {
 /// its staged session. A test that pops the relation frame directly runs no
 /// root drain, so it performs the disposal itself; without it the member's
 /// flight stays claimed and the next demand for that key waits on it.
-fn abandon_provisional_call_members(dispatch: &ProjectSemanticDispatch<'_>) {
+fn abandon_provisional_call_members(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+) {
     let drained = dispatch
         .dispatch_txn
         .borrow_mut()
@@ -239,7 +241,7 @@ fn abandon_provisional_call_members(dispatch: &ProjectSemanticDispatch<'_>) {
 }
 
 pub(super) fn callable(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     calls: Vec<SemanticNodeId>,
     constructs: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
@@ -256,7 +258,7 @@ pub(super) fn callable(
 }
 
 pub(super) fn call_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     callee: SemanticNodeId,
     kind: CallKind,
     receiver: Option<SemanticNodeId>,
@@ -269,7 +271,7 @@ pub(super) fn call_key(
 /// roots on that file being served, so a host that does not upsert
 /// [`CANONICAL`] must pass its own servable path.
 pub(super) fn call_key_at(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     callee: SemanticNodeId,
     kind: CallKind,
@@ -354,7 +356,7 @@ fn recovery_code(
 }
 
 fn selected_query(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     key: ResolveCallKey,
 ) -> ResolvedCallResult {
     match dispatch.execute(SemanticQueryKey::ResolveCall(Box::new(key))) {
@@ -1115,7 +1117,7 @@ fn genuine_any_returns_dynamic_any() {
 }
 
 fn anonymous_signature(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     params: Vec<FunctionParam>,
     type_parameters: Vec<TypeParamDecl>,
     return_type: SemanticNodeId,
@@ -2076,7 +2078,7 @@ fn overload_argument_offset(argument: &str) -> u32 {
 
 fn with_overload_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -2088,7 +2090,10 @@ fn with_overload_dispatch<R>(
 /// Build the two-overload callee plus the CONTENT-FREE call key whose
 /// single argument is identified by its program point — no argument type
 /// node, no content hash, no version in the key.
-fn overload_call_key(dispatch: &ProjectSemanticDispatch<'_>, offset: u32) -> ResolveCallKey {
+fn overload_call_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    offset: u32,
+) -> ResolveCallKey {
     let graph = dispatch.graph();
     let alpha = graph.intern_node(SemanticNodeData::Literal(
         crate::semantic_query::LiteralValue::String("alpha".to_owned()),
@@ -2162,7 +2167,10 @@ fn overload_call_key(dispatch: &ProjectSemanticDispatch<'_>, offset: u32) -> Res
     }
 }
 
-fn selected_return_literal(dispatch: &ProjectSemanticDispatch<'_>, key: ResolveCallKey) -> String {
+fn selected_return_literal(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    key: ResolveCallKey,
+) -> String {
     let result = selected_query(dispatch, key);
     let return_type = match result {
         ResolvedCallResult::Selected { return_type, .. }
@@ -2618,7 +2626,10 @@ fn a_call_through_the_ambient_generic_call_reads_the_callable() {
     );
 }
 
-fn tuple_of(dispatch: &ProjectSemanticDispatch<'_>, values: Vec<SemanticNodeId>) -> SemanticNodeId {
+fn tuple_of(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    values: Vec<SemanticNodeId>,
+) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
             values
@@ -2636,7 +2647,11 @@ fn tuple_of(dispatch: &ProjectSemanticDispatch<'_>, values: Vec<SemanticNodeId>)
     })
 }
 
-fn type_param(dispatch: &ProjectSemanticDispatch<'_>, name: &str, index: u16) -> SemanticNodeId {
+fn type_param(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+    index: u16,
+) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity::synthetic(name),
         param_index: index,
@@ -3374,7 +3389,7 @@ fn union_signature_return(result: &ResolvedCallResult) -> SemanticNodeId {
 }
 
 fn union_callee(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     arms: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Union(
@@ -4002,7 +4017,7 @@ const UNRELATED_DECL: &str = "/ws/inline-unrelated.ts";
 
 /// `typeof <name>` declared at file scope in `canonical`.
 fn typeof_value_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     name: &str,
 ) -> SemanticNodeId {
@@ -4027,7 +4042,7 @@ fn typeof_value_node(
 /// The declaring canonical of a `File`-scoped node, `None` for a
 /// scope-less one.
 fn declaring_file(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<Arc<str>> {
     match dispatch.graph().node_scope(node) {

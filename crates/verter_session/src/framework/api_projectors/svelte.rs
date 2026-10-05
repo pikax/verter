@@ -200,9 +200,11 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
                 Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
             )
         });
-        let resolver_ctx = resolver_ctx
-            .as_ref()
-            .map(|ctx| ctx as &dyn crate::resolver_core::ResolverContext);
+        let resolver_ctx = resolver_ctx.as_ref().map(|ctx| {
+            ctx as &dyn crate::resolver_core::ResolverContext<
+                crate::resolver_core::HostCapabilities,
+            >
+        });
         let dispatch =
             resolver_ctx.map(crate::project_semantic_dispatch::ProjectSemanticDispatch::new);
         let script_fact_evidence = resolver_ctx
@@ -609,8 +611,11 @@ fn public_component_name<'a>(
 /// resolved one-level rows. A partial outcome contributes its best safe rows
 /// and is never admitted by the executor's surface cache.
 fn resolve_public_props_text(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     script_syntax: Option<
         &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
@@ -737,8 +742,11 @@ fn resolve_public_props_text(
 /// dereferences it once and returns the one-level event rows; partial outcomes
 /// retain their best safe rows and are never admitted to the surface cache.
 fn resolve_public_dispatcher_text(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
 ) -> Option<String> {
     use crate::typeinfo::framework_surface::SvelteSurfaceSource;
@@ -775,8 +783,11 @@ fn resolve_public_dispatcher_text(
 /// binding's `typeof`, so an alias export keeps the public key while deriving
 /// its type from the real local identity.
 fn resolve_public_exports_text(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
 ) -> Option<ResolvedPublicExports> {
@@ -820,7 +831,10 @@ fn resolve_public_exports_text(
 }
 
 fn resolve_public_module_exports(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
 ) -> Vec<ResolvedPublicModuleExport> {

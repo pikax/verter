@@ -732,7 +732,11 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
 }
 
 /// `node` as the checker prints it.
-fn print(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, depth: usize) -> String {
+fn print(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+    depth: usize,
+) -> String {
     if depth > 12 {
         return "<unrendered deep>".to_owned();
     }
@@ -994,7 +998,7 @@ fn checker_string_literal(value: &str) -> String {
 /// `node` printed as an operand of `|`, `&`, `[]` or `keyof`:
 /// parenthesized as the checker parenthesizes it.
 fn operand(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     depth: usize,
     in_union: bool,
@@ -1021,7 +1025,7 @@ fn operand(
 /// A signature as `<T>(a: A, b?: B) => R`, the arrow `arrow` (`: ` inside
 /// an object type).
 fn signature_text(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     depth: usize,
     arrow: &str,

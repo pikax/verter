@@ -901,8 +901,10 @@ trait RaisedShapeAlgebra {
 /// `materialized` / `expanded_surface` / `can_shell_raise` pays no key-DAG
 /// construction. The witness binds the queried `node` to its own facts so a
 /// `route_admission` mint helper can never pair them with a different node.
-pub(in crate::project_semantic_dispatch) fn project_node_facts(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn project_node_facts<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<RaisedNodeShapeFacts> {
     let mut alg = RaisedFactsAlg;
@@ -914,8 +916,10 @@ pub(in crate::project_semantic_dispatch) fn project_node_facts(
 /// Project the wire-facing shallow named-member value from the SAME normalized
 /// raised-shape fold used by output materialization. The decision stays in the
 /// node domain; callers may materialize once afterwards solely for display.
-pub(in crate::project_semantic_dispatch) fn project_node_shallow_member_output(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn project_node_shallow_member_output<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<RaisedShallowMemberOutput> {
     let mut interner = ShapeInterner::default();
@@ -1026,8 +1030,10 @@ fn project_shallow_function(
 /// is `None`. A terminal splice pipeline decides on THIS — it never
 /// materializes a `TypeExpr` to make the same decision; it materializes at
 /// most once afterwards, solely for display.
-pub(in crate::project_semantic_dispatch) fn project_node_declaration_facts(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn project_node_declaration_facts<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<(
     bool,
@@ -1046,8 +1052,10 @@ pub(in crate::project_semantic_dispatch) fn project_node_declaration_facts(
 /// short-circuit projection is sufficient and matches the full fold's root term by
 /// construction (no member-value walk, no `TypeExpr` materialised). `None` when the
 /// whole raise is `None`.
-pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<bool> {
     let mut active = FxHashSet::default();
@@ -1066,8 +1074,8 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_sentinel(
 /// fields match the full fold; the placeholder-fed `facts` are stripped). `None`
 /// when the whole raise is `None`. The per-fact classifiers below read this; a
 /// caller never matches on the enum outside this module.
-fn project_node_root_kind(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn project_node_root_kind<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<RaisedRootKind> {
     let mut active = FxHashSet::default();
@@ -1084,8 +1092,10 @@ fn project_node_root_kind(
 /// `raise(node)` even for shapes the raw-node mirror would mis-classify (e.g.
 /// `Intersection([{}, IndexedAccess])`, which the root-only projection collapses
 /// to its operator arm). `None` when the whole raise is `None`.
-pub(in crate::project_semantic_dispatch) fn project_node_root_is_published_operator(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn project_node_root_is_published_operator<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<bool> {
     Some(matches!(
@@ -1116,8 +1126,10 @@ pub(in crate::project_semantic_dispatch) fn project_node_root_is_published_opera
 ///
 /// Read through the `raise::node_contains_semantic_miss_with_dispatch` accessor
 /// by the publication reducer's input-side no-poison gate.
-pub(in crate::project_semantic_dispatch) fn project_node_contains_semantic_miss(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn project_node_contains_semantic_miss<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<bool> {
     project_node_facts(dispatch, node).map(|facts| !facts.materialized())
@@ -1129,8 +1141,10 @@ pub(in crate::project_semantic_dispatch) fn project_node_contains_semantic_miss(
 /// is interned into the SAME interner, never re-folded). `None` when the whole
 /// raise is `None`. A site needing both — the changed/no-op gates — uses this
 /// instead of folding the node twice (facts fold + equality fold).
-pub(in crate::project_semantic_dispatch) fn project_node_shape_for_eq(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn project_node_shape_for_eq<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     expr: &TypeExpr,
 ) -> Option<NodeShapeEq> {
@@ -1153,8 +1167,10 @@ pub(in crate::project_semantic_dispatch) fn project_node_shape_for_eq(
 /// Raised-shape equality of two nodes, computed in ONE shared interner so the
 /// two keys are comparable. `Some(bool)` when BOTH raise to `Some`, `None` when
 /// EITHER raise is `None`.
-pub(in crate::project_semantic_dispatch) fn raised_shape_eq_nodes(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn raised_shape_eq_nodes<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     a: SemanticNodeId,
     b: SemanticNodeId,
 ) -> Option<bool> {
@@ -1179,8 +1195,10 @@ pub(in crate::project_semantic_dispatch) fn raised_shape_eq_nodes(
 /// Raised-shape equality of a node against a caller's `&TypeExpr`, computed in
 /// ONE shared interner. `Some(bool)` when the node raises to `Some`, `None`
 /// when the raise is `None`.
-pub(in crate::project_semantic_dispatch) fn raised_shape_eq_node_type_expr(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn raised_shape_eq_node_type_expr<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     expr: &TypeExpr,
 ) -> Option<bool> {

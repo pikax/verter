@@ -145,7 +145,9 @@ pub(super) struct PolicyCtx<'a, 'h> {
 impl<'a, 'h> PolicyCtx<'a, 'h> {
     /// The request-bound resolver context every raise / node read routes
     /// through (overlay-aware under a session context).
-    pub(super) fn resolver_ctx(&self) -> &'h dyn ResolverContext {
+    pub(super) fn resolver_ctx(
+        &self,
+    ) -> &'h dyn ResolverContext<crate::resolver_core::HostCapabilities> {
         self.engine.ctx
     }
 

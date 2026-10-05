@@ -100,12 +100,12 @@ fn is_js_canonical(canonical_id: &str) -> bool {
 }
 
 /// The graph adapter the record-level discovery reads types through.
-pub(crate) struct GraphTypes<'a, 'd> {
-    dispatch: &'a ProjectSemanticDispatch<'d>,
+pub(crate) struct GraphTypes<'a, 'd, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: &'a ProjectSemanticDispatch<'d, C>,
     store: &'a SignatureStore,
 }
 
-impl<'a, 'd> GraphTypes<'a, 'd> {
+impl<'a, 'd, C: crate::resolver_core::ResolverCapabilities> GraphTypes<'a, 'd, C> {
     fn node(&self, token: TypeToken) -> Option<SemanticNodeId> {
         self.store.type_token_node(token).ok()
     }
@@ -115,7 +115,7 @@ impl<'a, 'd> GraphTypes<'a, 'd> {
     }
 }
 
-impl SlotTypeFacts for GraphTypes<'_, '_> {
+impl<C: crate::resolver_core::ResolverCapabilities> SlotTypeFacts for GraphTypes<'_, '_, C> {
     fn accepts_void(&self, ty: TypeToken) -> bool {
         let Some(node) = self.node(ty) else {
             return false;
@@ -134,7 +134,7 @@ impl SlotTypeFacts for GraphTypes<'_, '_> {
     }
 }
 
-impl DiscoveryTypes for GraphTypes<'_, '_> {
+impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphTypes<'_, '_, C> {
     fn identical(
         &self,
         a: TypeToken,
@@ -245,7 +245,7 @@ impl DiscoveryTypes for GraphTypes<'_, '_> {
     }
 }
 
-impl GraphTypes<'_, '_> {
+impl<C: crate::resolver_core::ResolverCapabilities> GraphTypes<'_, '_, C> {
     fn residual_space(
         &self,
         descriptor: SignatureDescriptorId,
@@ -265,8 +265,8 @@ fn unsupported<T>() -> Result<T, DiscoveryError> {
     Err(DiscoveryError::Incomplete(IncompleteReason::Unsupported))
 }
 
-struct Walk<'w, 'a, 'd> {
-    types: &'w GraphTypes<'a, 'd>,
+struct Walk<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> {
+    types: &'w GraphTypes<'a, 'd, C>,
     kind: GraphSignatureKind,
     context_id: SemanticContextId,
     context: Option<SemanticContext>,
@@ -276,8 +276,8 @@ struct Walk<'w, 'a, 'd> {
     authored: rustc_hash::FxHashMap<SignatureDescriptorId, SemanticNodeId>,
 }
 
-impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
-    fn dispatch(&self) -> &'a ProjectSemanticDispatch<'d> {
+impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd, C> {
+    fn dispatch(&self) -> &'a ProjectSemanticDispatch<'d, C> {
         self.types.dispatch
     }
 
@@ -846,7 +846,7 @@ impl<'w, 'a, 'd> Walk<'w, 'a, 'd> {
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// `SignaturesOfType(subject, kind, context)`: the ordered call or
     /// construct candidates of `subject`. An empty set is a complete
     /// negative; every failure to settle the subject is an explicit
@@ -964,7 +964,7 @@ impl ProjectSemanticDispatch<'_> {
 
     fn read_result_inner(
         &self,
-        types: &GraphTypes<'_, '_>,
+        types: &GraphTypes<'_, '_, C>,
         descriptor: SignatureDescriptorId,
         call_substitution: crate::signature_kernel::CallSubstitutionId,
         demand: ResultDemand,
@@ -1027,7 +1027,7 @@ impl ProjectSemanticDispatch<'_> {
 
     fn recipe_effects(
         &self,
-        types: &GraphTypes<'_, '_>,
+        types: &GraphTypes<'_, '_, C>,
         view: &SemanticReadView,
         descriptor: SignatureDescriptorId,
         call: crate::signature_kernel::CallSubstitutionId,
@@ -1112,7 +1112,7 @@ impl ProjectSemanticDispatch<'_> {
     /// leaves the union signature with no predicate.
     fn union_effects(
         &self,
-        types: &GraphTypes<'_, '_>,
+        types: &GraphTypes<'_, '_, C>,
         view: &SemanticReadView,
         sequence: &crate::signature_kernel::ConstituentSequence,
         call: crate::signature_kernel::CallSubstitutionId,
@@ -1276,7 +1276,7 @@ impl ProjectSemanticDispatch<'_> {
 
     fn recipe_return(
         &self,
-        types: &GraphTypes<'_, '_>,
+        types: &GraphTypes<'_, '_, C>,
         view: &SemanticReadView,
         descriptor: SignatureDescriptorId,
         call: crate::signature_kernel::CallSubstitutionId,
@@ -1494,7 +1494,7 @@ fn is_retired_handle(error: &DiscoveryError) -> bool {
     )
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Dispatch the subject's shared `SignaturesOfType` read. Anything but a
     /// signature set is the reason the subject did not settle.
     fn signature_set_value(
@@ -2373,7 +2373,7 @@ impl ProjectSemanticDispatch<'_> {
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The `execute(SignaturesOfType)` producer.
     pub(super) fn build_signatures_of_type(
         &self,

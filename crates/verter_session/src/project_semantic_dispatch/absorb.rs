@@ -59,7 +59,7 @@ pub(super) enum SpecialKind {
     Error,
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Classify `id` as a lattice extreme, following transparent `Alias`
     /// redirects (bounded by the shared alias-hop bound (`canonical_algebra::ALIAS_PEEK_HOPS`)). Returns the kind AND the
     /// resolved node id (so an `error` operand can be reused verbatim as the

@@ -10,7 +10,7 @@ use crate::semantic_query::SemanticNodeId;
 /// Compare one prop value's resolved identity with package-validated Svelte
 /// `Snippet` import identities.
 pub(super) fn classify_svelte_callable_role(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     prop_value: SemanticNodeId,
     snippet_imports: &[SvelteSnippetImportFact],
 ) -> PropCallableRole {

@@ -100,7 +100,7 @@ fn make_seal_host() -> Arc<VerterHost> {
 
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -109,7 +109,10 @@ fn with_dispatch<R>(
     f(&dispatch)
 }
 
-fn key_for(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+fn key_for(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(SEAL_CANONICAL),
@@ -155,7 +158,7 @@ fn evaluate(host: &Arc<VerterHost>, name: &str) -> Option<Outcome> {
 
 #[track_caller]
 fn member(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
@@ -172,7 +175,11 @@ fn member(
 }
 
 #[track_caller]
-fn assert_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, what: &str) {
+fn assert_marker(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+    what: &str,
+) {
     assert!(
         matches!(
             dispatch.graph().node_data(node).as_deref(),
@@ -191,7 +198,7 @@ fn assert_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, w
 /// positional marker.
 #[track_caller]
 fn assert_string_or_marker_array(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     what: &str,
 ) {
@@ -226,7 +233,11 @@ fn assert_string_or_marker_array(
 }
 
 #[track_caller]
-fn assert_string_label(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, what: &str) {
+fn assert_string_label(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+    what: &str,
+) {
     let label = member(dispatch, node, "label");
     assert!(
         matches!(
@@ -536,7 +547,10 @@ fn make_product_host() -> Arc<VerterHost> {
     host
 }
 
-fn product_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+fn product_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(PRODUCT_CANONICAL),

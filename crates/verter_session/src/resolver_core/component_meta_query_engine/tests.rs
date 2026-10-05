@@ -1975,7 +1975,7 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
     // as workspace-owned (NOT package-backed). The substring check
     // on the same canonical would return `true` (path contains
     // `/node_modules/`).
-    let ctx: &dyn super::super::ResolverContext = &host;
+    let ctx: &dyn super::super::ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         ctx.workspace_is_workspace_owned(workspace_linked_canonical),
         "workspace-linked package must be workspace-owned per typed accessor",

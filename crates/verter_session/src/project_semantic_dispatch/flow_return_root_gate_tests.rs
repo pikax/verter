@@ -241,7 +241,7 @@ fn make_host() -> Arc<VerterHost> {
 
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -250,7 +250,10 @@ fn with_dispatch<R>(
     f(&dispatch)
 }
 
-fn r6_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+fn r6_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(R6_CANONICAL),

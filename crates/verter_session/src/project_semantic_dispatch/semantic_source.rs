@@ -274,9 +274,11 @@ impl SourceRaiseContext<'_> {
     /// interns the typed miss directly), so a composed shell's
     /// proven-absent interiors keep rendering the typed `Unknown` while a
     /// deref'd body carrying an interior failure fails closed.
-    pub(in crate::project_semantic_dispatch) fn check_raised_unknown_materializing(
+    pub(in crate::project_semantic_dispatch) fn check_raised_unknown_materializing<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
         &self,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
         hot: Option<&HotTypeRef>,
     ) {
         let Some(sink) = self.interior_failures else {
@@ -293,7 +295,7 @@ impl SourceRaiseContext<'_> {
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Raise a lower-crate [`SemanticTypeSource`] to a transient semantic-graph
     /// handle through the one shared engine.
     ///
@@ -1445,8 +1447,10 @@ pub fn demand_semantic_source_type_expr(
 ///
 /// [`ResolverContext`]: crate::resolver_core::resolver_context::ResolverContext
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn demand_semantic_source_type_expr_with_ctx(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+pub(crate) fn demand_semantic_source_type_expr_with_ctx<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<C>,
     owner_canonical: &str,
     source: &SemanticTypeSource,
 ) -> Option<verter_type_expr::TypeExpr> {
@@ -1615,7 +1619,7 @@ fn demand_semantic_source_carrier(
 #[path = "semantic_source_tests.rs"]
 mod semantic_source_tests;
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     pub(crate) fn macro_type_arg_hot_ref(
         &self,
         owner_canonical: &str,

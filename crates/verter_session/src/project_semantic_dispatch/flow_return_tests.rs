@@ -330,7 +330,7 @@ fn make_host() -> Arc<VerterHost> {
 
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -340,7 +340,7 @@ fn with_dispatch<R>(
 }
 
 fn flow_result_for_file(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
@@ -363,7 +363,7 @@ fn flow_result_for_file(
 }
 
 fn flow_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     part: FunctionPartIdentity,
     overload_ordinal: u32,
@@ -385,14 +385,14 @@ fn flow_key(
 }
 
 fn execute_flow(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     key: FlowReturnKey,
 ) -> QueryResult<SemanticQueryOutput<SemanticQueryValue>> {
     dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
 }
 
 fn flow_result(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     key: FlowReturnKey,
 ) -> (verter_type_expr::TypeExpr, bool) {
@@ -420,7 +420,7 @@ fn flow_result(
 /// absent, and nothing admits.
 #[track_caller]
 fn assert_whole_return_is_unmodeled_marker(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
     canonical: &str,
     what: &str,
@@ -461,7 +461,7 @@ fn assert_whole_return_is_unmodeled_marker(
 /// `expected` and warms.
 #[track_caller]
 fn assert_whole_return_is_clean(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
     canonical: &str,
     what: &str,
@@ -492,7 +492,10 @@ fn assert_whole_return_is_clean(
     );
 }
 
-fn flow_is_miss(dispatch: &ProjectSemanticDispatch<'_>, key: FlowReturnKey) -> bool {
+fn flow_is_miss(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    key: FlowReturnKey,
+) -> bool {
     matches!(
         execute_flow(dispatch, key),
         QueryResult::Error(QueryError::Miss)
@@ -2093,7 +2096,7 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
 // ────────────────────────────────────────────────────────────────────────
 
 fn flow_result_value(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     key: FlowReturnKey,
 ) -> crate::semantic_query::FlowReturnResult {
     let QueryResult::Value(SemanticQueryOutput {
@@ -2897,7 +2900,7 @@ fn flow_return_publishes_compute_recorded_whole_return_point() {
 /// The single-named-member `ReturnProjectionDemand` point for one
 /// declaration-body function.
 fn member_flow_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     member: &str,
 ) -> FlowReturnKey {
@@ -3301,7 +3304,7 @@ pub(crate) fn flow_return_routes_through_project_semantic_dispatch() {
 /// to `expected`, and admits exactly one warm candidate.
 fn assert_clean_warm(
     host: &Arc<VerterHost>,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     expected: &verter_type_expr::TypeExpr,
 ) {
@@ -3325,7 +3328,7 @@ fn assert_clean_warm(
 /// `reason` — a usable value, ReturnOnly, zero warm candidates.
 fn assert_degraded_return_only(
     host: &Arc<VerterHost>,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     reason: crate::semantic_query::FlowReturnDegradation,
 ) {
@@ -3875,7 +3878,10 @@ fn make_scc_host() -> Arc<VerterHost> {
     host
 }
 
-fn scc_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+fn scc_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(SCC_CANONICAL),
@@ -6933,7 +6939,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
 
 /// The whole-return `FlowReturnKey` of a top-level function of `canonical`.
 fn whole_return_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     name: &str,
 ) -> FlowReturnKey {
@@ -6960,7 +6966,7 @@ fn whole_return_key(
 /// holds zero candidates.
 #[track_caller]
 fn assert_control_callee_gaps_unwarmed(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
@@ -7006,7 +7012,7 @@ fn assert_control_callee_gaps_unwarmed(
 /// `present` primitive arms, none of the `absent` ones, is complete, and
 /// warms.
 fn assert_control_callee_narrows_warm(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
@@ -7053,7 +7059,7 @@ fn assert_control_callee_narrows_warm(
 /// `GuardNarrowing` gap, and the family slot holds zero candidates.
 #[track_caller]
 fn assert_class_evaluation_write_gaps_unwarmed(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
@@ -8256,7 +8262,7 @@ function f(x: Derived | string) { if (x instanceof K) return x; return 0; }
 /// candidates.
 #[track_caller]
 fn assert_instanceof_class_arms_gap_unwarmed(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
@@ -8600,7 +8606,7 @@ function f(x: string | number) {
 /// `GuardNarrowing` gap, and the family slot holds zero candidates.
 #[track_caller]
 fn assert_object_read_gaps_unwarmed(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
@@ -8644,7 +8650,7 @@ fn assert_object_read_gaps_unwarmed(
 /// `member` is set) is `string` and the answer is complete: an entered
 /// `asserts x is string` call applied before the read.
 fn assert_entered_assertion_narrows_the_read(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
@@ -8677,7 +8683,7 @@ fn assert_entered_assertion_narrows_the_read(
 /// answer is complete: a call the checker never enters into control flow
 /// narrows nothing.
 fn assert_never_entered_call_keeps_the_read(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
     canonical: &str,
     name: &str,
@@ -10189,7 +10195,7 @@ fn provenance_distinguishes_first_demands_of_two_runtimes() {
     use super::flow_solve::{FlowPartialReason, FlowSolveOutcome};
 
     let host = make_host();
-    let key_of = |dispatch: &ProjectSemanticDispatch| {
+    let key_of = |dispatch: &ProjectSemanticDispatch<crate::resolver_core::HostCapabilities>| {
         flow_key(
             dispatch,
             "subLiteral",
@@ -10590,19 +10596,21 @@ fn flow_expr_cold_warm(
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let key = |dispatch: &ProjectSemanticDispatch<'_>| FlowReturnKey {
-        function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("makeProps"),
-            FunctionPartIdentity::DeclarationBody,
-            0,
-        ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
-        context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
-        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    let key = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
+        FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(canonical),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        }
     };
     let cold = with_dispatch(&host, |dispatch| flow_result_value(dispatch, key(dispatch)));
     if cold.degradation().is_none() {
@@ -10883,7 +10891,10 @@ fn conv_dead_file_fact_reads<R>(host: &VerterHost, f: impl FnOnce() -> R) -> (R,
     (value, dead)
 }
 
-fn conv_flow_key(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> FlowReturnKey {
+fn conv_flow_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(CONV_OWNER),
@@ -10917,7 +10928,7 @@ fn conv_member_demand(base: SemanticNodeId) -> SemanticQueryKey {
 }
 
 fn conv_execute_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     key: SemanticQueryKey,
 ) -> SemanticNodeId {
     match dispatch.execute(key) {
@@ -11512,19 +11523,21 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let key = |dispatch: &ProjectSemanticDispatch<'_>| FlowReturnKey {
-        function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("makeProps"),
-            FunctionPartIdentity::DeclarationBody,
-            0,
-        ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
-        context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
-        result_contract: super::flow_solve::flow_return_result_contract_id(),
+    let key = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
+        FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from("makeProps"),
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(canonical),
+            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: crate::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        }
     };
     let (cold_reads, cold) = with_dispatch(&host, |dispatch| {
         let before = dispatch.graph().stats_snapshot().relation_check_count;

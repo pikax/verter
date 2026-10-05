@@ -21,7 +21,7 @@ use super::*;
 /// no widen at all. A carrier declared in ANOTHER module is nameable and
 /// keeps its precise `typeof` spelling at every depth.
 fn nameable_render_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: crate::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> crate::semantic_query::SemanticNodeId {
@@ -29,7 +29,7 @@ fn nameable_render_node(
 }
 
 pub(super) fn render_tsc_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     node: crate::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -88,7 +88,7 @@ pub(super) fn render_tsc_node(
 /// declaration is a tracked local dependency. A genuine miss (no rendered
 /// node at all) still fails closed, matching every other caller.
 pub(super) fn render_tsc_testing_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     node: crate::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -112,7 +112,7 @@ pub(super) fn render_tsc_testing_node(
 pub(super) fn tsc_scope_requirements(
     mac: &AnalyzedMacro,
     inventory: &TscScopeInventory<'_>,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
 ) -> Result<TscScopeRequirements, ProjectionFailure> {
     tsc_scope_requirements_for(
@@ -139,7 +139,7 @@ pub(super) fn tsc_scope_requirements_for(
     macro_span: Option<verter_span::Span>,
     type_references: &[String],
     inventory: &TscScopeInventory<'_>,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
 ) -> Result<TscScopeRequirements, ProjectionFailure> {
     let macro_owner = tsc_script_owner(owner)?;
@@ -514,7 +514,7 @@ fn inferred_class_members(
     declaration_span: verter_span::Span,
     include_static: bool,
     inventory: &TscScopeInventory<'_>,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
 ) -> Result<InferredClassProjection, ClassInferenceFailure> {
     fn collect_overload_groups(
@@ -1179,7 +1179,7 @@ fn binding_usage_precedence(usage: TscBindingUsage) -> u8 {
 /// single structural authority (a new carrier extends the registry, not this
 /// predicate).
 pub(super) fn emit_type_is_cross_sfc_carrier(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     payload: crate::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> bool {
@@ -1210,8 +1210,8 @@ pub(super) fn emit_type_is_cross_sfc_carrier(
 /// cross-file type whose bare name IS a directly-imported binding (the scope
 /// requirements retain that named import, so the bare form already resolves).
 pub(super) fn cross_file_namespace_import_type(
-    ctx: &dyn ResolverContext,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     attempt: &mut verter_compiler::compile_transaction::CompileAttempt<'_>,
     node: crate::semantic_query::SemanticNodeId,
     owner_canonical: &str,
@@ -1257,7 +1257,7 @@ pub(super) fn cross_file_namespace_import_type(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tsc_emit_rows(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     surface: &TypeInfoSurface,
     mac: &AnalyzedMacro,
@@ -1360,7 +1360,7 @@ fn push_tsc_emit(
 }
 
 fn render_emit_payload_parameters(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     node: crate::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -1395,7 +1395,7 @@ fn render_emit_payload_parameters(
 }
 
 fn render_tuple_parameters(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     elements: &[crate::semantic_query::TupleElement],
     counters: &mut VueMacroCodegenCounters,
@@ -1421,7 +1421,7 @@ fn render_tuple_parameters(
 }
 
 fn render_function_parameters(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     params: &[crate::semantic_query::FunctionParam],
     counters: &mut VueMacroCodegenCounters,

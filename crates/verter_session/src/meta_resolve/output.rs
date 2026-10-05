@@ -125,7 +125,7 @@ impl ComponentMetaOutput {
     /// — only `meta_resolve::projectors::output_sink` can mint it, so only
     /// the sink can construct an envelope.
     pub(crate) fn from_parts(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         analysis: ComponentMetaAnalysis,
         resolution: Option<ComponentMetaResolutionOutput>,
         types: MaterializedComponentMetaTypes,
@@ -201,7 +201,7 @@ pub struct TerminalTypeDisplay {
 
 impl TerminalTypeDisplay {
     pub(crate) fn from_text(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         text: Option<String>,
     ) -> Self {
         Self { text }
@@ -230,7 +230,7 @@ pub struct MaterializedTypePublication {
 
 impl MaterializedTypePublication {
     pub(crate) fn from_parts(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         publication: PublicationResult,
         materialized_type: Option<TypeExpr>,
         terminal_display: TerminalTypeDisplay,
@@ -297,7 +297,7 @@ impl MaterializedComponentMetaTypes {
     /// Assemble all output lanes. Requires the terminal output sink's
     /// capability — only the sink materializes output lanes.
     pub(crate) fn from_lanes(
-        _cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        _cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         lanes: MaterializedComponentMetaTypeLanes,
     ) -> Self {
         Self { lanes }

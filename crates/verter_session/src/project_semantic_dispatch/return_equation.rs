@@ -12,7 +12,7 @@ use super::dispatch_txn::{
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{FlowReturnKey, SemanticNodeData, SemanticNodeId};
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Solve the least fixed point
     /// `T(i) = normalize(S(i) union union(T(j), j in holds(i)))`.
     ///

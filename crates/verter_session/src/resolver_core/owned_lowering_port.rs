@@ -321,6 +321,43 @@ impl<
         T: SourceInputProvider
             + super::request_ports::IndexedInputs
             + super::request_ports::RouteLookup,
+    > super::request_ports::ExpressionSourceSelection for T
+{
+    type ExpressionDemand = crate::decl_body_memo::IndexedExpressionDemand;
+
+    fn indexed_flow_source(
+        &self,
+        canonical: &str,
+    ) -> Option<(
+        super::request_inputs::IndexedInputServe,
+        Option<Self::ExpressionDemand>,
+    )> {
+        let serve =
+            super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
+        let demand = self
+            .source(&serve.indexed.shallow_state)
+            .map(|source| source.decl_bodies().indexed_expression_demand());
+        Some((serve, demand))
+    }
+
+    fn indexed_expression_source(
+        &self,
+        canonical: &str,
+    ) -> Option<(
+        super::request_inputs::IndexedInputServe,
+        Self::ExpressionDemand,
+    )> {
+        let serve =
+            super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
+        let source = self.source(&serve.indexed.shallow_state)?;
+        Some((serve, source.decl_bodies().indexed_expression_demand()))
+    }
+}
+
+impl<
+        T: SourceInputProvider
+            + super::request_ports::IndexedInputs
+            + super::request_ports::RouteLookup,
     > OwnedLowering for T
 {
     fn svelte_script_facts(
@@ -566,38 +603,6 @@ impl<
             lane,
             expected_hash,
         })
-    }
-
-    fn indexed_flow_source(
-        &self,
-        canonical: &str,
-    ) -> Option<(
-        super::request_inputs::IndexedInputServe,
-        Option<std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>>,
-    )> {
-        let serve =
-            super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
-        let demand = self.source(&serve.indexed.shallow_state).map(|source| {
-            std::sync::Arc::new(source.decl_bodies().indexed_expression_demand())
-                as std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>
-        });
-        Some((serve, demand))
-    }
-
-    fn indexed_expression_source(
-        &self,
-        canonical: &str,
-    ) -> Option<(
-        super::request_inputs::IndexedInputServe,
-        std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>,
-    )> {
-        let serve =
-            super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
-        let source = self.source(&serve.indexed.shallow_state)?;
-        let demand: std::sync::Arc<
-            dyn verter_session_query::source::demand::ExpressionSourceDemand,
-        > = std::sync::Arc::new(source.decl_bodies().indexed_expression_demand());
-        Some((serve, demand))
     }
 
     fn recover_member_spans(

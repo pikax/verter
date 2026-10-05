@@ -258,7 +258,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
 /// comparable to other queries run on the same graph.
 fn instantiate_vue_default_node(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
 ) -> SemanticNodeId {
     let _whole_hash = host
@@ -296,7 +296,7 @@ fn instantiate_vue_default_node(
 /// SUPPLIED `dispatch` so the returned `SemanticNodeId` is comparable.
 fn typeof_default_construct_return_node(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
 ) -> SemanticNodeId {
     let _ = host;

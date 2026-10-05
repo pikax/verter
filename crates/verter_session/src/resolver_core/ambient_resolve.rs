@@ -24,8 +24,8 @@ use crate::resolver_core::ResolverContext;
 /// - returns a `ResolvedRootIdentity` whose `canonical_id` is the ambient
 ///   virtual id, so the recorded fact reaches the ambient `WholeHash`
 ///   arm on warm-read validation through the live `StoreView`.
-pub(crate) fn resolve_ambient_global(
-    ctx: &dyn ResolverContext,
+pub(crate) fn resolve_ambient_global<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     consumer_canonical: &str,
     consumer_project_stable_key: ProjectStableKey,
     symbol: &str,

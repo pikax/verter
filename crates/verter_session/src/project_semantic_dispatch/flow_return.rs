@@ -24,6 +24,7 @@
 //! through `ReturnOnly` (never admitted, never `never`).
 
 use std::sync::Arc;
+use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use super::call_resolve::union_self_roots;
 use super::dispatch_txn::flow_obligation_state::{
@@ -560,8 +561,8 @@ struct EvaluatedFlowRoot {
 /// The shared demand-site of one flow demand — derived ONCE by
 /// [`ProjectSemanticDispatch::flow_slice_demand_site`] and consumed by both
 /// the demand preparation and the content evaluation.
-pub(super) struct FlowSliceDemandSite {
-    source_demand: std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>,
+pub(super) struct FlowSliceDemandSite<D> {
+    source_demand: D,
     /// The served indexed state of the function's own file (pinned).
     indexed: Arc<crate::resolver_core::request_inputs::IndexedInputRecord>,
     /// The function's own file roots.
@@ -659,7 +660,7 @@ enum FlowFramePop {
     RootClose(FlowRootClose),
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// The full `FlowReturnContext` for a demand rooted at `canonical`:
     /// the live `P R T L J` env, the empty type-only substitution, and
     /// the policy of the project owning `canonical` — the function's OWN
@@ -5237,7 +5238,10 @@ impl<'a> ProjectSemanticDispatch<'a> {
     fn flow_slice_demand_site(
         &self,
         key: &FlowReturnKey,
-    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError> {
+    ) -> Result<
+        FlowSliceDemandSite<<C as crate::resolver_core::ResolverCapabilities>::ExpressionDemand>,
+        FlowSliceDemandSiteError,
+    > {
         // The evaluation models the whole-return point and the
         // single-named-member projection point, both at the empty input
         // point. Any other demand/input point fails CLOSED with a typed
@@ -8127,7 +8131,7 @@ fn indexed_argument_literal_mode(
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Whether a call's result `return_type` is wholly the fresh literal
     /// its inference kept: every top-level literal of it is one of the
     /// call's fresh literal returns, and it has one.
@@ -8789,6 +8793,8 @@ use verter_type_expr::TypeExpr;
 /// Nested semantic demands always return to the existing driver. All calls
 /// are monomorphized; this is an internal execution facet, not a session port.
 pub(super) trait FlowDemandDriver {
+    /// The capability family of the request context this driver serves.
+    type Caps: crate::resolver_core::ResolverCapabilities;
     fn flow_slice_skeleton(
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
@@ -8929,7 +8935,7 @@ pub(super) trait FlowDemandDriver {
     fn flow_slice_demand_site(
         &self,
         key: &FlowReturnKey,
-    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError>;
+    ) -> Result<FlowSliceDemandSite<<<Self as FlowDemandDriver>::Caps as crate::resolver_core::ResolverCapabilities>::ExpressionDemand>, FlowSliceDemandSiteError>;
     fn function_augmentations(
         &self,
         decl_canonical: &Arc<str>,
@@ -9112,7 +9118,10 @@ pub(super) trait FlowDemandDriver {
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite;
 }
-impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
+    for ProjectSemanticDispatch<'_, C>
+{
+    type Caps = C;
     fn flow_slice_skeleton(
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
@@ -9356,7 +9365,10 @@ impl FlowDemandDriver for ProjectSemanticDispatch<'_> {
     fn flow_slice_demand_site(
         &self,
         key: &FlowReturnKey,
-    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError> {
+    ) -> Result<
+        FlowSliceDemandSite<<C as crate::resolver_core::ResolverCapabilities>::ExpressionDemand>,
+        FlowSliceDemandSiteError,
+    > {
         ProjectSemanticDispatch::flow_slice_demand_site(self, key)
     }
     fn function_augmentations(
@@ -9702,12 +9714,14 @@ pub(super) struct FlowCx<'a, D: FlowDemandDriver> {
     driver: &'a D,
     arena: super::arena_ops::ArenaOps<'a>,
     inputs: &'a dyn crate::resolver_core::request_ports::IndexedInputs,
-    source: &'a dyn crate::resolver_core::request_ports::OwnedLowering,
+    source: &'a dyn crate::resolver_core::request_ports::ExpressionSourceSelection<
+        ExpressionDemand = <D::Caps as crate::resolver_core::ResolverCapabilities>::ExpressionDemand,
+    >,
     #[cfg(test)]
     observers: &'a super::EngineObservers,
 }
-impl<'a> FlowCx<'a, ProjectSemanticDispatch<'a>> {
-    fn new(driver: &'a ProjectSemanticDispatch<'a>) -> Self {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> FlowCx<'a, ProjectSemanticDispatch<'a, C>> {
+    fn new(driver: &'a ProjectSemanticDispatch<'a, C>) -> Self {
         Self {
             driver,
             arena: driver.arena(),
@@ -9724,6 +9738,7 @@ impl<D: FlowDemandDriver> FlowCx<'_, D> {
     }
 }
 impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
+    type Caps = D::Caps;
     fn flow_slice_skeleton(
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
@@ -9950,7 +9965,7 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn flow_slice_demand_site(
         &self,
         key: &FlowReturnKey,
-    ) -> Result<FlowSliceDemandSite, FlowSliceDemandSiteError> {
+    ) -> Result<FlowSliceDemandSite<<<Self as FlowDemandDriver>::Caps as crate::resolver_core::ResolverCapabilities>::ExpressionDemand>, FlowSliceDemandSiteError>{
         self.driver.flow_slice_demand_site(key)
     }
     fn function_augmentations(

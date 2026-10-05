@@ -97,7 +97,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn prepared_decl_bundle(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<Arc<PreparedDeclBundle>> {
         self.inner.prepared_decl_bundle_with_context(
@@ -113,7 +113,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn prepared_type_decl(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -136,7 +136,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn prepared_value_decl(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -178,7 +178,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn shallow_file_state(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
         self.inner.shallow_file_state_with_context(
@@ -230,7 +230,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
 
     fn observe_materialize_scope(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical: &str,
     ) -> Option<MaterializeScopeObservation> {
         if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {

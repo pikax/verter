@@ -770,7 +770,7 @@ pub(crate) fn resolve_script_facts_with_ctx<T: FrameworkScriptFactPayload>(
     host: &VerterHost,
     registration: &FrameworkRegistration,
     canonical: &str,
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
 ) -> ScriptFactEvidence<T> {
     resolve_script_facts_inner::<T>(host, registration, canonical, Some(ctx))
 }
@@ -779,7 +779,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     host: &VerterHost,
     registration: &FrameworkRegistration,
     canonical: &str,
-    request_ctx: Option<&dyn ResolverContext>,
+    request_ctx: Option<&dyn ResolverContext<crate::resolver_core::HostCapabilities>>,
 ) -> ScriptFactEvidence<T> {
     // Zero-cost fast path: this registration registers NO provider ⇒ no
     // candidates ⇒ no facts, so the resolved-validation half does ZERO per-file
@@ -1414,7 +1414,7 @@ impl VerterHost {
     /// resolves under, never a second `current_store_view_for_query`.
     pub(crate) fn resolve_svelte_script_facts_with_ctx(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical: &str,
     ) -> ScriptFactEvidence<verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts>
     {

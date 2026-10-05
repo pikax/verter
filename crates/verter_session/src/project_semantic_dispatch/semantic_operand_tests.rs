@@ -187,7 +187,7 @@ pub(super) fn request(mode: ProjectionMode) -> SemanticOperandForceRequest {
 }
 
 pub(super) fn mint(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     locator: AuthoredBodyLocator,
 ) -> SemanticOperand {
     dispatch
@@ -196,7 +196,7 @@ pub(super) fn mint(
 }
 
 pub(super) fn force(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
@@ -204,7 +204,7 @@ pub(super) fn force(
 }
 
 fn force_result(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     mode: ProjectionMode,
 ) -> ForcedSemanticOperand {
@@ -215,7 +215,7 @@ fn force_result(
 }
 
 fn force_with_context(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
 ) -> ForcedSemanticOperand {
@@ -226,7 +226,7 @@ fn force_with_context(
 }
 
 pub(super) fn force_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
 ) -> SemanticQueryKey {
@@ -242,7 +242,7 @@ pub(super) fn force_key(
 /// and the given projection precision. Mirrors the production routing in
 /// `force_semantic_operand` exactly.
 pub(super) fn force_key_at(
-    _dispatch: &ProjectSemanticDispatch<'_>,
+    _dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
     projection: SemanticOperandForceProjection,
@@ -359,7 +359,7 @@ fn join_within<T: Send + 'static>(handle: std::thread::JoinHandle<T>, label: &st
 
 fn locator_key(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     locator: AuthoredBodyLocator,
 ) -> SemanticQueryKey {
     let anchor = match &locator {
@@ -2538,7 +2538,7 @@ fn measured_request(id: u64, owner: &str) -> Arc<RequestContext> {
 /// whole-surface `ProjectPath` key a selective force must never dispatch.
 pub(super) fn lowered_root(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     locator: AuthoredBodyLocator,
 ) -> SemanticNodeId {
     match dispatch
@@ -2551,7 +2551,7 @@ pub(super) fn lowered_root(
 }
 
 pub(super) fn force_projecting(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
     path: Arc<[PathSegment]>,
@@ -2562,7 +2562,7 @@ pub(super) fn force_projecting(
 /// Force at a residual path spelled in the request-side segment
 /// vocabulary — the only spelling that can carry a computed index.
 fn force_demanding(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
     segments: Arc<[ForceProjectionSegment]>,
@@ -2574,7 +2574,7 @@ fn force_demanding(
 }
 
 fn try_force_demanding(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
     segments: Arc<[ForceProjectionSegment]>,
@@ -2591,7 +2591,7 @@ fn computed_index_demand(index: ForcedSemanticOperand) -> Arc<[ForceProjectionSe
 }
 
 fn force_key_domain(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
 ) -> ForcedSemanticOperand {
@@ -3501,7 +3501,7 @@ fn index_keys_locator() -> AuthoredBodyLocator {
 
 /// The forced `"name" | "tag"` key operand of `dispatch`'s own store.
 fn key_operand(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     context: ProjectionReductionContext,
     symbol: &str,
 ) -> ForcedSemanticOperand {

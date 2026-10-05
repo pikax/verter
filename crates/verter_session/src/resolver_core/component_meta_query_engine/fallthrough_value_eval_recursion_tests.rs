@@ -97,7 +97,8 @@ fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
     let project = open_project();
     let host = project.host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
 
     let n: u32 = 14;
 
@@ -172,7 +173,8 @@ fn diamond_dynamic_root_result_is_bounded_by_unique_leaves_not_exponential() {
     let project = open_project();
     let host = project.host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
 
     let n: u32 = 14;
     let leaf = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -349,7 +351,8 @@ fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
     let project = open_project();
     let host = project.host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
     let n: u32 = 14;
 
     // known_spread walker: leaf is an (empty) object surface.
@@ -419,7 +422,8 @@ fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
     let project = open_project();
     let host = project.host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
 
     let n: usize = 24;
     // `wide` yields N DISTINCT native-tag candidates.

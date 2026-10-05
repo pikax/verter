@@ -367,7 +367,7 @@ fn rest_template_and_mapped_parameters_keep_their_variance() {
 /// The variance markers and marker instantiations a measurement interns in
 /// the semantic graph, with the scope each was interned under.
 fn variance_marker_nodes(
-    dispatch: &super::ProjectSemanticDispatch<'_>,
+    dispatch: &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
 ) -> Vec<(
     crate::semantic_query::SemanticNodeId,
     crate::semantic_query::DeclIdentity,

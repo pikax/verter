@@ -82,7 +82,7 @@ fn decided(step: RelationStep) -> Option<bool> {
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     pub(in crate::project_semantic_dispatch) fn fix_inference_inputs(
         &self,
         inputs: Vec<super::super::dispatch_txn::FixationInput>,

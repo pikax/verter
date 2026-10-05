@@ -7,7 +7,7 @@ use crate::cache_runtime::singleflight::InflightTable;
 use crate::cache_runtime::{CacheAdmission, CacheEntry, NonAdmissionReason};
 use crate::component_meta_caches::*;
 use crate::fact_signature_helpers::ReadSetSignatureExt as _;
-use crate::resolver_core::fact_validation_port::FactValidation;
+use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
 use crate::resolver_core::ResolvedTypeDeclaration;
 use dashmap::DashMap;
 use std::sync::{
@@ -75,16 +75,19 @@ impl<'a, D> MemoRead<'a, D> {
     }
 }
 /// Request-local output coordination; storage never owns cold callbacks.
-pub(crate) struct MemoPublish<'a, D> {
+///
+/// `W` is the request's concrete workspace clock source: a publish samples
+/// the live aggregate basis through it without a dynamic dispatch.
+pub(crate) struct MemoPublish<'a, D, W> {
     db: &'a D,
-    facts: &'a dyn FactValidation,
+    facts: &'a dyn LiveFactValidation<Clocks = W>,
 }
-impl<'a, D> MemoPublish<'a, D> {
-    pub(super) fn new(db: &'a D, facts: &'a dyn FactValidation) -> Self {
+impl<'a, D, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> MemoPublish<'a, D, W> {
+    pub(super) fn new(db: &'a D, facts: &'a dyn LiveFactValidation<Clocks = W>) -> Self {
         Self { db, facts }
     }
     #[cfg(test)]
-    pub(crate) fn for_test(db: &'a D, facts: &'a dyn FactValidation) -> Self {
+    pub(crate) fn for_test(db: &'a D, facts: &'a dyn LiveFactValidation<Clocks = W>) -> Self {
         Self { db, facts }
     }
 }
@@ -389,8 +392,8 @@ where
 /// and bubble the superseded facts into the enclosing entry's signature.
 /// Discarding it is the completion fence's retry-on-mid-flight-change. Pinned
 /// by `declaration_lookup_straddling_compute_is_not_served_to_the_winner`.
-fn single_entry_admission<V>(
-    probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+fn single_entry_admission<V, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+    probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
     computed: ComputedEntry<V>,
 ) -> SingleEntryOutcome<V> {
     match computed {
@@ -434,13 +437,19 @@ where
 /// cannot escape the callback. All production Shape-cache writes require this
 /// capability, so key classification, gates, and the complete cold compute can
 /// share one driver-owned scope.
-pub(crate) struct ShapeCacheOwnerScope<'db, 't> {
+pub(crate) struct ShapeCacheOwnerScope<
+    'db,
+    't,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+> {
     db: &'db ShapeCacheDb,
-    ctx: &'db dyn FactValidation,
-    probe: &'t crate::fact_signature_helpers::CacheabilityProbe<'t>,
+    ctx: &'db dyn LiveFactValidation<Clocks = W>,
+    probe: &'t crate::fact_signature_helpers::CacheabilityProbe<'t, W>,
 }
 
-impl ShapeCacheOwnerScope<'_, '_> {
+impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    ShapeCacheOwnerScope<'_, '_, W>
+{
     #[must_use]
     pub(crate) fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
         MemoRead::new(self.db, self.ctx).peek(key)
@@ -545,7 +554,9 @@ impl MemoRead<'_, ShapeCacheDb> {
         result
     }
 }
-impl MemoPublish<'_, ImportedRegistryDb> {
+impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    MemoPublish<'_, ImportedRegistryDb, W>
+{
     #[cfg(test)]
     pub(crate) fn inject_concurrent_publish_for_test(
         &self,
@@ -635,7 +646,7 @@ impl MemoPublish<'_, ImportedRegistryDb> {
         &self,
         key: &ImportedRegistryKey,
         ctx: &dyn FactValidation,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         compute: F,
     ) -> Option<ImportedRegistryValue>
     where
@@ -725,7 +736,9 @@ impl MemoPublish<'_, ImportedRegistryDb> {
         self.get_or_compute_admit(key, || (), |()| compute())
     }
 }
-impl MemoPublish<'_, DeclarationLookupDb> {
+impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    MemoPublish<'_, DeclarationLookupDb, W>
+{
     /// The SOLE admission funnel for `DeclarationLookupDb`.
     ///
     /// The request-local publication driver opens the cacheability scope around the cold closure. The
@@ -769,7 +782,7 @@ impl MemoPublish<'_, DeclarationLookupDb> {
         &self,
         key: &DeclarationLookupKey,
         ctx: &dyn FactValidation,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         compute: F,
     ) -> Option<Arc<ResolvedTypeDeclaration>>
     where
@@ -824,7 +837,9 @@ impl MemoPublish<'_, DeclarationLookupDb> {
         self.get_or_compute(key, || (), |()| compute())
     }
 }
-impl MemoPublish<'_, ResolvabilityDb> {
+impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    MemoPublish<'_, ResolvabilityDb, W>
+{
     /// The SOLE admission funnel for `ResolvabilityDb`.
     ///
     /// The request-local publication driver opens the cacheability scope around the cold closure. The
@@ -862,7 +877,7 @@ impl MemoPublish<'_, ResolvabilityDb> {
         &self,
         key: &ResolvabilityKey,
         ctx: &dyn FactValidation,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         compute: F,
     ) -> Option<bool>
     where
@@ -906,7 +921,9 @@ impl MemoPublish<'_, ResolvabilityDb> {
         self.get_or_compute(key, || (), |()| compute())
     }
 }
-impl MemoPublish<'_, OwnerCollectionDb> {
+impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    MemoPublish<'_, OwnerCollectionDb, W>
+{
     /// The SOLE admission funnel for `OwnerCollectionDb`.
     ///
     /// The request-local publication driver opens the cacheability scope around the cold closure. The
@@ -952,7 +969,7 @@ impl MemoPublish<'_, OwnerCollectionDb> {
         &self,
         key: &OwnerCollectionKey,
         ctx: &dyn FactValidation,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         compute: F,
     ) -> Option<Option<verter_type_expr::locators::AuthoredBodyLocator>>
     where
@@ -998,7 +1015,9 @@ impl MemoPublish<'_, OwnerCollectionDb> {
         self.get_or_compute(key, || (), |()| compute())
     }
 }
-impl MemoPublish<'_, ShapeCacheDb> {
+impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    MemoPublish<'_, ShapeCacheDb, W>
+{
     #[cfg(test)]
     pub(crate) fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
         MemoRead::new(self.db, self.facts).peek(key)
@@ -1007,7 +1026,7 @@ impl MemoPublish<'_, ShapeCacheDb> {
     /// capability passed to `f` is the only route to a Shape-cache write.
     pub(crate) fn with_owner_scope<'db, F, R>(&'db self, f: F) -> R
     where
-        F: for<'t> FnOnce(ShapeCacheOwnerScope<'db, 't>) -> R,
+        F: for<'t> FnOnce(ShapeCacheOwnerScope<'db, 't, W>) -> R,
     {
         let ctx = self.facts;
 
@@ -1053,7 +1072,7 @@ impl MemoPublish<'_, ShapeCacheDb> {
         &self,
         key: &ShapeCacheKey,
         ctx: &dyn FactValidation,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         compute: F,
     ) -> Option<MaterializedOutputTypeExpr>
     where
@@ -1142,34 +1161,36 @@ impl MemoPublish<'_, ShapeCacheDb> {
         self.with_owner_scope(|scope| scope.admit_computed(key, value, fact_dep_signature))
     }
 }
-impl super::ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     pub(crate) fn imported_registry_read(&self) -> MemoRead<'_, ImportedRegistryDb> {
         MemoRead::new(self.binding.imported_registry.as_ref(), self.ctx)
     }
-    pub(crate) fn imported_registry_publish(&self) -> MemoPublish<'_, ImportedRegistryDb> {
+    pub(crate) fn imported_registry_publish(
+        &self,
+    ) -> MemoPublish<'_, ImportedRegistryDb, C::Clocks> {
         MemoPublish::new(self.binding.imported_registry.as_ref(), self.ctx)
     }
 
-    pub(crate) fn declaration_publish(&self) -> MemoPublish<'_, DeclarationLookupDb> {
+    pub(crate) fn declaration_publish(&self) -> MemoPublish<'_, DeclarationLookupDb, C::Clocks> {
         MemoPublish::new(self.binding.declarations.as_ref(), self.ctx)
     }
 
-    pub(crate) fn resolvability_publish(&self) -> MemoPublish<'_, ResolvabilityDb> {
+    pub(crate) fn resolvability_publish(&self) -> MemoPublish<'_, ResolvabilityDb, C::Clocks> {
         MemoPublish::new(self.binding.resolvability.as_ref(), self.ctx)
     }
 
-    pub(crate) fn owner_collection_publish(&self) -> MemoPublish<'_, OwnerCollectionDb> {
+    pub(crate) fn owner_collection_publish(&self) -> MemoPublish<'_, OwnerCollectionDb, C::Clocks> {
         MemoPublish::new(self.binding.owner_collections.as_ref(), self.ctx)
     }
     pub(crate) fn with_shape_scope<F, R>(&self, f: F) -> R
     where
-        F: for<'t> FnOnce(ShapeCacheOwnerScope<'_, 't>) -> R,
+        F: for<'t> FnOnce(ShapeCacheOwnerScope<'_, 't, C::Clocks>) -> R,
     {
         MemoPublish::new(self.binding.shapes.as_ref(), self.ctx).with_owner_scope(f)
     }
 }
 
-impl super::ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     pub(crate) fn intern_resolved_identity(
         &self,
         canonical: &str,
@@ -1185,7 +1206,7 @@ impl super::ProjectSemanticDispatch<'_> {
     }
 }
 
-impl super::ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     pub(crate) fn read_vue_surface(
         &self,
         key: &crate::framework::surface_store::FullKey<
@@ -1259,7 +1280,7 @@ impl super::ProjectSemanticDispatch<'_> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl super::ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     pub(crate) fn app_config_no_override_proof_get_or_compute(
         &self,
         key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
@@ -1377,7 +1398,7 @@ impl super::ProjectSemanticDispatch<'_> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl super::ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     pub(crate) fn produce_binder_identity_facts(
         &self,
         canonical: &str,
@@ -1615,7 +1636,7 @@ fn fact_space(
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-impl super::ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     fn app_config_proof_read(
         &self,
         key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
@@ -1819,7 +1840,9 @@ pub(crate) fn record_component_meta_result_miss(
     }
 }
 
-impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentMetaResultDb<P>> {
+impl<P: Send + Sync, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    MemoPublish<'_, crate::component_meta_result_db::ComponentMetaResultDb<P>, W>
+{
     pub(crate) fn compute_and_admit_with_entry<R, Compute, Decide>(
         &self,
         canonical: &str,
@@ -1927,7 +1950,9 @@ impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentM
     }
 }
 
-impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentMetaResultDb<P>> {
+impl<P: Send + Sync, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    MemoPublish<'_, crate::component_meta_result_db::ComponentMetaResultDb<P>, W>
+{
     pub(crate) fn compute_and_admit<R, Compute, Decide>(
         &self,
         canonical: &str,
@@ -1945,7 +1970,7 @@ impl<P: Send + Sync> MemoPublish<'_, crate::component_meta_result_db::ComponentM
     }
 }
 
-impl super::ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     /// Read the final component-meta result cache. The caller passes the
     /// store its project type store owns; the read validates candidates
     /// against this dispatch's fact service.
@@ -1963,7 +1988,7 @@ impl super::ProjectSemanticDispatch<'_> {
     pub(crate) fn component_meta_result_publish<'s, P: Send + Sync>(
         &'s self,
         db: &'s crate::component_meta_result_db::ComponentMetaResultDb<P>,
-    ) -> MemoPublish<'s, crate::component_meta_result_db::ComponentMetaResultDb<P>> {
+    ) -> MemoPublish<'s, crate::component_meta_result_db::ComponentMetaResultDb<P>, C::Clocks> {
         MemoPublish::new(db, self.ctx)
     }
 }

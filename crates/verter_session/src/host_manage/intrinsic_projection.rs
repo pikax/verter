@@ -64,8 +64,13 @@ impl VerterHost {
         &self,
         owner_canonical_id: &str,
         tag: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Option<Vec<IntrinsicSurfaceMember>> {
         let vue_canonical = self.resolve_project_intrinsic_canonical(owner_canonical_id, "vue")?;
         let jsx_canonical =
@@ -135,8 +140,13 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         type_name: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Option<verter_session_query::analysis::type_expand::ExpandedObjectShape> {
         // The root shape resolves in NODE DOMAIN through the query engine's
         // intrinsic rail (`project_intrinsic_root_shape`): the root-symbol
@@ -157,8 +167,13 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         tag: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Option<Vec<IntrinsicSurfaceMember>> {
         let intrinsics_shape = self.expand_project_intrinsic_shape_for_canonical(
             canonical_id,

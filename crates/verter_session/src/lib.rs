@@ -848,9 +848,6 @@ pub struct VerterHost {
     /// Per-host so an overflow forced on one host's tracer never bumps
     /// the counter a different host's delta assertion reads.
     pub(crate) signature_overflow_at_install: Arc<std::sync::atomic::AtomicU64>,
-    /// The live workspace slot as the fact basis's workspace clock source,
-    /// built once over [`Self::workspace`].
-    pub(crate) workspace_clocks: Arc<dyn verter_session_query::facts::clocks::WorkspaceClocks>,
     /// Exclusive ownership token for a shared test worker substrate. Declared
     /// last so it is released only after every production host field (including
     /// the scheduler/driver) has been dropped.

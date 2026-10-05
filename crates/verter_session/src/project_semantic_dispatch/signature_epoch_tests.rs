@@ -43,7 +43,10 @@ fn host() -> Arc<VerterHost> {
     host
 }
 
-fn prim(d: &ProjectSemanticDispatch<'_>, kind: PrimitiveKind) -> SemanticNodeId {
+fn prim(
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    kind: PrimitiveKind,
+) -> SemanticNodeId {
     d.graph().intern_node(SemanticNodeData::Primitive(kind))
 }
 
@@ -51,7 +54,10 @@ fn param(ty: SemanticNodeId) -> FunctionParam {
     FunctionParam::synthetic(None, ty, false, false)
 }
 
-fn callable(d: &ProjectSemanticDispatch<'_>, calls: Vec<SemanticNodeId>) -> SemanticNodeId {
+fn callable(
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    calls: Vec<SemanticNodeId>,
+) -> SemanticNodeId {
     d.graph()
         .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
@@ -67,7 +73,9 @@ fn callable(d: &ProjectSemanticDispatch<'_>, calls: Vec<SemanticNodeId>) -> Sema
 /// authored leaves) and a union of two callables whose parameters agree (one
 /// composite candidate whose node form is built through
 /// `ReadSignatureResult`).
-fn subjects(d: &ProjectSemanticDispatch<'_>) -> [SemanticNodeId; 2] {
+fn subjects(
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+) -> [SemanticNodeId; 2] {
     let string = prim(d, PrimitiveKind::String);
     let number = prim(d, PrimitiveKind::Number);
     let sig = |name, ordinal, param_ty, return_ty| {
@@ -100,7 +108,10 @@ fn subjects(d: &ProjectSemanticDispatch<'_>) -> [SemanticNodeId; 2] {
 
 /// The shared nodes of `subject`, rendered structurally so two hosts'
 /// answers compare; an incomplete read renders as its reason.
-fn rendered(d: &ProjectSemanticDispatch<'_>, read: SharedSignatureNodes) -> Vec<String> {
+fn rendered(
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    read: SharedSignatureNodes,
+) -> Vec<String> {
     match read {
         SharedSignatureNodes::Nodes(nodes) => {
             nodes.iter().map(|node| render_node(d, *node, 0)).collect()
@@ -109,7 +120,10 @@ fn rendered(d: &ProjectSemanticDispatch<'_>, read: SharedSignatureNodes) -> Vec<
     }
 }
 
-fn shared(d: &ProjectSemanticDispatch<'_>, subject: SemanticNodeId) -> Vec<String> {
+fn shared(
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    subject: SemanticNodeId,
+) -> Vec<String> {
     rendered(d, d.shared_signature_nodes(subject, SignatureKind::Call))
 }
 
@@ -162,7 +176,7 @@ fn set_epoch(value: &SignatureSetValue) -> Option<GraphEpoch> {
 }
 
 fn candidates(
-    d: &ProjectSemanticDispatch<'_>,
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value: &SignatureSetValue,
 ) -> Vec<SignatureCandidate> {
     match SemanticReadView::pin(d.graph().signature_store())

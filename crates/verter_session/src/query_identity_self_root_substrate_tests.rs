@@ -119,7 +119,7 @@ fn observed_parse_fact_lookup_is_content_addressed_not_get_any() {
     // the post-plant assertion is not vacuously satisfied by a
     // systematically-missing read.
     {
-        let ctx: &dyn ResolverContext = &host;
+        let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
         assert!(
             crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                 ctx,
@@ -174,7 +174,7 @@ fn observed_parse_fact_lookup_is_content_addressed_not_get_any() {
     // read keyed on the genuine `real_hash` finds NO artifact at that
     // identity (only the stale candidate is stored), so it returns
     // `None`. A `get_artifacts_any`-based read returns `Some`.
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
             ctx,
@@ -232,7 +232,7 @@ fn exported_type_signature_is_provenance_pure() {
     // The observation must still have a content-addressed artifact so
     // the provenance-pure parse-fact lookups resolve — `ensure_indexed_ready`
     // (idempotent) keeps the observed-version artifact reachable.
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let signature = crate::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
         canonical,
@@ -306,7 +306,7 @@ fn canonical_member_signature_is_provenance_pure() {
         "export interface Holder { picked: number; sibling: string; }\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let signature = crate::fact_signature_helpers::fact_signature_for_canonical_member(
         ctx,
         canonical,
@@ -376,7 +376,7 @@ fn canonical_surface_signature_is_provenance_pure() {
         "export const a = 1;\nexport const b = 2;\nexport type C = string;\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let signature = crate::fact_signature_helpers::fact_signature_for_canonical_surface(
         ctx,
         canonical,
@@ -450,7 +450,7 @@ fn strict_self_root_validation_rejects_untracked_whole_hash() {
     );
     let never_loaded = "/self_root/strict_never_loaded.ts";
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         !verter_session_query::facts::store_view::StoreView::tracks_file(&view, never_loaded),
@@ -501,7 +501,7 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
     let canonical = "/self_root/strict_tracked.ts";
     let (host, real_hash) = host_with_ts(canonical, "export const tracked = 1;\n");
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         verter_session_query::facts::store_view::StoreView::tracks_file(&view, canonical),

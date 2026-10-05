@@ -27,7 +27,7 @@ fn published_anchor_for_identity(
 /// union of complete leaves, otherwise the caller's `existing` source
 /// unchanged (never a fabricated stand-in).
 pub(super) fn published_source_for_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: Option<SemanticNodeId>,
     existing: verter_type_expr::facts::SemanticTypeSource,
 ) -> verter_type_expr::facts::SemanticTypeSource {
@@ -40,7 +40,7 @@ pub(super) fn published_source_for_node(
 /// publishes when no upgrade exists (its authored source, a proven absence,
 /// or a typed required-position failure; never a fabricated stand-in).
 pub(super) fn published_source_upgrade_for_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: Option<SemanticNodeId>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     match node.and_then(|node| dispatch.node_leaf_fact(node)) {
@@ -92,8 +92,10 @@ pub(super) fn published_source_upgrade_for_node(
 /// the position publishes when no upgrade exists (its authored source, or —
 /// for a REQUIRED payload position with no authored source — the typed
 /// source-construction failure; never a fabricated stand-in).
-pub(super) fn published_member_source_upgrade_for_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(super) fn published_member_source_upgrade_for_node<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: Option<SemanticNodeId>,
     include_lossy_instantiation: bool,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
@@ -173,8 +175,8 @@ pub(crate) enum MemberValuePosition {
 /// miss or an interior unknown-materializing failure, so publishing the address
 /// cannot turn either into a completed `unknown`. `None` is reserved for no
 /// live node, a root failure carrier, or no stamped type-argument base.
-pub(crate) fn structural_member_value_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn structural_member_value_source<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     member_key: &crate::semantic_query::PropertyKey,
     type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,

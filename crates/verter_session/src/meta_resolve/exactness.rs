@@ -7,7 +7,7 @@ use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
 
 /// Classify a synthesized value node as concrete or symbolic.
 pub(crate) fn classify_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> ExpansionExactness {
     let unwrapped =
@@ -31,7 +31,10 @@ pub(crate) fn classify_node(
 
 /// Whether a registry-symbol body's root must remain symbolic.
 pub(crate) fn node_root_should_stay_symbolic(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> bool {
     let unwrapped =
@@ -54,7 +57,10 @@ pub(crate) fn node_root_should_stay_symbolic(
 }
 
 /// An object is closed only when every member value is already concrete.
-fn object_is_closed_node(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+fn object_is_closed_node(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> bool {
     let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) else {
         return false;
     };

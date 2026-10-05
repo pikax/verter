@@ -797,7 +797,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 /// IS a parent-parameter reference). Every node is read once, whatever the
 /// nesting; purely carrier-data-driven.
 fn node_references_type_param_names(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: crate::semantic_query::SemanticNodeId,
     param_names: &FxHashSet<&str>,
 ) -> bool {

@@ -19,8 +19,8 @@
 /// `WholeHash` and `ProjectGeneration`; `RouteGeneration` has no validating
 /// fact representation and is deliberately omitted. The enclosing
 /// request-level tracer finalises and owns the reusable cache signature.
-pub(crate) fn emit_dispatch_dep_signature_facts(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn emit_dispatch_dep_signature_facts<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     sig: &crate::semantic_query::DepSignature,
 ) {
     use std::sync::atomic::Ordering::Relaxed;

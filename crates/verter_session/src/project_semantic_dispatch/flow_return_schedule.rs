@@ -94,6 +94,7 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
+use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::flow::flow_ir::{FlowCallee, FlowEffect, FlowExprRole, FlowSliceIR};
@@ -226,7 +227,7 @@ struct ScheduleRun {
     next_index: usize,
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Evaluate the callee returns `frame`'s body will demand, bottom-up,
     /// before the body runs — see the module documentation. `index`,
     /// `entry` and `lowered` are the frame's own served position and

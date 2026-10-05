@@ -78,7 +78,7 @@ impl VerterHost {
     /// the overlay's semantic inputs.
     pub(crate) fn resolve_imported_type_root_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
@@ -96,7 +96,7 @@ impl VerterHost {
     /// [`Self::resolve_imported_type_root_with_context`].
     pub(crate) fn resolve_imported_type_root_with_facts_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
@@ -163,7 +163,7 @@ impl VerterHost {
     /// named hot-path site at `imported_type_root.rs:49`).
     pub(crate) fn resolve_imported_type_root_with_facts_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
@@ -183,7 +183,7 @@ impl VerterHost {
 
     pub(in crate::host_manage) fn resolve_imported_type_root_with_facts_with_context_and_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,

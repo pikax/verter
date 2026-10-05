@@ -754,7 +754,9 @@ fn cheap_component_meta_record(
 #[cfg(test)]
 fn extract_component_meta_from_resolved_with_evaluated(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_id: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     evaluated_types: Option<&ExpandedComponentTypes>,

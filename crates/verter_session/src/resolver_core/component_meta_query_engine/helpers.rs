@@ -21,11 +21,17 @@ use crate::resolver_core::ResolverContext;
 /// test builds (the production path uses [`is_package_canonical`] on a
 /// concrete `&str`).
 #[cfg(test)]
-pub(super) fn is_package_source(ctx: &dyn ResolverContext, source: Option<&str>) -> bool {
+pub(super) fn is_package_source(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    source: Option<&str>,
+) -> bool {
     source.is_some_and(|s| ctx.workspace_is_package_backed(s))
 }
 
-pub(super) fn is_package_canonical(ctx: &dyn ResolverContext, canonical_id: &str) -> bool {
+pub(super) fn is_package_canonical(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    canonical_id: &str,
+) -> bool {
     ctx.workspace_is_package_backed(canonical_id)
 }
 
@@ -83,7 +89,7 @@ pub(super) enum ImportedRegistrySymbolResolution {
 }
 
 pub(super) fn resolve_imported_registry_symbol_with_budget<F>(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     source_owner: verter_type_expr::TopLevelOwnerId,
     exported_name: &str,

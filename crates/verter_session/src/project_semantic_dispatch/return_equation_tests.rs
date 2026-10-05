@@ -39,7 +39,7 @@ fn flow_identity(name: &str) -> FlowFunctionReturnIdentity {
 }
 
 fn call_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     callee: crate::semantic_query::SemanticNodeId,
     offset: u32,
 ) -> ResolveCallKey {

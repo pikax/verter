@@ -40,9 +40,9 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 /// otherwise drop the failed arm and publish the resolvable sibling's
 /// callable as a completed concrete slot.
 #[must_use]
-pub(crate) fn slots_from_typeinfo_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn slots_from_typeinfo_surface<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedSlotField> {
     let macro_surface = resolved.macro_surface();
@@ -176,8 +176,10 @@ pub(crate) fn slots_from_typeinfo_surface(
 /// Classify each published slot member's callable into the sealed shallow
 /// vocabulary for the zero-dispatch graph encoder.
 #[must_use]
-pub(crate) fn slot_member_types_from_typeinfo_surface(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn slot_member_types_from_typeinfo_surface<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     resolved: &impl ResolvedSurfaceAccess,
     slots: &[AnalyzedSlotField],
 ) -> Vec<crate::typeinfo::framework_surface::results::NamedTypeMember> {
@@ -219,8 +221,10 @@ pub(crate) fn slot_member_types_from_typeinfo_surface(
 /// Build the producer-owned return publication aligned with every normalized
 /// slot row. The replay address is the stamped macro type argument plus the
 /// slot member name; a missing base is a typed required-source failure.
-pub(crate) fn slot_return_publications_from_typeinfo_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(crate) fn slot_return_publications_from_typeinfo_surface<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     resolved: &impl ResolvedSurfaceAccess,
     slots: &[AnalyzedSlotField],
 ) -> Vec<Option<verter_type_expr::TypePublication>> {
@@ -283,8 +287,8 @@ pub(crate) fn slot_return_publications_from_typeinfo_surface(
 /// through the sealed output cap; it makes NO decision on the materialized value
 /// and takes NO `&TypeExpr` param (a node id + the active `ctx`). The mint cap is
 /// constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
-fn materialize_slot_return_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn materialize_slot_return_node<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     return_node: SemanticNodeId,
 ) -> TypeExpr {
     let cap = super::TypeinfoVueSurfaceOutputCap::new(dispatch);
@@ -325,9 +329,9 @@ fn materialize_slot_return_node(
 /// surface yields no bindings. Each per-member binding `TypeExpr` is minted ONCE
 /// at the registered terminal [`slot_binding_field`]; this navigator holds NO
 /// mint.
-fn binding_fields_from_param_node(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn binding_fields_from_param_node<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     first_param: SemanticNodeId,
 ) -> Vec<AnalyzedSlotFieldBinding> {
     // Open-generic gate: a symbolic-only param root (an open Conditional / mapped
@@ -434,8 +438,8 @@ fn binding_fields_from_param_node(
 /// source-root shape) — NOT a `"Pick<"` text sniff and NOT a
 /// materialise-then-decide. Any other shape (a literal object, a multi-arm
 /// `Intersection` first param, a userland or non-Pick alias) returns `None`.
-fn pick_source_root_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn pick_source_root_node<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     first_param: SemanticNodeId,
 ) -> Option<SemanticNodeId> {
     // A PARTIAL peel yields `None` — the existing safe concrete-materialization
@@ -500,8 +504,8 @@ fn pick_source_root_node(
 /// NODE-DOMAIN `Option` match, never a `TypeExpr` decide; the display renders
 /// through the by-name `.and_then` form. The mint cap is constructed
 /// INTERNALLY from `ctx` (the `raise_member_value` pattern).
-fn slot_binding_field(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn slot_binding_field<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
     member_name: &str,
     pick_root: Option<SemanticNodeId>,

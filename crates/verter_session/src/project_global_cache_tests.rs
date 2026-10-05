@@ -1037,25 +1037,26 @@ fn request_view_is_absent_from_crate_sources() {
 /// no ambient accessor to reintroduce.
 ///
 /// What this guard enforces is the compile-time half: the trait is used as
-/// `&dyn ResolverContext`, so its object safety must not regress. The
-/// `assert_obj_safe!(ResolverContext)` static check at the bottom of
-/// `resolver_context.rs` already fails the build; it is cross-checked here so
-/// the guard set surfaces the failure in one place. The FORBIDDEN
+/// `&dyn ResolverContext<C>`, so its object safety must not regress. The
+/// `assert_resolver_context_obj_safe` signature in `resolver_context.rs`,
+/// which names the trait object, already fails the build; it is cross-checked
+/// here so the guard set surfaces the failure in one place. The FORBIDDEN
 /// thread-local shape is asserted absent by
 /// `request_view_is_absent_from_crate_sources`.
 #[test]
 fn resolver_context_threads_session_view_via_view_accessor() {
     let src = include_str!("resolver_core/resolver_context.rs");
 
-    // The trait must NOT regress to a generic / non-dyn-compat
-    // shape. The `assert_obj_safe!(ResolverContext)` static check at
-    // the bottom of `resolver_context.rs` enforces dyn-compatibility
-    // at compile time, but we cross-check here so the guard set
-    // surfaces the failure in one place.
+    // The trait must NOT regress to a non-dyn-compat shape. The
+    // `assert_resolver_context_obj_safe` signature in `resolver_context.rs`
+    // enforces dyn-compatibility at compile time, but we cross-check here
+    // so the guard set surfaces the failure in one place.
     assert!(
-        src.contains("static_assertions::assert_obj_safe!(ResolverContext)"),
-        "`assert_obj_safe!(ResolverContext)` static check must remain \
-         in `resolver_context.rs` (dyn-compatibility guard)."
+        src.contains(
+            "fn assert_resolver_context_obj_safe<C: ResolverCapabilities>(_: &dyn ResolverContext<C>) {}"
+        ),
+        "the `assert_resolver_context_obj_safe` dyn-compatibility signature must \
+         remain in `resolver_context.rs`."
     );
 }
 

@@ -363,7 +363,7 @@ pub(crate) const SFC_SCRIPT_SETUP_DECL_NAME: &str = "<sfc-script-setup>";
 /// graph-native synthesis layer (path-independent caching per
 /// `CLAUDE.md` Build Philosophy).
 pub(crate) fn build_owner_decl_identity(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
 ) -> DeclIdentity {
@@ -434,9 +434,9 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 /// open evidence for compound roots containing open programs) recurse
 /// per-branch with the SAME presence-only rule and merge under the macro
 /// enumeration convention (a member present in any branch is published).
-pub(crate) fn read_positive_surface_members(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     surface_node: SemanticNodeId,
 ) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
     use crate::typeinfo::surface_resolution::SurfaceResolution;
@@ -445,8 +445,8 @@ pub(crate) fn read_positive_surface_members(
     /// positive members always publish, and ANY incomplete arm makes the
     /// whole join incomplete with the union of the arms' typed reasons — the
     /// joined subset is usable but never passes as the complete evidence.
-    fn join_arms(
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    fn join_arms<C: crate::resolver_core::ResolverCapabilities>(
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
         arms: &[crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>>],
         join: impl FnOnce(
             &crate::semantic_query_memo::SemanticGraphStore,
@@ -688,7 +688,7 @@ pub(crate) fn macro_payload_surface_provenance(
 /// unresolved import to a non-existent module), a diagnostic is
 /// pushed before returning `None`.
 pub(crate) fn resolve_macro_payload(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -928,7 +928,7 @@ pub(crate) fn resolve_macro_payload(
 }
 
 pub(crate) fn resolve_payload_surface(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     payload_node: SemanticNodeId,
     macro_index: usize,
     expansion_kind: MacroExpansionKind,

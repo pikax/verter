@@ -460,8 +460,13 @@ impl VerterHost {
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Option<crate::types::FallthroughResolution> {
         // Try to reuse an already-cached Expanded resolved state before recomputing.
         // get_component_meta() typically resolves Expanded just before calling fallthrough,
@@ -509,8 +514,13 @@ impl VerterHost {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> FallthroughComputeOutcome {
         let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
         let resolution = self.compute_fallthrough_surface_from_resolved_state(
@@ -534,8 +544,13 @@ impl VerterHost {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Option<crate::types::FallthroughResolution> {
         // INTERNAL backstop (install-if-none, NEVER install-always): a direct
         // internal caller of this fallthrough choke with no active request
@@ -914,8 +929,13 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         overrides_in: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Option<crate::resolver_core::FallthroughPropOverrideSet> {
         if !self.config.generic_root_propagation {
@@ -974,8 +994,13 @@ impl VerterHost {
         base: &verter_session_query::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> ResolvedConsumedBindings {
         use verter_session_query::analysis::component_meta::PartialBranchReason;
@@ -1090,8 +1115,13 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
     ) -> Vec<DynamicRootCandidate> {
         let Some(template) = snapshot.template.as_deref() else {
@@ -1174,12 +1204,14 @@ impl VerterHost {
     /// request in [`Self::resolve_fallthrough_surface_internal_with_overrides`]
     /// — it therefore encloses the cold compute that produced `result`. Every
     /// admission below (both node stores AND the legacy mirror) is gated on it.
-    pub(super) fn cache_fallthrough_result(
+    pub(super) fn cache_fallthrough_result<
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &crate::types::FallthroughResolution,
-        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_, W>,
     ) {
         // No-poison: a PARTIAL fallthrough (a budget/fuse trip folded into the
         // active cold-compute completeness scope) must NOT warm any fallthrough
@@ -1481,11 +1513,13 @@ impl VerterHost {
         }
     }
 
-    pub(super) fn mirror_cached_fallthrough_arc(
+    pub(super) fn mirror_cached_fallthrough_arc<
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         canonical_id: &str,
         resolution: Arc<crate::types::FallthroughResolution>,
-        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_, W>,
     ) {
         // No-poison SELF-GATE: the mirror is a promotion site (it warms the
         // legacy `cached_fallthrough` entry on `DerivedRawState`), so it carries

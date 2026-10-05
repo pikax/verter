@@ -70,7 +70,7 @@ enum IdentitySubject {
 /// `(owner_canonical, local_binding, source_specifier, imported_name)`.
 type AuthoredImportEdge = (Arc<str>, Arc<str>, Arc<str>, Arc<str>);
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Compose exact authored-route evidence through requested local aliases
     /// and the shared direct-import route authority.
     pub(crate) fn resolve_authored_reference_route(

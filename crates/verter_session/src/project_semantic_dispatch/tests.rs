@@ -5601,7 +5601,7 @@ fn resolve_decl_records_file_scope_in_sidecar() {
 //  - the content-free `ResolvedDeclSlotIdentity` slot on `Instantiate.base`.
 
 fn resolve_decl_anchor(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     name: &str,
 ) -> SemanticNodeId {
@@ -9517,7 +9517,7 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
 /// Shared helper: dispatch `Instantiate` for a builtin utility over `args`
 /// in `Published(Expanded)` and return the produced value node.
 fn instantiate_utility(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
     name: &str,
     args: &[SemanticNodeId],
@@ -14139,7 +14139,7 @@ fn reverse_test_target(
 }
 
 fn reverse_test_conditional(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     check: SemanticNodeId,
     extends: SemanticNodeId,
     infer: SemanticNodeId,
@@ -15467,7 +15467,7 @@ fn binding_relation_roots_bypass_cross_transaction_singleflight() {
         crate::semantic_query::RelationContext::default(),
     );
     assert!(
-        ProjectSemanticDispatch::relate_root_uses_family_singleflight(&non_binding),
+        ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relate_root_uses_family_singleflight(&non_binding),
         "non-binding roots retain cooperative singleflight"
     );
 
@@ -15476,7 +15476,7 @@ fn binding_relation_roots_bypass_cross_transaction_singleflight() {
         ..non_binding
     };
     assert!(
-        !ProjectSemanticDispatch::relate_root_uses_family_singleflight(&binding),
+        !ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relate_root_uses_family_singleflight(&binding),
         "a cold binding root must open its own transaction-local inference \
          session instead of joining another transaction's in-flight session"
     );
@@ -23446,7 +23446,7 @@ fn surface_get_member<'a>(view: &'a SurfaceView, name: &str) -> &'a SurfaceMembe
 /// returned `SemanticNodeId`. Panics on non-Value results so the
 /// CHARACTERIZATION tests can assert directly against the surface.
 fn run_empty_path_shallow(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     base: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.execute_type_node(empty_path_shallow_key(base)) {
@@ -26800,7 +26800,7 @@ fn barrel_keyed_class_surface_composes_under_export_target_identity() {
 
 fn typeof_value_node(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch,
+    dispatch: &ProjectSemanticDispatch<crate::resolver_core::HostCapabilities>,
     canonical: &str,
     name: &str,
 ) -> SemanticNodeId {
@@ -26867,7 +26867,7 @@ fn overload_set_key_of_kind(
 
 /// The dispatched overload set, or the raw error result.
 fn execute_overload_set(
-    dispatch: &ProjectSemanticDispatch,
+    dispatch: &ProjectSemanticDispatch<crate::resolver_core::HostCapabilities>,
     key: SemanticQueryKey,
 ) -> Result<Arc<[crate::semantic_query::SignatureRef]>, QueryResult<SemanticNodeId>> {
     match crate::semantic_query::SemanticQueryApi::execute(dispatch, key) {

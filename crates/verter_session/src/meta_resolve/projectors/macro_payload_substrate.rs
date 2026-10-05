@@ -157,7 +157,7 @@ pub(crate) enum PayloadSurfaceScope {
 /// (decided / object / union / cyclic) payload to the default
 /// single-dispatch surface.
 pub(crate) fn resolve_emit_payload_to_conditional_root(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     depth: u16,
     visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
@@ -227,7 +227,7 @@ pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 /// `args` is empty — a bare named-decl demand carries no explicit type
 /// arguments.
 fn lower_decl_body_to_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
@@ -245,7 +245,7 @@ fn lower_decl_body_to_node(
 
 #[allow(dead_code)]
 pub(crate) fn resolve_payload_surface_with_scope(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     payload_node: SemanticNodeId,
     macro_index: usize,
     expansion_kind: MacroExpansionKind,

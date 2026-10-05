@@ -265,9 +265,9 @@ impl VueMacroSurface {
     /// Falls back to the member's declaration_origin, then the SFC owner, when
     /// the value node carries no single-file scope (a structural / scope-less
     /// value node — a primitive, a shared literal-union).
-    fn member_expr_scope(
+    fn member_expr_scope<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
         member: &TypeInfoSurfaceMember,
     ) -> TypeExprScope {
         crate::typeinfo::framework_surface::scope::member_value_expr_scope(
@@ -614,8 +614,8 @@ impl VerterHost {
 /// not re-derived by [`VerterHost::runtime_object_macro_surface`]. Content-
 /// addressed like every other `intern_node` call: repeated calls across
 /// members / requests collapse onto the same node.
-fn unknown_member_value_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn unknown_member_value_node<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
 ) -> crate::semantic_query::SemanticNodeId {
     dispatch
         .graph()
@@ -644,9 +644,9 @@ fn unknown_member_value_node(
 ///
 /// Bound to `ctx` (the borrowed request facade), so an overlay session resolves the
 /// slot-param object against its OVERLAY content.
-pub(crate) fn navigate_param_to_object_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn navigate_param_to_object_surface<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     scope_canonical: &str,
     payload: &verter_type_expr::locators::AuthoredTypePayloadRef,
 ) -> crate::typeinfo::surface_resolution::SurfaceResolution<TypeInfoSurface> {
@@ -737,8 +737,8 @@ pub(crate) fn navigate_param_to_object_surface(
 /// must stay byte-identical across an API reshape, so this primitive keeps the
 /// source authority it has always had rather than following whichever candidate
 /// the calling request would resolve.
-pub(super) fn slice_canonical_span(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(super) fn slice_canonical_span<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     cspan: &CanonicalSpan,
 ) -> Option<String> {
     // `base_indexed_ready_serve` is an `IndexedInputs` port method; the trait
@@ -785,8 +785,8 @@ pub(crate) fn normalize_jsdoc_body(raw: &str) -> String {
 /// ([`member_jsdoc_from_spans`]) and the call-signature emit path
 /// ([`signature_jsdoc_from_spans`]) — both anchor JSDoc on the typeinfo
 /// surface's spans, never a reparse.
-fn jsdoc_from_spans(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+fn jsdoc_from_spans<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     description_span: Option<&CanonicalSpan>,
     tag_spans: &[crate::typeinfo::surface::JsdocTagSpan],
 ) -> (Option<String>, Vec<JsdocTag>) {
@@ -818,8 +818,8 @@ fn jsdoc_from_spans(
 }
 
 /// Slice a surface MEMBER's leading-JSDoc spans into `(description, tags)`.
-pub(super) fn member_jsdoc_from_spans(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(super) fn member_jsdoc_from_spans<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     member: &TypeInfoSurfaceMember,
 ) -> (Option<String>, Vec<JsdocTag>) {
     jsdoc_from_spans(
@@ -831,8 +831,8 @@ pub(super) fn member_jsdoc_from_spans(
 
 /// Slice a call-SIGNATURE's leading-JSDoc spans into `(description, tags)` (the
 /// call-signature emit path).
-pub(super) fn signature_jsdoc_from_spans(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(super) fn signature_jsdoc_from_spans<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     sig: &crate::typeinfo::surface::TypeInfoSurfaceSignature,
 ) -> (Option<String>, Vec<JsdocTag>) {
     jsdoc_from_spans(
@@ -852,8 +852,10 @@ pub(super) fn signature_jsdoc_from_spans(
 /// `framework_surface` sibling cannot forge a `&TypeInfoSurfaceMember` and
 /// reverse-materialize a `TypeExpr` here. The forgeable-input boundary is
 /// closed at the normalizer (it requires a [`ResolvedVueSurface`] token).
-pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
 ) -> Option<TypeExpr> {
     // Publication sink (DTO surface): materialize into a sealed carrier and
@@ -893,9 +895,9 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn raise_member_value(
 /// [`ctx.ensure_indexed_ready_serve`]: crate::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve
 /// [`FactValidation`]: crate::resolver_core::fact_validation_port::FactValidation
 #[must_use]
-pub(crate) fn vue_macro_dtos_with_ctx(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn vue_macro_dtos_with_ctx<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     request: &VueMacroSurfaceRequest,
 ) -> crate::typeinfo::framework_surface::MacroDtosRead {
     use crate::semantic_query::ResultCompleteness;
@@ -1213,9 +1215,9 @@ fn surface_kind_for_macro(
     }
 }
 
-pub(crate) fn resolve_vue_macro_surface_with_ctx(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn resolve_vue_macro_surface_with_ctx<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     request: &VueMacroSurfaceRequest,
 ) -> Option<VueMacroSurface> {
     verter_debug_assert_eq!(
@@ -1390,9 +1392,9 @@ pub(crate) fn resolve_vue_macro_surface_with_ctx(
         unresolved_surface_arms,
     })
 }
-fn runtime_object_macro_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     request: &VueMacroSurfaceRequest,
     mac: &verter_session_query::analysis::types::AnalyzedMacro,
 ) -> Option<VueMacroSurface> {

@@ -197,9 +197,9 @@ impl EvaluateDeferredOutcome {
     /// nothing and is permitted (e.g. a build-internal unit test driving a
     /// concrete path directly). Non-build consumers read the typed demand
     /// outcome ([`StructuralFactDemandOutcome`]) instead of this projection.
-    pub(super) fn into_active_query_build_node(
+    pub(super) fn into_active_query_build_node<C: crate::resolver_core::ResolverCapabilities>(
         self,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> SemanticNodeId {
         let is_partial = matches!(self.completeness, ResultCompleteness::Partial(_));
         if is_partial || self.cache_suppress {
@@ -242,9 +242,11 @@ impl EvaluateDeferredOutcome {
     /// partial still folds into the enclosing build and the request: the
     /// build that keeps the unevaluated operand is partial and never
     /// admitted, whatever else its caller reads afterwards.
-    pub(super) fn into_complete_active_query_build_node(
+    pub(super) fn into_complete_active_query_build_node<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
         self,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> Option<SemanticNodeId> {
         #[cfg(test)]
         let this = if FORCE_PARTIAL_CLOSED_EVALUATION.get() {
@@ -607,7 +609,7 @@ impl StructuralFactDemandOutcome {
     }
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     pub(super) fn normalized_index_key_node(&self, node: SemanticNodeId) -> IndexKey {
         self.normalized_index_key_node_outcome(node).0
     }

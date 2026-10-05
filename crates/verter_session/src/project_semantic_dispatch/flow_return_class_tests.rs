@@ -42,7 +42,7 @@ fn host_with(source: &str) -> Arc<VerterHost> {
 
 pub(super) fn with_dispatch<R>(
     source: &str,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let host = host_with(source);
     let store_view = host.resolver_store_view_read().into_owned_view();
@@ -54,7 +54,7 @@ pub(super) fn with_dispatch<R>(
 
 /// The whole-return flow key of the fixture position `name` at `part`.
 pub(super) fn flow_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     part: FunctionPartIdentity,
 ) -> crate::semantic_query::FlowReturnKey {
@@ -78,7 +78,7 @@ pub(super) fn flow_key(
 /// evaluate clean.
 #[track_caller]
 fn clean_result(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     part: FunctionPartIdentity,
 ) -> Arc<FlowReturnResult> {
@@ -101,7 +101,10 @@ fn clean_result(
 fn with_probe<R>(
     source: &str,
     name: &str,
-    check: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    check: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     with_dispatch(source, |dispatch| {
         let result = clean_result(dispatch, name, FunctionPartIdentity::DeclarationBody);
@@ -122,7 +125,7 @@ fn with_probe<R>(
 /// shared checker-syntax projection.
 #[track_caller]
 fn assert_matches(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     expected: &str,
     what: &str,
@@ -172,7 +175,7 @@ fn assert_tuple_probe(source: &str, name: &str, expected: &[(&str, bool, &str)])
 /// constructor surface and the instance node its first construct
 /// signature returns.
 fn constructor_and_instance(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     constructor: SemanticNodeId,
 ) -> (crate::semantic_query::SurfaceView, SemanticNodeId) {
     let graph = dispatch.graph();
@@ -197,7 +200,7 @@ fn constructor_and_instance(
 
 /// The own (non-inherited) surface of a class-expression instance.
 fn instance_surface(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     instance: SemanticNodeId,
 ) -> crate::semantic_query::SurfaceView {
     let graph = dispatch.graph();
@@ -219,7 +222,10 @@ fn instance_surface(
 }
 
 /// The printed name of the class-expression instance `node`.
-fn printed_name(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> String {
+fn printed_name(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> String {
     match dispatch.graph().node_data(node).as_deref() {
         Some(SemanticNodeData::ClassExpressionInstance {
             identity,

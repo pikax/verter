@@ -46,7 +46,10 @@ pub(crate) const PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER: &str =
 /// composite shapes do not produce a root name (the predicate
 /// downstream falls back to `false` for those cases).
 pub(crate) fn collect_define_props_root_names(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
 ) -> rustc_hash::FxHashSet<String> {
@@ -102,7 +105,10 @@ pub(crate) fn collect_define_props_root_names(
 /// - `Primitive(_)` / `Object(_)` / fully-expanded fields whose
 ///   raw type was None → does NOT fire (no work to skip).
 pub(crate) fn slot_binding_targets_define_props_root(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     field: &verter_session_query::analysis::type_expand::ExpandedField,

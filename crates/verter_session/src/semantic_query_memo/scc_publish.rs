@@ -183,9 +183,9 @@ impl SemanticGraphStore {
     /// invalidation aborted a flight, a member's result is not
     /// admissible, or the component cannot fit the retention budget.
     /// Waiting joiners wake on the abort sentinel and retry admission.
-    pub(crate) fn publish_scc_members_fenced(
+    pub(crate) fn publish_scc_members_fenced<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: Option<&dyn crate::resolver_core::ResolverContext>,
+        ctx: Option<&dyn crate::resolver_core::ResolverContext<C>>,
         required_root: &SccRootWitness,
         carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: &Arc<[Arc<str>]>,
@@ -527,12 +527,12 @@ impl SemanticGraphStore {
     /// its per-family bounded-retention eviction against the publishing
     /// caller's stable store view. Both run OUTSIDE the batch's `entries`
     /// hold — `plan_family_slot_eviction` takes the lock itself.
-    fn stage_member(
+    fn stage_member<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         family: FamilyKey,
         mut entry: MemoEntry,
         flight: InlineMemberFlight,
-        ctx: Option<&dyn crate::resolver_core::ResolverContext>,
+        ctx: Option<&dyn crate::resolver_core::ResolverContext<C>>,
     ) -> StagedMember {
         let admission_seq = self.alloc_candidate_admission_seq();
         entry.admission_seq = admission_seq;
@@ -622,7 +622,7 @@ impl SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn publish_unfenced_candidate_for_tests(
         &self,
-        ctx: Option<&dyn crate::resolver_core::ResolverContext>,
+        ctx: Option<&dyn crate::resolver_core::fact_validation_port::FactValidation>,
         family: FamilyKey,
         value: SemanticQueryValue,
         satisfied_projection: MaterializedSet,

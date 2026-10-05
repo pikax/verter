@@ -23,6 +23,17 @@ use crate::resolver_core::ValueDeclIdentity;
 use crate::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
+/// The capability types every host request context hands out: the source's
+/// owned expression-demand handle and the host's live workspace slot. Base
+/// and overlay contexts share them, so request structures carrying them are
+/// instantiated once.
+pub enum HostCapabilities {}
+
+impl ResolverCapabilities for HostCapabilities {
+    type ExpressionDemand = crate::decl_body_memo::IndexedExpressionDemand;
+    type Clocks = crate::resolver_store::WorkspaceSlotClocks;
+}
+
 #[cfg(any(test, feature = "test-support"))]
 impl sealed::Sealed for crate::VerterHost {}
 
@@ -46,26 +57,26 @@ impl<'a> sealed::RequestBoundSealed
 {
 }
 
-impl<'a> RequestBoundResolverContext
+impl<'a> RequestBoundResolverContext<HostCapabilities>
     for crate::resolver_core::host_resolver_context::HostResolverContext<'a>
 {
 }
 
-impl<'a> RequestBoundResolverContext
+impl<'a> RequestBoundResolverContext<HostCapabilities>
     for crate::resolver_core::session_resolver_context::SessionResolverContext<'a>
 {
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
-static_assertions::assert_not_impl_any!(crate::VerterHost: ResolverContext);
+static_assertions::assert_not_impl_any!(crate::VerterHost: ResolverContext<HostCapabilities>);
 
 #[cfg(any(test, feature = "test-support"))]
-static_assertions::assert_impl_all!(crate::VerterHost: ResolverContext);
+static_assertions::assert_impl_all!(crate::VerterHost: ResolverContext<HostCapabilities>);
 
 /// Test-only direct-host seam. Production builds compile this implementation
 /// out, so every production `ResolverContext` is structurally request-bound.
 #[cfg(any(test, feature = "test-support"))]
-impl ResolverContext for crate::VerterHost {}
+impl ResolverContext<HostCapabilities> for crate::VerterHost {}
 
 #[cfg(any(test, feature = "test-support"))]
 impl IndexedInputs for crate::VerterHost {
@@ -513,13 +524,13 @@ pub(crate) trait RequestBoundLifecycle {
 
     fn prepared_decl_bundle(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<Arc<PreparedDeclBundle>>;
 
     fn prepared_type_decl(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -530,7 +541,7 @@ pub(crate) trait RequestBoundLifecycle {
 
     fn prepared_value_decl(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -556,7 +567,7 @@ pub(crate) trait RequestBoundLifecycle {
 
     fn shallow_file_state(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<Arc<ShallowFileState>> {
         self.host().shallow_file_state_with_context(
@@ -587,7 +598,7 @@ pub(crate) trait RequestBoundLifecycle {
 
     fn observe_materialize_scope(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical: &str,
     ) -> Option<MaterializeScopeObservation> {
         self.host()
@@ -670,7 +681,7 @@ impl<L> RequestBoundAdapter<L> {
     }
 }
 
-impl<L: RequestBoundLifecycle> ResolverContext for RequestBoundAdapter<L> where
+impl<L: RequestBoundLifecycle> ResolverContext<HostCapabilities> for RequestBoundAdapter<L> where
     Self: sealed::Sealed + sealed::RequestBoundSealed
 {
 }
@@ -1166,7 +1177,7 @@ impl crate::VerterHost {
 mod request_bound_adapter_structure_tests {
     use super::ResolverContext;
 
-    fn assert_resolver_context<T: ResolverContext>() {}
+    fn assert_resolver_context<T: ResolverContext<super::HostCapabilities>>() {}
 
     #[test]
     fn request_bound_lifecycles_share_one_resolver_context_implementation() {
@@ -1182,6 +1193,17 @@ use verter_session_query::facts::fact_cache::{
     RouteSurfaceFactRef,
 };
 use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
+
+impl<L: RequestBoundLifecycle> crate::resolver_core::fact_validation_port::LiveFactValidation
+    for RequestBoundAdapter<L>
+{
+    type Clocks = crate::resolver_store::WorkspaceSlotClocks;
+    fn aggregate_clock_reader(
+        &self,
+    ) -> verter_session_query::facts::clocks::AggregateClockReader<Self::Clocks> {
+        self.0.host().aggregate_clock_reader()
+    }
+}
 
 impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn current_external_supersession_fingerprint(&self) -> u64 {
@@ -1215,9 +1237,6 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
             roots,
             facts,
         )
-    }
-    fn aggregate_clock_reader(&self) -> verter_session_query::facts::clocks::AggregateClockReader {
-        self.0.host().aggregate_clock_reader()
     }
     fn record_signature_overflow(&self) {
         self.0

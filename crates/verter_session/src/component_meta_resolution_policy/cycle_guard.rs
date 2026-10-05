@@ -250,7 +250,10 @@ fn hash_node(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
 /// literal values, and composite structural shape stay distinct). It is an
 /// ephemeral recursion-guard identity only — never a cache key.
 pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     root: SemanticNodeId,
     hasher: &mut H,
 ) {
@@ -263,7 +266,10 @@ pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
 }
 
 fn hash_node_rec<H: std::hash::Hasher>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     hasher: &mut H,
     seen: &mut rustc_hash::FxHashMap<SemanticNodeId, u64>,

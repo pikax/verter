@@ -313,7 +313,7 @@ pub(super) fn query_key_discriminant(key: &SemanticQueryKey) -> &'static str {
     }
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Raise a [`SemanticNodeId`] back to a [`TypeExpr`].
     ///
     /// Pure structural conversion: walks the graph payload one structural
@@ -1876,8 +1876,8 @@ fn remap_mapper(
     new_mapper
 }
 
-fn rebuild_object(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn rebuild_object<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     mapping: &MappingMap,
     context: ProjectionReductionContext,
@@ -1964,8 +1964,8 @@ fn rebuild_object(
     )
 }
 
-fn rebuild_union_or_intersection(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn rebuild_union_or_intersection<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     arms: &[SemanticNodeId],
     category: crate::semantic_query::composite::CompositeOriginCategory,
@@ -2002,8 +2002,8 @@ fn rebuild_union_or_intersection(
     Some(dispatch.graph().intern_preserving_scope(node, data))
 }
 
-fn rebuild_tuple(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn rebuild_tuple<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     elements: &Arc<[TupleElement]>,
     readonly: bool,
@@ -2040,8 +2040,8 @@ fn rebuild_tuple(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn rebuild_function(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     kind: crate::semantic_query::SignatureKind,
     params: &Arc<[crate::semantic_query::FunctionParam]>,
@@ -2225,8 +2225,10 @@ impl ReduceState {
 /// resolution miss), the function returns `false` — the reducer
 /// proceeds with the `Instantiate` dispatch as the safe default
 /// (matches the earlier behaviour).
-pub(super) fn userland_instantiation_body_is_closed_object(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(super) fn userland_instantiation_body_is_closed_object<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     base: &crate::semantic_query::DeclIdentity,
 ) -> bool {
     // The closed-object SHAPE verdict is a producer-minted FACT
@@ -2295,8 +2297,8 @@ impl ClosednessVerdict {
 /// atomic observation — never a separate current-content re-read). Non-file
 /// canonicals (the builtin / synthetic / empty sentinels) and files unknown
 /// to the live view observe nothing.
-fn observe_closedness_walk_consult(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+fn observe_closedness_walk_consult<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     canonical_id: &str,
 ) {
     if crate::semantic_query::is_non_file_base(canonical_id) {
@@ -2414,8 +2416,8 @@ enum OperandPosition {
 /// non-enumerable surface). `Unavailable` ⇒ a REFUSAL (missing prepared
 /// decl / fact, unresolved name, genuine cycle, budget exhaustion) — never
 /// collapsed into a proof, never cached.
-pub(super) fn prepared_decl_body_is_closed(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(super) fn prepared_decl_body_is_closed<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     decl_name: &str,
@@ -2444,8 +2446,8 @@ pub(super) fn prepared_decl_body_is_closed(
 
 /// Cycle-unguarded core of [`prepared_decl_body_is_closed`] — never call
 /// directly; the in-flight insert/remove discipline lives in the wrapper.
-fn prepared_decl_body_is_closed_unguarded(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn prepared_decl_body_is_closed_unguarded<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     decl_name: &str,
@@ -2529,8 +2531,8 @@ fn prepared_decl_body_is_closed_unguarded(
 /// `budget` (one decrement per evaluated recipe node, threaded through the
 /// escape walks); decl-level cycles refuse through the dispatch-wide
 /// in-flight guard (`push_closedness_active`).
-fn recipe_key_domain_closedness(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn recipe_key_domain_closedness<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     recipe: &verter_type_expr::facts::ClosednessRecipe,
     bindings: &KeyDomainBindings<'_>,
@@ -2646,8 +2648,8 @@ fn recipe_key_domain_closedness(
 /// resolves through the walk back into the evaluator consumes ONE shared
 /// budget and terminates bounded. A verdict of open WITH the budget
 /// exhausted is UNAVAILABLE (the fuse fired — a refusal, not a proof).
-fn lower_and_classify_key_domain(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn lower_and_classify_key_domain<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     slot: &verter_type_expr::locators::TypeBodySlot,
     bindings: &KeyDomainBindings<'_>,
@@ -2667,8 +2669,8 @@ fn lower_and_classify_key_domain(
 /// [`ClosednessRecipe::ValueProjection`] operands enter the node walk at
 /// their operand-policy positions (object: value-sensitive; index:
 /// key-domain).
-fn lower_and_classify_key_domain_at(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn lower_and_classify_key_domain_at<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     slot: &verter_type_expr::locators::TypeBodySlot,
     bindings: &KeyDomainBindings<'_>,
@@ -2691,8 +2693,8 @@ fn lower_and_classify_key_domain_at(
 /// `T = D` bound slot), derefed LEASE-ONLY through the anchor canonical's
 /// retained snapshot via the shared locator-deref worker. `None` =
 /// unavailable — conservative (undecidable ⇒ refusal).
-pub(super) fn deref_slot_body(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+pub(super) fn deref_slot_body<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<C>,
     slot: &verter_type_expr::locators::TypeBodySlot,
 ) -> Option<TypeExpr> {
     let serve = ctx.ensure_indexed_ready_serve(slot.anchor.canonical_id.as_ref())?;
@@ -2735,8 +2737,8 @@ struct EscapeLoweringEnv {
     bound_params: FxHashSet<SemanticNodeId>,
 }
 
-fn escape_lowering_env(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn escape_lowering_env<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     bindings: &KeyDomainBindings<'_>,
 ) -> EscapeLoweringEnv {
@@ -2765,8 +2767,8 @@ fn escape_lowering_env(
 /// declaration-identity node an open/abstract parameter lowers to inside a
 /// recipe escape (hash-consed: every escape of the same decl version
 /// interns the same shell).
-fn type_param_shell_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn type_param_shell_node<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     param: &verter_type_expr::facts::NarrowTypeParam,
 ) -> SemanticNodeId {
@@ -2787,8 +2789,8 @@ fn type_param_shell_node(
 /// Shallow-lower ONE derefed authored body under the escape environment —
 /// the ONE shared lowerer, structural-transit (carrier-preserving; interior
 /// refs intern as `DeclRef`/`InstantiationRef` carriers, never executed).
-fn lower_body_under_env(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn lower_body_under_env<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     prepared: &verter_session_query::type_solver::prepared::PreparedTypeDecl,
     slot: &verter_type_expr::locators::TypeBodySlot,
     body: &TypeExpr,
@@ -2821,8 +2823,8 @@ fn lower_body_under_env(
 /// remaining ⇒ `ProvenOpen`; open with the budget EXHAUSTED ⇒
 /// `Unavailable` — the fuse fired mid-walk, so the openness answer may be
 /// the fuse's, not a proof (never collapse a budget abort into a proof).
-fn classify_lowered_node_key_domain(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn classify_lowered_node_key_domain<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     bound_params: FxHashSet<SemanticNodeId>,
     budget: &mut u32,
@@ -2837,8 +2839,8 @@ fn classify_lowered_node_key_domain(
 }
 
 /// Position-pinned variant of [`classify_lowered_node_key_domain`].
-fn classify_lowered_node_key_domain_at(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn classify_lowered_node_key_domain_at<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     bound_params: FxHashSet<SemanticNodeId>,
     budget: &mut u32,
@@ -2884,8 +2886,10 @@ fn classify_lowered_node_key_domain_at(
 ///
 /// Bounded by the same shared budget; arity mismatches are PROVEN open
 /// (decided from available facts); missing facts/defaults are UNAVAILABLE.
-pub(super) fn prepared_instantiation_key_domain_is_closed(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(super) fn prepared_instantiation_key_domain_is_closed<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     base: &crate::semantic_query::DeclIdentity,
     args: &[KeyDomainBinding],
     budget: &mut u32,
@@ -2910,8 +2914,10 @@ pub(super) fn prepared_instantiation_key_domain_is_closed(
 /// Cycle-unguarded core of
 /// [`prepared_instantiation_key_domain_is_closed`] — never call directly;
 /// the in-flight push/pop discipline lives in the wrapper.
-fn prepared_instantiation_key_domain_is_closed_unguarded(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn prepared_instantiation_key_domain_is_closed_unguarded<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     base: &crate::semantic_query::DeclIdentity,
     args: &[KeyDomainBinding],
     budget: &mut u32,
@@ -3218,8 +3224,10 @@ fn enumeration_domain_arg_index_for_name(decl_name: &str) -> Option<usize> {
 /// matching. An unrecognised utility name returns `false` (not subject
 /// to this carrier-stop), preserving userland operator-helper and
 /// nominal-generic behaviour.
-pub(super) fn utility_enumeration_domain_is_open_or_unknown(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(super) fn utility_enumeration_domain_is_open_or_unknown<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     base: &crate::semantic_query::DeclIdentity,
     args: &[SemanticNodeId],
 ) -> bool {
@@ -3262,8 +3270,8 @@ pub(super) fn utility_enumeration_domain_is_open_or_unknown(
 /// a K-only transform, a finite keyspace) which still enumerates
 /// path-precisely. Pure typed-IR inspection — no reduction, no
 /// substitution, no string matching.
-pub(crate) fn mapped_type_is_open_or_unknown(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn mapped_type_is_open_or_unknown<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     source: SemanticNodeId,
     mapper: &crate::semantic_query::MapperKey,
 ) -> bool {
@@ -3294,8 +3302,8 @@ pub(crate) fn mapped_type_is_open_or_unknown(
 /// and destroys the deferred structure the demand points need for
 /// per-key realization. Closed-argument builtins keep the eager
 /// execute, byte-for-byte.
-pub(crate) fn builtin_lowering_argument_is_open(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn builtin_lowering_argument_is_open<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> bool {
     OpenWalk::lowering_value_argument(dispatch).node_is_open(dispatch.ctx, node)
@@ -3314,8 +3322,10 @@ pub(crate) fn builtin_lowering_argument_is_open(
 /// deferred carrier (shallow values). Value-body openness defers only
 /// the operator MATERIALISATION routes (the full predicate above), not
 /// the key enumeration.
-pub(crate) fn mapped_type_key_domain_is_open_or_unknown(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn mapped_type_key_domain_is_open_or_unknown<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     source: SemanticNodeId,
     mapper: &crate::semantic_query::MapperKey,
 ) -> bool {
@@ -3511,14 +3521,14 @@ impl OpenQuestion {
     }
 }
 
-struct OpenWalk<'a> {
+struct OpenWalk<'a, C: crate::resolver_core::ResolverCapabilities> {
     /// The ACTIVE dispatcher (NOT a freshly-constructed one). The walk
     /// resolves carrier heads and consults the shared branch-selection
     /// oracle THROUGH this dispatcher so the dispatcher-local
     /// `instantiate_active` + `carrier_normalizing` cycle-guard state is
     /// shared — a freshly-constructed dispatch would lose that state and
     /// diverge on recursive refs.
-    dispatch: &'a ProjectSemanticDispatch<'a>,
+    dispatch: &'a ProjectSemanticDispatch<'a, C>,
     bound_params: FxHashSet<SemanticNodeId>,
     /// The SINGLE policy axis. The [`OpenQuestion`], value-surface descent,
     /// per-argument key-domain judgement, and the concrete-instantiation
@@ -3546,13 +3556,13 @@ struct OpenMemoKey {
     role: OpenRole,
 }
 
-impl<'a> OpenWalk<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Construct an [`OpenWalk`] for `role` with the given bound binder
     /// (`None` for roles that bind no mapper binder), starting at
     /// `OperandPosition::KeyDomain` with a fresh memo / in-flight set and
     /// the full node budget.
     fn for_role(
-        dispatch: &'a ProjectSemanticDispatch<'a>,
+        dispatch: &'a ProjectSemanticDispatch<'a, C>,
         role: OpenRole,
         bound_param: Option<SemanticNodeId>,
     ) -> Self {
@@ -3576,7 +3586,7 @@ impl<'a> OpenWalk<'a> {
     /// value surfaces are closed leaves and the walk MUST prove finiteness
     /// (no concrete-instantiation shortcut). Conditionals are tri-state
     /// through the shared oracle (see [`OpenWalk`]).
-    fn enumeration_domain(dispatch: &'a ProjectSemanticDispatch<'a>) -> Self {
+    fn enumeration_domain(dispatch: &'a ProjectSemanticDispatch<'a, C>) -> Self {
         Self::for_role(dispatch, OpenRole::KeyDomainProof, None)
     }
 
@@ -3586,7 +3596,7 @@ impl<'a> OpenWalk<'a> {
     /// Conditionals are tri-state through the shared oracle. See
     /// [`OpenWalk`].
     fn mapped_value_body(
-        dispatch: &'a ProjectSemanticDispatch<'a>,
+        dispatch: &'a ProjectSemanticDispatch<'a, C>,
         bound_param: SemanticNodeId,
     ) -> Self {
         Self::for_role(dispatch, OpenRole::OuterGenericValue, Some(bound_param))
@@ -3601,7 +3611,7 @@ impl<'a> OpenWalk<'a> {
     /// consumes the argument's VALUES), and an instantiation is open iff an
     /// argument is open. Conditionals are tri-state through the shared
     /// oracle.
-    fn lowering_value_argument(dispatch: &'a ProjectSemanticDispatch<'a>) -> Self {
+    fn lowering_value_argument(dispatch: &'a ProjectSemanticDispatch<'a, C>) -> Self {
         Self::for_role(dispatch, OpenRole::OuterGenericValue, None)
     }
 
@@ -3626,7 +3636,7 @@ impl<'a> OpenWalk<'a> {
     /// miss, recursive ref, budget exhaustion) is OPEN. Conditionals are
     /// tri-state through the shared oracle. See [`OpenWalk`].
     fn mapped_source_keyspace(
-        dispatch: &'a ProjectSemanticDispatch<'a>,
+        dispatch: &'a ProjectSemanticDispatch<'a, C>,
         bound_param: SemanticNodeId,
     ) -> Self {
         Self::for_role(dispatch, OpenRole::KeyDomainProof, Some(bound_param))
@@ -3642,7 +3652,7 @@ impl<'a> OpenWalk<'a> {
     /// an outer generic directly, or an open-argument instantiation, still
     /// opens. The bound binder `K` is closed. See [`OpenWalk`].
     fn mapped_name_remap(
-        dispatch: &'a ProjectSemanticDispatch<'a>,
+        dispatch: &'a ProjectSemanticDispatch<'a, C>,
         bound_param: SemanticNodeId,
     ) -> Self {
         Self::for_role(dispatch, OpenRole::MappedNameRemap, Some(bound_param))
@@ -3695,7 +3705,7 @@ impl<'a> OpenWalk<'a> {
     /// conditional-inference binding placeholder, NOT an unbound generic.
     fn node_is_open(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
     ) -> bool {
         let memo_key = OpenMemoKey {
@@ -3736,7 +3746,7 @@ impl<'a> OpenWalk<'a> {
     /// value-sensitive operand keeps two independent verdicts.
     fn node_is_open_at(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
         position: OperandPosition,
     ) -> bool {
@@ -3752,7 +3762,7 @@ impl<'a> OpenWalk<'a> {
     /// lives in the wrapper.
     fn node_openness_uncached(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
     ) -> bool {
         if self.budget == 0 {
@@ -4116,7 +4126,7 @@ impl<'a> OpenWalk<'a> {
     #[inline(never)]
     fn conditional_is_open(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
         data: &SemanticNodeData,
     ) -> bool {
@@ -4159,7 +4169,7 @@ impl<'a> OpenWalk<'a> {
     #[inline(never)]
     fn mapped_is_open(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         data: &SemanticNodeData,
     ) -> bool {
         let SemanticNodeData::Mapped { source, mapper } = data else {
@@ -4193,7 +4203,7 @@ impl<'a> OpenWalk<'a> {
     #[inline(never)]
     fn instantiation_is_open(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
         data: &SemanticNodeData,
     ) -> bool {
@@ -4313,7 +4323,7 @@ impl<'a> OpenWalk<'a> {
     #[inline(never)]
     fn carrier_ref_is_open(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
         data: Arc<SemanticNodeData>,
     ) -> bool {
@@ -4357,7 +4367,7 @@ impl<'a> OpenWalk<'a> {
     /// for those cases.
     fn reduced_instantiation_key_domain_is_closed(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
     ) -> bool {
         if self.budget == 0 {
@@ -4388,7 +4398,7 @@ impl<'a> OpenWalk<'a> {
     /// access sits in a value-sensitive operand).
     fn index_key_is_open(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         index: &crate::semantic_query::IndexKey,
     ) -> bool {
         use crate::semantic_query::IndexKey;
@@ -4412,8 +4422,8 @@ impl<'a> OpenWalk<'a> {
 /// unresolvable ⇒ OPEN, the safe direction). The consult is rooted on
 /// the active fact tracer — the verdict depends on the consulted files'
 /// content.
-fn instantiation_base_is_resolvable(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+fn instantiation_base_is_resolvable<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     base: &crate::semantic_query::DeclIdentity,
     budget: &mut u32,
 ) -> bool {
@@ -4500,8 +4510,10 @@ pub(crate) use shape_engine::RaisedNodeShapeFacts;
 /// `TypeExpr`. `None` when the whole raise is `None`. DISPATCH-taking primary —
 /// the publication finaliser scores both candidate carriers' nodes through this.
 #[must_use]
-pub(crate) fn project_node_publication_score_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn project_node_publication_score_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<PublicationScore> {
     shape_engine::project_node_publication_score(dispatch, node)
@@ -4528,8 +4540,8 @@ pub(crate) fn type_expr_publication_score(expr: &TypeExpr) -> PublicationScore {
 /// `true` when `node` can be shell-raised to a `TypeExpr` at all
 /// (`raise(node).is_some()`). DISPATCH-taking primary.
 #[must_use]
-pub(crate) fn node_can_shell_raise_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_can_shell_raise_with_dispatch<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> bool {
     shape_engine::project_node_facts(dispatch, node).is_some_and(|facts| facts.can_shell_raise())
@@ -4542,8 +4554,10 @@ pub(crate) fn node_can_shell_raise_with_dispatch(
 /// key interned. A mint site passes the witness straight to a `route_admission`
 /// `admit_*` helper, which binds the carrier to `witness.node()`.
 #[must_use]
-pub(crate) fn node_raised_shape_facts_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_raised_shape_facts_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<RaisedNodeShapeFacts> {
     shape_engine::project_node_facts(dispatch, node)
@@ -4552,8 +4566,10 @@ pub(crate) fn node_raised_shape_facts_with_dispatch(
 /// Classify a node's normalized raised shape into the closed shallow member
 /// output vocabulary without reverse-materializing a `TypeExpr`.
 #[must_use]
-pub(crate) fn node_shallow_member_output_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_shallow_member_output_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<RaisedShallowMemberOutput> {
     shape_engine::project_node_shallow_member_output(dispatch, node)
@@ -4566,8 +4582,10 @@ pub(crate) fn node_shallow_member_output_with_dispatch(
 /// this classification. DISPATCH-taking primary — the cache-admission gate
 /// reads this off the reduced-output carrier node instead of materialising it.
 #[must_use]
-pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> bool {
     shape_engine::project_node_root_sentinel(dispatch, node).unwrap_or(false)
@@ -4580,8 +4598,10 @@ pub(crate) fn node_root_is_unmaterialized_sentinel_with_dispatch(
 /// [`node_root_is_unmaterialized_sentinel_with_dispatch`], whose whole-raise
 /// `None` arm deliberately answers `false` for the cache-admission gate.
 #[must_use]
-pub(crate) fn node_raise_misses_or_root_sentinel_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_raise_misses_or_root_sentinel_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> bool {
     shape_engine::project_node_root_sentinel(dispatch, node).unwrap_or(true)
@@ -4597,8 +4617,10 @@ pub(crate) fn node_raise_misses_or_root_sentinel_with_dispatch(
 /// the root-only projection collapses to its operator arm). A whole-raise `None`
 /// is `false`.
 #[must_use]
-pub(crate) fn node_root_is_published_operator_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_root_is_published_operator_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> bool {
     shape_engine::project_node_root_is_published_operator(dispatch, node).unwrap_or(false)
@@ -4624,8 +4646,10 @@ pub(crate) fn node_root_is_published_operator_with_dispatch(
 // (`Some(false)`). The parity suite additionally exercises it as the
 // node-vs-`TypeExpr` equivalence proof.
 #[must_use]
-pub(crate) fn node_contains_semantic_miss_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_contains_semantic_miss_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<bool> {
     shape_engine::project_node_contains_semantic_miss(dispatch, node)
@@ -4637,8 +4661,10 @@ pub(crate) fn node_contains_semantic_miss_with_dispatch(
 /// `typeof <value>` dependency paths. `None` when the whole raise is
 /// `None`. The terminal splice pipeline decides on this — it materializes
 /// at most once afterwards, solely for display.
-pub(crate) fn node_declaration_facts_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_declaration_facts_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<(
     bool,
@@ -4653,8 +4679,10 @@ pub(crate) fn node_declaration_facts_with_dispatch(
 /// interner). A site needing both reads this instead of folding the node twice.
 /// DISPATCH-taking primary. `None` when the whole raise is `None`.
 #[must_use]
-pub(crate) fn node_raised_shape_for_eq_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn node_raised_shape_for_eq_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     expr: &TypeExpr,
 ) -> Option<NodeShapeEq> {
@@ -4675,8 +4703,8 @@ pub(crate) fn node_raised_shape_for_eq_with_dispatch(
 // element-wise inside a loop, so taking the caller's dispatch keeps the whole
 // probe on one dispatch instead of minting one per element.
 #[must_use]
-pub(crate) fn raised_shape_eq_nodes_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn raised_shape_eq_nodes_with_dispatch<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     a: SemanticNodeId,
     b: SemanticNodeId,
 ) -> Option<bool> {
@@ -4701,8 +4729,10 @@ pub(crate) fn raised_shape_eq_nodes_with_dispatch(
     )
 )]
 #[must_use]
-pub(crate) fn raised_shape_eq_node_type_expr_with_dispatch(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn raised_shape_eq_node_type_expr_with_dispatch<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     expr: &TypeExpr,
 ) -> Option<bool> {

@@ -9,7 +9,7 @@
 
 use super::*;
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// The ONE shared binder-frame constructor for declared type-parameter
     /// lists — decl headers (typed-IR bounds lowered inline), function /
     /// constructor signature generics, free authored `TypeParameter`

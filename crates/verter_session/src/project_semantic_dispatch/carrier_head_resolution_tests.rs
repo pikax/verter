@@ -75,7 +75,10 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
 
 /// The `NodeScopeId::File` for `canonical`, sourced from the host's live
 /// shallow state (so the `whole_hash` matches the eager lowering path's scope).
-pub(super) fn file_scope(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str) -> NodeScopeId {
+pub(super) fn file_scope(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+) -> NodeScopeId {
     file_scope_in_owner(
         dispatch,
         canonical,
@@ -84,7 +87,7 @@ pub(super) fn file_scope(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str
 }
 
 fn file_scope_in_owner(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
 ) -> NodeScopeId {
@@ -103,7 +106,7 @@ fn file_scope_in_owner(
 /// Construct a `BareRef(name, scope, args)` carrier node, where `args` are the
 /// interned primitive type arguments (`Foo<string, …>`).
 pub(super) fn bare_ref_carrier(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     scope: NodeScopeId,
     args: &[PrimitiveKind],
@@ -129,7 +132,7 @@ pub(super) fn bare_ref_carrier(
 /// node-level scope — the structural lowerer interns it with the lowering
 /// file's scope, so the head resolver reads `node_scope` to recover the owner.
 pub(super) fn import_type_carrier(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     specifier: &str,
     qualifier: &[&str],
     args: &[PrimitiveKind],
@@ -162,7 +165,7 @@ pub(super) fn import_type_carrier(
 /// Drive a carrier node through the dispatch as the base of an empty-path
 /// `ProjectPath` query in `mode`, returning the resolved subject node.
 fn resolve_subject(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     carrier: SemanticNodeId,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
@@ -186,7 +189,7 @@ fn resolve_subject(
 /// uses in production. Returns the eager-lowered node (NOT pre-projected), so
 /// the caller compares at the SAME stage as the carrier-resolved subject.
 fn eager_lower_subject(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     expr: &TypeExpr,
     canonical: &str,
     mode: ProjectionMode,
@@ -219,7 +222,7 @@ fn eager_lower_subject(
 /// the carrier-subject path runs — so the two entry points are compared at the
 /// SAME projection stage (path-independence).
 fn eager_resolved(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     expr: &TypeExpr,
     canonical: &str,
     mode: ProjectionMode,
@@ -228,28 +231,40 @@ fn eager_resolved(
     resolve_subject(dispatch, lowered, mode)
 }
 
-fn is_opaque(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+fn is_opaque(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> bool {
     matches!(
         dispatch.graph().node_data(node).as_deref(),
         Some(SemanticNodeData::Opaque(_))
     )
 }
 
-fn is_bare_ref(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+fn is_bare_ref(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> bool {
     matches!(
         dispatch.graph().node_data(node).as_deref(),
         Some(SemanticNodeData::BareRef(_))
     )
 }
 
-fn is_import_type(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+fn is_import_type(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> bool {
     matches!(
         dispatch.graph().node_data(node).as_deref(),
         Some(SemanticNodeData::ImportType(_))
     )
 }
 
-fn is_decl_ref(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+fn is_decl_ref(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> bool {
     matches!(
         dispatch.graph().node_data(node).as_deref(),
         Some(SemanticNodeData::DeclRef { .. })
@@ -262,7 +277,7 @@ fn is_decl_ref(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> 
 /// (Expanded) mode — which routes a resolved head through `Instantiate` to the
 /// Object body — so this drives the subject in Expanded and reads the Object.
 fn first_member_primitive(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: SemanticNodeId,
 ) -> Option<(String, PrimitiveKind)> {
     let expanded = resolve_subject(dispatch, subject, ProjectionMode::Expanded);
@@ -272,7 +287,7 @@ fn first_member_primitive(
 /// `Some((member_name, primitive))` for the first member of `node` IF `node` is
 /// directly an Object with a primitive first-member value. No re-projection.
 fn first_member_primitive_of_object(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<(String, PrimitiveKind)> {
     let data = dispatch.graph().node_data(node)?;
@@ -1059,7 +1074,7 @@ fn carrier_head_rehydrates_name_resolution_for_import_binding() {
 /// `canonical`'s primary decl) — exercises the `Ref` arm's fast-path — then
 /// projected through the SAME empty-path `ProjectPath` for stage-parity.
 fn eager_resolved_with_name_resolution(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     expr: &TypeExpr,
     canonical: &str,
     mode: ProjectionMode,

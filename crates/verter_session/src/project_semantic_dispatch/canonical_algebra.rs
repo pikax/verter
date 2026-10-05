@@ -4069,7 +4069,7 @@ fn render_domain(walk: &mut TruthinessWalk<'_>, node: SemanticNodeId) -> RenderD
     render
 }
 
-impl super::ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
     /// The `execute(ClassifyTruthinessDomain)` producer — the family
     /// cold-build arm. SOLE constructor of the truthiness-domain value.
     /// A domain with any `Undecided` bucket, or a walk whose evidence is

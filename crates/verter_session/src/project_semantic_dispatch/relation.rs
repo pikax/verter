@@ -73,6 +73,7 @@
 //! "Reverse-homomorphic mapped recovery".
 
 use std::sync::Arc;
+use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -476,7 +477,7 @@ pub(super) struct RelationDischargeOutcome {
     pub(super) flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet,
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     // ──────────────────────────────────────────────────────────────────
     // The sole relation authority
     // ──────────────────────────────────────────────────────────────────
@@ -12574,7 +12575,9 @@ trait RelationDemandDriver {
     fn relation_strict_config(&self) -> StrictFamilyConfig;
     fn reduce_merged_declaration(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId;
 }
-impl RelationDemandDriver for ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
+    for ProjectSemanticDispatch<'_, C>
+{
     fn apparent_source_step(
         &self,
         source: SemanticNodeId,
@@ -12958,8 +12961,10 @@ struct RelationCx<'a, D: RelationDemandDriver> {
     driver: &'a D,
     arena: super::arena_ops::ArenaOps<'a>,
 }
-impl<'a> RelationCx<'a, ProjectSemanticDispatch<'a>> {
-    fn new(driver: &'a ProjectSemanticDispatch<'a>) -> Self {
+impl<'a, C: crate::resolver_core::ResolverCapabilities>
+    RelationCx<'a, ProjectSemanticDispatch<'a, C>>
+{
+    fn new(driver: &'a ProjectSemanticDispatch<'a, C>) -> Self {
         Self {
             driver,
             arena: super::arena_ops::ArenaOps::new(driver.graph()),
@@ -14954,9 +14959,12 @@ pub(crate) mod reverse_ownership_tests {
         })
     }
 
-    fn require_relation_result_signature<'dispatch>(
+    fn require_relation_result_signature<
+        'dispatch,
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
         _pass: fn(
-            &ProjectSemanticDispatch<'dispatch>,
+            &ProjectSemanticDispatch<'dispatch, C>,
             SemanticNodeId,
             &ReverseHomomorphicSpec,
             &mut Vec<InferBinding>,
@@ -14977,7 +14985,9 @@ pub(crate) mod reverse_ownership_tests {
         // This private function item is nameable only from the relation
         // authority's own module tree, and its sole output is the closed
         // reducer lattice rather than a standalone binding map.
-        require_relation_result_signature(ProjectSemanticDispatch::relate_reverse_homomorphic);
+        require_relation_result_signature(
+            ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relate_reverse_homomorphic,
+        );
         classify_relation_result_exhaustively(RelationResult::Unknown);
 
         let active_param = SemanticNodeId(304);

@@ -68,7 +68,7 @@ fn production_relation_admission_is_semantic_store_owned() {
     assert!(
         store_source.lines().any(|line| line
             .trim_start()
-            .starts_with("pub(crate) fn publish_scc_members_fenced(")),
+            .starts_with("pub(crate) fn publish_scc_members_fenced<")),
         "the production relation write must be crate-private"
     );
 }
@@ -2400,7 +2400,8 @@ fn invalidate_all_clears_id_keyed_semantic_caches() {
 #[test]
 fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     let host = ctx_host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        &host;
     let store = SemanticGraphStore::new();
     let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2462,7 +2463,8 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     use crate::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        &host;
     let store = SemanticGraphStore::new();
     let rctx = RequestContext::new(7781, Arc::from("/w/modeless_counter.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&rctx));
@@ -2518,7 +2520,8 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
     use crate::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        &host;
     let store = SemanticGraphStore::new();
     let rctx = RequestContext::new(7783, Arc::from("/w/modeless_miss.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&rctx));
@@ -2611,7 +2614,8 @@ fn relation_modeless_probe_rejects_entry_after_generation_bump() {
     use verter_session_query::facts::fact_cache::FactVersionRef;
 
     let host = ctx_host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        &host;
     let store = SemanticGraphStore::new();
     let rctx = RequestContext::new(7784, Arc::from("/w/modeless_stale.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&rctx));
@@ -2921,7 +2925,9 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
     let publisher_store = Arc::clone(&store);
     let publisher = thread::spawn(move || {
         publisher_store.publish_scc_members_fenced(
-            None,
+            None::<
+                &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+            >,
             &crate::semantic_query_memo::SccRootWitness::relate(root_key, root_admission_seq),
             &carrier,
             &roots,
@@ -3078,7 +3084,8 @@ fn relation_family_cap_evicts_invalid_candidate_before_valid_lru_front() {
 #[test]
 fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let host = ctx_host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        &host;
     let store = SemanticGraphStore::new();
     let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3139,7 +3146,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         .begin_inline_relation_flight(&refuse_key)
         .expect("the refused member claims its family flight");
     let published = store.publish_scc_members_fenced(
-        None,
+        None::<&dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>>,
         &root_witness,
         &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         &Arc::from(Vec::<Arc<str>>::new()),
@@ -3161,7 +3168,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
         .begin_inline_relation_flight(&refuse_key)
         .expect("the refused member re-claims its family flight");
     let published = store.publish_scc_members_fenced(
-        None,
+        None::<&dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>>,
         &root_witness,
         &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         &Arc::from(Vec::<Arc<str>>::new()),
@@ -7181,7 +7188,9 @@ fn joiner_of_cache_suppress_winner_inherits_carrier_and_suppression() {
     let winner_key = key.clone();
     let winner_fact_for_build = winner_fact.clone();
     let winner = thread::spawn(move || {
-        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        let host: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = winner_host.as_ref();
         winner_store.execute_cooperative(
             host,
             winner_key,
@@ -7440,7 +7449,9 @@ fn cross_view_joiner_forks_when_winner_carrier_fails_follower_validation() {
     let winner_key = key.clone();
     let winner_fact_for_build = winner_fact.clone();
     let winner = thread::spawn(move || {
-        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        let host: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = winner_host.as_ref();
         winner_store.execute_cooperative(
             host,
             winner_key,
@@ -7658,7 +7669,9 @@ fn same_view_joiner_still_coalesces_onto_winner() {
     let winner_node = winner_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let winner_fact_for_build = winner_fact.clone();
     let winner = thread::spawn(move || {
-        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        let host: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = winner_host.as_ref();
         winner_store.execute_cooperative(
             host,
             winner_key,
@@ -7699,7 +7712,9 @@ fn same_view_joiner_still_coalesces_onto_winner() {
     let follower_cold_flag = Arc::clone(&follower_cold_ran);
     let follower = thread::spawn(move || {
         // SAME view as the winner — the plain base host context.
-        let host: &dyn crate::resolver_core::ResolverContext = follower_host.as_ref();
+        let host: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = follower_host.as_ref();
         let recompute_id =
             follower_store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let cache_read = follower_store.execute_cooperative(
@@ -7840,7 +7855,9 @@ fn cross_view_joiner_of_suppressed_overflow_winner_forks() {
     let winner_host = Arc::clone(&host);
     let winner_key = key.clone();
     let winner = thread::spawn(move || {
-        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        let host: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = winner_host.as_ref();
         winner_store.execute_cooperative(
             host,
             winner_key,
@@ -8115,7 +8132,9 @@ fn cross_view_joiner_of_suppressed_unrootable_winner_forks() {
     let winner_key = key.clone();
     let winner_dep_fact_for_build = winner_dep_fact.clone();
     let winner = thread::spawn(move || {
-        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        let host: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = winner_host.as_ref();
         winner_store.execute_cooperative(
             host,
             winner_key,
@@ -8408,7 +8427,9 @@ fn cross_view_joiner_of_nonsuppressed_miss_winner_without_self_root_forks() {
     let winner_key = key.clone();
     let winner_dep_fact_for_build = winner_dep_fact.clone();
     let winner = thread::spawn(move || {
-        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        let host: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = winner_host.as_ref();
         winner_store.execute_cooperative(
             host,
             winner_key,

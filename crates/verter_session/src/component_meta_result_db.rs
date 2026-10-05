@@ -289,8 +289,14 @@ impl<P> ComponentMetaResultDb<P> {
     #[cfg(test)]
     pub(crate) fn fixture<'a>(
         &'a self,
-        facts: &'a dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> crate::project_semantic_dispatch::memo::MemoPublish<'a, Self> {
+        facts: &'a dyn crate::resolver_core::fact_validation_port::LiveFactValidation<
+            Clocks = crate::resolver_store::WorkspaceSlotClocks,
+        >,
+    ) -> crate::project_semantic_dispatch::memo::MemoPublish<
+        'a,
+        Self,
+        crate::resolver_store::WorkspaceSlotClocks,
+    > {
         crate::project_semantic_dispatch::memo::MemoPublish::for_test(self, facts)
     }
 
@@ -714,7 +720,9 @@ mod tests {
             .find("    pub(crate) fn compute_and_admit_with_entry")
             .expect("the selected MemoPublish must own cold trace/finalise/admit");
         let compute_end = driver_source[compute_start..]
-            .find("\nimpl<P: Send + Sync> MemoPublish")
+            .find(
+                "\nimpl<P: Send + Sync, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>\n    MemoPublish",
+            )
             .map(|offset| compute_start + offset)
             .expect("the result driver must have a bounded implementation");
         let compute_body = &driver_source[compute_start..compute_end];

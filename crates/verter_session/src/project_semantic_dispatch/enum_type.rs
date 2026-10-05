@@ -37,7 +37,7 @@ pub(super) struct EnumDeclaration {
     pub(super) members: Arc<[EnumMemberEntry]>,
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The enum the VALUE declaration `symbol` in `canonical`'s `owner`
     /// scope declares, following the export-target chase a `typeof`
     /// reference takes, so a re-exported enum is its declaring file's.

@@ -88,8 +88,11 @@ impl NativePropProjectionCache {
 /// This projection owns no runtime DTO and performs one graph-only shallow
 /// demand. Member display rendering is publication-only.
 pub(crate) fn named_native_props_outcome(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     root_canonical: &str,
     root_owner: verter_type_expr::TopLevelOwnerId,
     root_name: &str,

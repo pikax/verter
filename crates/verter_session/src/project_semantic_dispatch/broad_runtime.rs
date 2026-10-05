@@ -102,7 +102,7 @@ impl ObservedRuntimePartial {
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     pub(super) fn build_classify_broad_runtime(
         &self,
         locator: &BroadRuntimeSubjectLocator,

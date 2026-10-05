@@ -46,8 +46,8 @@ pub(super) struct QueryDelivery {
 
 /// The program instantiations run on: the dispatch they evaluate through
 /// and the task that owns every producer the drive claims.
-pub(super) struct QueryProgram<'p, 'a> {
-    dispatch: &'p ProjectSemanticDispatch<'a>,
+pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: &'p ProjectSemanticDispatch<'a, C>,
     task: ExecutionTask,
     /// Claims that continue after an outside producer went away.
     retries: FxHashMap<SemanticQueryKey, ClaimAttempt>,
@@ -58,16 +58,16 @@ pub(super) struct QueryProgram<'p, 'a> {
 }
 
 /// A suspended semantic computation.
-pub(super) enum QueryFrame<'p, 'a> {
-    Instantiate(Box<InstantiateFrame<'p, 'a>>),
+pub(super) enum QueryFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
+    Instantiate(Box<InstantiateFrame<'p, 'a, C>>),
 }
 
 /// An instantiation's build between its steps.
-pub(super) struct InstantiateFrame<'p, 'a> {
-    dispatch: &'p ProjectSemanticDispatch<'a>,
+pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: &'p ProjectSemanticDispatch<'a, C>,
     key: SemanticQueryKey,
     lease: Option<ProducerLease<'p>>,
-    tracer: Option<crate::fact_signature_helpers::StepwiseFactTracer<'p>>,
+    tracer: Option<crate::fact_signature_helpers::StepwiseFactTracer<'p, C::Clocks>>,
     taint: BuildLocalTaint,
     build: Option<Box<InstantiateBuild>>,
     /// The declaration and arguments the build entered as active, until it
@@ -81,7 +81,7 @@ pub(super) struct InstantiateFrame<'p, 'a> {
     depth: u32,
 }
 
-impl Drop for InstantiateFrame<'_, '_> {
+impl<C: crate::resolver_core::ResolverCapabilities> Drop for InstantiateFrame<'_, '_, C> {
     fn drop(&mut self) {
         // A build stopped between its steps leaves the declaration it
         // entered; its lease aborts its flight on drop.
@@ -98,9 +98,9 @@ pub(super) struct PendingClaim<'p> {
     attempt: ClaimAttempt,
 }
 
-impl<'p, 'a> Program for QueryProgram<'p, 'a> {
+impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryProgram<'p, 'a, C> {
     type Demand = SemanticQueryKey;
-    type Frame = QueryFrame<'p, 'a>;
+    type Frame = QueryFrame<'p, 'a, C>;
     type Value = QueryDelivery;
     type Failure = ();
     type Role = ();
@@ -215,7 +215,7 @@ impl<'p, 'a> Program for QueryProgram<'p, 'a> {
     }
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Whether `key` runs on the continuation runtime when it is evaluated
     /// outside any drive: an instantiation read for its value alone.
     pub(super) fn drives_on_the_runtime(&self, key: &SemanticQueryKey) -> bool {
@@ -403,9 +403,9 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// build needs another instantiation or completes.
     fn step_instantiate_frame<'p>(
         &self,
-        frame: &mut InstantiateFrame<'p, 'a>,
-        delivery: Option<Outcome<QueryProgram<'p, 'a>>>,
-    ) -> EvalStep<QueryProgram<'p, 'a>>
+        frame: &mut InstantiateFrame<'p, 'a, C>,
+        delivery: Option<Outcome<QueryProgram<'p, 'a, C>>>,
+    ) -> EvalStep<QueryProgram<'p, 'a, C>>
     where
         'a: 'p,
     {
@@ -494,7 +494,7 @@ impl<'a> ProjectSemanticDispatch<'a> {
     /// tracer verdict fold into its output first.
     fn complete_instantiate_frame(
         &self,
-        frame: &mut InstantiateFrame<'_, 'a>,
+        frame: &mut InstantiateFrame<'_, 'a, C>,
         output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
     ) -> QueryDelivery {
         let finalise = frame

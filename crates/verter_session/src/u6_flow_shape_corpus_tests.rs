@@ -779,7 +779,7 @@ pub(crate) fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
 /// rails: only a closed `Object` surface has named members; a spread
 /// PROGRAM is a construction plan and reports none.
 fn member_shapes(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: crate::semantic_query::SemanticNodeId,
 ) -> Vec<(String, NodeShape)> {
     match dispatch.graph().node_data(node).as_deref() {

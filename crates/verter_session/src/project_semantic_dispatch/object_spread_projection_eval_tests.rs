@@ -126,7 +126,7 @@ fn context(
 }
 
 fn project(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     program: SemanticNodeId,
     selector: ObjectProjectionSelector,
     policy: ExactOptionalPropertyPolicy,
@@ -943,7 +943,7 @@ fn index_object(
 }
 
 fn relate(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     source: SemanticNodeId,
     target: SemanticNodeId,
 ) -> crate::semantic_query::RelationResult {
@@ -1520,7 +1520,7 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
 }
 
 fn relate_fresh_excess(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     source: SemanticNodeId,
     target: SemanticNodeId,
 ) -> crate::project_semantic_dispatch::dispatch_txn::RelationStep {
@@ -2758,7 +2758,7 @@ fn exact_optional_property_types_threads_into_consumer_projections() {
 }
 
 fn empty_path_shallow_surface(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     base: SemanticNodeId,
 ) -> crate::semantic_query::SurfaceView {

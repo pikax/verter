@@ -45,7 +45,7 @@ pub(crate) fn project_props(
         return Vec::new();
     }
 
-    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
     // Resolve the payload + surface through the publication-authority token
     // API, enumerate candidates, and ADMIT each under the cursor. Admission
     // applies the public-visibility filter, the derived-kind/cursor match, the

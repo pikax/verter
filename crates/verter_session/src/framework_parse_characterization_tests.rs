@@ -636,7 +636,7 @@ fn eval_env_reuses_indexed_ready_eval_source_without_recatalog() {
         .expect("analysis after IndexedReady");
     let before = crate::parse::catalog_eval_source_call_count();
     let from_captured = VerterHost::clone_owner_eval_source_arc(
-        &host as &dyn ResolverContext,
+        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         "EvalEnv.vue",
         Some(&indexed.eval_source),
     )
@@ -645,19 +645,22 @@ fn eval_env_reuses_indexed_ready_eval_source_without_recatalog() {
         Arc::ptr_eq(&from_captured, &indexed.eval_source),
         "captured eval-env compute must clone IndexedReady.eval_source, not to_string"
     );
-    let from_fallthrough =
-        VerterHost::clone_owner_eval_source_arc(&host as &dyn ResolverContext, "EvalEnv.vue", None)
-            .expect("fallthrough clones IndexedReady");
+    let from_fallthrough = VerterHost::clone_owner_eval_source_arc(
+        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        "EvalEnv.vue",
+        None,
+    )
+    .expect("fallthrough clones IndexedReady");
     assert!(
         Arc::ptr_eq(&from_fallthrough, &indexed.eval_source),
         "uncaptured eval-env compute must clone IndexedReady.eval_source, not recatalog or to_string"
     );
 
     let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-        &host as &dyn ResolverContext,
+        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     );
     let computed = host.compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
-        &host as &dyn ResolverContext,
+        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         &fixture_dispatch_0,
         "EvalEnv.vue",
         &snapshot,

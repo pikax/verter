@@ -37,7 +37,10 @@ pub(crate) struct FlowSliceDriver<'a> {
 }
 
 impl<'a> FlowSliceDriver<'a> {
-    pub(crate) fn new(stores: &'a FlowSliceStores, ctx: &'a dyn ResolverContext) -> Self {
+    pub(crate) fn new<C: crate::resolver_core::ResolverCapabilities>(
+        stores: &'a FlowSliceStores,
+        ctx: &'a dyn ResolverContext<C>,
+    ) -> Self {
         Self::from_ports(stores, ctx, ctx)
     }
     pub(crate) fn from_ports(

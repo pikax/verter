@@ -95,7 +95,7 @@ pub(super) enum GlobalWrapper {
     Unsettled,
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The global wrapper interface `name` (`String`, `Number`, `Array`, …)
     /// instantiated with `args` — the apparent type of a primitive, a
     /// literal, an array or a tuple — as `canonical`'s project declares it,
@@ -693,7 +693,7 @@ impl ProjectSemanticDispatch<'_> {
 #[path = "apparent_type_tests.rs"]
 mod apparent_type_tests;
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Whether `key` is a `SignaturesOfType` read whose subject takes its
     /// signatures from a global wrapper ([`Self::apparent_wrapper_of`]).
     pub(super) fn key_reads_apparent_signatures(&self, key: &SemanticQueryKey) -> bool {

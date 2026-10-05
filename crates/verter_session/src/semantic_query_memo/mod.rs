@@ -1850,10 +1850,10 @@ impl SemanticGraphStore {
     /// miss; from the caller's perspective the entry is unavailable
     /// either way.
     #[must_use]
-    pub(crate) fn get_validated(
+    pub(crate) fn get_validated<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         key: &SemanticQueryKey,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
     ) -> Option<CacheRead<QueryResult<SemanticNodeId>>> {
         let (family, slot) = family_and_slot(key);
         // Same formula as `requested_point_for_key`, reusing the
@@ -1870,10 +1870,10 @@ impl SemanticGraphStore {
     /// re-projecting the key. Used by the cooperative slow path's
     /// step-1 warm re-read.
     #[must_use]
-    fn get_validated_value_prepared(
+    fn get_validated_value_prepared<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         prepared: &PreparedKeyHandle,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         capture: &mut producer::ReadCapture<'_>,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
         let (operand_evidence, deferred_carrier) = capture.parts();
@@ -1900,12 +1900,12 @@ impl SemanticGraphStore {
     /// so the probe owns the hit count. Counting the probe miss too
     /// would record two misses per logical cold query, breaking the
     /// one-miss contract.
-    fn get_validated_value_impl(
+    fn get_validated_value_impl<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         family: &FamilyKey,
         slot: ModeSlot,
         requested: &crate::semantic_query::demand::MaterializedPoint,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         operand_evidence: Option<
             &mut Option<crate::semantic_query::operand::SemanticOperandEvidence>,
         >,
@@ -2041,9 +2041,9 @@ impl SemanticGraphStore {
     /// constant-time `Vec` reorder, no fact-rail work. Mirrors the
     /// relation memo's `get_relation`.
     #[inline]
-    fn try_warm_value_hit_fast_path(
+    fn try_warm_value_hit_fast_path<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         prepared: &PreparedKeyHandle,
         capture: &mut producer::ReadCapture<'_>,
     ) -> Option<CacheRead<QueryResult<SemanticQueryValue>>> {
@@ -2247,9 +2247,9 @@ impl SemanticGraphStore {
     /// was raced by a project-generation reset, so its build interned
     /// against a stale id epoch and its narrower backfills must be
     /// skipped too — see [`Self::invalidate_all`]'s serialization docs.
-    fn warm_publish_one(
+    fn warm_publish_one<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         prepared: &PreparedKeyHandle,
         result: &QueryResult<SemanticQueryValue>,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
@@ -2470,9 +2470,9 @@ impl SemanticGraphStore {
     /// `Parse(...)` / `ResolveImports(...)` / `RouteSurface(...)`
     /// observations — never a fence-only reconstruction, which drops
     /// path-precise facts.
-    fn warm_publish_one_if_absent(
+    fn warm_publish_one_if_absent<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,

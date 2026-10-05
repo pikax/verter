@@ -12,7 +12,10 @@ use crate::semantic_query::SemanticNodeId;
 /// would drop it. The interned graph is acyclic, while the visited set dedupes
 /// shared subgraphs and permits arbitrarily deep alias chains.
 pub(crate) fn component_meta_registry_node_has_explicit_object_surface(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> bool {
     use crate::semantic_query::SemanticNodeData;

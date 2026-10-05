@@ -90,7 +90,7 @@ pub(crate) fn build_keys_union_node(
 ///   `None`.
 /// - anything else — `None`.
 fn node_root_identity(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: crate::semantic_query::SemanticNodeId,
     depth: u32,
 ) -> Option<crate::semantic_query::DeclIdentity> {
@@ -183,7 +183,7 @@ pub(crate) fn node_package_backed_object_like_root_with_fence(
 /// is set so the aggregate demotes to a fallback instead of silently ORing a
 /// partial root set.
 fn collect_node_root_identities(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: crate::semantic_query::SemanticNodeId,
     depth: u32,
     out: &mut Vec<crate::semantic_query::DeclIdentity>,
@@ -281,7 +281,10 @@ fn collect_node_root_identities(
 /// node carries resolved identities, so no name-resolution engine is
 /// needed).
 pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical_id: &str,
     node: crate::semantic_query::SemanticNodeId,
 ) -> (bool, crate::semantic_query::DepSignature) {

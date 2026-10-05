@@ -18,7 +18,7 @@ struct TemplateParts {
     holes: Vec<SemanticNodeId>,
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The verdict of `source` below the template literal pattern
     /// `target` — `Some(true)` / `Some(false)` when the checker's rule
     /// decides it, `None` when a slice's relation to its hole is undecided

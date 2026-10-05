@@ -104,7 +104,7 @@ pub(crate) fn reduce_published_field_types(
 #[allow(clippy::too_many_arguments)]
 fn finalize_published_prop_source(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     transit_ctx: crate::semantic_query::ProjectionReductionContext,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,

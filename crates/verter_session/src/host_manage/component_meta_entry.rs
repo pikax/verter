@@ -350,7 +350,9 @@ impl VerterHost {
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &host_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(cold) = self.component_meta_via_view_cold(
             canonical.as_str(),
@@ -514,7 +516,9 @@ impl VerterHost {
                 fixed.cold_seed(),
                 overlay,
             );
-            let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+            let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+                crate::resolver_core::HostCapabilities,
+            > = &host_ctx;
             let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             let seed = with_resolution.then(|| {
                 crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
@@ -582,7 +586,9 @@ impl VerterHost {
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &session_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(ComponentMetaColdResult {
             resolved,
@@ -819,7 +825,9 @@ impl VerterHost {
             fixed.cold_seed(),
             overlay,
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &session_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(cold) = self.component_meta_via_view_cold(
             canonical.as_str(),
@@ -864,8 +872,13 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         seed_fence: &ColdSeedFence,
         validated_at_generation: u64,
     ) -> Result<Option<ComponentMetaColdResult>, crate::semantic_query::ExecutionAbort> {
@@ -1517,7 +1530,9 @@ mod component_meta_entry_tests;
 /// cancelled, in which case the missing value is the abort and nothing is
 /// published.
 pub(super) fn absent_unless_aborted<T>(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
 ) -> Result<Option<T>, crate::semantic_query::ExecutionAbort> {
     if ctx.is_cancelled() {
         Err(crate::semantic_query::ExecutionAbort::Cancelled)

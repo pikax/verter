@@ -91,8 +91,8 @@ use std::sync::Arc;
 /// crate::project_semantic_dispatch::ProjectSemanticDispatch::normalize_node_for_structural_fact_demand
 /// [`stable_member_carrier_partiality`]:
 /// crate::typeinfo::surface_resolution::stable_member_carrier_partiality
-pub(crate) fn realize_callable_member(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn realize_callable_member<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     node: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
 ) -> crate::typeinfo::surface_resolution::SurfaceResolution<crate::semantic_query::SemanticNodeId> {
@@ -104,8 +104,8 @@ pub(crate) fn realize_callable_member(
 /// normalization is bounded by the dispatch-owned demand itself.
 const CALLABLE_COMPOSITE_DEPTH_FUSE: u32 = 32;
 
-fn realize_callable_member_at(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn realize_callable_member_at<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     node: crate::semantic_query::SemanticNodeId,
     context: crate::semantic_query::ProjectionReductionContext,
     composite_depth: u32,
@@ -347,8 +347,11 @@ fn route_outer_utility_is_shadowed(
 /// fully-expanded surface (no deferred `KeyOf` / `IndexedAccess` /
 /// `Mapped` / `TypeOf` / `Conditional` shells).
 pub(crate) fn project_expr_class_a_via_dispatch(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
 ) -> Option<verter_type_expr::TypeExpr> {
@@ -372,8 +375,11 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// the registry member-path / refine consumers compute their reject/accept facts
 /// off the projected node WITHOUT re-lowering a materialised leaf.
 pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
-    ctx: &'ctx dyn ResolverContext,
-    dispatch: &'ctx crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx>,
+    ctx: &'ctx dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &'ctx crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        'ctx,
+        crate::resolver_core::HostCapabilities,
+    >,
     mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
@@ -500,8 +506,8 @@ pub(crate) fn decompose_indexed_access_chain(
 /// indexed-access decomposes to `(base, [Index("ui"), Index("header")])`
 /// WITHOUT lowering the base a second time (it IS the same handle). A
 /// non-indexed carrier decomposes to `(node, [])`.
-pub(crate) fn decompose_indexed_access_chain_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     node: crate::semantic_query::SemanticNodeId,
 ) -> (
     crate::semantic_query::SemanticNodeId,
@@ -635,8 +641,8 @@ pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
 ///   the inline-shadow class (an inline-authored member colliding with a
 ///   same-named declared member in the same file can never adopt the wrong
 ///   slot).
-pub(crate) fn arg_preserving_member_use_site_slot(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn arg_preserving_member_use_site_slot<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member_key: &crate::semantic_query::PropertyKey,
     declaration_origin: Option<&str>,
     value_node: crate::semantic_query::SemanticNodeId,
@@ -705,8 +711,8 @@ pub(crate) fn arg_preserving_member_use_site_slot(
 /// authored type arguments that head-resolves to one through the shared
 /// carrier-preserving normalization — name-to-declaration routing only,
 /// never body expansion). `None` for every other shape.
-fn resolved_instantiation_head(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn resolved_instantiation_head<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     node: crate::semantic_query::SemanticNodeId,
 ) -> Option<(
     crate::semantic_query::DeclIdentity,

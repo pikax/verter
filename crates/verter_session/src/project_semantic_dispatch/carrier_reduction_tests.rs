@@ -64,7 +64,7 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 /// carrier rooted in `canonical`. The single instantiation argument is the
 /// interned primitive `arg`.
 fn typeof_carrier_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     name: &str,
     path: &[&str],
@@ -98,7 +98,7 @@ fn typeof_carrier_node(
 /// param-0 primitive is `None` when param 0 is not a primitive (e.g. it is a
 /// surviving free `TypeParam`, which is the pre-reduction generic shape).
 fn function_shape(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<(usize, Option<PrimitiveName>)> {
     let graph = dispatch.graph();
@@ -131,7 +131,10 @@ fn primitive_name_of(kind: PrimitiveKind) -> PrimitiveName {
     }
 }
 
-fn is_opaque_miss(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+fn is_opaque_miss(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> bool {
     matches!(
         dispatch.graph().node_data(node).as_deref(),
         Some(SemanticNodeData::Opaque(_))

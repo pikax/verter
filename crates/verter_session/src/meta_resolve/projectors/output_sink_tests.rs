@@ -78,7 +78,7 @@ fn input_side_no_poison_gate_reads_typed_whole_tree_miss_fact() {
         .unwrap();
     let host = project.host();
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let ctx: &dyn ResolverContext = host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host;
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let transit =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);

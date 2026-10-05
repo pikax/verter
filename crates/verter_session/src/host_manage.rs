@@ -392,7 +392,9 @@ impl FallthroughRequestHost for VerterHost {
     fn with_cacheability_context<R>(
         &self,
         fixed_store_view: Option<(&Self::View, u64, bool)>,
-        operation: impl FnOnce(&dyn crate::resolver_core::ResolverContext) -> R,
+        operation: impl FnOnce(
+            &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ) -> R,
     ) -> R {
         let Some((view, _captured_fingerprint, is_current)) = fixed_store_view else {
             return self.with_base_resolver_context(operation);
@@ -524,7 +526,9 @@ impl FallthroughRequestHost for VerterHost {
         .into_cold_seed_view();
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &host_ctx;
         VerterHost::compute_fallthrough_surface_uncached(
             self,
             canonical_id,
@@ -535,12 +539,12 @@ impl FallthroughRequestHost for VerterHost {
         )
     }
 
-    fn store_fallthrough_result(
+    fn store_fallthrough_result<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &Self::Resolution,
-        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_, W>,
     ) {
         self.cache_fallthrough_result(canonical_id, prop_type_overrides, result, admission);
     }
@@ -575,9 +579,14 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// Production callers (`get_component_meta` / `..._via_view` /
     /// `..._with_resolution`) supply a real request-bound ctx; tests /
     /// off-path callers go through `with_bare_host_ctx_for_test`.
-    pub(in crate::host_manage) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
+    pub(in crate::host_manage) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     pub(in crate::host_manage) dispatch:
-        &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
+        &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            'a,
+            crate::resolver_core::HostCapabilities,
+        >,
 }
 
 #[cfg(test)]

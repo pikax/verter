@@ -8,6 +8,16 @@ use verter_session_query::facts::fact_cache::{
 };
 use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
+/// Samples the live aggregate clocks a fact basis composes. The clock source
+/// type is concrete per host, so a live sample dispatches statically.
+pub trait LiveFactValidation: FactValidation {
+    /// The workspace clock source a live aggregate sample reads.
+    type Clocks: verter_session_query::facts::clocks::WorkspaceClocks + Clone;
+    fn aggregate_clock_reader(
+        &self,
+    ) -> verter_session_query::facts::clocks::AggregateClockReader<Self::Clocks>;
+}
+
 pub trait FactValidation {
     fn current_external_supersession_fingerprint(&self) -> u64;
     fn current_project_generation(&self) -> u64;
@@ -26,7 +36,6 @@ pub trait FactValidation {
         crate::fact_signature_helpers::StructuralCarrierReadSet,
         crate::cache_runtime::NonAdmissionReason,
     >;
-    fn aggregate_clock_reader(&self) -> verter_session_query::facts::clocks::AggregateClockReader;
     fn record_signature_overflow(&self);
     #[cfg(test)]
     fn tracer_forcing(&self) -> (bool, usize);

@@ -1,6 +1,7 @@
 //! Ordered call/construct applicability executor.
 
 use std::sync::Arc;
+use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use rustc_hash::FxHashMap;
 
@@ -166,7 +167,7 @@ enum CandidateVerdict {
     Degraded(ResolveCallFailure),
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// `value` with its polymorphic `this` bound to the call's `receiver`,
     /// when the call has one.
     fn receiver_bound_return(
@@ -3915,7 +3916,7 @@ enum RestShape {
     Unresolved,
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Classify one rest parameter's type. Reference carriers and alias
     /// chains of ANY authored depth resolve through the shared cycle-safe
     /// structural unwrap before classification, so a named alias

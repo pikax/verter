@@ -72,7 +72,9 @@ pub(in crate::project_semantic_dispatch) trait InferenceDemandDriver {
     ) -> SemanticNodeId;
     fn nodes_provably_equal(&self, a: SemanticNodeId, b: SemanticNodeId) -> bool;
 }
-impl InferenceDemandDriver for ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> InferenceDemandDriver
+    for ProjectSemanticDispatch<'_, C>
+{
     fn call_relation(
         &self,
         source: SemanticNodeId,
@@ -173,8 +175,10 @@ pub(in crate::project_semantic_dispatch) struct InferenceTxn<'a, D: InferenceDem
     source: &'a dyn crate::resolver_core::request_ports::OwnedLowering,
     binding: binding_control::BindingControl<'a>,
 }
-impl<'b, 'a> InferenceTxn<'b, ProjectSemanticDispatch<'a>> {
-    fn new(driver: &'b ProjectSemanticDispatch<'a>) -> Self {
+impl<'b, 'a, C: crate::resolver_core::ResolverCapabilities>
+    InferenceTxn<'b, ProjectSemanticDispatch<'a, C>>
+{
+    fn new(driver: &'b ProjectSemanticDispatch<'a, C>) -> Self {
         Self {
             driver,
             arena: super::arena_ops::ArenaOps::new(driver.graph()),

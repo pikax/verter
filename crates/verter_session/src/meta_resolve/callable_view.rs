@@ -164,23 +164,26 @@ fn classify_snippet_params_arg(data: Option<&SemanticNodeData>) -> SnippetParams
 }
 
 /// A lightweight borrowed view over a callable ROOT node in the shared graph.
-pub(crate) struct CallableNodeView<'a, 'ctx> {
-    dispatch: &'a ProjectSemanticDispatch<'ctx>,
+pub(crate) struct CallableNodeView<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: &'a ProjectSemanticDispatch<'ctx, C>,
     root: SemanticNodeId,
 }
 
 /// A lightweight borrowed view over a node guaranteed to be a
 /// [`SemanticNodeData::Signature`] (the realized signature of a callable).
-pub(crate) struct SignatureNodeView<'a, 'ctx> {
-    dispatch: &'a ProjectSemanticDispatch<'ctx>,
+pub(crate) struct SignatureNodeView<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: &'a ProjectSemanticDispatch<'ctx, C>,
     /// A node guaranteed to intern as `SemanticNodeData::Signature` by
     /// construction ([`CallableNodeView::signature`] only mints this view when
     /// the realized root is a `Function`).
     function: SemanticNodeId,
 }
 
-impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
-    pub(crate) fn new(dispatch: &'a ProjectSemanticDispatch<'ctx>, root: SemanticNodeId) -> Self {
+impl<'a, 'ctx, C: crate::resolver_core::ResolverCapabilities> CallableNodeView<'a, 'ctx, C> {
+    pub(crate) fn new(
+        dispatch: &'a ProjectSemanticDispatch<'ctx, C>,
+        root: SemanticNodeId,
+    ) -> Self {
         Self { dispatch, root }
     }
 
@@ -386,7 +389,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     pub(crate) fn signature(
         &self,
         context: ProjectionReductionContext,
-    ) -> Option<SignatureNodeView<'a, 'ctx>> {
+    ) -> Option<SignatureNodeView<'a, 'ctx, C>> {
         let realized = self.single_callable_arm(context)?;
         match self.data(realized).as_deref() {
             // Call-kind by construction (`single_callable_arm` only realizes
@@ -660,7 +663,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     #[allow(dead_code)]
     pub(crate) fn first_param_object_surface(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<C>,
         context: ProjectionReductionContext,
     ) -> Option<TypeInfoSurface> {
         let signature = self.signature(context)?;
@@ -1076,7 +1079,7 @@ impl<'a, 'ctx> CallableNodeView<'a, 'ctx> {
     }
 }
 
-impl SignatureNodeView<'_, '_> {
+impl<C: crate::resolver_core::ResolverCapabilities> SignatureNodeView<'_, '_, C> {
     fn data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
         node_data_for(self.dispatch.graph(), node)
     }
@@ -1218,8 +1221,8 @@ impl SignatureNodeView<'_, '_> {
 /// operator, an ambiguous artifact) is a fault THIS enumerator cannot decide
 /// — a name could hide inside it, so completing over it would delete an
 /// authored contributor silently.
-fn unenumerable_event_name_reasons(
-    ctx: &dyn ResolverContext,
+fn unenumerable_event_name_reasons<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     data: &SemanticNodeData,
 ) -> Option<crate::typeinfo::surface_resolution::NonEmptyReasons> {
     use crate::semantic_query::PartialReason;

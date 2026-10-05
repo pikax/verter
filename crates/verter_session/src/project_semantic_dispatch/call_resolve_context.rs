@@ -6,7 +6,7 @@
 use super::super::ProjectSemanticDispatch;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The object literal argument `argument` with each member whose
     /// position in the parameter type `target` is one of the `const` type
     /// parameters `const_params` read as that member of the argument's const

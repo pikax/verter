@@ -52,7 +52,7 @@ pub(crate) fn reset_cycle_gate_compute_counter_for_test() {
     CYCLE_GATE_COMPUTE_COUNTER.with(|c| c.set(0));
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The sealed dispatch API for the materialization cycle gate.
     ///
     /// Returns the family's full [`CacheRead`]: the opaque outcome plus

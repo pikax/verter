@@ -58,7 +58,7 @@ use crate::semantic_query::{
     SurfaceView, TypeParamDecl,
 };
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     pub(super) fn substitute_semantic_type_param(
         &self,
         node: SemanticNodeId,

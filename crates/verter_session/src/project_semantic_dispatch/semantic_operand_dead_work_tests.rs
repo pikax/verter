@@ -274,11 +274,14 @@ struct MatrixRow {
     /// The selective demand. `None` = whole-surface force.
     path: Option<Arc<[PathSegment]>>,
     /// Mint the row's operand (may itself assert the mint succeeded).
-    operand: fn(&ProjectSemanticDispatch<'_>) -> SemanticOperand,
+    operand:
+        fn(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> SemanticOperand,
     /// Check the ANSWER the evaluation owed the demand.
     answer: fn(&VerterHost, &ForcedSemanticOperand),
     /// Build the dead-target keys this row forbids any forcing attempt on.
-    dead_keys: fn(&ProjectSemanticDispatch<'_>) -> Vec<SemanticQueryKey>,
+    dead_keys: fn(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> Vec<SemanticQueryKey>,
     /// The exact per-family dispatch multiset of the COLD window.
     expected_cold_classes: &'static [(&'static str, usize)],
     /// The exact per-family dispatch multiset of the warm repeat.
@@ -440,7 +443,7 @@ fn run_matrix_row(row: &MatrixRow) {
 }
 
 fn dead_key_for(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     locator: AuthoredBodyLocator,
     path: Option<Arc<[PathSegment]>>,
 ) -> SemanticQueryKey {

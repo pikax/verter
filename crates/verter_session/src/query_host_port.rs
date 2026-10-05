@@ -53,7 +53,7 @@ use verter_session_query::source::deref::{DerefedBodyShape, LocatorBodyDerefErro
 /// boundary instead of stopping at the request-sticky / traced-scope
 /// suppression rails inside the bridge.
 pub struct SessionQueryHostPort<'ctx> {
-    ctx: &'ctx dyn RequestBoundResolverContext,
+    ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
 }
 
 impl<'ctx> SessionQueryHostPort<'ctx> {
@@ -69,7 +69,9 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
     /// therefore redundant defense-in-depth (it can only ever hold),
     /// retained so a hypothetical future marker misuse trips loudly in dev
     /// builds.
-    pub(crate) fn new(ctx: &'ctx dyn RequestBoundResolverContext) -> Self {
+    pub(crate) fn new(
+        ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
+    ) -> Self {
         verter_debug_assert!(
             ctx.is_request_bound(),
             "QueryHostPort binds a request-view-bound ResolverContext"
@@ -91,7 +93,9 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
 
 // NEGATIVE — the direct host cannot satisfy the request-bound marker. Adding
 // any such implementation makes this assertion fail to compile.
-static_assertions::assert_not_impl_all!(crate::VerterHost: RequestBoundResolverContext);
+static_assertions::assert_not_impl_all!(
+    crate::VerterHost: RequestBoundResolverContext<crate::resolver_core::HostCapabilities>
+);
 
 const _: () = {
     // POSITIVE — both genuinely request-bound contexts coerce to the

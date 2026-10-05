@@ -25,7 +25,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
         provider_canonical: &str,
         imported_name: &str,
         view: &V,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
     ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
     where
@@ -47,12 +47,16 @@ impl<'a> ImportedRootRequestDriver<'a> {
         .0
     }
 
-    fn get_or_resolve_returning_facts_in_scope<V, F>(
+    fn get_or_resolve_returning_facts_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         provider_canonical: &str,
         imported_name: &str,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
     where
@@ -104,11 +108,15 @@ impl<'a> ImportedRootRequestDriver<'a> {
     /// that receives it, whatever refused it and whichever producer supplied
     /// it. The mark is cache non-admission only, never request partiality: the
     /// value served is VALID (Complete).
-    fn resolve_root_singleflight_inner<V, F>(
+    fn resolve_root_singleflight_inner<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: (String, String),
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<crate::resolver_core::SingleflightRunResult<ImportedRootFlightOutcome>>
     where
@@ -248,7 +256,7 @@ impl<'a> RouteRequestDriver<'a> {
         &self,
         key: RouteNameKey,
         view: &V,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
@@ -263,11 +271,15 @@ impl<'a> RouteRequestDriver<'a> {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn get_or_resolve_route_with_facts_in_scope<V, F>(
+    fn get_or_resolve_route_with_facts_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: RouteNameKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
@@ -286,7 +298,7 @@ impl<'a> RouteRequestDriver<'a> {
         &self,
         key: RouteNameKey,
         view: &V,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
@@ -300,11 +312,15 @@ impl<'a> RouteRequestDriver<'a> {
         .0
     }
 
-    fn get_or_resolve_route_observing_facts_in_scope<V, F>(
+    fn get_or_resolve_route_observing_facts_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: RouteNameKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
@@ -412,11 +428,15 @@ impl<'a> RouteRequestDriver<'a> {
     /// (callers that need to discriminate leader vs follower for provenance
     /// counter bumps inspect `role`), or `None` when the resolve closure
     /// returns `None`.
-    fn resolve_route_singleflight_inner<V, F>(
+    fn resolve_route_singleflight_inner<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: RouteNameKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<SingleflightRunResult<RouteFlightOutcome>>
     where

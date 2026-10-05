@@ -24,8 +24,13 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     fn resolve_component_meta_native_props_target_with_view(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -144,7 +149,9 @@ impl VerterHost {
     /// ensure is the canonical once-per-generation materialization.
     fn ensure_owner_direct_imports_indexed(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         owner_canonical: &str,
     ) {
         let Some(serve) = ctx.ensure_indexed_ready_serve(owner_canonical) else {
@@ -171,7 +178,9 @@ impl VerterHost {
 
     fn build_imported_macro_declaration_from_target(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         requested_name: &str,
         target_canonical: &str,
         target_owner: verter_type_expr::TopLevelOwnerId,
@@ -240,8 +249,13 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_component_meta_macro_surface_with_view(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,
@@ -319,8 +333,13 @@ impl VerterHost {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_component_meta_native_props_with_view(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         owner_canonical: &str,
         import_source: &str,
         type_name: &str,

@@ -457,7 +457,9 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
     let winner_host = Arc::clone(&host);
     let winner_key = key.clone();
     let winner = thread::spawn(move || {
-        let host: &dyn crate::resolver_core::ResolverContext = winner_host.as_ref();
+        let host: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = winner_host.as_ref();
         winner_store.execute_cooperative_value(
             host,
             winner_key,

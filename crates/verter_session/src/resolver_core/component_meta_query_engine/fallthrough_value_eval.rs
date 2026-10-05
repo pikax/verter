@@ -502,7 +502,10 @@ impl ComponentMetaQueryEngine<'_> {
 /// attr + listener key sets. `None` for any node that exposes no static key
 /// surface (the caller records an unknown spread).
 pub(crate) fn known_spread_keys_from_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<KnownSpreadKeys> {
     known_spread_keys_from_node_inner(
@@ -514,7 +517,10 @@ pub(crate) fn known_spread_keys_from_node(
 }
 
 fn known_spread_keys_from_node_inner(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
     memo: &mut FxHashMap<SemanticNodeId, Option<KnownSpreadKeys>>,
@@ -672,7 +678,10 @@ fn insert_dynamic_root_candidate_charged(
 /// (the SAME ordering the syntactic-combine site re-applies), so observable
 /// output order is unchanged — only the exponential duplication is removed.
 pub(crate) fn collect_dynamic_root_candidates_from_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
 ) -> Vec<DynamicRootCandidate> {
@@ -689,7 +698,10 @@ pub(crate) fn collect_dynamic_root_candidates_from_node(
 }
 
 fn collect_dynamic_root_candidates_from_node_inner(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     imports: &[AnalyzedImport],
     active: &mut FxHashSet<SemanticNodeId>,

@@ -27,7 +27,7 @@ enum CaptureTier {
     Null,
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     pub(in crate::project_semantic_dispatch) fn template_capture(
         &self,
         slice: SemanticNodeId,

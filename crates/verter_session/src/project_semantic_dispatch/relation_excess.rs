@@ -138,7 +138,7 @@ pub(super) enum ArmKnows {
     Undecidable,
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Derive the relation-time freshness of one source (argument) node
     /// from its canonical excess-origin facts — never a key-carried axis.
     /// [`ExcessPropertyOrigin`] is the single authority: a source is
@@ -1087,8 +1087,8 @@ impl<'a> ProjectSemanticDispatch<'a> {
 /// TS `filterPrimitivesIfContainsNonPrimitive`: when the union contains the
 /// `object` nonprimitive, primitive arms drop (unless that empties the
 /// union).
-fn filter_primitives_if_contains_nonprimitive(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn filter_primitives_if_contains_nonprimitive<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     arms: &[SemanticNodeId],
 ) -> Vec<SemanticNodeId> {
     let graph = dispatch.graph();

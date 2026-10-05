@@ -365,11 +365,11 @@ impl ActiveInstantiation {
 /// dispatch-side analogue of the retired solver's `RecursionTracker`
 /// and closes the stack-bound recursion hole Session 4 traced down to
 /// the `type TreeNode = { children: TreeNode[] }` materialisation path.
-pub struct ProjectSemanticDispatch<'a> {
+pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabilities> {
     binding: EngineBinding,
     pub(crate) policy: EnginePolicy,
     cancellation: crate::resolver_core::request_ports::CancellationCheckpoint,
-    pub(super) ctx: &'a dyn ResolverContext,
+    pub(super) ctx: &'a dyn ResolverContext<C>,
     pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[ActiveInstantiation; 8]>>,
     /// The operands each awaited relation is unwrapping on the current
     /// path — the checker's `awaitedTypeStack`. A run pushes every operand
@@ -665,7 +665,7 @@ impl<'g> Drop for BuildLocalTaintGuard<'g> {
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// `key`'s flow return, and whether its evaluation read a member's
     /// degraded body-derived return as a type — a fact the value's own
     /// nodes do not carry, which the published answer must not drop.
@@ -738,14 +738,14 @@ impl<'g> Drop for RelationEnvironmentScope<'g> {
     }
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Create a dispatcher bound to a sealed request context.
     ///
     /// Production construction paths supply `HostResolverContext` or
     /// `SessionResolverContext`. Test-support builds may additionally use the
     /// explicitly fenced host seam when exercising dispatch in isolation.
     #[must_use]
-    pub(crate) fn new(ctx: &'a dyn ResolverContext) -> Self {
+    pub(crate) fn new(ctx: &'a dyn ResolverContext<C>) -> Self {
         // The non-request-bound construction counter belongs only to the
         // explicit test-support seam. Production implementations of the
         // sealed trait are request-bound by construction.
@@ -2311,7 +2311,7 @@ fn narrow_value_cache_read(
     }
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Shared cold-build entry point used by BOTH
     /// [`SemanticQueryApi::execute`] and [`Self::execute_read`].
     ///
@@ -3569,8 +3569,8 @@ impl CarrierNormalizationPrelude {
 }
 
 #[inline(never)]
-fn finalise_traced_build_output<T>(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
     provenance: &crate::meta_provenance::MetaProvenance,
@@ -3839,7 +3839,9 @@ fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> boo
     )
 }
 
-impl<'a> SemanticQueryApi for ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> SemanticQueryApi
+    for ProjectSemanticDispatch<'a, C>
+{
     fn execute(
         &self,
         key: SemanticQueryKey,
@@ -4037,7 +4039,7 @@ pub fn omit_builtin_decl_identity() -> crate::semantic_query::ResolvedDeclSlotId
     )
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Test seam: the flow-demand ledger footprint of this dispatch —
     /// `(installed demand count, reserved demand storage capacity)`. The
     /// no-flow allocation contract: an ordinary query and every pending
@@ -4292,13 +4294,13 @@ pub enum BuiltinUtilityResolution {
 /// The adapter borrows the existing facade's selected engine binding and
 /// request ports. Scope is resolved fresh per call, with no host reference or
 /// independent query driver.
-pub struct SessionDispatchHost<'a> {
+pub struct SessionDispatchHost<'a, C: crate::resolver_core::ResolverCapabilities> {
     resources: &'a EngineBinding,
-    ctx: &'a dyn ResolverContext,
+    ctx: &'a dyn ResolverContext<C>,
 }
 
-impl<'a> SessionDispatchHost<'a> {
-    fn from_facade(dispatch: &'a ProjectSemanticDispatch<'_>) -> Self {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, C> {
+    fn from_facade(dispatch: &'a ProjectSemanticDispatch<'_, C>) -> Self {
         Self {
             resources: &dispatch.binding,
             ctx: dispatch.ctx,

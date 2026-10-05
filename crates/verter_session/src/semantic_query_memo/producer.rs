@@ -259,9 +259,9 @@ impl SemanticGraphStore {
     /// only once the warm lookup misses, so a warm read takes no task, and
     /// the caller keeps the scope for as long as the producer it may be
     /// handed runs, so every query nested in that build joins the task.
-    pub(crate) fn acquire_query<'s>(
+    pub(crate) fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
         &'s self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: SemanticQueryKey,
         execution: &mut Option<ExecutionScope>,
         capture: &mut ReadCapture<'_>,
@@ -291,9 +291,9 @@ impl SemanticGraphStore {
 
     /// Begin one logical claim of `key`. `Err` answers it without a claim:
     /// a cancelled request, or a validated warm result.
-    pub(crate) fn begin_query_claim(
+    pub(crate) fn begin_query_claim<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: SemanticQueryKey,
         capture: &mut ReadCapture<'_>,
     ) -> Result<ClaimAttempt, ValueRead> {
@@ -363,9 +363,9 @@ impl SemanticGraphStore {
     }
 
     /// One claim attempt of `attempt`'s key for `task`.
-    pub(crate) fn claim_query<'s>(
+    pub(crate) fn claim_query<'s, C: crate::resolver_core::ResolverCapabilities>(
         &'s self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         attempt: &mut ClaimAttempt,
         task: &ExecutionTask,
         capture: &mut ReadCapture<'_>,
@@ -494,9 +494,9 @@ impl SemanticGraphStore {
 impl Subscription<'_> {
     /// Wait for the producer's completion. Blocks the calling thread: only a
     /// synchronous entry, or a drive with nothing else to run, waits.
-    pub(crate) fn wait(
+    pub(crate) fn wait<C: crate::resolver_core::ResolverCapabilities>(
         self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
@@ -654,9 +654,9 @@ impl<'s> ProducerLease<'s> {
     /// Close the producer with its build's output. `Err` is the cancellation
     /// read: a producer whose request was cancelled owns no publish right,
     /// so its flight is aborted and its value discarded.
-    pub(crate) fn settle(
+    pub(crate) fn settle<C: crate::resolver_core::ResolverCapabilities>(
         self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         output: BuildOutput,
     ) -> Result<SettledProducer<'s>, ValueRead> {
         let Self {
@@ -791,9 +791,9 @@ impl SettledProducer<'_> {
     /// and neither does one the retention account refuses — none of which
     /// changes the completed value. `Err` is the cancellation read: a
     /// cancelled request whose admission did not linearize aborts the flight.
-    pub(crate) fn admit(
+    pub(crate) fn admit<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         capture: &mut ReadCapture<'_>,
     ) -> Result<(), ValueRead> {
         let store = self.store;
@@ -905,9 +905,9 @@ impl SettledProducer<'_> {
     /// Deliver the result: bubble its carrier into this producer's active
     /// tracers, complete the flight for every subscriber, retire the flight
     /// and return the read.
-    pub(crate) fn complete(
+    pub(crate) fn complete<C: crate::resolver_core::ResolverCapabilities>(
         self,
-        _ctx: &dyn crate::resolver_core::ResolverContext,
+        _ctx: &dyn crate::resolver_core::ResolverContext<C>,
         capture: &mut ReadCapture<'_>,
     ) -> ValueRead {
         let Self {
@@ -982,9 +982,9 @@ impl SettledProducer<'_> {
 impl SemanticGraphStore {
     #[must_use = "the CacheRead carries both the resolved node id and the dep signature callers must fold into their dependency-fact set"]
     #[allow(dead_code)] // test-support can be enabled without the in-crate memo tests
-    pub(crate) fn execute_cooperative<F, R, O>(
+    pub(crate) fn execute_cooperative<F, R, O, C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: SemanticQueryKey,
         recursion_sentinel: R,
         build: F,
@@ -1008,9 +1008,14 @@ impl SemanticGraphStore {
     }
 
     #[allow(dead_code)] // test-support can be enabled without the in-crate memo tests
-    pub(crate) fn execute_cooperative_value<F, R, O>(
+    pub(crate) fn execute_cooperative_value<
+        F,
+        R,
+        O,
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: SemanticQueryKey,
         recursion_sentinel: R,
         build: F,
@@ -1030,9 +1035,14 @@ impl SemanticGraphStore {
     }
 
     #[allow(dead_code)] // test-support can be enabled without the in-crate memo tests
-    pub(crate) fn execute_cooperative_value_capturing_publication<F, R, O>(
+    pub(crate) fn execute_cooperative_value_capturing_publication<
+        F,
+        R,
+        O,
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: SemanticQueryKey,
         recursion_sentinel: R,
         build: F,
@@ -1052,9 +1062,9 @@ impl SemanticGraphStore {
         )
     }
 
-    fn execute_cooperative_captured<F, R, O>(
+    fn execute_cooperative_captured<F, R, O, C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: SemanticQueryKey,
         recursion_sentinel: R,
         build: F,

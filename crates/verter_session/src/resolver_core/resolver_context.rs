@@ -4,6 +4,10 @@
 //! inputs, owned lowering, routing, fact validation, cancellation and execution
 //! submission. Their answers are owned records, typed source demands or an
 //! opaque engine attachment; no ambient host/store/config getter is exposed.
+//! Two capability refinements — expression-source selection over owned
+//! lowering, live clock sampling over fact validation — hand out concrete
+//! capability types named by the context's [`ResolverCapabilities`] family,
+//! so the operations made on a selected capability dispatch statically.
 //!
 //! Private lifecycle adapters select the captured request view and completion
 //! overlay. The query facade owns execution and output capabilities, and nested
@@ -14,9 +18,10 @@
 
 use std::sync::Arc;
 
-use super::fact_validation_port::FactValidation;
+use super::fact_validation_port::{FactValidation, LiveFactValidation};
 use super::request_ports::{
-    Cancellation, ExecutionSubmission, IndexedInputs, OwnedLowering, RouteLookup,
+    Cancellation, ExecutionSubmission, ExpressionSourceSelection, IndexedInputs, OwnedLowering,
+    RouteLookup,
 };
 
 use crate::fact_tracing::tracing as tracer_stack;
@@ -94,22 +99,43 @@ impl MaterializeScopeObservation {
 /// `meta_resolve/*` post-moves, `component_meta_caches.rs`,
 /// `project_semantic_dispatch/*`).
 ///
-/// `ResolverContext` composes six request ports and private structural seals.
-/// All service traits are dyn-compatible and expose no ambient host access.
+/// `ResolverContext` composes six request ports, their two capability
+/// refinements and private structural seals. All service traits are
+/// dyn-compatible and expose no ambient host access.
 ///
 /// Visibility is `pub(crate)` because this is purely an internal seal — no
 /// external integrators construct
 /// `&dyn ResolverContext`.
-pub(crate) trait ResolverContext:
+///
+/// `C` names the concrete capability types the request ports hand out, so a
+/// selected expression source or a live clock sample dispatches statically
+/// after the one request-port call that selected it.
+pub(crate) trait ResolverContext<C: ResolverCapabilities>:
     sealed::Sealed
     + sealed::RequestBoundSealed
     + IndexedInputs
     + OwnedLowering
+    + ExpressionSourceSelection<ExpressionDemand = C::ExpressionDemand>
     + RouteLookup
     + FactValidation
+    + LiveFactValidation<Clocks = C::Clocks>
     + Cancellation
     + ExecutionSubmission
 {
+}
+
+/// The concrete capability types one family of request contexts hands out.
+///
+/// The host chooses them once; every request context it builds — base or
+/// overlay — shares them, so a request structure carrying `C` is
+/// instantiated once per host family, not once per context kind.
+pub trait ResolverCapabilities: 'static {
+    /// The owned expression-source demand handle a selection returns.
+    type ExpressionDemand: verter_session_query::source::demand::ExpressionSourceDemand
+        + Clone
+        + 'static;
+    /// The workspace clock source a live aggregate sample reads.
+    type Clocks: verter_session_query::facts::clocks::WorkspaceClocks + Clone + 'static;
 }
 
 // Sealed marker — `VerterHost` is the base implementer,
@@ -140,24 +166,29 @@ pub(crate) trait ResolverContext:
 /// request-bound. Overlay-vs-base correctness stays the caller's
 /// obligation (chosen at the request entry) and its regression coverage is
 /// tracked separately.
-pub(crate) trait RequestBoundResolverContext:
-    ResolverContext + sealed::RequestBoundSealed
+pub(crate) trait RequestBoundResolverContext<C: ResolverCapabilities>:
+    ResolverContext<C> + sealed::RequestBoundSealed
 {
 }
 
 // Production request contexts carry the seal. The direct host receives it
 // only in the explicitly test-only configuration below.
 // Compile-time dyn-compatibility check. If a future trait edit
-// accidentally introduces an associated type, generic method, or
-// `where Self: Sized` bound that breaks dyn-compatibility, this assertion
-// fires inside this file at compile time long before a callsite-cascade
-// error.
-static_assertions::assert_obj_safe!(ResolverContext);
+// accidentally introduces an unbound associated type, a generic method, or a
+// `where Self: Sized` bound that breaks dyn-compatibility, naming the trait
+// object in this signature fails inside this file at compile time long
+// before a callsite-cascade error.
+#[allow(dead_code)]
+fn assert_resolver_context_obj_safe<C: ResolverCapabilities>(_: &dyn ResolverContext<C>) {}
 // The request-bound refinement is used as `&dyn RequestBoundResolverContext`
 // by the query host port, so it must stay dyn-compatible too. A marker
 // subtrait of a dyn-compatible trait adding no new methods is dyn-safe;
 // this pins it against a future edit.
-static_assertions::assert_obj_safe!(RequestBoundResolverContext);
+#[allow(dead_code)]
+fn assert_request_bound_resolver_context_obj_safe<C: ResolverCapabilities>(
+    _: &dyn RequestBoundResolverContext<C>,
+) {
+}
 /// Fan `fact` into every active tracer on the current thread's stack.
 ///
 /// Used by the rewritten `compile_fact_emission` and any other producer

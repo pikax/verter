@@ -45,7 +45,10 @@ fn publication_score_improves(candidate: &PublicationScore, current: &Publicatio
 /// its zero symbolic carriers would beat any symbolic current
 /// (`0 < current.symbolic_carriers`), wrongly preferring the shapeless candidate.
 pub(crate) fn compare_node_improvement(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     candidate: crate::semantic_query::SemanticNodeId,
     current: crate::semantic_query::SemanticNodeId,
 ) -> bool {
@@ -75,7 +78,10 @@ pub(crate) fn compare_node_improvement(
 /// directly (peeling `Alias`); a builtin-utility name is matched on the
 /// reference's declaration name.
 pub(crate) fn node_root_is_explicit_selector_operator(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: crate::semantic_query::SemanticNodeId,
 ) -> bool {
     use crate::semantic_query::SemanticNodeData;

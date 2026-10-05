@@ -355,10 +355,10 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     );
 
     let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-        host.as_ref() as &dyn ResolverContext,
+        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     );
     let owner_local = component_meta_registry_public_route_owner_local_root(
-        host.as_ref() as &dyn ResolverContext,
+        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         &fixture_dispatch_2,
         &producer_scope,
         &analysis,
@@ -444,10 +444,10 @@ fn owner_local_alias_of_alias_external_import_declines() {
     );
 
     let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-        host.as_ref() as &dyn ResolverContext,
+        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     );
     let owner_local = component_meta_registry_public_route_owner_local_root(
-        host.as_ref() as &dyn ResolverContext,
+        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         &fixture_dispatch_3,
         &producer_scope,
         &analysis,
@@ -496,10 +496,10 @@ fn owner_local_generic_typeparameter_body_declines() {
     );
 
     let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-        host.as_ref() as &dyn ResolverContext,
+        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     );
     let owner_local = component_meta_registry_public_route_owner_local_root(
-        host.as_ref() as &dyn ResolverContext,
+        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         &fixture_dispatch_4,
         &producer_scope,
         &analysis,

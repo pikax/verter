@@ -59,7 +59,7 @@ fn host_with_box() -> VerterHost {
 
 /// `Box[member]` under `context`, through the shared `ProjectPath` query.
 fn project_member(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     member: &str,
     context: ProjectionReductionContext,
 ) -> SemanticNodeId {

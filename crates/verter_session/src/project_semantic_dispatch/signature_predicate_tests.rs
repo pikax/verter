@@ -31,7 +31,10 @@ const PROBE_FILE: &str = "/wb/signature_predicate_probe.ts";
 fn with_probe<R>(
     source: &str,
     probe: &str,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    read: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host;
     let host = make_audit_host();
@@ -78,7 +81,10 @@ fn with_probe<R>(
     read(&dispatch, node)
 }
 
-fn describe(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> String {
+fn describe(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> String {
     crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(dispatch, node, 0)
 }
 
@@ -121,7 +127,7 @@ fn return_type_of_a_predicate_signature_is_boolean_and_of_an_assertion_void() {
 
 /// The lone call signature of a callable surface.
 fn only_call_signature(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
@@ -150,7 +156,7 @@ fn candidates(
 
 /// The effect half of one candidate's result read under `call`.
 fn read_effects(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     candidate: SignatureCandidate,
     call: crate::signature_kernel::CallSubstitutionId,
 ) -> Option<PredicateEffect> {
@@ -656,7 +662,10 @@ type SharedCallSignature = (SemanticNodeId, Option<PredicateEffect>);
 /// The call signatures `SignaturesOfType` shares for `probe`.
 fn shared_call_signatures(
     probe: &str,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>, Vec<SharedCallSignature>),
+    read: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        Vec<SharedCallSignature>,
+    ),
 ) {
     with_probe(COMPOSITES, probe, |dispatch, node| {
         let store = dispatch.graph().signature_store();
@@ -684,7 +693,10 @@ fn shared_call_signatures(
     });
 }
 
-fn shown(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> String {
+fn shown(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> String {
     crate::semantic_query::display::display(
         dispatch.graph(),
         &crate::semantic_query::SemanticQueryValue::TypeNode(node),
@@ -694,7 +706,11 @@ fn shown(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> String
 }
 
 /// Whether a live node is the checker's `printed` type.
-fn prints_as(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId, printed: &str) -> bool {
+fn prints_as(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+    printed: &str,
+) -> bool {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
     let expected = checker_syntax::parse(printed).expect("checker print parses");
     checker_syntax::matches_node(dispatch, node, &expected, 0)

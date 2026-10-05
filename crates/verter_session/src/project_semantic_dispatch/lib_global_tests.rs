@@ -192,7 +192,7 @@ fn eval(
 
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    read: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());

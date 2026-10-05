@@ -55,7 +55,10 @@ pub(crate) struct RenderedNodeDisplay {
 /// boundary, so graph-oriented consumers cannot branch on a
 /// reverse-materialized shape.
 pub(crate) fn render_node_display_with_ctx(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<RenderedNodeDisplay> {
     let cap = TypeinfoRaiseOutputCap::new(dispatch);

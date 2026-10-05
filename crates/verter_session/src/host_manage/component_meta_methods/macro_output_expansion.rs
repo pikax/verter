@@ -117,7 +117,10 @@ impl AdmittedExpansionNode {
 /// preserves symbolically instead of publishing a fabricated value).
 #[must_use]
 fn materialize_admitted_expansion_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     artifact: &AdmittedExpansionNode,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> Option<verter_session_query::analysis::type_expand::ExpandedNormalizedExpr> {
@@ -208,7 +211,10 @@ pub(crate) enum MacroPathOutputExpansion {
 /// crosses in. The hot-ref producer is the ONE mode-neutral carrier producer; a
 /// different DEMAND on its handle, never a second lowering of the macro argument.
 fn lower_macro_arg_carrier_head(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     mode: ProjectionMode,
@@ -228,7 +234,10 @@ fn lower_macro_arg_carrier_head(
 /// former branch (produced-node-id audit parity + the `parsed` fallback) EXACTLY.
 #[must_use]
 pub(crate) fn expand_define_model_output(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
@@ -271,7 +280,10 @@ pub(crate) fn expand_define_model_output(
 /// accepting a raw node or a forgeable wrapper.
 #[must_use]
 pub(crate) fn expand_generic_project_path_output(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,
@@ -332,7 +344,10 @@ pub(crate) fn expand_generic_project_path_output(
 /// wrapper.
 #[must_use]
 pub(crate) fn expand_slot_binding_output(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,

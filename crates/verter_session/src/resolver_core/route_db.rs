@@ -573,11 +573,15 @@ impl RouteDb {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn get_or_build_barrel_surface_in_scope<V, F>(
+    fn get_or_build_barrel_surface_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: BarrelSurfaceKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
         build: F,
     ) -> Option<Arc<BarrelRouteSurface>>
     where

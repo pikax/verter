@@ -2089,9 +2089,10 @@ fn semantic_query_api_has_exactly_one_implementor() {
     // `impl SemanticQueryApi for ` should appear exactly once — on
     // `ProjectSemanticDispatch`.
     let count = count_def_in_crates("impl SemanticQueryApi for ");
-    // Also allow the "impl<'a> SemanticQueryApi for ..." form.
-    let count_lifetimed =
-        count_def_in_crates("impl<'a> SemanticQueryApi for ProjectSemanticDispatch");
+    // Also allow the capability-generic "impl<'a, C: ...> SemanticQueryApi" form.
+    let count_lifetimed = count_def_in_crates(
+        "impl<'a, C: crate::resolver_core::ResolverCapabilities> SemanticQueryApi",
+    );
     assert!(
         count + count_lifetimed >= 1,
         "SemanticQueryApi must have at least one implementor; got {count} plain + {count_lifetimed} lifetimed"

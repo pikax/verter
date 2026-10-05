@@ -101,8 +101,13 @@ pub(crate) fn apply_component_meta_resolution_policy(
     host: &VerterHost,
     owner_canonical: &str,
     snapshot: Option<&FileAnalysisSnapshot>,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
 ) {
     let macro_participating_idents: FxHashSet<ResolvedRootIdentity> = match snapshot {
         Some(snap) => build_policy_macro_role_identities(
@@ -141,8 +146,13 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
     host: &VerterHost,
     owner_canonical: &str,
     macro_participating_idents: &FxHashSet<ResolvedRootIdentity>,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
 ) {
     let registry = PolicyRegistry::build(type_registry, type_registry_meta);
     // Bind the engine to the supplied request-bound `ctx` so every
@@ -258,8 +268,13 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
 ///   → `{ ButtonProps, AvatarProps }` (named alias body contributes
 ///   its full reference closure)
 fn build_policy_macro_role_identities(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
     macro_kinds: &[AnalyzedMacroKind],
@@ -428,7 +443,10 @@ fn build_policy_macro_role_identities(
 /// Iterative (worklist + visited node-set) for stack safety on deeply
 /// nested or shared shapes.
 fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     root: SemanticNodeId,
     mut sink: F,
 ) {

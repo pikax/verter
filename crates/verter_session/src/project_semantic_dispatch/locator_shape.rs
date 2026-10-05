@@ -745,7 +745,7 @@ enum LocatorRefPlan {
     Carrier(crate::project_semantic_dispatch::carrier::RefHeadResolution),
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// The carrier-only locator-shape lowering entry: intern the FIXED
     /// authored shape of `expr` under the sealed [`LocatorShapeCtx`].
     ///

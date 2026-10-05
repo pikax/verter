@@ -80,7 +80,7 @@ enum KeyNamesArm {
     OpenConstruction,
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Iterative `keyof` enumeration: a heap-backed worklist drives
     /// per-arm descent so deeply-nested Intersection / Union arm
     /// chains do not grow the Rust call stack.

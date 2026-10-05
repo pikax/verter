@@ -220,7 +220,7 @@ fn parse_key_and_language_are_function_key_axes() {
         ],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
     for key in [&baseline, &parse_key_changed, &language_changed] {
         rig.driver(ctx)
             .lookup_hash(hash_key(key.clone(), &["b"]))
@@ -311,7 +311,7 @@ fn skeleton_source_verifies_parse_key_and_language() {
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let serve = ctx
         .ensure_indexed_ready_serve(canonical)
         .expect("the fixture file is served");
@@ -438,7 +438,7 @@ fn flow_slice_identity_uses_only_the_shared_build_fingerprint() {
         ],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
     rig.driver(ctx)
         .lookup_hash(hash_key(baseline, &["b"]))
         .expect("baseline build");
@@ -476,7 +476,10 @@ struct Rig {
 }
 
 impl Rig {
-    fn driver<'a>(&'a self, ctx: &'a dyn ResolverContext) -> FlowSliceDriver<'a> {
+    fn driver<'a>(
+        &'a self,
+        ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    ) -> FlowSliceDriver<'a> {
         FlowSliceDriver::new(&self.stores, ctx).with_fixture(self.source.as_ref())
     }
 }
@@ -597,10 +600,13 @@ fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
     assert_eq!(source.build_calls(), 0);
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let built = FlowSliceDriver::new(&stores, &host as &dyn ResolverContext)
-        .with_fixture(source.as_ref())
-        .skeleton_for(&key)
-        .expect("fixture key must build");
+    let built = FlowSliceDriver::new(
+        &stores,
+        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    )
+    .with_fixture(source.as_ref())
+    .skeleton_for(&key)
+    .expect("fixture key must build");
     assert_eq!(source.build_calls(), 1);
 
     let peeked = stores
@@ -647,7 +653,7 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
 
     let key = hash_key(function, &["b"]);
     let invocations_before_hash = compute_flow_slice_hash_thread_invocations();
@@ -733,7 +739,7 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
 
     let key_a = hash_key(function.clone(), &["a"]);
     let key_b = hash_key(function.clone(), &["b"]);
@@ -801,7 +807,7 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
         ..FlowSliceBudget::default()
     };
     let rig = rig(vec![(function.clone(), MYTYPE_FIXTURE)], tiny);
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
 
     let key = hash_key(function, &["b"]);
     for _ in 0..2 {
@@ -838,7 +844,7 @@ fn warm_hash_hit_reuses_planned_value_without_recompute() {
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
 
     let key = hash_key(function, &["b"]);
     let first = planned(rig.driver(ctx).lookup_hash(key.clone()).expect("cold"));
@@ -881,7 +887,7 @@ pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
         ],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
 
     let key_v1 = hash_key(v1, &["b"]);
     let key_v2 = hash_key(v2, &["b"]);
@@ -923,7 +929,7 @@ fn published_entries_carry_empty_fact_rail() {
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
 
     let key = hash_key(function, &["b"]);
     let _ = rig.driver(ctx).lookup_hash(key.clone()).expect("hash");
@@ -948,7 +954,7 @@ fn graph_store_remove_canonical_evicts_bundles() {
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
 
     let key = hash_key(function, &["b"]);
     let _ = rig.driver(ctx).lookup_hash(key.clone()).expect("cold");
@@ -986,7 +992,7 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let serve = ctx
         .ensure_indexed_ready_serve(canonical)
         .expect("the fixture file is served");
@@ -1341,7 +1347,7 @@ pub(crate) fn flow_slice_ir_detaches_from_oxc_arena() {
         vec![(function.clone(), MYTYPE_FIXTURE)],
         FlowSliceBudget::default(),
     );
-    let ctx: &dyn ResolverContext = &rig.host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &rig.host;
     let key = hash_key(function, &["b"]);
     let slice_hash = planned(rig.driver(ctx).lookup_hash(key.clone()).expect("hash"));
     let ir = rig
@@ -1574,7 +1580,7 @@ fn the_two_shift_edits_are_invisible_to_flow_body_stable_hash() {
     let hash_of = |source: &str| {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         upsert_source(&host, canonical, source);
-        let ctx: &dyn ResolverContext = host.as_ref();
+        let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let serve = ctx
             .ensure_indexed_ready_serve(canonical)
             .expect("the fixture file is served");

@@ -889,9 +889,9 @@ impl ResolveCallSelection {
         }
     }
 
-    pub(crate) fn with_return_type(
+    pub(crate) fn with_return_type<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        dispatch: &super::ProjectSemanticDispatch<'_>,
+        dispatch: &super::ProjectSemanticDispatch<'_, C>,
         return_type: SemanticNodeId,
     ) -> ResolvedCallResult {
         match self {

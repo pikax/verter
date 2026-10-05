@@ -557,7 +557,7 @@ fn resolve_named_symbol_request(
 #[allow(clippy::type_complexity)]
 fn resolve_named_symbol_in_current_view(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     name: &str,
     type_args: crate::typeinfo::types::TypeArgList<'_>,
@@ -733,7 +733,7 @@ pub(crate) fn classify_dispatch_error(
 /// before this loop runs out of steps.
 pub(crate) fn materialize_through_aliases(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     start: SemanticNodeId,
     mode: ProjectionMode,
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {

@@ -48,7 +48,7 @@ fn distinct_fallback_source() -> SemanticTypeSource {
 /// shell raise). Used to CONFIRM a node's resolved shape while asserting the
 /// sink's content-free SOURCE projection.
 fn shell_raise_oracle(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<TypeExpr> {
     dispatch.materialize_output_type_expr_for_test(node)

@@ -182,7 +182,9 @@ pub(crate) struct DemandCancellation<'a> {
 
 impl<'a> DemandCancellation<'a> {
     /// Narrow the request's resolver context down to its cancellation signal.
-    pub(super) fn from_context(ctx: &'a dyn ResolverContext) -> Self {
+    pub(super) fn from_context<C: crate::resolver_core::ResolverCapabilities>(
+        ctx: &'a dyn ResolverContext<C>,
+    ) -> Self {
         Self {
             checkpoint: ctx.cancellation_checkpoint(),
             _request: std::marker::PhantomData,

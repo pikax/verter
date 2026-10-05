@@ -188,7 +188,7 @@ fn signature_admission_from_non_cacheable_finalise_refuses_admission() {
 #[test]
 fn compute_ctx_from_resolver_carries_compat_token_and_generation() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let cx = ComputeCtx::from_resolver(ctx);
     // The compat token matches the resolver's store-view token, and the
     // generation matches the project-type-store generation.
@@ -285,7 +285,7 @@ fn artifact_node_has_no_entry_associated_type() {
 #[test]
 fn lookup_dedups_cold_compute_under_same_view() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let node = CountingArtifactNode {
         entries: dashmap::DashMap::new(),
         inflight: InflightTable::new(),
@@ -393,7 +393,7 @@ impl QueryNode for StaleGenerationQueryNode {
 #[test]
 fn publish_rejects_candidate_when_self_root_edited_mid_compute() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let node = StaleGenerationQueryNode {
         inflight: InflightTable::new(),
         publish_count: Arc::new(AtomicUsize::new(0)),
@@ -548,7 +548,7 @@ impl QueryNode for SkewedDiscriminantQueryNode {
 #[test]
 fn discriminant_generation_tracks_candidate_stamp_not_lookup_snapshot() {
     let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let gen_before = ctx.current_project_generation();
     let node = SkewedDiscriminantQueryNode {
         generations: Arc::clone(host.project_type_store()),

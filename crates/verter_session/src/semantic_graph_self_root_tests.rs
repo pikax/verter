@@ -204,7 +204,7 @@ fn resolve_decl_same_canonical_edit_rejects_warm_entry() {
     // the entry's self-root validation directly.
     upsert(&host, c, "export type Foo = { a: string; b: number };\n");
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical memo entry must still be present after the same-canonical edit \
@@ -264,7 +264,7 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
 
     upsert(&host, c, "export const val = { a: 1, b: 2 };\n");
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical TypeOf memo entry must still be present after the same-canonical edit"
@@ -334,7 +334,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         "export type Box<T> = { value: T; tag: string };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical Instantiate memo entry must still be present after the same-canonical edit"
@@ -404,7 +404,7 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
         "<script setup lang=\"ts\">defineProps<{ x: string; y: number }>()</script>\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical ResolveMacroPayload memo entry must still be present after the edit"
@@ -672,7 +672,7 @@ fn validate_with_self_roots_rejects_untracked_self_root() {
     let host = host();
     // One unrelated tracked file so a live store view exists.
     upsert(&host, "/sg_self_root/anchor.ts", "export const z = 1;\n");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let untracked = "/sg_self_root/never_loaded.ts";
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
@@ -699,7 +699,7 @@ fn validate_with_self_roots_accepts_matching_tracked_self_root() {
         .ensure_indexed_ready(c)
         .map(|indexed| indexed.whole_hash)
         .expect("IndexedReady materialises");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
         canonical_id: c.to_string(),
@@ -719,7 +719,7 @@ fn validate_with_self_roots_accepts_matching_tracked_self_root() {
 fn validate_with_self_roots_rejects_overflow_carrier() {
     let host = host();
     upsert(&host, "/sg_self_root/anchor2.ts", "export const z = 1;\n");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let carrier = ReadSetSignature::overflow();
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
     assert!(
@@ -739,7 +739,7 @@ fn validate_with_self_roots_rejects_overflow_carrier() {
 fn execute_cooperative_fast_path_validates_self_root() {
     let host = host();
     upsert(&host, "/sg_self_root/anchor3.ts", "export const z = 1;\n");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let store = SemanticGraphStore::new();
     let key =
         SemanticQueryKey::ResolveDecl(resolve_decl_key("/sg_self_root/never_loaded2.ts", "Probe"));
@@ -810,7 +810,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
 fn relation_memo_warm_read_validates_self_root() {
     let host = host();
     upsert(&host, "/sg_self_root/anchor4.ts", "export const z = 1;\n");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let store = SemanticGraphStore::new();
     let source = store.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::String,
@@ -852,7 +852,7 @@ fn relation_memo_warm_read_validates_self_root() {
 #[test]
 fn relation_memo_warm_read_serves_validated_entry() {
     let host = host();
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let store = SemanticGraphStore::new();
     let source = store.intern_node(SemanticNodeData::Primitive(
         crate::semantic_query::PrimitiveKind::Number,
@@ -925,7 +925,7 @@ fn family_memo_validate_rejects_stale_project_generation() {
     use crate::semantic_query::{PrimitiveKind, QueryError, SemanticNodeData};
 
     let host = host();
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
@@ -1025,7 +1025,7 @@ fn family_memo_validate_rejects_stale_project_generation() {
 #[test]
 fn structural_node_kind_publishes_no_file_self_root() {
     let host = host();
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
@@ -1159,7 +1159,7 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
         "export type Foo = { a: number; b: string; c: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical KeyOf memo entry must still be present after the same-canonical edit"
@@ -1240,7 +1240,7 @@ fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
         matches!(primed, crate::semantic_query::QueryResult::Value(_)),
         "KeyOf over a cross-file merged declaration must resolve before the edit"
     );
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // Fixture invariant: the warm `KeyOf` entry exists AND validates BEFORE
     // any edit — the discrimination is the validator rejecting it after the
     // augmenter edit, not its absence.
@@ -1330,7 +1330,7 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
         "export type Foo = { a: number; b: string; c: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical ProjectPath memo entry must still be present after the same-canonical edit"
@@ -1551,7 +1551,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
         "export type Foo = { a: number; b: string; d: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical Pick utility memo entry must still be present after the same-canonical edit"
@@ -1670,7 +1670,7 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
         "export type Foo = { a: number; b: string; c: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical non-builtin Instantiate memo entry must still be present after the edit"
@@ -1790,7 +1790,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
         "export type Foo = { a: number; b: string; c: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical ResolveMacroPayload memo entry must still be present after the edit"
@@ -1945,29 +1945,31 @@ fn session_overlay_warm_validation_matrix() {
     // caller can tell a warm hit (returns the published node) from a
     // cold recompute (returns the recompute node) independently of the
     // `cold_ran` flag.
-    let drive = |graph: &SemanticGraphStore, ctx: &dyn ResolverContext| {
-        let mut cold_ran = false;
-        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let read = graph.execute_cooperative(
-            ctx,
-            key.clone(),
-            || {
-                graph.intern_node(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss,
-                ))
-            },
-            || {
-                cold_ran = true;
-                (
-                    QueryResult::Value(recompute_node),
-                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
-                )
-            },
-        );
-        (cold_ran, read.value, recompute_node)
-    };
+    let drive =
+        |graph: &SemanticGraphStore,
+         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>| {
+            let mut cold_ran = false;
+            let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::Number,
+            ));
+            let read = graph.execute_cooperative(
+                ctx,
+                key.clone(),
+                || {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        crate::semantic_query::QueryError::Miss,
+                    ))
+                },
+                || {
+                    cold_ran = true;
+                    (
+                        QueryResult::Value(recompute_node),
+                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                    )
+                },
+            );
+            (cold_ran, read.value, recompute_node)
+        };
 
     // --- Case 1: overlay-current → warm HIT ------------------------
     {
@@ -2074,7 +2076,7 @@ fn session_overlay_warm_validation_matrix() {
         let graph = SemanticGraphStore::new();
         let published = publish_entry_rooted_on(&graph, base_hash);
         // Plain base host context — no session overlay.
-        let base_ctx: &dyn ResolverContext = host.as_ref();
+        let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let (cold_ran, value, _recompute) = drive(&graph, base_ctx);
         assert!(
             !cold_ran,
@@ -2180,7 +2182,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     // Establish the same request-bound authorities production uses. A plain
     // host sees the base content; the SessionResolverContext sees the overlay
     // and owns its exact source/language/parse identity.
-    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     let session_store_view = host
         .resolver_store_view_read()
         .into_owned_view()
@@ -2281,29 +2283,31 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
             node
         };
 
-    let drive = |graph: &SemanticGraphStore, ctx: &dyn ResolverContext| {
-        let mut cold_ran = false;
-        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let read = graph.execute_cooperative(
-            ctx,
-            key.clone(),
-            || {
-                graph.intern_node(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss,
-                ))
-            },
-            || {
-                cold_ran = true;
-                (
-                    QueryResult::Value(recompute_node),
-                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
-                )
-            },
-        );
-        (cold_ran, read.value, recompute_node)
-    };
+    let drive =
+        |graph: &SemanticGraphStore,
+         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>| {
+            let mut cold_ran = false;
+            let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::Number,
+            ));
+            let read = graph.execute_cooperative(
+                ctx,
+                key.clone(),
+                || {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        crate::semantic_query::QueryError::Miss,
+                    ))
+                },
+                || {
+                    cold_ran = true;
+                    (
+                        QueryResult::Value(recompute_node),
+                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                    )
+                },
+            );
+            (cold_ran, read.value, recompute_node)
+        };
 
     // --- Case 1: overlay-current (Parse fact) → warm HIT -----------
     {
@@ -2371,7 +2375,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     {
         let graph = SemanticGraphStore::new();
         let published = publish_entry(&graph, base_hash, &base_parse_fact);
-        let base_ctx: &dyn ResolverContext = host.as_ref();
+        let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let (cold_ran, value, _recompute) = drive(&graph, base_ctx);
         assert!(
             !cold_ran,
@@ -2502,7 +2506,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
 
     // The base parse fact for the deleted canonical's SyntacticExportSet
     // — the carrier shape a cold build produced while the file was alive.
-    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     let deleted_parse_fact =
         crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
             base_ctx,
@@ -2541,29 +2545,32 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
         node
     };
 
-    let drive = |graph: &SemanticGraphStore, key: &SemanticQueryKey, ctx: &dyn ResolverContext| {
-        let mut cold_ran = false;
-        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let read = graph.execute_cooperative(
-            ctx,
-            key.clone(),
-            || {
-                graph.intern_node(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss,
-                ))
-            },
-            || {
-                cold_ran = true;
-                (
-                    QueryResult::Value(recompute_node),
-                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
-                )
-            },
-        );
-        (cold_ran, read.value, recompute_node)
-    };
+    let drive =
+        |graph: &SemanticGraphStore,
+         key: &SemanticQueryKey,
+         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>| {
+            let mut cold_ran = false;
+            let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::Number,
+            ));
+            let read = graph.execute_cooperative(
+                ctx,
+                key.clone(),
+                || {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        crate::semantic_query::QueryError::Miss,
+                    ))
+                },
+                || {
+                    cold_ran = true;
+                    (
+                        QueryResult::Value(recompute_node),
+                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                    )
+                },
+            );
+            (cold_ran, read.value, recompute_node)
+        };
 
     // --- Case 1: deleted (FileWholeHash self-root) → MISS ----------
     {
@@ -2804,29 +2811,32 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
         node
     };
 
-    let drive = |graph: &SemanticGraphStore, key: &SemanticQueryKey, ctx: &dyn ResolverContext| {
-        let mut cold_ran = false;
-        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let read = graph.execute_cooperative(
-            ctx,
-            key.clone(),
-            || {
-                graph.intern_node(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss,
-                ))
-            },
-            || {
-                cold_ran = true;
-                (
-                    QueryResult::Value(recompute_node),
-                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
-                )
-            },
-        );
-        (cold_ran, read.value, recompute_node)
-    };
+    let drive =
+        |graph: &SemanticGraphStore,
+         key: &SemanticQueryKey,
+         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>| {
+            let mut cold_ran = false;
+            let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+                crate::semantic_query::PrimitiveKind::Number,
+            ));
+            let read = graph.execute_cooperative(
+                ctx,
+                key.clone(),
+                || {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        crate::semantic_query::QueryError::Miss,
+                    ))
+                },
+                || {
+                    cold_ran = true;
+                    (
+                        QueryResult::Value(recompute_node),
+                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                    )
+                },
+            );
+            (cold_ran, read.value, recompute_node)
+        };
 
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
     let overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =

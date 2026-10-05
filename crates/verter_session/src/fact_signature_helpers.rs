@@ -100,8 +100,12 @@ use verter_session_query::facts::{
 /// superseded artifact — an entry the read-side fact rail cannot
 /// reject, so every shared-cache admission point MUST refuse it
 /// (serve the value to the caller, publish nothing).
-pub(crate) fn install_fact_tracer<F, R>(
-    source: &FactTracerBasisSource<'_>,
+pub(crate) fn install_fact_tracer<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
     f: F,
 ) -> (R, FactReadSetFinalise)
 where
@@ -117,8 +121,8 @@ where
 
 /// Finalise the read set of one compute's tracer scope: re-check its basis,
 /// finalise it, and report an overflow.
-fn finalise_compute_scope(
-    source: &FactTracerBasisSource<'_>,
+fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+    source: &FactTracerBasisSource<'_, W>,
     mut read_set: verter_session_query::facts::fact_read_set::FactReadSet,
 ) -> FactReadSetFinalise {
     note_basis_recheck(source, &mut read_set);
@@ -145,15 +149,17 @@ fn finalise_compute_scope(
 /// frame's build): installed on the thread only while one of its steps
 /// runs, and finalised once, as [`install_fact_tracer`] finalises its
 /// scope, when the compute completes.
-pub(crate) struct StepwiseFactTracer<'h> {
-    source: FactTracerBasisSource<'h>,
+pub(crate) struct StepwiseFactTracer<'h, W> {
+    source: FactTracerBasisSource<'h, W>,
     tracer: crate::resolver_core::resolver_context::OwnedFactTracer,
     #[cfg(test)]
     forced: bool,
 }
 
-impl<'h> StepwiseFactTracer<'h> {
-    pub(crate) fn new(source: FactTracerBasisSource<'h>) -> Self {
+impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    StepwiseFactTracer<'h, W>
+{
+    pub(crate) fn new(source: FactTracerBasisSource<'h, W>) -> Self {
         let tracer =
             crate::resolver_core::resolver_context::OwnedFactTracer::new(source.live_basis());
         Self {
@@ -200,10 +206,10 @@ impl<'h> StepwiseFactTracer<'h> {
 /// compare stamps from different worlds; binding them in one value that
 /// is only ever constructed from a single context or a single host makes
 /// that unrepresentable at the call site.
-enum BasisAuthority<'h> {
+enum BasisAuthority<'h, W> {
     Bound {
         port: &'h dyn crate::resolver_core::fact_validation_port::FactValidation,
-        clocks: verter_session_query::facts::clocks::AggregateClockReader,
+        clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
     },
     Unbound {
         overflow: &'h std::sync::atomic::AtomicU64,
@@ -214,54 +220,21 @@ enum BasisAuthority<'h> {
     },
 }
 
-pub struct FactTracerBasisSource<'h> {
-    authority: BasisAuthority<'h>,
-    seed: verter_session_query::facts::fact_cache::AggregateBasisSeed,
+/// The clock source of a basis source bound to no context. An unbound
+/// source never samples live clocks, so this type has no values.
+#[derive(Clone, Copy)]
+pub enum UnboundClocks {}
+
+impl verter_session_query::facts::clocks::WorkspaceClocks for UnboundClocks {
+    fn content_generation(&self) -> u64 {
+        match *self {}
+    }
+    fn source_env_generation(&self) -> Option<u64> {
+        match *self {}
+    }
 }
 
-impl<'h> FactTracerBasisSource<'h> {
-    /// Seed from a request-bound resolver context.
-    ///
-    /// The seed is a BORROW of the view the request boundary already
-    /// bound, so this costs one virtual call and no store-view read. This
-    /// is the constructor every producer that holds a context should use:
-    /// a request-bound scope detects movement in the two composite
-    /// domains, and an unbound one cannot.
-    ///
-    /// It reads the seed through
-    /// [`ResolverContext::aggregate_basis_seed`](crate::resolver_core::ResolverContext::aggregate_basis_seed)
-    /// rather than re-deriving it from the view. This keeps the context
-    /// projection as the one compaction-basis authority and lets test doubles
-    /// explicitly represent an unbound basis.
-    #[must_use]
-    pub fn from_ctx(
-        ctx: &'h dyn crate::resolver_core::fact_validation_port::FactValidation,
-    ) -> Self {
-        Self {
-            authority: BasisAuthority::Bound {
-                port: ctx,
-                clocks: ctx.aggregate_clock_reader(),
-            },
-            seed: ctx.aggregate_basis_seed(),
-        }
-    }
-
-    /// Seed from a context the producer may or may not have been given.
-    ///
-    /// Producers with a request context are bound to its exact basis;
-    /// context-free utility callers remain explicitly unbound. No context is
-    /// fabricated as a fallback.
-    #[must_use]
-    pub fn from_optional_ctx(
-        host: &'h crate::VerterHost,
-        ctx: Option<&'h dyn crate::resolver_core::ResolverContext>,
-    ) -> Self {
-        match ctx {
-            Some(ctx) => Self::from_ctx(ctx),
-            None => Self::unbound(host),
-        }
-    }
-
+impl<'h> FactTracerBasisSource<'h, UnboundClocks> {
     /// Seed a scope that has NO bound view.
     ///
     /// Names no domain, so the scope compacts nothing and detects no
@@ -271,16 +244,7 @@ impl<'h> FactTracerBasisSource<'h> {
     /// no bound view has no view to be validated against later either.
     #[must_use]
     pub fn unbound(host: &'h crate::VerterHost) -> Self {
-        Self {
-            authority: BasisAuthority::Unbound {
-                overflow: &host.signature_overflow_at_install,
-                #[cfg(test)]
-                non_cacheable: &host.test_force.force_fact_tracer_non_cacheable_read,
-                #[cfg(test)]
-                observations: &host.test_force.force_fact_tracer_overflow_observations,
-            },
-            seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
-        }
+        Self::unbound_with_clocks(host)
     }
 
     /// The unbound-observer basis: the only constructor that lets a fact
@@ -309,6 +273,76 @@ impl<'h> FactTracerBasisSource<'h> {
             seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         }
     }
+}
+
+/// `W` is the bound context's concrete workspace clock source, so the live
+/// basis re-check samples it without a dynamic dispatch.
+pub struct FactTracerBasisSource<'h, W> {
+    authority: BasisAuthority<'h, W>,
+    seed: verter_session_query::facts::fact_cache::AggregateBasisSeed,
+}
+
+impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
+    FactTracerBasisSource<'h, W>
+{
+    /// Seed from a request-bound resolver context.
+    ///
+    /// The seed is a BORROW of the view the request boundary already
+    /// bound, so this costs one virtual call and no store-view read. This
+    /// is the constructor every producer that holds a context should use:
+    /// a request-bound scope detects movement in the two composite
+    /// domains, and an unbound one cannot.
+    ///
+    /// It reads the seed through
+    /// [`ResolverContext::aggregate_basis_seed`](crate::resolver_core::ResolverContext::aggregate_basis_seed)
+    /// rather than re-deriving it from the view. This keeps the context
+    /// projection as the one compaction-basis authority and lets test doubles
+    /// explicitly represent an unbound basis.
+    #[must_use]
+    pub fn from_ctx(
+        ctx: &'h dyn crate::resolver_core::fact_validation_port::LiveFactValidation<Clocks = W>,
+    ) -> Self {
+        Self {
+            authority: BasisAuthority::Bound {
+                port: ctx,
+                clocks: ctx.aggregate_clock_reader(),
+            },
+            seed: ctx.aggregate_basis_seed(),
+        }
+    }
+
+    /// Seed from a context the producer may or may not have been given.
+    ///
+    /// Producers with a request context are bound to its exact basis;
+    /// context-free utility callers remain explicitly unbound. No context is
+    /// fabricated as a fallback.
+    #[must_use]
+    pub fn from_optional_ctx<C: crate::resolver_core::ResolverCapabilities<Clocks = W>>(
+        host: &'h crate::VerterHost,
+        ctx: Option<&'h dyn crate::resolver_core::ResolverContext<C>>,
+    ) -> Self {
+        match ctx {
+            Some(ctx) => Self::from_ctx(ctx),
+            None => Self::unbound_with_clocks(host),
+        }
+    }
+
+    /// [`FactTracerBasisSource::unbound`] at any clock type, so an optional
+    /// context's two arms share one source type.
+    #[must_use]
+    fn unbound_with_clocks(host: &'h crate::VerterHost) -> Self {
+        Self {
+            authority: BasisAuthority::Unbound {
+                overflow: &host.signature_overflow_at_install,
+                #[cfg(test)]
+                non_cacheable: &host.test_force.force_fact_tracer_non_cacheable_read,
+                #[cfg(test)]
+                observations: &host.test_force.force_fact_tracer_overflow_observations,
+            },
+            seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        }
+    }
+
     fn record_signature_overflow(&self) {
         match &self.authority {
             BasisAuthority::Bound { port, .. } => port.record_signature_overflow(),
@@ -386,7 +420,10 @@ impl<'h> FactTracerBasisSource<'h> {
 /// would tell it nothing. That keeps the check byte-cheap for every
 /// tracer whose source vouches for nothing.
 #[inline]
-fn note_basis_recheck(source: &FactTracerBasisSource<'_>, read_set: &mut FactReadSet) {
+fn note_basis_recheck<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+    source: &FactTracerBasisSource<'_, W>,
+    read_set: &mut FactReadSet,
+) {
     if !read_set.aggregate_basis().names_any_domain() {
         return;
     }
@@ -398,8 +435,8 @@ fn note_basis_recheck(source: &FactTracerBasisSource<'_>, read_set: &mut FactRea
 /// from inside its own closure, so an exit-only check would run after
 /// the write it was meant to gate.
 #[inline]
-fn note_basis_recheck_on_cell(
-    source: &FactTracerBasisSource<'_>,
+fn note_basis_recheck_on_cell<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+    source: &FactTracerBasisSource<'_, W>,
     cell: &verter_session_query::facts::fact_read_set::FactReadSetCell,
 ) {
     if !cell.has_aggregate_basis() {
@@ -449,8 +486,10 @@ fn note_basis_recheck_on_cell(
 /// reverts to a raw, overflow-discarding tracer still fans the observations and
 /// still fails the test. The production build compiles it out.
 #[cfg(test)]
-fn force_tracer_overflow_observations(
-    source: &FactTracerBasisSource<'_>,
+fn force_tracer_overflow_observations<
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
     scope: Option<crate::host_test_force::TracerScope>,
 ) {
     let (non_cacheable, sticky) = source.tracer_forcing();
@@ -483,13 +522,17 @@ fn force_tracer_overflow_observations(
 /// arm expands to the plain, unnamed opener — the identity exists in test builds
 /// alone.
 #[cfg(test)]
-fn with_cacheability_scope_named<F, R>(
-    source: &FactTracerBasisSource<'_>,
+fn with_cacheability_scope_named<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
     scope: crate::host_test_force::TracerScope,
     f: F,
 ) -> (R, bool)
 where
-    F: for<'t> FnOnce(&CacheabilityProbe<'t>) -> R,
+    F: for<'t> FnOnce(&CacheabilityProbe<'t, W>) -> R,
 {
     let (value, mut read_set) = source.with_fact_tracer_cell(|cell| {
         force_tracer_overflow_observations(source, Some(scope));
@@ -505,8 +548,12 @@ where
 /// [`install_fact_tracer_cacheability`] for an ADDRESSABLE scope. See
 /// [`with_cacheability_scope_named`].
 #[cfg(test)]
-pub(crate) fn install_fact_tracer_cacheability_named<F, R>(
-    source: &FactTracerBasisSource<'_>,
+pub(crate) fn install_fact_tracer_cacheability_named<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
     scope: crate::host_test_force::TracerScope,
     f: F,
 ) -> (R, bool)
@@ -519,8 +566,12 @@ where
 /// [`install_fact_tracer`] for an ADDRESSABLE scope. See
 /// [`with_cacheability_scope_named`].
 #[cfg(test)]
-pub(crate) fn install_fact_tracer_named<F, R>(
-    source: &FactTracerBasisSource<'_>,
+pub(crate) fn install_fact_tracer_named<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
     scope: crate::host_test_force::TracerScope,
     f: F,
 ) -> (R, FactReadSetFinalise)
@@ -618,7 +669,7 @@ pub(crate) use {named_cacheability_scope, named_fact_tracer};
 /// does: by opening a real scope (`for_tests::with_cacheability_scope_for_tests`)
 /// and receiving the borrow. The `cell` field stays private, so the token
 /// cannot be constructed by struct literal either.
-pub struct CacheabilityProbe<'t> {
+pub struct CacheabilityProbe<'t, W> {
     cell: &'t verter_session_query::facts::fact_read_set::FactReadSetCell,
     /// The scope's basis source, RETAINED so [`Self::non_cacheable`] can
     /// re-compose the live basis in `O(1)`. Held because this probe is an
@@ -627,10 +678,10 @@ pub struct CacheabilityProbe<'t> {
     /// fresh movement check rather than inheriting one taken on exit.
     /// Retaining the SOURCE rather than the host is what keeps that
     /// per-admission check off the store-view read path.
-    source: &'t FactTracerBasisSource<'t>,
+    source: &'t FactTracerBasisSource<'t, W>,
 }
 
-impl CacheabilityProbe<'_> {
+impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> CacheabilityProbe<'_, W> {
     /// `true` when the enclosing scope's compute MUST NOT warm any shared
     /// cache. TWO INDEPENDENT non-admission conditions fold into it:
     ///
@@ -702,9 +753,16 @@ impl CacheabilityProbe<'_> {
 /// Returns `(value, non_cacheable)` — the same verdict [`CacheabilityProbe`]
 /// reports, sampled once after the scope pops, for a producer that admits
 /// AFTER its compute rather than inside it.
-pub fn with_cacheability_scope<F, R>(source: &FactTracerBasisSource<'_>, f: F) -> (R, bool)
+pub fn with_cacheability_scope<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
+    f: F,
+) -> (R, bool)
 where
-    F: for<'t> FnOnce(&CacheabilityProbe<'t>) -> R,
+    F: for<'t> FnOnce(&CacheabilityProbe<'t, W>) -> R,
 {
     let (value, mut read_set) = source.with_fact_tracer_cell(|cell| {
         #[cfg(test)]
@@ -729,8 +787,12 @@ where
 /// signature (building the entry's `ReadSetSignature` from it) uses
 /// [`install_fact_tracer`] and routes `Overflow` through
 /// [`SignatureAdmission::from_finalise`].
-pub(crate) fn install_fact_tracer_cacheability<F, R>(
-    source: &FactTracerBasisSource<'_>,
+pub(crate) fn install_fact_tracer_cacheability<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
     f: F,
 ) -> (R, bool)
 where
@@ -785,8 +847,10 @@ pub(crate) fn observe_fact_signature(sig: &[FactVersionRef]) {
 /// contributor body folded into a parent value, so a warm parent hit
 /// revalidates each contributor's source-env identity against the live
 /// view.
-pub(crate) fn observe_file_source_env_from_artifact_key(
-    ctx: &dyn ResolverContext,
+pub(crate) fn observe_file_source_env_from_artifact_key<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn ResolverContext<C>,
     artifact_key: Option<&verter_session_query::source::artifact_key::FileArtifactKey>,
 ) -> Option<FactVersionRef> {
     let key = artifact_key?;
@@ -993,8 +1057,10 @@ pub(crate) fn bubble_fact_signature_via_tls(signature: &[FactVersionRef]) {
 /// bare `ParseFactRef` (not a wrapped `FactVersionRef`) is returned so
 /// a producer that roots the same canonical multiple ways can place it
 /// exactly once.
-pub(crate) fn parse_fact_ref_for_observed_current_content(
-    ctx: &dyn ResolverContext,
+pub(crate) fn parse_fact_ref_for_observed_current_content<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn ResolverContext<C>,
     canonical_id: &str,
     observed_content_hash: Hash16,
     key: FactKey,
@@ -1058,8 +1124,8 @@ fn observed_self_root_fact(canonical_id: &str, observed_hash: Hash16) -> FactVer
 /// member-keyed scopes, matching the `fact_signature_for_canonical_surface`
 /// precedent.
 #[cfg(test)]
-pub(crate) fn fact_signature_for_canonical_member(
-    ctx: &dyn ResolverContext,
+pub(crate) fn fact_signature_for_canonical_member<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     canonical_id: &str,
     exporter: &str,
     member: &str,
@@ -1139,8 +1205,8 @@ pub(crate) fn fact_signature_for_canonical_member(
 /// [`NonAdmissionReason::UnresolvedProvenance`] when the observed
 /// version's parse-fact registry cannot be recovered. The caller
 /// still returns the freshly-computed value.
-pub(crate) fn fact_signature_for_exported_type(
-    ctx: &dyn ResolverContext,
+pub(crate) fn fact_signature_for_exported_type<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     canonical_id: &str,
     type_name: &str,
     space: SymbolSpace,
@@ -1231,8 +1297,10 @@ pub(crate) fn fact_signature_for_exported_type(
 /// [`NonAdmissionReason::UnresolvedProvenance`] when the observed
 /// version's parse-fact registry cannot be recovered.
 #[cfg(test)]
-pub(crate) fn fact_signature_for_canonical_surface(
-    ctx: &dyn ResolverContext,
+pub(crate) fn fact_signature_for_canonical_surface<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn ResolverContext<C>,
     canonical_id: &str,
     observed_hash: Hash16,
 ) -> SignatureAdmission {

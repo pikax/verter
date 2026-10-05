@@ -154,7 +154,9 @@ fn no_ambient_host() -> Arc<VerterHost> {
 
 /// An anonymous `(x: string) => "rootless"` call signature — no authored
 /// occurrence, so its anchor classification is rootless.
-fn rootless_signature(dispatch: &ProjectSemanticDispatch<'_>) -> SemanticNodeId {
+fn rootless_signature(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+) -> SemanticNodeId {
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let return_type = graph.intern_node(SemanticNodeData::Literal(
@@ -203,7 +205,7 @@ fn surface_member_names(host: &VerterHost, node: SemanticNodeId) -> Vec<String> 
 /// `(base, demand_canonical)` — built through the SAME private context
 /// constructor, so the probe key and the walker key agree.
 fn rootless_key(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     base: SemanticNodeId,
     demand_canonical: &str,
 ) -> SemanticQueryKey {
@@ -222,7 +224,7 @@ fn rootless_key(
 /// through the walker-side entry (`apparent_type_of` behind a lexical
 /// demand-scope frame).
 fn apparent_under_demand_scope(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     base: SemanticNodeId,
     demand_canonical: &str,
 ) -> Option<SemanticNodeId> {
@@ -580,7 +582,7 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
 /// Run `f` over a dispatch on a fresh store view of `host`.
 fn with_fresh_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -608,7 +610,10 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
          export function readStringLength() { return s.length }\n",
     );
     for name in ["readArrayLength", "readStringLength"] {
-        let key = |dispatch: &ProjectSemanticDispatch<'_>| crate::semantic_query::FlowReturnKey {
+        let key = |dispatch: &ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >| crate::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
                 Arc::from(FLOW),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -622,9 +627,9 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
             input: crate::semantic_query::FlowInputContext::empty(),
             result_contract: super::super::flow_solve::flow_return_result_contract_id(),
         };
-        let with_dispatch = |f: &dyn Fn(&ProjectSemanticDispatch<'_>) -> Option<String>| {
-            with_fresh_dispatch(&host, f)
-        };
+        let with_dispatch = |f: &dyn Fn(
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        ) -> Option<String>| { with_fresh_dispatch(&host, f) };
         let request = crate::request_context::RequestContext::new(1, Arc::from(FLOW), false, None);
         let _request = crate::request_context::RequestContextGuard::install(request);
         let mut served = None;

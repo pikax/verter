@@ -708,7 +708,7 @@ fn scope_kind_sort_key(kind: &crate::semantic_query::BinderScopeKind) -> (u8, St
 /// `AppConfigNoOverrideProofDb` producer precedent).
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn produce_binder_identity_facts(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical: &str,
 ) -> Option<Arc<BinderIdentityFactsEntry>> {
     crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)

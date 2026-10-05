@@ -176,7 +176,11 @@ pub(super) fn observe<R>(
     host: &VerterHost,
     root: &str,
     symbol: &str,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>, Option<FlowReturnDegradation>, SemanticNodeId) -> R,
+    read: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        Option<FlowReturnDegradation>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     let carrier = host.get_flow_return_type_with_audit(
         &identity(&format!("{root}/main.ts"), symbol),
@@ -232,7 +236,10 @@ pub(super) fn assert_complete(host: &VerterHost, root: &str, function: &str) {
 }
 
 /// The lone call signature of a function value.
-fn lone_signature(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> SemanticNodeId {
+fn lone_signature(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
         Some(SemanticNodeData::Object(surface)) if surface.call_signatures.len() == 1 => {
             surface.call_signatures[0]

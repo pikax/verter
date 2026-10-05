@@ -217,7 +217,7 @@ pub struct ProjectionBenchCase {
 /// [`ProjectSemanticDispatch::project_view_node_worklist`].
 #[cfg(any(test, feature = "test-support"))]
 pub struct ProjectionBenchHarness<'a> {
-    dispatch: ProjectSemanticDispatch<'a>,
+    dispatch: ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>,
     env: FxHashMap<String, SemanticNodeId>,
     substitutions: Vec<(Arc<str>, SemanticNodeId)>,
     memo: ViewMemo,
@@ -365,7 +365,7 @@ impl<'a> ProjectionBenchHarness<'a> {
     }
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Plan the projection of a substituted decl-body shape into the
     /// caller's demanded view, applying the per-arm [`ProjectionStamp`] rule:
     ///

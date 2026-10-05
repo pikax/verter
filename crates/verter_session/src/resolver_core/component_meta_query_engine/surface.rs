@@ -52,7 +52,10 @@ crate::project_semantic_dispatch::output_materialization::define_output_capabili
 /// handed back to the demand-bound adapters below as the accepted publication
 /// value — a raw node is never accepted from outside the adapters.
 fn materialize_published_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<TypeExpr> {
     let cap = MetaQuerySurfaceOutputCap::new(dispatch);
@@ -74,7 +77,10 @@ fn materialize_published_node(
 /// node→`TypeExpr` materialisation except through the engine's sink-local
 /// publication methods.
 pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_projection_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: &AdmittedRouteProjectionNode,
 ) -> Option<TypeExpr> {
     materialize_published_node(dispatch, node.node())
@@ -88,7 +94,10 @@ pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_p
 /// materialise the accepted result node ONCE at this sink. `None` on
 /// lower-miss, dispatch error/recursive, gate-reject, or raise-miss.
 pub(crate) fn lower_and_project_to_expanded_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
@@ -132,7 +141,10 @@ pub(crate) fn lower_and_project_to_expanded_node(
 /// node crosses in; the `*_published` wrapper materialises the accepted node
 /// ONCE at the surface sink.
 pub(crate) fn project_class_a_terminal_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
@@ -204,8 +216,11 @@ pub(crate) fn project_class_a_terminal_node(
 /// threaded (a transient engine is created internally), matching the engine-less
 /// `project_expr_class_a_via_dispatch` callers.
 pub(crate) fn project_class_a_published(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical_id: &str,
     expr: &TypeExpr,
 ) -> Option<TypeExpr> {
@@ -231,7 +246,10 @@ pub(crate) fn project_class_a_published(
 /// [`compound_root_surface_view_via_dispatch`] driven from the decl anchor
 /// (carrier intact).
 pub(super) fn surface_view_from_semantic_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<SurfaceView> {
     let mut active = FxHashSet::default();
@@ -239,7 +257,10 @@ pub(super) fn surface_view_from_semantic_node(
 }
 
 fn surface_view_from_semantic_node_inner(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<SurfaceView> {
@@ -280,7 +301,10 @@ fn surface_view_from_semantic_node_inner(
 /// raise keeps heritage / import carriers unresolved (materialized) and would
 /// admit a partial composed surface the surface-materialization filter rejects.
 pub(super) fn compound_root_surface_view_via_dispatch(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
 ) -> Option<(SurfaceView, SemanticNodeId)> {
     use crate::semantic_query::{

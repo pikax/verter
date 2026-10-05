@@ -1118,7 +1118,10 @@ export type NestedCond<T> = { [K in 'a' | 'b']: T extends { meta: infer M } ? Op
 /// for an open generic), returning the instantiated body node.
 fn skeleton_instantiate(
     host: &Arc<VerterHost>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     decl_name: &str,
 ) -> crate::semantic_query::SemanticNodeId {
     use crate::semantic_query::{

@@ -25,7 +25,7 @@ fn main() {
     // the type at all is what must fail: the owning module is
     // `pub(crate)`, so no external crate can reach the authority methods
     // regardless of argument shape.
-    let dispatch: verter_session::project_semantic_dispatch::ProjectSemanticDispatch = todo!();
+    let dispatch: verter_session::project_semantic_dispatch::ProjectSemanticDispatch<_> = todo!();
     let _ = dispatch.force_semantic_operand(todo!(), todo!());
     let _ = dispatch.mint_authored_semantic_operand(todo!(), todo!());
     let _ = dispatch.mint_node_semantic_operand(todo!());

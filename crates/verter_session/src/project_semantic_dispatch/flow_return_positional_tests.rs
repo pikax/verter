@@ -178,7 +178,7 @@ fn make_pos_host() -> Arc<VerterHost> {
 
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -187,7 +187,11 @@ fn with_dispatch<R>(
     f(&dispatch)
 }
 
-fn key_for(dispatch: &ProjectSemanticDispatch<'_>, canonical: &str, name: &str) -> FlowReturnKey {
+fn key_for(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+    name: &str,
+) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(canonical),
@@ -238,7 +242,7 @@ fn evaluate(host: &Arc<VerterHost>, canonical: &str, name: &str) -> Option<Outco
 /// a collapsed composite cannot hide behind a projection.
 #[track_caller]
 fn member(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
@@ -255,7 +259,10 @@ fn member(
 }
 
 #[track_caller]
-fn is_unresolved_marker(dispatch: &ProjectSemanticDispatch<'_>, node: SemanticNodeId) -> bool {
+fn is_unresolved_marker(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> bool {
     matches!(
         dispatch.graph().node_data(node).as_deref(),
         Some(SemanticNodeData::Opaque(error)) if error.means_type_is_not_yet_known()

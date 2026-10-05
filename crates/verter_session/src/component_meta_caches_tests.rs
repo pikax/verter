@@ -971,7 +971,7 @@ defineProps<{ x: Lib }>()
 /// helper observes the scope and runs the engine fact-signature builder
 /// exactly as the projector pipeline does.
 fn shape_value_and_fact_sig_for_scope(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
     scope_canonical: &str,
     result_is_partial: bool,
 ) -> (
@@ -1033,7 +1033,8 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
         )
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
     let db = host.project_type_store().shape_cache_db();
 
     // Baseline: a COMPLETE value admits.
@@ -1123,7 +1124,8 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
         .upsert_base("/m3_int.ts", "export type Member = { z: boolean };")
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
     let db = host.project_type_store().shape_cache_db();
 
     let key = ShapeCacheKey::member_value_node_whole_for_test(
@@ -1191,7 +1193,8 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
         )
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
     let db = host.project_type_store().shape_cache_db();
 
     // CONTROL — the same funnel, the same shape, a LIVE decl-body lease: admits.
@@ -1323,7 +1326,8 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         .upsert_base("/m6_refusal.ts", "export type Probe = { q: string };")
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
     let db = host.project_type_store().declaration_db();
 
     let declaration = |text: &str| ResolvedTypeDeclaration {
@@ -1658,7 +1662,8 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
         .upsert_base("/rel_b.ts", "export type B = { y: number };")
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
+        host;
     let store = host.project_type_store();
     let db = store.shape_cache_db();
     let graph = store.semantic_graph();

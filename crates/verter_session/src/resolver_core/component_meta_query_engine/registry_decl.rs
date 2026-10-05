@@ -232,7 +232,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// Out-of-seal-scope callers (`host_manage/*`) accept the trait
     /// object because every method they reach (project_type_store,
     /// prepared_decl_bundle, dispatch, etc.) is on the trait surface.
-    pub(crate) fn semantic_dispatch(&self) -> &'a ProjectSemanticDispatch<'a> {
+    pub(crate) fn semantic_dispatch(
+        &self,
+    ) -> &'a ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities> {
         self.dispatch
     }
 

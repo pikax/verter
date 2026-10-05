@@ -28,7 +28,7 @@ fn object_unions(count: usize) -> String {
 
 /// The `S` and `T` a `[S, T]` probe reads.
 fn pair(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> (SemanticNodeId, SemanticNodeId) {
     match dispatch.graph().node_data(node).as_deref() {

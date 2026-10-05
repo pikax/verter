@@ -47,8 +47,8 @@ pub(crate) struct WrapperCandidate {
 /// alone is insufficient — a workspace file that spells `vue` as its terminal
 /// import source, or a package-backed export named `Ref` reached through a
 /// non-`vue` edge, both fail closed here.
-pub(crate) fn wrapper_candidate_for_route(
-    ctx: &dyn ResolverContext,
+pub(crate) fn wrapper_candidate_for_route<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
     route: super::symbol_identity::ResolvedReferenceRoute,
 ) -> Option<WrapperCandidate> {
     if route.terminal_import_source.as_ref() != "vue"
@@ -130,8 +130,10 @@ fn unresolved(
 /// extract demands the role for a whole-value composable-call binding under its
 /// own request-bound `ResolverContext` and fact tracer, and publishes it on
 /// `BindingAnalysis.return_wrapper_role`.
-pub(crate) fn wrapper_role_for_value_signature_return(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn wrapper_role_for_value_signature_return<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     canonical: &str,
     owner: TopLevelOwnerId,
     symbol: &str,
@@ -225,8 +227,10 @@ pub(crate) fn wrapper_role_for_value_signature_return(
 /// one overload's wrapper family as if it were the call's, so this fails closed
 /// with `Unresolved { Unsupported }` instead. A declaration with NO signature at
 /// all is `AnalysisUnavailable`, at parity with the delegate.
-pub(crate) fn wrapper_role_for_sole_value_signature_return(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn wrapper_role_for_sole_value_signature_return<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     canonical: &str,
     owner: TopLevelOwnerId,
     symbol: &str,

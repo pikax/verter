@@ -131,7 +131,7 @@ pub(super) enum AuthoredSignatures {
     Undecided,
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The subject's candidates of `kind`, read from `SignaturesOfType`,
     /// each as the authored signature node this subject carries it at — a
     /// composite candidate (a union or mixin synthesis) has representatives,
@@ -369,7 +369,7 @@ impl ProjectSemanticDispatch<'_> {
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Whether `signature`'s return is body-derived and its evaluation
     /// closed with a typed degradation. A return still in flight or with no
     /// value answers `false`: its own read already carries that.

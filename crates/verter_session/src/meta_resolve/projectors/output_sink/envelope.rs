@@ -143,8 +143,8 @@ impl<'a> OutputSourceMemo<'a> {
     #[allow(clippy::too_many_arguments)]
     fn materialize_output_lane_slot(
         &mut self,
-        dispatch: &ProjectSemanticDispatch<'_>,
-        cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         effective_scope: &'a str,
         lane: crate::meta_resolve::ComponentMetaOutputLane,
         index: usize,
@@ -206,8 +206,8 @@ impl<'a> OutputSourceMemo<'a> {
     #[allow(clippy::too_many_arguments)]
     fn materialize_publication_lane_slot(
         &mut self,
-        dispatch: &ProjectSemanticDispatch<'_>,
-        cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
         effective_scope: &'a str,
         lane: crate::meta_resolve::ComponentMetaOutputLane,
         index: usize,
@@ -323,8 +323,8 @@ impl<'a> OutputSourceMemo<'a> {
 ///
 /// [`ComponentMetaOutputError`]: crate::meta_resolve::ComponentMetaOutputError
 fn materialize_component_meta_output_types<'a>(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    cap: &MetaResolveProjectorsOutputCap<'_, '_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities>,
     scope_canonical_id: &'a str,
     analysis: &'a verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Result<
@@ -634,8 +634,11 @@ fn finalize_resolved_type_registry_overlay(
 ///
 /// [`ComponentMetaOutput`]: crate::meta_resolve::ComponentMetaOutput
 pub(crate) fn build_component_meta_output(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical_id: &str,
     mut analysis: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     resolution: Option<crate::meta_resolve::output::ComponentMetaResolutionSeed>,

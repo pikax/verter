@@ -168,7 +168,9 @@ impl VerterHost {
         &self,
         function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         cancellation: Option<verter_execution::cancellation::CancellationToken>,
-        run: impl FnOnce(&ProjectSemanticDispatch<'_>) -> Result<Arc<FlowReturnResult>, FlowReturnError>,
+        run: impl FnOnce(
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        ) -> Result<Arc<FlowReturnResult>, FlowReturnError>,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         let canonical_id: &str = function.anchor.canonical_id.as_ref();
         let function_symbol: &str = function.anchor.symbol.as_ref();
@@ -237,8 +239,9 @@ impl VerterHost {
                         &current_view,
                         overlay,
                     );
-                    let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
-                        &host_ctx;
+                    let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext<
+                        crate::resolver_core::HostCapabilities,
+                    > = &host_ctx;
                     match registration.as_ref() {
                         AuditRequestRegistration::Active(_) => {
                             let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));

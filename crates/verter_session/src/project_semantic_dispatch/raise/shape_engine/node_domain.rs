@@ -1577,8 +1577,8 @@ fn root_only_placeholder_facts() -> RaisedShapeFacts {
 /// gate `fold_surface_view` applies to a call / construct signature (tag
 /// `Function`). Folds the signature root-only with a FRESH cycle set (matching
 /// `fold_member`'s fresh-per-member `active`).
-fn signature_raises_to_function(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn signature_raises_to_function<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     sig: SemanticNodeId,
 ) -> bool {
     let mut active = FxHashSet::default();
@@ -1622,8 +1622,8 @@ fn signature_raises_to_function(
 /// `Some` — the projection is the strictly more lenient / safe side, so it never
 /// panics where the full fold would. Root fields pinned equal to the full fold's
 /// by the parity test.
-pub(super) fn project_root_summary(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(super) fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<RootOnlySummary> {
@@ -1891,8 +1891,10 @@ pub(super) fn project_root_summary(
 /// CLOSED: a projection that "succeeds" onto such a node is a projection
 /// MISS and must answer `None` instead of handing out a node whose
 /// publication would silently read `Unknown`.
-pub(in crate::project_semantic_dispatch) fn node_is_unknown_materializing_failure(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn node_is_unknown_materializing_failure<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> bool {
     // Derived from the SINGLE `QueryError` disposition authority — never a

@@ -354,8 +354,11 @@ pub enum ComponentMetaResolutionPurpose {
 /// component-meta cache entry correctly keyed — all inside the single
 /// resolution engine.
 pub(crate) fn component_meta_resolved_macros(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {

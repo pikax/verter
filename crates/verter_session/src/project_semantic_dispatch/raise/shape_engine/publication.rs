@@ -733,8 +733,10 @@ impl RaisedShapeAlgebra for PublicationScoreAlg {
 /// The [`PublicationScore`] of `node`, folded through the publication algebra over
 /// the shared [`super::fold_node`] traversal. `None` when the whole raise is
 /// `None` (the node — or a `?`-propagating required child — is unraisable).
-pub(in crate::project_semantic_dispatch) fn project_node_publication_score(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(in crate::project_semantic_dispatch) fn project_node_publication_score<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> Option<PublicationScore> {
     let mut alg = PublicationScoreAlg;
@@ -743,9 +745,9 @@ pub(in crate::project_semantic_dispatch) fn project_node_publication_score(
 }
 
 /// Thin alias so the entry point and the recursion read clearly.
-fn fold_node_publication(
+fn fold_node_publication<C: crate::resolver_core::ResolverCapabilities>(
     alg: &mut PublicationScoreAlg,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<ScoredOut> {

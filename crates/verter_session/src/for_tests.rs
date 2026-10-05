@@ -129,7 +129,12 @@ where
 /// pops.
 pub fn with_cacheability_scope_for_tests<F, R>(host: &crate::VerterHost, f: F) -> (R, bool)
 where
-    F: for<'t> FnOnce(&crate::fact_signature_helpers::CacheabilityProbe<'t>) -> R,
+    F: for<'t> FnOnce(
+        &crate::fact_signature_helpers::CacheabilityProbe<
+            't,
+            crate::fact_signature_helpers::UnboundClocks,
+        >,
+    ) -> R,
 {
     crate::fact_signature_helpers::with_cacheability_scope(
         &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
@@ -535,6 +540,21 @@ pub fn active_session_view_is_none_for_tests(host: &crate::VerterHost) -> bool {
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
     !ctx.has_session_view_for_tests()
+}
+
+/// Run `f` against a base request context bound to the host's current view,
+/// so an integration test can drive the request ports themselves.
+pub fn with_host_resolver_context_for_tests<R>(
+    host: &crate::VerterHost,
+    f: impl FnOnce(&crate::resolver_core::HostResolverContext<'_>) -> R,
+) -> R {
+    let view = host.resolver_store_view().into_owned_view();
+    let ctx = crate::resolver_core::HostResolverContext::new(
+        host,
+        &view,
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    f(&ctx)
 }
 
 /// Drive the AppConfigNoOverrideProofDb production producer
@@ -1349,10 +1369,11 @@ pub fn dispatch_vue_publication_keyof_partial_reasons_for_tests(
         })
 }
 
-pub use crate::resolver_core::fact_validation_port::FactValidation;
+pub use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
 pub use crate::resolver_core::host_resolver_context::HostResolverContext;
 /// Compile-contract access to the actual request ports and base-host adapter.
 /// Their production owner modules remain private; fields and construction stay sealed.
 pub use crate::resolver_core::request_ports::{
-    Cancellation, ExecutionSubmission, IndexedInputs, OwnedLowering, RouteLookup,
+    Cancellation, ExecutionSubmission, ExpressionSourceSelection, IndexedInputs, OwnedLowering,
+    RouteLookup,
 };

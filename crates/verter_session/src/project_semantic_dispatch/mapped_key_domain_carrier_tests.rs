@@ -43,7 +43,10 @@ use crate::semantic_query::{
 };
 
 /// Intern an unsubstituted outer `TypeParam` (an unbound generic).
-fn outer_type_param(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> SemanticNodeId {
+fn outer_type_param(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic(name),
         param_index: 0,
@@ -53,13 +56,19 @@ fn outer_type_param(dispatch: &ProjectSemanticDispatch<'_>, name: &str) -> Seman
     })
 }
 
-fn primitive(dispatch: &ProjectSemanticDispatch<'_>, kind: PrimitiveKind) -> SemanticNodeId {
+fn primitive(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    kind: PrimitiveKind,
+) -> SemanticNodeId {
     dispatch
         .graph()
         .intern_node(SemanticNodeData::Primitive(kind))
 }
 
-fn keyof(dispatch: &ProjectSemanticDispatch<'_>, base: SemanticNodeId) -> SemanticNodeId {
+fn keyof(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    base: SemanticNodeId,
+) -> SemanticNodeId {
     dispatch
         .graph()
         .intern_node(SemanticNodeData::KeyOf { base })
@@ -70,7 +79,7 @@ fn keyof(dispatch: &ProjectSemanticDispatch<'_>, base: SemanticNodeId) -> Semant
 /// so a carrier-stop, if any, is attributable to the KEY domain — the axis
 /// under test.)
 fn computed_mapper(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     key_space: SemanticNodeId,
     value_expr: SemanticNodeId,
 ) -> MapperKey {
@@ -89,7 +98,7 @@ fn computed_mapper(
 
 /// Intern `Mapped { source, mapper }`.
 fn mapped(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     source: SemanticNodeId,
     mapper: MapperKey,
 ) -> SemanticNodeId {
@@ -103,7 +112,7 @@ fn mapped(
 /// An empty `Vec` means the surface synthesised no members (a carrier-stop or
 /// a genuinely-empty surface).
 fn shallow_member_names(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Vec<String> {
     let empty_path: Arc<[PathSegment]> = Arc::from(Vec::new().into_boxed_slice());
@@ -138,7 +147,7 @@ fn shallow_member_names(
 /// A pre-resolved `InstantiationRef(Foo<args>)` body node (the eager equivalent
 /// of a `BareRef(Foo, args)` carrier) for path-independence comparison.
 fn instantiation_ref(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
     name: &str,
     args: &[SemanticNodeId],
@@ -161,7 +170,10 @@ fn instantiation_ref(
 /// aliases is a chain of distinct nodes — the openness walk decrements its node
 /// budget once per hop (`node_openness_uncached` → `budget -= 1`, then the
 /// `Alias` arm recurses into `target`).
-fn alias_node(dispatch: &ProjectSemanticDispatch<'_>, target: SemanticNodeId) -> SemanticNodeId {
+fn alias_node(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    target: SemanticNodeId,
+) -> SemanticNodeId {
     dispatch
         .graph()
         .intern_node(SemanticNodeData::Alias(target))
@@ -174,7 +186,7 @@ fn alias_node(dispatch: &ProjectSemanticDispatch<'_>, target: SemanticNodeId) ->
 /// `resolve_import_type_head` can recover the owner canonical from the node
 /// scope and resolve the relative specifier.
 fn import_type_generic_carrier(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     specifier: &str,
     qualifier: &[&str],
     arg_nodes: &[SemanticNodeId],
@@ -819,7 +831,7 @@ fn literal_union_bare_ref_keyspace_enumerates() {
 
 /// A single-member closed `Object` surface `{ <name>: <value> }`.
 fn object_one_member(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     value: SemanticNodeId,
 ) -> SemanticNodeId {
@@ -851,7 +863,10 @@ fn object_one_member(
 }
 
 /// An `Intersection` over the given arms.
-fn intersection(dispatch: &ProjectSemanticDispatch<'_>, arms: &[SemanticNodeId]) -> SemanticNodeId {
+fn intersection(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    arms: &[SemanticNodeId],
+) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Intersection(
         crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             arms.to_vec().into_boxed_slice(),
@@ -861,7 +876,7 @@ fn intersection(dispatch: &ProjectSemanticDispatch<'_>, arms: &[SemanticNodeId])
 
 /// A nullary `Function` `() => <return_type>` (no params, no type parameters).
 fn nullary_function(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     return_type: SemanticNodeId,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Signature {
@@ -881,7 +896,7 @@ fn nullary_function(
 /// A `__builtin__` utility instantiation `Utility<args…>` (e.g.
 /// `ReturnType<Fn>`), the exact node a builtin-utility reference lowers to.
 fn builtin_instantiation(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     utility: &str,
     args: &[SemanticNodeId],
 ) -> SemanticNodeId {

@@ -570,7 +570,7 @@ fn exact_memo_identity_cycle_precedes_both_operational_limits() {
 }
 
 fn enter_nested_query_boundaries(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     remaining: usize,
 ) -> Option<PartialReasonSet> {
     if remaining == 0 {

@@ -253,7 +253,7 @@ impl ComponentMetaQueryEngine<'_> {
     /// gate, so the rail cannot be dropped by a producer that forgets.
     fn resolve_imported_registry_symbol_admission(
         &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         source_owner: verter_type_expr::TopLevelOwnerId,
         exported_name: &str,

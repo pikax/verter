@@ -85,7 +85,9 @@ const MAX_IMPORT_HOPS: usize = 64;
 /// cycle guard. The returned [`SourceWalkResult`] feeds
 /// [`super::admission::admit_source_walk`] directly.
 #[allow(dead_code)]
-pub(crate) fn resolve_source_declarations<C: ResolverContext>(
+pub(crate) fn resolve_source_declarations<
+    C: ResolverContext<crate::resolver_core::HostCapabilities>,
+>(
     ctx: &C,
     locator: &SourceLocator,
 ) -> SourceWalkResult {
@@ -107,7 +109,7 @@ enum WalkOutcome {
     Cycle,
 }
 
-fn walk<C: ResolverContext>(
+fn walk<C: ResolverContext<crate::resolver_core::HostCapabilities>>(
     ctx: &C,
     locator: &SourceLocator,
     visited: &mut FxHashSet<(String, String, SymbolSpace)>,
@@ -293,7 +295,7 @@ fn walk<C: ResolverContext>(
 /// `canonical`. Returns `None` when the name does not bind to a defining
 /// declaration in the controlled fixture set (an unresolved import, a missing
 /// leaf, an export with no backing declaration).
-fn resolve_defining<C: ResolverContext>(
+fn resolve_defining<C: ResolverContext<crate::resolver_core::HostCapabilities>>(
     ctx: &C,
     canonical: &str,
     name: &str,

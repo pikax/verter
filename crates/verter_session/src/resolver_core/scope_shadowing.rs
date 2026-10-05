@@ -101,8 +101,8 @@ impl ScopeShadowing {
     /// for the canonical id (e.g. the file is unknown to the
     /// scheduler). This matches the dispatch path's behaviour when
     /// `scope_payload` is `None`.
-    pub(crate) fn from_host_scope(
-        ctx: &dyn crate::resolver_core::ResolverContext,
+    pub(crate) fn from_host_scope<C: crate::resolver_core::ResolverCapabilities>(
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         scope_canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {

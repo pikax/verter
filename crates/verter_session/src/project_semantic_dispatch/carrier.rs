@@ -299,7 +299,7 @@ pub(super) enum CarrierArgsContinuation {
     },
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     pub(super) fn finish_carrier_resolution(
         &self,
         continuation: CarrierArgsContinuation,

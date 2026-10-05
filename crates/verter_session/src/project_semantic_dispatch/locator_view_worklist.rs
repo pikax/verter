@@ -235,7 +235,7 @@ enum ProjectionChildPlan<'a> {
     },
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Whether an application of a declaration an enclosing build is
     /// materialising stays its recursive back-edge where the run finishes
     /// it now, read off its enclosing nodes' frames on the run's stack:

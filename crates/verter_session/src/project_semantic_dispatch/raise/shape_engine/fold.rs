@@ -83,9 +83,9 @@ pub(super) struct FoldedTypeParam<O> {
 /// (a present-but-unraisable child fails the whole composite) with typed
 /// surface-member carrier-arg fallbacks — re-housed so the materialization and
 /// the node-domain facts/key share ONE traversal.
-pub(super) fn fold_node<A: RaisedShapeAlgebra>(
+pub(super) fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
     alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<A::Out> {
@@ -456,9 +456,9 @@ pub(super) fn fold_node<A: RaisedShapeAlgebra>(
 
 /// Raise an [`IndexKey`] used as an `IndexedAccess` index — string / number
 /// literals construct directly; a `TypeNode` recurses through the core.
-fn fold_index_key<A: RaisedShapeAlgebra>(
+fn fold_index_key<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
     alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     index: &IndexKey,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<A::Out> {
@@ -476,9 +476,9 @@ fn fold_index_key<A: RaisedShapeAlgebra>(
 /// `None` when any parameter, the required return, or a present-but-unraisable
 /// type-param slot fails (presence-aware whole-composite failure).
 #[allow(clippy::too_many_arguments)]
-fn fold_function<A: RaisedShapeAlgebra>(
+fn fold_function<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
     alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     params: &[crate::semantic_query::FunctionParam],
     return_type: SemanticNodeId,
     type_parameters: &[crate::semantic_query::TypeParamDecl],
@@ -550,9 +550,9 @@ fn fold_function<A: RaisedShapeAlgebra>(
 /// when the slot is ABSENT, `Some(Some(out))` when it raises, `None` when it
 /// is PRESENT but unraisable (whole-composite failure — never silently
 /// substituted with `None`).
-fn fold_optional_slot<A: RaisedShapeAlgebra>(
+fn fold_optional_slot<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
     alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     slot: Option<SemanticNodeId>,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<Option<A::Out>> {
@@ -562,9 +562,9 @@ fn fold_optional_slot<A: RaisedShapeAlgebra>(
     }
 }
 
-fn push_surface_member<A: RaisedShapeAlgebra>(
+fn push_surface_member<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
     alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     members: &mut Vec<A::Member>,
     member: &crate::semantic_query::SurfaceMember,
 ) {
@@ -614,9 +614,12 @@ fn push_surface_member<A: RaisedShapeAlgebra>(
     ));
 }
 
-fn fold_object_spread_program<A: RaisedShapeAlgebra>(
+fn fold_object_spread_program<
+    A: RaisedShapeAlgebra,
+    C: crate::resolver_core::ResolverCapabilities,
+>(
     alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     program: &ObjectSpreadProgram,
 ) -> A::Out {
@@ -660,14 +663,17 @@ fn fold_object_spread_program<A: RaisedShapeAlgebra>(
     }
 }
 
-fn fold_open_object_spread_program<A: RaisedShapeAlgebra>(
+fn fold_open_object_spread_program<
+    A: RaisedShapeAlgebra,
+    C: crate::resolver_core::ResolverCapabilities,
+>(
     alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     program: &ObjectSpreadProgram,
 ) -> A::Out {
-    fn fold_child<A: RaisedShapeAlgebra>(
+    fn fold_child<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
         alg: &mut A,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
         node: SemanticNodeId,
     ) -> A::Out {
         let mut active = FxHashSet::default();
@@ -675,9 +681,9 @@ fn fold_open_object_spread_program<A: RaisedShapeAlgebra>(
             .unwrap_or_else(|| alg.opaque_sentinel(&QueryError::UnrepresentableSurfaceMember))
     }
 
-    fn fold_key<A: RaisedShapeAlgebra>(
+    fn fold_key<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
         alg: &mut A,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
         key: &crate::semantic_query::AuthoredPropertyKey,
     ) -> verter_type_expr::AuthoredPropertyKey<A::Out, verter_type_expr::facts::ValueDeclIdentityPart>
     {
@@ -818,8 +824,8 @@ pub(crate) fn folded_nodes_for_tests() -> usize {
 /// alone), and printing it spells the instance a second time beside the
 /// construct signature's return: a class expression nested in a method's
 /// return doubled the raised shape per level.
-fn is_class_expression_prototype(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn is_class_expression_prototype<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     surface: &SurfaceView,
     member: &crate::semantic_query::SurfaceMember,
 ) -> bool {
@@ -838,16 +844,16 @@ fn is_class_expression_prototype(
 /// value misses becomes the `SEMANTIC_SURFACE_MEMBER` sentinel. Returns `None`
 /// when the surface yields no representable members (the empty-`{}` case is
 /// handled by the caller).
-fn fold_surface_view<A: RaisedShapeAlgebra>(
+fn fold_surface_view<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
     alg: &mut A,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     surface: &SurfaceView,
 ) -> Option<A::Out> {
     // Fold a member VALUE through the core with a fresh cycle set; a miss
     // becomes the SEMANTIC_SURFACE_MEMBER sentinel (matching the materializer).
-    fn fold_member<A: RaisedShapeAlgebra>(
+    fn fold_member<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
         alg: &mut A,
-        dispatch: &ProjectSemanticDispatch<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
         node: SemanticNodeId,
     ) -> A::Out {
         let mut active = FxHashSet::default();

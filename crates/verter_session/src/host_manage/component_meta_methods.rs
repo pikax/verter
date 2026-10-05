@@ -542,7 +542,9 @@ impl VerterHost {
             store_view,
             std::sync::Arc::clone(overlay),
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &session_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
@@ -579,7 +581,9 @@ impl VerterHost {
             store_view,
             std::sync::Arc::clone(overlay),
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &session_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &session_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
@@ -640,7 +644,9 @@ impl VerterHost {
             cold_seed,
             std::sync::Arc::clone(overlay),
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &host_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
@@ -697,7 +703,9 @@ impl VerterHost {
             cold_seed,
             std::sync::Arc::clone(overlay),
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &host_ctx;
         let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
@@ -839,8 +847,13 @@ impl VerterHost {
         &self,
         canonical: &str,
         whole_hash: Hash16,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
             canonical,
@@ -864,8 +877,13 @@ impl VerterHost {
         captured: Option<&CapturedComponentMetaInputs>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         session_view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<ResolvedComponentMetaState> {
         // `ctx` is required, so every production caller supplies the exact
@@ -1317,7 +1335,10 @@ impl VerterHost {
         // unloaded producing canonical) conservatively stays symbolic — the
         // consumer re-resolves the named root on demand.
         fn imported_registry_alias_should_stay_symbolic(
-            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+                '_,
+                crate::resolver_core::HostCapabilities,
+            >,
             body: &verter_type_expr::facts::PreparedTypeBodyFacts,
         ) -> bool {
             let locator =
@@ -1366,8 +1387,11 @@ impl VerterHost {
         /// reference member value enqueues `Whole`), matching the registry
         /// seed-scan contract.
         fn collect_imported_component_meta_registry_seed_refs_node(
-            ctx: &dyn crate::resolver_core::ResolverContext,
-            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+            ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+                '_,
+                crate::resolver_core::HostCapabilities,
+            >,
             graph: &crate::semantic_query_memo::SemanticGraphStore,
             node: crate::semantic_query::SemanticNodeId,
             published_names: &rustc_hash::FxHashSet<String>,
@@ -1377,8 +1401,13 @@ impl VerterHost {
             cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
         ) {
             fn collect_one_filtered_node(
-                ctx: &dyn crate::resolver_core::ResolverContext,
-                dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+                ctx: &dyn crate::resolver_core::ResolverContext<
+                    crate::resolver_core::HostCapabilities,
+                >,
+                dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+                    '_,
+                    crate::resolver_core::HostCapabilities,
+                >,
                 node: crate::semantic_query::SemanticNodeId,
                 published_names: &rustc_hash::FxHashSet<String>,
                 queued_names: &mut RegistryQueuedNames,
@@ -1710,7 +1739,10 @@ impl VerterHost {
                 crate::semantic_query::ProjectionMode::Navigate,
             );
         let raise_seed_source =
-            |dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+            |dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+                '_,
+                crate::resolver_core::HostCapabilities,
+            >,
              producer_scope: &RegistryProducerScope,
              source: &verter_type_expr::facts::SemanticTypeSource| {
                 dispatch.raise_semantic_type_source_to_hot(

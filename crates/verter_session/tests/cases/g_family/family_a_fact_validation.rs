@@ -358,9 +358,9 @@ fn central_fact_signature_helpers_are_provenance_pure() {
     // The three central helpers in `fact_signature_helpers.rs`.
     let helpers_src = read_session_source("fact_signature_helpers.rs");
     const HELPERS: &[&str] = &[
-        "pub(crate) fn fact_signature_for_exported_type(",
-        "pub(crate) fn fact_signature_for_canonical_member(",
-        "pub(crate) fn fact_signature_for_canonical_surface(",
+        "pub(crate) fn fact_signature_for_exported_type<",
+        "pub(crate) fn fact_signature_for_canonical_member<",
+        "pub(crate) fn fact_signature_for_canonical_surface<",
     ];
     for helper in HELPERS {
         let body = extract_fn_body(&helpers_src, helper);

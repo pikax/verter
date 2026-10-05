@@ -33,7 +33,10 @@ fn host() -> Arc<VerterHost> {
     host
 }
 
-fn prim(d: &ProjectSemanticDispatch<'_>, kind: PrimitiveKind) -> SemanticNodeId {
+fn prim(
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    kind: PrimitiveKind,
+) -> SemanticNodeId {
     d.graph().intern_node(SemanticNodeData::Primitive(kind))
 }
 
@@ -42,7 +45,7 @@ fn param(ty: SemanticNodeId) -> FunctionParam {
 }
 
 fn callable(
-    d: &ProjectSemanticDispatch<'_>,
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     calls: Vec<SemanticNodeId>,
     constructs: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
@@ -58,7 +61,7 @@ fn callable(
 }
 
 fn discover(
-    d: &ProjectSemanticDispatch<'_>,
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: SemanticNodeId,
     kind: SignatureKind,
 ) -> QueryOutcome<SignatureSetRef> {
@@ -127,7 +130,7 @@ fn identity_substitution(
 }
 
 fn read_return(
-    d: &ProjectSemanticDispatch<'_>,
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     candidate: crate::signature_kernel::SignatureCandidate,
     call: crate::signature_kernel::CallSubstitutionId,
 ) -> Result<SemanticNodeId, IncompleteReason> {
@@ -893,7 +896,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
 }
 
 fn signature_set_of(
-    d: &ProjectSemanticDispatch<'_>,
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: SemanticNodeId,
     context: SemanticContextId,
 ) -> SignatureSetRef {
@@ -1018,7 +1021,7 @@ fn read_signature_result_distinct_demands_do_not_alias() {
 }
 
 fn generic_identity(
-    d: &ProjectSemanticDispatch<'_>,
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     constraint: Option<SemanticNodeId>,
 ) -> SemanticNodeId {

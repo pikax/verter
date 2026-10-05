@@ -173,7 +173,7 @@ fn union_operand_evidence(
     ))
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Seal a published runtime node to this graph and generation.
     /// `pub(super)`: the forcing authority lives in this module tree, and
     /// no consumer outside it can mint an operand.

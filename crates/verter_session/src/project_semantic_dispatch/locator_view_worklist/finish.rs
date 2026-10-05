@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     pub(super) fn plan_bare_reference_projection(
         &self,
         data: &SemanticNodeData,

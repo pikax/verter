@@ -44,8 +44,8 @@ use crate::resolver_core::ResolverContext;
 /// dispatch reads contribute evidence directly to the request-level tracer
 /// that owns the reusable component-meta signature. The local counter lets
 /// behavioral tests prove this traversal contributed evidence.
-fn emit_slot_binding_graph_dispatch_facts(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn emit_slot_binding_graph_dispatch_facts<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     sig: &crate::semantic_query::DepSignature,
 ) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -243,7 +243,7 @@ const SFC_SCRIPT_SETUP_DECL_NAME: &str = "<sfc-script-setup>";
 
 /// Build the owner [`DeclIdentity`] for an SFC's macro queries.
 fn build_owner_decl_identity(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
 ) -> DeclIdentity {
@@ -366,7 +366,10 @@ fn macro_expansion_for_budget_exceeded(
 /// referential lowered shape (e.g. `type R = { next: R }` in Navigate
 /// mode) terminates after the first visit.
 fn accumulate_lowered_node_carrier_deps(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     node: SemanticNodeId,
     owner_canonical: &str,
 ) {
@@ -499,8 +502,8 @@ fn accumulate_lowered_node_carrier_deps(
 /// otherwise an open generic slot param (`SlotProps<M>` in a `generic="M"`
 /// component) would reduce to a committed branch and the DTO path would invent a
 /// phantom binding that the graph-native path correctly declined.
-pub(crate) fn slot_param_root_is_symbolic_only(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn slot_param_root_is_symbolic_only<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     root: SemanticNodeId,
 ) -> bool {
     let mut node = root;
@@ -521,8 +524,8 @@ enum SlotRootStep {
     Next(SemanticNodeId),
 }
 
-fn slot_param_root_step(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn slot_param_root_step<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> SlotRootStep {
     let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) else {
@@ -655,8 +658,8 @@ fn slot_param_root_step(
 /// (`DeclRef` / `InstantiationRef`) are treated as NOT-free (they are concrete
 /// declaration references, resolved elsewhere). Every node is read once,
 /// whatever the nesting.
-fn node_contains_free_type_param(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn node_contains_free_type_param<C: crate::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> bool {
     use crate::graph_walk::Reach;
@@ -713,7 +716,7 @@ fn node_contains_free_type_param(
 /// alias-unwrap + closed-object semantics. See the `exactness` module
 /// docs for the full predicate.
 pub(crate) fn compute_exactness_for_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> ExpansionExactness {
     super::exactness::classify_node(dispatch, node)
@@ -1033,8 +1036,8 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 /// branch records its typed reason so the caller skips
 /// publication.
 pub(crate) fn compute_bindings_via_graph(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    ctx: &dyn ResolverContext,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     macro_payload_node: SemanticNodeId,
     owner_macro: SlotMacroIdentity,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
@@ -1405,8 +1408,11 @@ pub(crate) fn compute_bindings_via_graph(
 /// content — a `publish_merged_bindings` slot read in an overlay session no
 /// longer leaks the base host's slot bindings.
 fn typeinfo_macro_dtos(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
@@ -1467,7 +1473,7 @@ fn typeinfo_macro_dtos(
 /// re-resolves in the owner scope on demand. `None` for every non-reference
 /// value shape (the caller falls through to the synthetic carrier).
 fn named_reference_carrier_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value_node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     let mut current = value_node;
@@ -1517,7 +1523,7 @@ fn named_reference_carrier_source(
 /// as the synthetic carrier instead would render the binding's own NAME
 /// as its type on every consumer surface.
 fn closed_leaf_fact_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value_node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     use verter_type_expr::facts::{ClosedTypeFact, FactOrLocator, SemanticTypeSource};
@@ -1563,7 +1569,7 @@ fn closed_leaf_fact_source(
 /// (`{ meta: meta; }`) — the same name-as-type defect the leaf arm
 /// corrects, one level in.
 fn closed_leaf_object_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     value_node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     use verter_type_expr::facts::{ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact};
@@ -1614,7 +1620,7 @@ fn closed_leaf_object_source(
 }
 
 fn closed_member_path_route_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     value_node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
@@ -1714,7 +1720,7 @@ fn closed_member_path_route_source(
 /// (slow path / synthetic) when the root has no prepared decl, the
 /// member is absent, or the annotation cannot raise.
 fn owner_local_member_reaches_non_owner_ref(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     identity: &DeclIdentity,
     member_name: &str,
@@ -1753,7 +1759,7 @@ fn owner_local_member_reaches_non_owner_ref(
 /// fail-closed keeps the slow path). Every node is read once, whatever the
 /// nesting.
 fn node_reaches_non_owner_ref(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     node: SemanticNodeId,
 ) -> bool {
@@ -2371,10 +2377,10 @@ defineSlots<{ default(props: { item: string }): any }>()
 }
 
 pub(crate) fn publish_merged_bindings(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     graph_native: &[GraphNativeBindingEntry],
     resolved_macros: &[ResolvedMacroMeta],
     expanded: &mut ExpandedComponentTypes,

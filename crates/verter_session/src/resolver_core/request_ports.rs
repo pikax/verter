@@ -438,6 +438,25 @@ pub struct TerminalMacroInventory {
     pub(crate) script_analysis:
         Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
 }
+/// Selects one exact observed source's expression-demand capability. The
+/// capability type is concrete per host, so a selection allocates nothing
+/// and the demands made on it dispatch statically.
+pub trait ExpressionSourceSelection: OwnedLowering {
+    /// The owned expression-source demand handle a selection returns. It
+    /// shares the selected source's retained state.
+    type ExpressionDemand: verter_session_query::source::demand::ExpressionSourceDemand + Clone;
+
+    fn indexed_flow_source(
+        &self,
+        canonical: &str,
+    ) -> Option<(IndexedInputServe, Option<Self::ExpressionDemand>)>;
+
+    fn indexed_expression_source(
+        &self,
+        canonical: &str,
+    ) -> Option<(IndexedInputServe, Self::ExpressionDemand)>;
+}
+
 pub trait OwnedLowering {
     fn member_presence_for_observed_content(
         &self,
@@ -583,22 +602,6 @@ pub trait OwnedLowering {
         key: verter_session_query::facts::registry::FactKey,
         lane: verter_session_query::facts::registry::FactLane,
     ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef>;
-    fn indexed_flow_source(
-        &self,
-        canonical: &str,
-    ) -> Option<(
-        IndexedInputServe,
-        Option<std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>>,
-    )>;
-
-    fn indexed_expression_source(
-        &self,
-        canonical: &str,
-    ) -> Option<(
-        IndexedInputServe,
-        std::sync::Arc<dyn verter_session_query::source::demand::ExpressionSourceDemand>,
-    )>;
-
     fn recover_member_spans(
         &self,
         source: &ShallowInputRecord,

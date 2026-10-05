@@ -22,7 +22,7 @@ use crate::semantic_query::{
     HotTypeRef, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
 };
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Project a RESOLVED node into its complete closed LEAF fact when it is
     /// one (a primitive / string / number / boolean literal). `None` for any
     /// richer shape — the caller publishes its content-free source instead;

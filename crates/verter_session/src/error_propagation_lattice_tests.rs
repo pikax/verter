@@ -305,10 +305,14 @@ fn error_any_never_propagation_lattice() {
 
     // The single-segment indexed-access shape is recognised; a member path is
     // NOT (member projection is a distinct surface).
-    assert!(ProjectSemanticDispatch::project_path_is_indexed_access(&[
+    assert!(ProjectSemanticDispatch::<
+        crate::resolver_core::HostCapabilities,
+    >::project_path_is_indexed_access(&[
         PathSegment::Index(IndexKey::String(Arc::from("k")))
     ]));
-    assert!(!ProjectSemanticDispatch::project_path_is_indexed_access(&[
+    assert!(!ProjectSemanticDispatch::<
+        crate::resolver_core::HostCapabilities,
+    >::project_path_is_indexed_access(&[
         PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo"))
     ]));
 

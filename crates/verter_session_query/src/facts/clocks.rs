@@ -56,18 +56,21 @@ impl BracketedGenerationRead {
 /// Fixed live-clock sampling authority. The workspace slot remains live so a
 /// workspace replacement has the same visibility as the host's original read.
 /// No workspace, store, mutation, or callback capability can escape this record.
+///
+/// `W` is the host's concrete workspace clock source, so a live sample
+/// reads it without an extra dynamic dispatch.
 #[derive(Clone)]
-pub struct AggregateClockReader {
-    workspace: Arc<dyn WorkspaceClocks>,
+pub struct AggregateClockReader<W> {
+    workspace: W,
     project: ProjectGenerationRead,
     imports: BracketedGenerationRead,
     routes: BracketedGenerationRead,
 }
-impl AggregateClockReader {
+impl<W: WorkspaceClocks> AggregateClockReader<W> {
     /// Sample `workspace`, `project`, `imports` and `routes`.
     #[must_use]
     pub fn new(
-        workspace: Arc<dyn WorkspaceClocks>,
+        workspace: W,
         project: ProjectGenerationRead,
         imports: BracketedGenerationRead,
         routes: BracketedGenerationRead,

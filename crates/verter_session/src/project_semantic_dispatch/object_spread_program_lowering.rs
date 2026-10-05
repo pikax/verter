@@ -103,7 +103,7 @@ pub(super) fn direct_effects_from_surface(surface: &SurfaceView) -> Vec<ObjectCo
     effects
 }
 
-impl<'a> ProjectSemanticDispatch<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn lower_spread_object_literal(
         &self,

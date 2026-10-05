@@ -20,9 +20,9 @@ impl SemanticGraphStore {
         self.begin_inline_member_flight(SemanticQueryKey::ResolveCall(Box::new(key.clone())))
     }
 
-    pub(crate) fn get_resolve_call_result(
+    pub(crate) fn get_resolve_call_result<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: &crate::semantic_query::ResolveCallKey,
     ) -> Option<crate::semantic_query::ResolvedCallResult> {
         let family = FamilyKey::ResolveCall {

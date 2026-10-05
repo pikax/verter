@@ -38,9 +38,11 @@ impl SemanticGraphStore {
     /// candidate does not count: after an edit, the callees above it are
     /// re-evaluated by the schedule, bottom-up, rather than one nested
     /// demand per invalidated level.
-    pub(crate) fn has_serving_flow_return_candidate(
+    pub(crate) fn has_serving_flow_return_candidate<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: &crate::semantic_query::FlowReturnKey,
     ) -> bool {
         let family = FamilyKey::FlowReturn {
@@ -69,9 +71,9 @@ impl SemanticGraphStore {
     /// ONLY — no slice hash or selected-ID is re-derived or consulted
     /// here (the sole-rail invariant; slice identity is structurally
     /// unrepresentable in the fact rail).
-    pub(crate) fn get_flow_return_result(
+    pub(crate) fn get_flow_return_result<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         key: &crate::semantic_query::FlowReturnKey,
     ) -> Option<crate::semantic_query::FlowReturnResult> {
         let family = FamilyKey::FlowReturn {

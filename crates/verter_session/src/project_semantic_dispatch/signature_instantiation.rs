@@ -13,7 +13,7 @@ use crate::semantic_query::{
     TypeParamDecl, VariancePhase,
 };
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// `source` instantiated in the context of `target` when `source` is a
     /// generic signature `target` does not share its type parameters with:
     /// each type parameter fixes, as a call's does, from the candidates the

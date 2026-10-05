@@ -67,7 +67,9 @@ fn carrier_wrapping(
 fn accumulate_carrier_deps_descends_carrier_args() {
     for kind in 0u8..3 {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+        let ctx: &dyn crate::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &host;
         let graph = Arc::clone(host.project_type_store().semantic_graph());
 
         // A cross-file DeclRef (declared in /dep.ts) wrapped in a carrier
@@ -170,7 +172,12 @@ fn under_nested_arrays<R: Send + 'static>(
     leaf: impl FnOnce(&crate::semantic_query_memo::SemanticGraphStore) -> SemanticNodeId
         + Send
         + 'static,
-    probe: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R + Send + 'static,
+    probe: impl FnOnce(
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+            SemanticNodeId,
+        ) -> R
+        + Send
+        + 'static,
 ) -> R {
     std::thread::Builder::new()
         .stack_size(1 << 20)

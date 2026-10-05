@@ -38,7 +38,10 @@ pub(super) const PROBE_FILE: &str = "/wb/checker_probe.ts";
 pub(super) fn with_probe<R>(
     source: &str,
     probe: &str,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    read: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     with_probe_in(ProbeProject::default(), source, probe, read)
 }
@@ -48,7 +51,10 @@ pub(super) fn with_probe_in<R>(
     project: ProbeProject<'_>,
     source: &str,
     probe: &str,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    read: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     with_probe_on_host(&probe_host(project), project, source, probe, read)
 }
@@ -67,7 +73,10 @@ pub(super) fn with_probe_on_host<R>(
     project: ProbeProject<'_>,
     source: &str,
     probe: &str,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    read: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     with_probe_outcome_on_host(host, project, source, probe, |dispatch, outcome| {
         let node = outcome
@@ -83,7 +92,10 @@ pub(super) fn with_probe_on_host<R>(
 pub(super) fn with_recovered_probe<R>(
     source: &str,
     probe: &str,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R,
+    read: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ) -> R,
 ) -> R {
     let project = ProbeProject::default();
     with_probe_outcome_on_host(
@@ -112,7 +124,10 @@ pub(super) fn with_probe_outcome_on_host<R>(
     project: ProbeProject<'_>,
     source: &str,
     probe: &str,
-    read: impl FnOnce(&ProjectSemanticDispatch<'_>, super::evaluate::StructuralFactDemandOutcome) -> R,
+    read: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        super::evaluate::StructuralFactDemandOutcome,
+    ) -> R,
 ) -> R {
     let module = format!(
         "{source}\nexport function __checker_probe() {{ \

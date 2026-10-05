@@ -55,7 +55,7 @@ fn push_root(roots: &mut Vec<ObservedGraphSelfRoot>, root: ObservedGraphSelfRoot
     }
 }
 
-impl ProjectSemanticDispatch<'_> {
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// The module object the value root names when read whole, if it names
     /// one: a namespace import (or an import assignment of a module without
     /// `export =`), or a namespace this file declares — in its own scope or

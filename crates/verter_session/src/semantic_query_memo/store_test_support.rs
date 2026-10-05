@@ -33,7 +33,7 @@ impl SemanticGraphStore {
     #[cfg(test)]
     pub(crate) fn execute_cooperative_batch(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
         keys: &[crate::semantic_query::SemanticQueryKey],
     ) -> Vec<Result<SemanticNodeId, BatchExpandError>> {
         keys.iter()
@@ -250,7 +250,9 @@ impl SemanticGraphStore {
     #[allow(clippy::too_many_arguments)]
     fn publish_for_tests_impl(
         &self,
-        view: Option<&dyn crate::resolver_core::ResolverContext>,
+        view: Option<
+            &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        >,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,

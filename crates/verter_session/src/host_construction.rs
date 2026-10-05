@@ -596,9 +596,6 @@ impl VerterHost {
             },
             block_content: crate::block_content::BlockContentHostLane::default(),
             language_classifier,
-            workspace_clocks: Arc::new(crate::resolver_store::WorkspaceSlotClocks(Arc::clone(
-                &workspace_lock,
-            ))),
             workspace: workspace_lock,
             alias_to_canonical: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
@@ -856,14 +853,19 @@ impl VerterHost {
     #[must_use]
     pub fn semantic_dispatch(
         &self,
-    ) -> crate::project_semantic_dispatch::ProjectSemanticDispatch<'_> {
+    ) -> crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    > {
         crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
     }
 
     /// Run one base-lane operation through a sealed request-bound context.
     pub(crate) fn with_base_resolver_context<R>(
         &self,
-        operation: impl FnOnce(&dyn crate::resolver_core::ResolverContext) -> R,
+        operation: impl FnOnce(
+            &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ) -> R,
     ) -> R {
         let base = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -1780,6 +1782,14 @@ mod fact_validation_authority {
     use verter_session_query::facts::store_view::{
         ResolverHash16, StoreView, StoreViewCompatToken,
     };
+    impl crate::resolver_core::fact_validation_port::LiveFactValidation for crate::VerterHost {
+        type Clocks = crate::resolver_store::WorkspaceSlotClocks;
+        fn aggregate_clock_reader(
+            &self,
+        ) -> verter_session_query::facts::clocks::AggregateClockReader<Self::Clocks> {
+            crate::VerterHost::aggregate_clock_reader(self)
+        }
+    }
     impl FactValidation for crate::VerterHost {
         fn current_external_supersession_fingerprint(&self) -> u64 {
             crate::VerterHost::current_external_supersession_fingerprint(self)
@@ -1809,11 +1819,6 @@ mod fact_validation_authority {
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
             };
             crate::semantic_query_memo::semantic_graph_read_set_signature(&view, roots, facts)
-        }
-        fn aggregate_clock_reader(
-            &self,
-        ) -> verter_session_query::facts::clocks::AggregateClockReader {
-            crate::VerterHost::aggregate_clock_reader(self)
         }
         fn record_signature_overflow(&self) {
             self.signature_overflow_at_install
