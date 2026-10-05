@@ -1174,3 +1174,178 @@ mod request_bound_adapter_structure_tests {
         assert_resolver_context::<crate::resolver_core::SessionResolverContext<'static>>();
     }
 }
+
+use super::fact_validation_port::FactValidation;
+use std::collections::BTreeSet;
+use verter_session_query::facts::fact_cache::{
+    DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
+    RouteSurfaceFactRef,
+};
+use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
+
+impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
+    fn current_external_supersession_fingerprint(&self) -> u64 {
+        self.0.host().current_external_supersession_fingerprint()
+    }
+    fn source_environment(
+        &self,
+        key: &verter_session_query::source::artifact_key::FileArtifactKey,
+    ) -> verter_session_query::source::env_identity::SourceEnvIdentity {
+        crate::resolver_store::live_source_env_identity(self.0.host(), key)
+    }
+    fn current_project_generation(&self) -> u64 {
+        self.0
+            .host()
+            .project_type_store()
+            .current_project_generation()
+    }
+    fn complete_graph_signature(
+        &self,
+        roots: &[(
+            std::sync::Arc<str>,
+            verter_session_query::analysis::types::Hash16,
+        )],
+        facts: &[FactVersionRef],
+    ) -> Result<
+        crate::fact_signature_helpers::StructuralCarrierReadSet,
+        crate::cache_runtime::NonAdmissionReason,
+    > {
+        crate::semantic_query_memo::semantic_graph_read_set_signature(
+            self.0.request_view(),
+            roots,
+            facts,
+        )
+    }
+    fn aggregate_clock_reader(&self) -> verter_session_query::facts::clocks::AggregateClockReader {
+        self.0.host().aggregate_clock_reader()
+    }
+    fn record_signature_overflow(&self) {
+        self.0
+            .host()
+            .signature_overflow_at_install
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    #[cfg(test)]
+    fn tracer_forcing(&self) -> (bool, usize) {
+        (
+            self.0
+                .host()
+                .test_force
+                .force_fact_tracer_non_cacheable_read
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.0
+                .host()
+                .test_force
+                .force_fact_tracer_overflow_observations
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    #[inline]
+    fn current_dependency_fact_versions(
+        &self,
+        canonical: &str,
+        tracked_deps: &BTreeSet<String>,
+    ) -> Vec<FactVersionRef> {
+        crate::VerterHost::current_dependency_fact_versions(self.0.host(), canonical, tracked_deps)
+    }
+    fn compat_token(&self) -> StoreViewCompatToken {
+        self.0.request_view().compat_token()
+    }
+    fn validates(&self, fact: &FactVersionRef) -> bool {
+        self.0.request_view().validates(fact)
+    }
+    fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
+        self.0.request_view().validates_parse_domain(fact)
+    }
+    fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
+        self.0.request_view().validates_resolve_imports_domain(fact)
+    }
+    fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool {
+        self.0.request_view().validates_route_surface_domain(fact)
+    }
+    fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool {
+        self.0
+            .request_view()
+            .validates_program_analysis_domain(fact)
+    }
+    fn validates_file_source_env(
+        &self,
+        canonical_id: &str,
+        parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
+        parse_key: &verter_language::ParseKey,
+        file_language_id: &verter_language::FileLanguage,
+    ) -> bool {
+        self.0.request_view().validates_file_source_env(
+            canonical_id,
+            parse_env_hash,
+            parse_key,
+            file_language_id,
+        )
+    }
+    fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
+        self.0
+            .request_view()
+            .validates_self_root_whole_hash(canonical_id, hash)
+    }
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
+        self.0.request_view().strict_self_root_world_identity()
+    }
+    fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
+        self.0
+            .request_view()
+            .strict_self_root_is_witnessable(canonical_id)
+    }
+    fn mint_strict_self_root_world(
+        &self,
+        roots: &[(&str, ResolverHash16)],
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
+        self.0.request_view().mint_strict_self_root_world(roots)
+    }
+    fn tracks_file(&self, canonical_id: &str) -> bool {
+        self.0.request_view().tracks_file(canonical_id)
+    }
+    fn derived_hash_for(
+        &self,
+        canonical_id: &str,
+        kind: DerivedFactKind,
+    ) -> Option<ResolverHash16> {
+        self.0.request_view().derived_hash_for(canonical_id, kind)
+    }
+    fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
+        self.0.request_view().aggregate_basis_seed()
+    }
+    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
+        self.0.request_view().validates_fact_signature(sig)
+    }
+    fn validate_fact_signature(
+        &self,
+        sig: &[FactVersionRef],
+        self_root_canonicals: &[&str],
+    ) -> Result<(), usize> {
+        self.0
+            .request_view()
+            .validate_fact_signature(sig, self_root_canonicals)
+    }
+    fn validates_fact_signature_with_self_roots(
+        &self,
+        sig: &[FactVersionRef],
+        self_root_canonicals: &[&str],
+    ) -> bool {
+        self.0
+            .request_view()
+            .validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+    }
+    fn promote_route_completion(
+        &self,
+        canonical: &str,
+        whole_hash: verter_session_query::analysis::types::Hash16,
+        route_hash: Option<verter_session_query::analysis::types::Hash16>,
+    ) {
+        self.0
+            .request_view()
+            .promote_route_completion(canonical, whole_hash, route_hash)
+    }
+}

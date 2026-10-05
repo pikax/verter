@@ -496,13 +496,14 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
 fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     use rustc_hash::FxHashMap;
 
-    use crate::resolver_store::{HostStoreView, SourceEnvIdentity};
+    use crate::resolver_store::HostStoreView;
     use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_session_query::facts::store_view::StoreView;
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
     use verter_session_query::source::artifact_key::FileArtifactKey;
+    use verter_session_query::source::env_identity::SourceEnvIdentity;
 
     let host = make_host();
     upsert_augmentation_fixture(&host);
@@ -637,7 +638,6 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
 #[test]
 fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
     use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_store::SourceEnvIdentity;
     use crate::semantic_query::{
         ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
@@ -646,6 +646,7 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
+    use verter_session_query::source::env_identity::SourceEnvIdentity;
 
     let host = make_host();
     upsert_augmentation_fixture(&host);

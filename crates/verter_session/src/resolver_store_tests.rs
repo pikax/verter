@@ -128,10 +128,10 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
 
 mod file_source_env_validation {
     use super::*;
-    use crate::resolver_store::SourceEnvIdentity;
     use verter_session_query::facts::fact_cache::FactVersionRef;
     use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_session_query::source::artifact_key::FileArtifactKey;
+    use verter_session_query::source::env_identity::SourceEnvIdentity;
 
     const CONTRIB: &str = "/contrib.d.ts";
     const CONTRIB_HASH: [u8; 16] = [5u8; 16];

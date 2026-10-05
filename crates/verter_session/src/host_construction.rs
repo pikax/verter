@@ -1787,7 +1787,7 @@ mod fact_validation_authority {
         fn source_environment(
             &self,
             key: &verter_session_query::source::artifact_key::FileArtifactKey,
-        ) -> crate::resolver_store::SourceEnvIdentity {
+        ) -> verter_session_query::source::env_identity::SourceEnvIdentity {
             crate::resolver_store::live_source_env_identity(self, key)
         }
         fn current_project_generation(&self) -> u64 {

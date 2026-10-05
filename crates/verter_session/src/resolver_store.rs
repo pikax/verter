@@ -4,6 +4,7 @@ use std::panic::Location;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use verter_session_query::analysis::types::Hash16;
+use verter_session_query::source::env_identity::SourceEnvIdentity;
 
 /// Per-call-site counter for [`HostStoreView::from_host_read`] invocations.
 ///
@@ -1113,19 +1114,6 @@ pub(crate) struct StoreViewSnapshot {
     /// None of them is copied per owner at build time, so capture cost is
     /// independent of how many files the host tracks.
     roots: crate::store_view_roots::StoreViewRoots,
-}
-
-/// The view-current source-env identity of one canonical's artifact:
-/// `parse_key` / `file_language_id` from the
-/// [`verter_session_query::source::artifact_key::FileArtifactKey`] identity, plus the
-/// canonical's LIVE `parse_env_hash` dimension (content validity stays
-/// on the `FileWholeHash` rail). Snapshot value backing the strict
-/// `FileSourceEnv` validation branch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceEnvIdentity {
-    pub(crate) parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
-    pub(crate) parse_key: verter_language::ParseKey,
-    pub(crate) file_language_id: verter_language::FileLanguage,
 }
 
 /// The LIVE source-env identity for `key`'s canonical — the SINGLE

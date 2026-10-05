@@ -67,7 +67,7 @@ use rustc_hash::FxHashMap;
 use verter_scheduler::invalidation::Hash16;
 
 use crate::file_artifact_store::{FileFacts, ProjectIdentity};
-use crate::resolver_store::SourceEnvIdentity;
+use verter_session_query::source::env_identity::SourceEnvIdentity;
 
 // ── Owner-visit instrumentation ──
 
