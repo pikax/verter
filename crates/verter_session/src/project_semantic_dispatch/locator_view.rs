@@ -226,9 +226,11 @@ pub struct ProjectionBenchHarness<'a> {
 #[cfg(any(test, feature = "test-support"))]
 impl<'a> ProjectionBenchHarness<'a> {
     #[must_use]
-    pub fn new(host: &'a crate::VerterHost) -> Self {
+    pub(crate) fn new(
+        ctx: &'a dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    ) -> Self {
         Self {
-            dispatch: ProjectSemanticDispatch::new(host),
+            dispatch: ProjectSemanticDispatch::new(ctx),
             env: FxHashMap::default(),
             substitutions: Vec::new(),
             memo: ViewMemo::default(),

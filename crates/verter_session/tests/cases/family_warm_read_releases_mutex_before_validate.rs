@@ -128,8 +128,11 @@ fn warm_read_validates_outside_entries_mutex() {
         *worker_thread_id_for_worker.lock().unwrap() = Some(thread::current().id());
         // Drive the warm-read path via the concrete VerterHost —
         // mirrors the production `try_warm_hit_fast_path` callers.
-        let _ = graph_for_worker
-            .get_validated_with_host_for_tests(&key_for_worker, host_for_worker.as_ref());
+        let _ = verter_session::for_tests::get_validated_with_host(
+            &graph_for_worker,
+            &key_for_worker,
+            host_for_worker.as_ref(),
+        );
         worker_done_clone.store(true, Ordering::SeqCst);
     });
 

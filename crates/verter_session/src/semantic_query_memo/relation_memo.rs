@@ -313,7 +313,7 @@ impl SemanticGraphStore {
         );
     }
 
-    /// Host-view-aware variant of [`Self::insert_relation_payload_for_tests`]:
+    /// Store-view-aware variant of [`Self::insert_relation_payload_for_tests`]:
     /// the publish plans its per-family bounded-retention eviction against
     /// the publishing caller's stable store view (invalid-first victim
     /// selection), backing the per-family bounded-retention relation guards.
@@ -321,7 +321,7 @@ impl SemanticGraphStore {
     #[doc(hidden)]
     pub fn insert_relation_payload_with_view_for_tests(
         &self,
-        host: &crate::VerterHost,
+        view: &dyn crate::resolver_core::fact_validation_port::FactValidation,
         key: crate::semantic_query::RelateMemoKey,
         carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
@@ -329,7 +329,7 @@ impl SemanticGraphStore {
         validated_at_generation: u64,
     ) {
         self.publish_unfenced_candidate_for_tests(
-            Some(host),
+            Some(view),
             FamilyKey::Relate {
                 key: super::family_intern::InternedRelateKey::intern(key),
             },

@@ -28853,7 +28853,7 @@ fn resolve_overload_set_warm_entry_refused_on_type_arg_origin_edit() {
     execute_overload_set(&dispatch, key.clone())
         .unwrap_or_else(|err| panic!("instantiated overload set must resolve, got {err:?}"));
     assert!(
-        graph.get_validated_with_host_for_tests(&key, &host),
+        crate::for_tests::get_validated_with_host(&graph, &key, &host),
         "pre-edit the warm entry validates"
     );
     upsert_ts(
@@ -28862,7 +28862,7 @@ fn resolve_overload_set_warm_entry_refused_on_type_arg_origin_edit() {
         "export type OverloadArg = { tag: number };",
     );
     assert!(
-        !graph.get_validated_with_host_for_tests(&key, &host),
+        !crate::for_tests::get_validated_with_host(&graph, &key, &host),
         "an edit to the type-argument's defining file must refuse the stale \
          warm entry — the produced value semantically depends on the arg \
          node, so its file-derived origin must be self-rooted"
@@ -28892,7 +28892,7 @@ fn resolve_overload_set_warm_entry_refused_on_carrier_target_origin_edit() {
         .unwrap_or_else(|err| panic!("the cross-file carrier callee must settle, got {err:?}"));
     assert_eq!(refs.len(), 2, "both remote interface overloads are visible");
     assert!(
-        graph.get_validated_with_host_for_tests(&key, &host),
+        crate::for_tests::get_validated_with_host(&graph, &key, &host),
         "pre-edit the warm entry validates"
     );
     upsert_ts(
@@ -28901,7 +28901,7 @@ fn resolve_overload_set_warm_entry_refused_on_carrier_target_origin_edit() {
         "export interface RemoteOverloaded {\n  (x: string): string;\n  (x: number): boolean;\n}",
     );
     assert!(
-        !graph.get_validated_with_host_for_tests(&key, &host),
+        !crate::for_tests::get_validated_with_host(&graph, &key, &host),
         "an edit to the carrier TARGET's defining file must refuse the stale \
          warm entry — the settled signature group was lowered from that \
          file's content version"

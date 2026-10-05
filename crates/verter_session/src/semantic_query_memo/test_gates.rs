@@ -365,19 +365,4 @@ impl SemanticGraphStore {
     pub fn try_lock_entries_for_tests(&self) -> bool {
         self.entries.try_lock().is_some()
     }
-
-    /// Test-only wrapper around the `pub(crate)` warm-read
-    /// `get_validated`. Lets integration tests drive the warm-read
-    /// path (snapshot under lock + validate outside lock + brief LRU
-    /// reacquire) end-to-end with a concrete `&VerterHost` as the
-    /// `ResolverContext`. Returns `true` on a warm hit, `false` on a
-    /// miss / stale candidate.
-    #[doc(hidden)]
-    pub fn get_validated_with_host_for_tests(
-        &self,
-        key: &crate::semantic_query::SemanticQueryKey,
-        host: &crate::VerterHost,
-    ) -> bool {
-        self.get_validated(key, host).is_some()
-    }
 }

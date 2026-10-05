@@ -1433,20 +1433,10 @@ pub(in crate::project_semantic_dispatch) fn absolutize_locator(
 ///
 /// `None` = the source has no live graph representation under the current
 /// view (unknown file, memo deref miss, unrouted payload position).
-#[cfg(any(test, feature = "test-support"))]
-pub fn demand_semantic_source_type_expr(
-    host: &crate::VerterHost,
-    owner_canonical: &str,
-    source: &SemanticTypeSource,
-) -> Option<verter_type_expr::TypeExpr> {
-    demand_semantic_source_type_expr_with_ctx(host, owner_canonical, source)
-}
-
-/// Context-generic body of [`demand_semantic_source_type_expr`]: the same
-/// demand walk runs against base-view and overlay-view test contexts. One
-/// probe body, two view bindings; never a second engine.
 ///
-/// [`ResolverContext`]: crate::resolver_core::resolver_context::ResolverContext
+/// Context-generic: the same demand walk runs against base-view and
+/// overlay-view test contexts. One probe body, any view binding; never a
+/// second engine.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn demand_semantic_source_type_expr_with_ctx<
     C: crate::resolver_core::ResolverCapabilities,
@@ -1487,14 +1477,16 @@ pub(crate) fn demand_semantic_source_type_expr_with_ctx<
     Some(carrier.type_expr_for_test().clone())
 }
 
-/// Shallow sibling of [`demand_semantic_source_type_expr`]: raise the source
+/// Shallow sibling of [`demand_semantic_source_type_expr_with_ctx`]: raise the source
 /// and shell-materialize WITHOUT any reduction demand, so a shallow published
 /// carrier keeps its published shallow shape (`Ref` / utility carriers
 /// survive). Used by tests that assert the published surface\'s
 /// shallow-by-default form.
 #[cfg(any(test, feature = "test-support"))]
-pub fn shallow_semantic_source_type_expr(
-    host: &crate::VerterHost,
+pub(crate) fn shallow_semantic_source_type_expr_with_ctx<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<C>,
     owner_canonical: &str,
     source: &SemanticTypeSource,
 ) -> Option<verter_type_expr::TypeExpr> {
@@ -1517,19 +1509,19 @@ pub fn shallow_semantic_source_type_expr(
         }
         _ => {}
     }
-    shallow_semantic_source_carrier(host, owner_canonical, source)
+    shallow_semantic_source_carrier(ctx, owner_canonical, source)
         .map(|carrier| carrier.type_expr_for_test().clone())
 }
 
 /// The shared shallow materialization of a published source into its sealed
 /// output carrier (the raise-time sidecar intact — nothing unwrapped).
 #[cfg(any(test, feature = "test-support"))]
-fn shallow_semantic_source_carrier(
-    host: &crate::VerterHost,
+fn shallow_semantic_source_carrier<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<C>,
     owner_canonical: &str,
     source: &SemanticTypeSource,
 ) -> Option<super::output_materialization::MaterializedOutputTypeExpr> {
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let context = ProjectionReductionContext::structural_transit_with_mode(
         crate::semantic_query::ProjectionMode::Navigate,
     );
@@ -1561,12 +1553,14 @@ fn shallow_semantic_source_carrier(
 /// when the request-level `synthesis_should_suppress` flag is `false` (the
 /// channel is the fold + `from_parts` choke point, never the suppress flag).
 #[cfg(any(test, feature = "test-support"))]
-pub fn shallow_semantic_source_is_degraded(
-    host: &crate::VerterHost,
+pub(crate) fn shallow_semantic_source_is_degraded_with_ctx<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<C>,
     owner_canonical: &str,
     source: &SemanticTypeSource,
 ) -> Option<bool> {
-    shallow_semantic_source_carrier(host, owner_canonical, source)
+    shallow_semantic_source_carrier(ctx, owner_canonical, source)
         .map(|carrier| carrier.result_is_partial())
 }
 
@@ -1576,24 +1570,26 @@ pub fn shallow_semantic_source_is_degraded(
 /// full consumer walk (fold + `from_parts` choke point, never the suppress
 /// flag).
 #[cfg(any(test, feature = "test-support"))]
-pub fn demand_semantic_source_is_degraded(
-    host: &crate::VerterHost,
+pub(crate) fn demand_semantic_source_is_degraded_with_ctx<
+    C: crate::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<C>,
     owner_canonical: &str,
     source: &SemanticTypeSource,
 ) -> Option<bool> {
-    demand_semantic_source_carrier(host, owner_canonical, source)
+    demand_semantic_source_carrier(ctx, owner_canonical, source)
         .map(|carrier| carrier.result_is_partial())
 }
 
 /// The shared demand-walk carrier extraction (sidecar intact — nothing
 /// unwrapped).
 #[cfg(any(test, feature = "test-support"))]
-fn demand_semantic_source_carrier(
-    host: &crate::VerterHost,
+fn demand_semantic_source_carrier<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<C>,
     owner_canonical: &str,
     source: &SemanticTypeSource,
 ) -> Option<super::output_materialization::MaterializedOutputTypeExpr> {
-    let dispatch = ProjectSemanticDispatch::new(host);
+    let dispatch = ProjectSemanticDispatch::new(ctx);
     let context =
         ProjectionReductionContext::published(crate::semantic_query::ProjectionMode::Expanded);
     let raise_context = match source {

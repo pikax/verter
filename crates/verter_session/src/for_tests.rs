@@ -717,6 +717,25 @@ pub mod projection_bench_support {
     pub use crate::project_semantic_dispatch::locator_view::{
         ProjectionBenchCase, ProjectionBenchHarness,
     };
+
+    /// A projection harness bound to `host` as its resolver context.
+    #[must_use]
+    pub fn harness_for_host(host: &crate::VerterHost) -> ProjectionBenchHarness<'_> {
+        ProjectionBenchHarness::new(host)
+    }
+}
+
+/// Drive the semantic graph store's warm-read path (snapshot under lock +
+/// validate outside lock + brief LRU reacquire) end-to-end with a concrete
+/// `&VerterHost` as the resolver context. Returns `true` on a warm hit,
+/// `false` on a miss / stale candidate.
+#[doc(hidden)]
+pub fn get_validated_with_host(
+    graph: &SemanticGraphStore,
+    key: &crate::semantic_query::SemanticQueryKey,
+    host: &crate::VerterHost,
+) -> bool {
+    graph.get_validated(key, host).is_some()
 }
 
 /// The signature-kernel contention probe's isolation variants

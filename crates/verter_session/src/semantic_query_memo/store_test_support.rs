@@ -210,7 +210,7 @@ impl SemanticGraphStore {
         )
     }
 
-    /// Host-view-aware variant of
+    /// Store-view-aware variant of
     /// [`Self::publish_with_carrier_dispatch_and_generation_for_tests`]:
     /// the publish plans its per-family bounded-retention eviction
     /// against the publishing caller's stable store view (invalid-first
@@ -221,7 +221,7 @@ impl SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     pub fn publish_with_view_for_tests(
         &self,
-        host: &crate::VerterHost,
+        view: &dyn crate::resolver_core::fact_validation_port::FactValidation,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
@@ -231,7 +231,7 @@ impl SemanticGraphStore {
     ) -> usize {
         let satisfied_projection = MaterializedSet::single(requested_point_for_key(&key));
         self.publish_for_tests_impl(
-            Some(host),
+            Some(view),
             key,
             result,
             read_set_signature,
@@ -250,9 +250,7 @@ impl SemanticGraphStore {
     #[allow(clippy::too_many_arguments)]
     fn publish_for_tests_impl(
         &self,
-        view: Option<
-            &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
-        >,
+        view: Option<&dyn crate::resolver_core::fact_validation_port::FactValidation>,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,

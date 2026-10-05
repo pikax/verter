@@ -21715,9 +21715,7 @@ fn assert_no_degraded_props(
             continue;
         };
         assert_eq!(
-            crate::project_semantic_dispatch::semantic_source::shallow_semantic_source_is_degraded(
-                host, canonical, source
-            ),
+            crate::test_only::semantic_source_probe::shallow_is_degraded(host, canonical, source),
             Some(false),
             "prop `{}` must carry NO typed degradation on its raise-time sidecar (masking case)",
             p.name,

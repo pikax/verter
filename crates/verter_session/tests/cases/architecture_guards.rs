@@ -11978,7 +11978,7 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     // scan cannot see the cfg(test) boundary.
     "crates/verter_session/src/meta_resolve/projectors/output_sink.rs",
     // `#[cfg(any(test, feature = "test-support"))]` semantic-source probe
-    // only (`demand_semantic_source_type_expr` builds an overlaid quiescent
+    // only (`demand_semantic_source_type_expr_with_ctx` builds an overlaid quiescent
     // view for session-published assertions); never compiled into the
     // production consumption path.
     "crates/verter_session/src/meta.rs",

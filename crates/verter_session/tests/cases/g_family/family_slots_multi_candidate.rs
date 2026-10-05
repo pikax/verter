@@ -523,7 +523,7 @@ pub(crate) fn family_eviction_prefers_invalid_then_lru_valid_hit() {
     // satisfying + valid candidate — the LRU front 100 — and PROMOTES
     // it to the back (freshest).
     assert!(
-        graph.get_validated_with_host_for_tests(&key, &host),
+        verter_session::for_tests::get_validated_with_host(graph, &key, &host),
         "fixture invariant: the warm read must hit (all eight \
          candidates are valid and self-satisfying)."
     );
