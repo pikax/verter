@@ -956,6 +956,29 @@ impl RealProviderTestSession {
     /// reporting them as `None` blames the feature under test for a request
     /// that never produced an answer.
     pub(crate) async fn hover_text(&self, uri: &Uri, position: Position) -> Option<String> {
+        let started = std::time::Instant::now();
+        self.hover_result(uri, position)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "hover request at {}:{} in {} failed after {:?}: {error}",
+                    position.line,
+                    position.character,
+                    uri.as_str(),
+                    started.elapsed(),
+                )
+            })
+    }
+
+    /// Hover text at a position, or the RPC error the request answered with.
+    ///
+    /// For a caller that re-requests on `ContentModified` the way an editor
+    /// does; every other caller wants [`Self::hover_text`].
+    pub(crate) async fn hover_result(
+        &self,
+        uri: &Uri,
+        position: Position,
+    ) -> tower_lsp_server::jsonrpc::Result<Option<String>> {
         let params = HoverParams {
             text_document_position_params: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -963,32 +986,23 @@ impl RealProviderTestSession {
             },
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
-        let started = std::time::Instant::now();
-        match self.server().hover(params).await {
-            Ok(Some(hover)) => match hover.contents {
-                HoverContents::Markup(m) => Some(m.value),
-                HoverContents::Scalar(MarkedString::String(s)) => Some(s),
-                HoverContents::Scalar(MarkedString::LanguageString(ls)) => Some(ls.value),
-                HoverContents::Array(items) => Some(
-                    items
-                        .into_iter()
-                        .map(|item| match item {
-                            MarkedString::String(s) => s,
-                            MarkedString::LanguageString(ls) => ls.value,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                ),
-            },
-            Ok(None) => None,
-            Err(error) => panic!(
-                "hover request at {}:{} in {} failed after {:?}: {error}",
-                position.line,
-                position.character,
-                uri.as_str(),
-                started.elapsed(),
-            ),
-        }
+        Ok(self
+            .server()
+            .hover(params)
+            .await?
+            .map(|hover| match hover.contents {
+                HoverContents::Markup(m) => m.value,
+                HoverContents::Scalar(MarkedString::String(s)) => s,
+                HoverContents::Scalar(MarkedString::LanguageString(ls)) => ls.value,
+                HoverContents::Array(items) => items
+                    .into_iter()
+                    .map(|item| match item {
+                        MarkedString::String(s) => s,
+                        MarkedString::LanguageString(ls) => ls.value,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            }))
     }
 
     /// Get signature help at a position (raw LSP `SignatureHelp`).

@@ -34062,6 +34062,76 @@ async fn virtual_file_query_serves_provider_result_from_stable_matched_surface()
     );
 }
 
+/// A virtual tab is a document the host never ingests, so the readiness basis
+/// a virtual-file definition settles against carries no diagnostics
+/// generation. Background settlement of the carrier the tab mirrors (or of the
+/// tab's own id) during the provider await is therefore not a basis move: the
+/// definition answers with the provider's location instead of
+/// `ContentModified`. The served surface stays guarded by the provider-surface
+/// check, which is what a carrier resync with new content trips.
+#[tokio::test(flavor = "multi_thread")]
+async fn virtual_file_definition_survives_a_generation_move_during_the_provider_await() {
+    let content = "computed\n";
+    let (service, provider, virtual_uri, tsx_path) =
+        make_virtual_file_fixture(content, content).await;
+    let server = service.inner();
+    let offset = "comp".len() as u32;
+    provider.set_definitions(
+        &tsx_path,
+        offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: tsx_path.clone(),
+            start: 0,
+            end: "computed".len() as u32,
+        }],
+    );
+    let virtual_canonical = crate::documents::uri_to_canonical_id(&virtual_uri);
+    let documents = Arc::clone(&server.documents);
+    let moved_canonical = virtual_canonical.clone();
+    provider.set_on_query(
+        &tsx_path,
+        Box::new(move || {
+            documents
+                .host()
+                .bump_diagnostics_generation("/workspace/src/App.vue");
+            documents
+                .host()
+                .bump_diagnostics_generation(&moved_canonical);
+        }),
+    );
+
+    let response = server
+        .goto_definition(goto_definition_params(
+            &virtual_uri,
+            Position {
+                line: 0,
+                character: offset,
+            },
+        ))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("a generation move during the provider await must not fail it: {error:?}")
+        });
+
+    assert_eq!(
+        server
+            .documents
+            .host()
+            .get_diagnostics_generation(&virtual_canonical),
+        None,
+        "the host never tracks a virtual tab, so its basis has no generation to move"
+    );
+    let Some(GotoDefinitionResponse::Array(locations)) = response else {
+        panic!("the virtual-file definition answers with the provider location, got {response:?}");
+    };
+    assert_eq!(locations.len(), 1, "{locations:?}");
+    assert_eq!(locations[0].range.start, Position::new(0, 0));
+    assert_eq!(
+        locations[0].range.end,
+        Position::new(0, "computed".len() as u32)
+    );
+}
+
 /// Shared setup for the FOREIGN-carrier mapping tests: parent + child carriers
 /// synced (both CarrierIde surfaces recorded), with the mock provider primed to
 /// return a definition location inside the CHILD's IDE surface for a query at
