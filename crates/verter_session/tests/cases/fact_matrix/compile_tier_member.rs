@@ -27,7 +27,9 @@ fn read_session_src(rel: &str) -> String {
 fn compile_tier_signature_carries_member() {
     let src = read_session_src("types.rs");
     assert!(
-        src.contains("fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature"),
+        src.contains(
+            "fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature"
+        ),
         "compile_tier matrix slice: `CompileSlot` MUST carry \
          `fact_dep_signature: ReadSetSignature` (the carrier that wraps \
          `Arc<[FactVersionRef]>` + the overflow flag). A regression that \

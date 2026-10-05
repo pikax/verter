@@ -47,7 +47,9 @@ fn cached_meta_payload_signature_carries_member_presence() {
         .expect("CachedMetaPayload struct close");
     let window = &src[idx..idx + window_end];
     assert!(
-        window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
+        window.contains(
+            "fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>"
+        ),
         "Block 1A matrix slice: CachedMetaPayload must carry \
          `fact_versions: Arc<[FactVersionRef]>` after the Block 1A migration. \
          Window:\n{window}"

@@ -38,8 +38,9 @@ fn component_meta_signature_carries_module_augmentation_index_shape() {
         .expect("ComponentMetaResultEntry struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
-            || window.contains("read_set_signature: ReadSetSignature"),
+        window.contains(
+            "read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature"
+        ) || window.contains("read_set_signature: ReadSetSignature"),
         "component_meta matrix slice: \
          `ComponentMetaResultEntry` MUST carry \
          `read_set_signature: ReadSetSignature`. Window:\n{window}"

@@ -11943,7 +11943,7 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     // `#[cfg(any(test, feature = "test-support"))]` fence; its production
     // lifecycle clones the already request-bound base view.
     "crates/verter_session/src/resolver_store.rs",
-    "crates/verter_session/src/resolver_core/resolver_context.rs",
+    "crates/verter_session/src/resolver_core/request_bound.rs",
     "crates/verter_session/src/resolver_core/host_resolver_context.rs",
     // Request-driver owned-view snapshot accessors (currentness gated by
     // `snapshot_view_is_current`, not by the unwrapped value).
@@ -13478,13 +13478,16 @@ mod lazy_decl_body_storage_guards {
             "anti-vacuity: `ShallowFileState` must own the
              `ClassifiedTypeDeps` dependency-edge cache"
         );
-        // Header fields moved into the shared immutable request record. Scan
-        // both parts of the worker shape; the projection may own syntax facts
-        // but never the worker's body/cache authority.
-        let inputs = struct_body(&state_src, "ShallowInputRecord");
+        // Header fields live in the shallow input assembly the worker owns.
+        // Scan both parts of the worker shape; the assembly may own syntax
+        // facts but never the worker's body/cache authority.
+        let inputs_src = strip_comments(&read_production_source(
+            "../verter_session_query/src/inputs/shallow.rs",
+        ));
+        let inputs = struct_body(&inputs_src, "ShallowInputAssembly");
         assert!(
-            state.contains("inputs: ShallowInputRecord"),
-            "worker owns the shared header record"
+            state.contains("inputs: ShallowInputAssembly"),
+            "worker owns the shallow input assembly"
         );
         assert!(
             inputs.contains("headers") && inputs.contains("synthesised_value_symbols"),
@@ -13500,7 +13503,7 @@ mod lazy_decl_body_storage_guards {
         ] {
             assert!(
                 !inputs.contains(forbidden),
-                "ShallowInputRecord must not carry worker/body authority `{forbidden}`"
+                "ShallowInputAssembly must not carry worker/body authority `{forbidden}`"
             );
         }
         let state_and_inputs = format!("{state},{inputs}");
@@ -13611,7 +13614,7 @@ mod lazy_decl_body_storage_guards {
                 ][..],
             ),
         ] {
-            let body = struct_body(&state_src, struct_name);
+            let body = struct_body(&inputs_src, struct_name);
             for forbidden in forbidden_fields {
                 assert!(
                     !body.contains(forbidden),
@@ -13633,7 +13636,7 @@ mod lazy_decl_body_storage_guards {
 
         // ── ClassifiedTypeDeps stores dependency EDGES only, never a body
         //    product ──
-        let deps = struct_body(&state_src, "ClassifiedTypeDeps");
+        let deps = struct_body(&inputs_src, "ClassifiedTypeDeps");
         assert!(
             deps.contains("local_deps") && deps.contains("external_deps"),
             "anti-vacuity: `ClassifiedTypeDeps` must carry the \

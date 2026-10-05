@@ -35,7 +35,9 @@ fn cached_resolved_meta_signature_carries_import_ref() {
         .expect("ResolvedComponentMetaCacheEntry struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
+        window.contains(
+            "fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>"
+        ),
         "Block 1A matrix slice: ResolvedComponentMetaCacheEntry must carry \
          `fact_versions: Arc<[FactVersionRef]>` after the Block 1A migration. \
          Window:\n{window}"

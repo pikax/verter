@@ -60,7 +60,9 @@ fn cached_fallthrough_signature_carries_import_ref() {
         .expect("CachedFallthroughEntry struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
+        window.contains(
+            "fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>"
+        ),
         "matrix slice: CachedFallthroughEntry must carry \
          `fact_versions: Arc<[FactVersionRef]>`. \
          Window:\n{window}"

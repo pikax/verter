@@ -51,8 +51,9 @@ fn assert_struct_carries_fact_carrier(src: &str, ty: &str) {
     // oracle.
     assert!(
         window.contains("read_set_signature: ReadSetSignature")
-            || window
-                .contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature",),
+            || window.contains(
+                "read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature",
+            ),
         "{ty} must carry the carrier `read_set_signature: ReadSetSignature` — its `facts` rail \
          is the sole cache-validity oracle. Window:\n{window}"
     );
@@ -70,7 +71,10 @@ fn assert_struct_carries_fact_carrier(src: &str, ty: &str) {
     // path-precise signature lives inside `read_set_signature.facts`.
     assert!(
         !window.contains("fact_dep_signature: Arc<[FactVersionRef]>")
-            && !window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
+            && !window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>")
+            && !window.contains(
+                "fact_dep_signature: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>",
+            ),
         "{ty} must NOT carry a separate `fact_dep_signature: Arc<[FactVersionRef]>` field — the \
          path-precise signature lives inside `read_set_signature.facts`. Window:\n{window}"
     );
