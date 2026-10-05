@@ -7144,6 +7144,92 @@ async fn completion_final_native_retry_waits_for_commit_fence_and_returns_curren
     drop(service);
 }
 
+/// The final native completion holds the document commit fence, so only
+/// background settlement can move its basis. A generation-only move recomputes
+/// it under that fence; a workspace replacement, or generation churn that never
+/// stops moving, still answers `ContentModified` instead of recomputing forever
+/// or answering against a superseded workspace.
+#[tokio::test(flavor = "multi_thread")]
+async fn final_native_completion_settles_generation_moves_and_fails_closed_past_them() {
+    let source =
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>";
+    let canonical = "/workspace/App.vue";
+    for change in ["generation", "churn", "workspace"] {
+        let service = make_hover_test_service(Arc::new(MockTypeProvider::new()));
+        let server = service.inner();
+        install_test_resolver(server);
+        let uri = open_test_vue(server, canonical, source);
+        let position = LineIndex::new_utf16(source)
+            .offset_to_position(source.find("count }}").unwrap() as u32)
+            .expect("completion position");
+        let recomputations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let host = server.documents.host_arc();
+            let recomputations = Arc::clone(&recomputations);
+            server.on_final_completion_recompute(move || {
+                let seen = recomputations.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                // Churn moves the generation inside every recomputation the
+                // bound allows, then stops: an unbounded loop would settle.
+                if change == "churn" && seen <= super::GENERATION_ONLY_RECOMPUTE_LIMIT {
+                    host.host().bump_diagnostics_generation(canonical);
+                }
+            });
+        }
+        let (first_arrived, first_release) = server.pause_next_completion_after_snapshot();
+        let (second_arrived, second_release) = server.pause_next_completion_after_snapshot();
+        let (final_arrived, final_release) = server.pause_final_completion_after_snapshot();
+
+        let completion = server.completion(completion_params(&uri, position, None));
+        let drive = async {
+            // Two edit races spend the provider attempts and reach the final
+            // native attempt.
+            first_arrived.notified().await;
+            server.documents.did_change(&uri, 2, source);
+            first_release.notify_one();
+            second_arrived.notified().await;
+            server.documents.did_change(&uri, 3, source);
+            second_release.notify_one();
+
+            final_arrived.notified().await;
+            if change == "workspace" {
+                install_test_resolver(server);
+            } else {
+                server
+                    .documents
+                    .host()
+                    .bump_diagnostics_generation(canonical);
+            }
+            final_release.notify_one();
+        };
+        let (response, ()) = futures_util::future::join(completion, drive).await;
+        let recomputations = recomputations.load(std::sync::atomic::Ordering::SeqCst);
+        match change {
+            "generation" => {
+                assert!(response.is_ok(), "{change}: {response:?}");
+                assert_eq!(recomputations, 1, "{change}");
+            }
+            "churn" => {
+                assert!(
+                    matches!(&response, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                    "{change}: {response:?}"
+                );
+                assert_eq!(
+                    recomputations,
+                    super::GENERATION_ONLY_RECOMPUTE_LIMIT,
+                    "{change}"
+                );
+            }
+            _ => {
+                assert!(
+                    matches!(&response, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                    "{change}: {response:?}"
+                );
+                assert_eq!(recomputations, 0, "{change}");
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
     let child = |prop: &str| {

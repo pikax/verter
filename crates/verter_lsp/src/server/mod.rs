@@ -594,6 +594,10 @@ pub struct ServerCore {
     completion_before_final_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
     #[cfg(test)]
     completion_final_snapshot_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
+    /// Runs after every recomputation of the final native completion, while
+    /// the commit fence is still held.
+    #[cfg(test)]
+    completion_final_recompute_hook: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Handle for the background workspace scanner. Receives priority signals
     /// from `did_open` to reorder the scan queue. `None` until `initialized()`.
     /// Arc-wrapped so background init can install the scanner without &self.
@@ -860,6 +864,19 @@ impl VerterLanguageServer {
             release: Arc::clone(&release),
         });
         (arrived, release)
+    }
+
+    #[cfg(test)]
+    fn on_final_completion_recompute(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.completion_final_recompute_hook.lock() = Some(Arc::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_final_completion_recompute_hook(&self) {
+        let hook = self.completion_final_recompute_hook.lock().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     #[cfg(test)]
@@ -1281,6 +1298,8 @@ impl VerterLanguageServer {
             completion_before_final_pause: parking_lot::Mutex::new(None),
             #[cfg(test)]
             completion_final_snapshot_pause: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            completion_final_recompute_hook: parking_lot::Mutex::new(None),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ownership_generation_fence: Arc::new(

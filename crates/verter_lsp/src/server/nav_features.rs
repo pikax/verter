@@ -117,23 +117,6 @@ pub(super) fn child_contract_completion_analysis(
     Some(analysis)
 }
 
-/// Native completion items with [`enrich_v_bind_completion_details`] applied
-/// when the cursor sits in a style `v-bind(|)`; every other list is unchanged.
-async fn with_style_v_bind_details(
-    server: &VerterLanguageServer,
-    uri: &Uri,
-    position: &Position,
-    items: Option<Vec<CompletionItem>>,
-    maybe_style_position: bool,
-) -> Option<Vec<CompletionItem>> {
-    match items {
-        Some(items) if maybe_style_position && is_style_v_bind_context(server, uri, position) => {
-            Some(enrich_v_bind_completion_details(server, uri, items).await)
-        }
-        other => other,
-    }
-}
-
 /// Attach provider-typed `detail` to `v-bind(|)` completion items: for each
 /// offered binding (bounded), a quickinfo at its DECLARATION position supplies
 /// the type line. Items whose declaration cannot be mapped keep their native
@@ -936,12 +919,13 @@ async fn handle_completion_attempt(
     let native_snapshot = capture_native_snapshot();
     // Normal attempts release the typing fence before cold child/meta work and
     // validate identity after provider awaits. The bounded final native-only
-    // attempt deliberately retains the fence through the synchronous native
-    // calculation: it has no provider await and therefore returns one coherent,
-    // current snapshot instead of panicking or failing open under sustained churn.
-    // The fence stops edits and membership changes, not background settlement,
-    // so the final attempt recomputes under the same fence when only the
-    // diagnostics generation moved (see the settlement check below).
+    // attempt deliberately retains the fence through its native calculation, so
+    // it returns one coherent, current snapshot instead of panicking or failing
+    // open under sustained churn. Its only provider await is the bounded
+    // style `v-bind(|)` detail enrichment of its first computation. The fence
+    // stops edits and membership changes, not background settlement, so the
+    // final attempt recomputes under the same fence when only the diagnostics
+    // generation moved (see the settlement check below).
     let native_edit_fence = if native_only {
         Some(edit_fence)
     } else {
@@ -1019,11 +1003,11 @@ async fn handle_completion_attempt(
                     })
                     .map(str::to_string)
                     .or_else(|| {
-                        (verter_semantic::resolver_core::is_relative_specifier(&import.source)
-                            && verter_semantic::resolver_core::path_is_carrier(&import.source))
+                        (verter_session_query::resolution::is_relative_specifier(&import.source)
+                            && verter_session_query::resolution::path_is_carrier(&import.source))
                         .then(|| {
-                            verter_semantic::resolver_core::join_paths(
-                                &verter_semantic::resolver_core::parent_dir(canonical_id),
+                            verter_session_query::resolution::join_paths(
+                                &verter_session_query::resolution::parent_dir(canonical_id),
                                 &import.source,
                             )
                         })
@@ -1155,8 +1139,12 @@ async fn handle_completion_attempt(
         }
         scope
     });
-    let verter_items =
-        with_style_v_bind_details(server, uri, position, verter_items, maybe_style_position).await;
+    let verter_items = match verter_items {
+        Some(items) if maybe_style_position && is_style_v_bind_context(server, uri, position) => {
+            Some(enrich_v_bind_completion_details(server, uri, items).await)
+        }
+        other => other,
+    };
 
     if recognized_authored_component_contract_miss {
         server.enqueue_import_dependency_publication_if_idle(uri);
@@ -1174,8 +1162,10 @@ async fn handle_completion_attempt(
         // resync or a compile of this file) can move the final basis. A
         // generation-only move is not a content change: recompute the native
         // answer against a fresh basis under the SAME fence, bounded like every
-        // other route. An edit, close/reopen or workspace replacement still
-        // fails closed at once, as does churn past the bound.
+        // other route. A workspace replacement still fails closed at once, as
+        // does churn past the bound. A recomputation is synchronous and native:
+        // it keeps the native kind detail instead of repeating the provider
+        // `v-bind(|)` enrichment while every document commit waits on the fence.
         let mut generation_recomputations = 0;
         while let Some(settlement) = final_settlement
             .as_ref()
@@ -1202,14 +1192,9 @@ async fn handle_completion_attempt(
                 server.enqueue_import_dependency_publication_if_idle(uri);
             }
             verter_is_incomplete = recomputed.is_incomplete;
-            verter_items = with_style_v_bind_details(
-                server,
-                uri,
-                position,
-                recomputed.items,
-                recomputed.maybe_style_position,
-            )
-            .await;
+            verter_items = recomputed.items;
+            #[cfg(test)]
+            server.run_final_completion_recompute_hook();
         }
         drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
