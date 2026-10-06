@@ -10,6 +10,7 @@ pub use inner::*;
 mod inner {
     use std::sync::{Arc, Mutex};
 
+    use crate::server::test_support::{RequestBarrier, RequestBarriers};
     use crate::type_provider::protocol::*;
     use crate::type_provider::traits::{ProviderFuture, TypeProvider};
 
@@ -352,6 +353,13 @@ mod inner {
     pub struct MockTypeProvider {
         state: Arc<Mutex<MockState>>,
         call_recorded: Arc<tokio::sync::Notify>,
+        /// Request barriers every interactive query reaches: dispatch before
+        /// the answer is produced, decode after. Kept outside `state`, whose
+        /// lock several query methods hold while building their future.
+        request_barriers: Arc<Mutex<Option<Arc<RequestBarriers>>>>,
+        /// Interactive queries still owed a scripted delivery failure, for
+        /// every query kind alike.
+        failed_deliveries: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Default for MockTypeProvider {
@@ -365,7 +373,53 @@ mod inner {
             Self {
                 state: Arc::new(Mutex::new(MockState::default())),
                 call_recorded: Arc::new(tokio::sync::Notify::new()),
+                request_barriers: Arc::new(Mutex::new(None)),
+                failed_deliveries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+
+        /// Make every interactive query reach `barriers` at provider dispatch
+        /// and at provider-response decode.
+        pub(crate) fn set_request_barriers(&self, barriers: Arc<RequestBarriers>) {
+            *self.request_barriers.lock().unwrap() = Some(barriers);
+        }
+
+        /// Fail the next `count` interactive queries of any kind after their
+        /// dispatch, as a provider whose response never decodes.
+        pub fn fail_next_deliveries(&self, count: usize) {
+            self.failed_deliveries
+                .store(count, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn barriered<'a, T: Send + 'a>(
+            &self,
+            answer: ProviderFuture<'a, T>,
+        ) -> ProviderFuture<'a, T> {
+            let barriers = self.request_barriers.lock().unwrap().clone();
+            let failed_deliveries = Arc::clone(&self.failed_deliveries);
+            Box::pin(async move {
+                if let Some(barriers) = &barriers {
+                    barriers.reach(RequestBarrier::ProviderDispatch).await;
+                }
+                let fail = failed_deliveries
+                    .fetch_update(
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                        |owed| owed.checked_sub(1),
+                    )
+                    .is_ok();
+                let result = if fail {
+                    Err(TypeProviderError::new(
+                        "scripted provider delivery failure".to_string(),
+                    ))
+                } else {
+                    answer.await
+                };
+                if let Some(barriers) = &barriers {
+                    barriers.reach(RequestBarrier::ProviderDecode).await;
+                }
+                result
+            })
         }
 
         fn note_recorded(&self) {
@@ -1436,7 +1490,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
@@ -1450,7 +1504,7 @@ mod inner {
                     items,
                     is_incomplete: false,
                 })
-            })
+            }))
         }
 
         fn get_hover(&self, path: &str, offset: u32) -> ProviderFuture<'_, Option<HoverInfo>> {
@@ -1489,14 +1543,14 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if fail {
                     return Err(TypeProviderError::new(
                         "scripted transient hover failure".to_string(),
                     ));
                 }
                 Ok(result)
-            })
+            }))
         }
 
         fn get_diagnostics(&self, path: &str) -> ProviderFuture<'_, Vec<TypeDiagnostic>> {
@@ -1581,14 +1635,14 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if fail {
                     return Err(TypeProviderError::new(
                         "scripted transient definition failure".to_string(),
                     ));
                 }
                 Ok(result)
-            })
+            }))
         }
 
         fn get_type_definition(
@@ -1613,14 +1667,14 @@ mod inner {
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, locs)| locs.clone())
                 .unwrap_or_default();
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if fail {
                     return Err(TypeProviderError::new(
                         "scripted transient type-definition failure".to_string(),
                     ));
                 }
                 Ok(result)
-            })
+            }))
         }
 
         fn get_references(&self, path: &str, offset: u32) -> ProviderFuture<'_, Vec<TypeLocation>> {
@@ -1649,7 +1703,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_rename_locations(
@@ -1678,13 +1732,13 @@ mod inner {
                 };
                 (result, block)
             };
-            Box::pin(async move {
+            self.barriered(Box::pin(async move {
                 if let Some((arrived, release)) = block {
                     arrived.notify_one();
                     release.notified().await;
                 }
                 Ok(result)
-            })
+            }))
         }
 
         fn get_signature_help(
@@ -1721,7 +1775,7 @@ mod inner {
             if let Some(callback) = on_query {
                 callback();
             }
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_code_actions(
@@ -1744,7 +1798,7 @@ mod inner {
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, actions)| actions.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_semantic_tokens(&self, path: &str) -> ProviderFuture<'_, Vec<SemanticToken>> {
@@ -1758,7 +1812,7 @@ mod inner {
                 .find(|(p, _)| p == path)
                 .map(|(_, tokens)| tokens.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_document_highlights(
@@ -1777,7 +1831,7 @@ mod inner {
                 .find(|(p, o, _)| p == path && *o == offset)
                 .map(|(_, _, hl)| hl.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn get_inlay_hints(
@@ -1798,7 +1852,7 @@ mod inner {
                 .find(|(p, so, eo, _)| p == path && *so == start_offset && *eo == end_offset)
                 .map(|(_, _, _, hints)| hints.clone())
                 .unwrap_or_default();
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn resolve_completion(
@@ -1816,7 +1870,7 @@ mod inner {
                 .iter()
                 .find(|(p, candidate, _)| p == path && *candidate == data)
                 .and_then(|(_, _, resolved)| resolved.clone());
-            Box::pin(async move { Ok(result) })
+            self.barriered(Box::pin(async move { Ok(result) }))
         }
 
         fn configure_paths(
