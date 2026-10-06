@@ -17,7 +17,7 @@
 // surfaces as a genuine orphan.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use crate::resolver_core::prepared_decl::PreparedDeclOutcomeFold;
+use crate::fact_tracing::PreparedDeclOutcomeFold;
 use std::sync::Arc;
 
 use verter_session_query::declarations::AugmentationScopeKind;

@@ -10,6 +10,7 @@ use verter_session_query::type_solver::{
 use verter_type_expr::TopLevelOwnerId;
 
 use super::ShallowFileState;
+use crate::fact_tracing::PreparedDeclOutcomeFold;
 use crate::identity_interner::IdentityInterner;
 use verter_semantic_source::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use verter_session_query::inputs::prepared::{
@@ -65,38 +66,6 @@ type OwnerNameResolutionBases =
 /// via `Arc` by every non-namespaced prepared decl of the defining file. See
 /// `PreparedTypeDecl::name_resolution` for the sharing + interning contract.
 type SharedNameResolutionBase = Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>;
-
-/// Session-side evidence folding over a prepared-declaration outcome.
-///
-/// The outcome itself is an owned record; folding a lease miss into the
-/// enclosing compute's non-cacheability is host evidence and stays here.
-pub(crate) trait PreparedDeclOutcomeFold<T> {
-    fn into_result(self) -> Result<Option<T>, PreparationFailure>;
-}
-
-impl<T> PreparedDeclOutcomeFold<T> for PreparedDeclOutcome<T> {
-    /// Collapse to the plain `Option` for direct/standalone callers
-    /// (`prepare_exported_*`, tests) that do NOT admit into the write-once
-    /// slot cache: a lease-miss reads as `None` there (they recompute on the
-    /// next call, warm-poisoning nothing).
-    ///
-    /// The `LeaseMiss` arm marks the generalized non-cacheability rail so an
-    /// enclosing traced compute that folds this transient miss refuses its
-    /// own shared-cache admission; a `Ready(None)` cacheable absence marks
-    /// nothing.
-    fn into_result(self) -> Result<Option<T>, PreparationFailure> {
-        match self {
-            PreparedDeclOutcome::Ready(value) => Ok(value),
-            PreparedDeclOutcome::LeaseMiss => {
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
-                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
-                );
-                Ok(None)
-            }
-            PreparedDeclOutcome::Failed(failure) => Err(failure),
-        }
-    }
-}
 
 /// FINAL defining-file canonicalization of a file's import targets, computed
 /// at bundle materialization through the SAME route authority the carrier

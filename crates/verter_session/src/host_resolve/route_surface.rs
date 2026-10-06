@@ -160,7 +160,7 @@ impl VerterHost {
         let scope_payload_arc = self.prepared_decl_bundle(scope_canonical_id).map(|bundle| {
             std::sync::Arc::new(
                 crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle,
+                    &*bundle,
                     scope_owner,
                 ),
             )

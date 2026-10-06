@@ -22,7 +22,7 @@ fn payload_with_imports(
     import_names: &[&str],
 ) -> DeclarationScopePayload {
     let (bundle, owner) = bundle_with_imports(names, type_bindings, import_names);
-    DeclarationScopePayload::from_bundle(&bundle, owner)
+    DeclarationScopePayload::from_bundle(&*bundle, owner)
 }
 
 fn bundle_with_imports(
@@ -167,7 +167,7 @@ fn a_shadow_set_views_its_bundle_without_copying_names() {
     let raw_before = Arc::strong_count(&bundle);
     let before = Arc::strong_count(&pure_bundle);
     let shadows: Vec<ScopeShadowing> = (0..8)
-        .map(|_| ScopeShadowing::from_prepared_decl_bundle(&bundle, owner))
+        .map(|_| ScopeShadowing::from_prepared_decl_bundle(&*bundle, owner))
         .collect();
     assert_eq!(
         Arc::strong_count(&pure_bundle),
@@ -207,9 +207,9 @@ fn shadow_sets_from_payload_and_bundle_observe_same_names() {
     // path read the same three surfaces of the same owner scope.
     let (bundle, owner) = bundle_with_imports(&["Pick", "Cfg"], &["T"], &["Imported"]);
     let shadow_from_payload = ScopeShadowing::from_scope_payload(Some(
-        &DeclarationScopePayload::from_bundle(&bundle, owner),
+        &DeclarationScopePayload::from_bundle(&*bundle, owner),
     ));
-    let shadow_from_bundle = ScopeShadowing::from_prepared_decl_bundle(&bundle, owner);
+    let shadow_from_bundle = ScopeShadowing::from_prepared_decl_bundle(&*bundle, owner);
     for name in ["Pick", "Cfg", "T", "Imported", "Omit", ""] {
         assert_eq!(
             shadow_from_payload.is_shadowing_lib(name),
@@ -226,7 +226,7 @@ fn shadow_sets_from_payload_and_bundle_observe_same_names() {
     assert!(!shadow_from_bundle.is_shadowing_lib("Omit"));
     // Another owner scope of the same bundle declares nothing.
     let other = ScopeShadowing::from_prepared_decl_bundle(
-        &bundle,
+        &*bundle,
         verter_type_expr::TopLevelOwnerId::instance(1),
     );
     assert!(!other.is_shadowing_lib("Pick"));

@@ -8,7 +8,7 @@
 //! `SemanticQueryKey::LowerLocator` memo drives.
 
 use super::*;
-use crate::resolver_core::prepared_decl::PreparedDeclOutcomeFold;
+use crate::fact_tracing::PreparedDeclOutcomeFold;
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// The ONE shared binder-frame constructor for declared type-parameter

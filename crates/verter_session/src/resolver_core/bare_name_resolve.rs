@@ -74,9 +74,20 @@ impl std::fmt::Debug for DeclarationScopePayload {
     }
 }
 
+/// A prepared owner scope's owned input record, from whichever prepared
+/// source holds it.
+pub(crate) trait PreparedInputSource {
+    fn scope_inputs(&self) -> Arc<verter_session_query::inputs::prepared::PreparedInputRecord>;
+}
+impl PreparedInputSource for Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
+    fn scope_inputs(&self) -> Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
+        Arc::clone(self)
+    }
+}
+
 impl DeclarationScopePayload {
     pub(crate) fn from_bundle(
-        bundle: &impl super::request_inputs::PreparedInputSource,
+        bundle: &impl PreparedInputSource,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {
         Self {

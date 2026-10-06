@@ -46,8 +46,8 @@ export const defaults = { label: 'ok' }
     let instance_scope = bundle
         .owner_scope(instance_owner)
         .expect("script-setup instance scope should be prepared");
-    let module_payload = DeclarationScopePayload::from_bundle(&bundle, module_owner);
-    let instance_payload = DeclarationScopePayload::from_bundle(&bundle, instance_owner);
+    let module_payload = DeclarationScopePayload::from_bundle(&*bundle, module_owner);
+    let instance_payload = DeclarationScopePayload::from_bundle(&*bundle, instance_owner);
 
     assert!(
         std::ptr::eq(

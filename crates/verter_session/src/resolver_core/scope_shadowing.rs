@@ -127,7 +127,7 @@ impl ScopeShadowing {
     /// aligned is the load-bearing invariant: the dispatch path and the
     /// materialise path MUST observe the same shadow set per scope.
     pub(crate) fn from_prepared_decl_bundle(
-        bundle: &impl crate::resolver_core::request_inputs::PreparedInputSource,
+        bundle: &impl crate::resolver_core::bare_name_resolve::PreparedInputSource,
         owner: verter_type_expr::TopLevelOwnerId,
     ) -> Self {
         Self::from_scope_payload(Some(&DeclarationScopePayload::from_bundle(bundle, owner)))

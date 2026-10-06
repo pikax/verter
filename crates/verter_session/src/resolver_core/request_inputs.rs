@@ -359,16 +359,8 @@ impl InputArtifactLeases {
     }
 }
 
-pub(crate) trait PreparedInputSource {
-    fn scope_inputs(&self) -> Arc<PreparedInputRecord>;
-}
-impl PreparedInputSource for Arc<super::prepared_decl::PreparedDeclBundle> {
+impl super::bare_name_resolve::PreparedInputSource for super::prepared_decl::PreparedDeclBundle {
     fn scope_inputs(&self) -> Arc<PreparedInputRecord> {
         self.input_record()
-    }
-}
-impl PreparedInputSource for Arc<PreparedInputRecord> {
-    fn scope_inputs(&self) -> Arc<PreparedInputRecord> {
-        Arc::clone(self)
     }
 }
