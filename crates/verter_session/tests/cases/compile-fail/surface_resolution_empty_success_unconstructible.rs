@@ -7,15 +7,21 @@
 //! 2. the `unwrap_or_default` spelling — the exact form the migrated drop
 //!    sites used to convert a failed resolution into an empty success —
 //!    does not exist on the outcome;
-//! 3. the reason-taking constructor is producer-sealed (`pub(crate)`), so an
-//!    out-of-crate caller cannot mint incomplete claims;
+//! 3. the reason-taking constructor is crate-private to the engine
+//!    (`pub(crate)`), so another crate cannot mint an incomplete claim except
+//!    through a borrowed engine-minted `SurfaceClaimAuthority`;
 //! 4. `Resolved` carries its surface inside the proof-bearing `Witnessed`
 //!    wrapper, so the raw empty-success `Resolved(TypeInfoSurface::empty())`
 //!    is a TYPE error from any crate — the shape that used to compile;
 //! 5. `NoSurface` demands a `SurfaceProof` minted only by the module's
 //!    private finalizer, so the bare complete-negative claim cannot be
-//!    constructed from outside either (the named `no_surface` mint is
-//!    producer-sealed).
+//!    constructed from outside either. The named `resolved` / `no_surface`
+//!    mints are crate-private to the engine; another crate states those
+//!    claims only through a borrowed `SurfaceClaimAuthority`, which the
+//!    engine mints solely with a NEW engine (`EngineStores::create`) and the
+//!    host keeps private (see `surface_claim_authority_not_obtainable.rs`).
+//!    A crate that merely depends on the engine therefore cannot spell the
+//!    complete empty success `resolved(TypeInfoSurface::empty())`.
 //!
 //! The companion fixture
 //! `surface_resolution_incomplete_claim_not_forgeable.rs` proves the

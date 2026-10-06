@@ -22,6 +22,17 @@
 //! compile anywhere: a raw empty-success cannot be spelled, only claimed
 //! through a constructor whose name states the claim.
 //!
+//! Outside this crate every claim — success, negative, or incomplete — and
+//! the checked reason bridge are stated only through a borrowed
+//! [`SurfaceClaimAuthority`]. The engine mints one per engine, at
+//! [`EngineStores::create`](crate::project_semantic_dispatch::engine_resources::EngineStores::create),
+//! beside its output authority; the host's composition code holds it
+//! privately and lends it to its publication adapters. A crate that merely
+//! depends on the engine cannot spell a claim: the authority has a private
+//! field and is neither `Clone`, `Copy` nor `Default`, so obtaining one means
+//! constructing a whole new engine, and nothing it can reach of a live host
+//! yields that host's authority.
+//!
 //! The incomplete claim is equally unforgeable: [`IncompleteSurface`]'s
 //! fields are module-private and its reason is the [`NonEmptyReasons`]
 //! newtype — a reason set that CANNOT represent emptiness. There is no
@@ -50,6 +61,60 @@ pub struct SurfaceProof(());
 /// this function; nothing else can mint a [`SurfaceProof`].
 fn finalize() -> SurfaceProof {
     SurfaceProof(())
+}
+
+/// The engine-minted capability to state a [`SurfaceResolution`] claim from
+/// outside the engine.
+///
+/// Non-forgeable: its field is private, it has no public constructor, and it
+/// is neither `Clone`, `Copy` nor `Default`. The only mint is
+/// [`EngineStores::create`](crate::project_semantic_dispatch::engine_resources::EngineStores::create),
+/// which builds a NEW engine; the host stores its engine's authority
+/// privately and lends it only to the session code that publishes resolved
+/// surfaces. Every claim method borrows it.
+pub struct SurfaceClaimAuthority(());
+
+static_assertions::assert_not_impl_any!(SurfaceClaimAuthority: Clone, Copy, Default);
+
+impl SurfaceClaimAuthority {
+    /// The one mint, reached only from the engine's store construction.
+    pub(crate) fn mint() -> Self {
+        Self(())
+    }
+
+    /// The COMPLETE claim: the full member domain was resolved.
+    pub fn resolved<T>(&self, value: T) -> SurfaceResolution<T> {
+        SurfaceResolution::resolved(value)
+    }
+
+    /// The PRESENCE-ONLY claim: every carried member is real, the domain is
+    /// open.
+    pub fn open_presence<T>(&self, value: T) -> SurfaceResolution<T> {
+        SurfaceResolution::open_presence(value)
+    }
+
+    /// The COMPLETE-NEGATIVE claim: there is no such surface.
+    pub fn no_surface<T>(&self) -> SurfaceResolution<T> {
+        SurfaceResolution::no_surface()
+    }
+
+    /// The incomplete claim from the observed non-empty reasons.
+    pub fn incomplete<T>(&self, reason: NonEmptyReasons) -> SurfaceResolution<T> {
+        SurfaceResolution::incomplete(reason)
+    }
+
+    /// The incomplete claim carrying the usable positive subset the producer
+    /// still built.
+    pub fn incomplete_with<T>(&self, reason: NonEmptyReasons, partial: T) -> SurfaceResolution<T> {
+        SurfaceResolution::incomplete_with(reason, partial)
+    }
+
+    /// The checked bridge from a possibly-empty reason set: `None` when `set`
+    /// records no reason. The caller states what an empty classification
+    /// means.
+    pub fn non_empty_reasons(&self, set: PartialReasonSet) -> Option<NonEmptyReasons> {
+        NonEmptyReasons::new(set)
+    }
 }
 
 /// A produced surface together with the [`SurfaceProof`] that witnessed its
@@ -98,7 +163,7 @@ impl NonEmptyReasons {
     /// Checked bridge from the possibly-empty base set: `None` when `set`
     /// records no reason. The caller decides what an empty classification
     /// means — this constructor never substitutes one.
-    pub fn new(set: PartialReasonSet) -> Option<Self> {
+    pub(crate) fn new(set: PartialReasonSet) -> Option<Self> {
         (!set.is_empty()).then_some(Self(set))
     }
 
@@ -189,7 +254,7 @@ pub struct IncompleteSurface<T> {
 impl<T> SurfaceResolution<T> {
     /// The COMPLETE-claim mint: the producer resolved the full member
     /// domain. Routes through the private finalizer.
-    pub fn resolved(value: T) -> Self {
+    pub(crate) fn resolved(value: T) -> Self {
         Self::Resolved(Witnessed {
             value,
             _proof: finalize(),
@@ -198,7 +263,7 @@ impl<T> SurfaceResolution<T> {
 
     /// The PRESENCE-ONLY-claim mint: every carried member is real, the
     /// domain is open. Routes through the private finalizer.
-    pub fn open_presence(value: T) -> Self {
+    pub(crate) fn open_presence(value: T) -> Self {
         Self::OpenPresence(Witnessed {
             value,
             _proof: finalize(),
@@ -207,13 +272,13 @@ impl<T> SurfaceResolution<T> {
 
     /// The COMPLETE-NEGATIVE-claim mint: there is no such surface. Routes
     /// through the private finalizer.
-    pub fn no_surface() -> Self {
+    pub(crate) fn no_surface() -> Self {
         Self::NoSurface(finalize())
     }
 
     /// The incomplete claim, from the type-level non-empty reason set the
     /// producer observed at the drop.
-    pub fn incomplete(reason: NonEmptyReasons) -> Self {
+    pub(crate) fn incomplete(reason: NonEmptyReasons) -> Self {
         Self::Incomplete(IncompleteSurface {
             reason,
             partial: None,
@@ -222,7 +287,7 @@ impl<T> SurfaceResolution<T> {
 
     /// The incomplete claim carrying the usable positive subset the producer
     /// still built (the resolvable arms of a compound surface).
-    pub fn incomplete_with(reason: NonEmptyReasons, partial: T) -> Self {
+    pub(crate) fn incomplete_with(reason: NonEmptyReasons, partial: T) -> Self {
         Self::Incomplete(IncompleteSurface {
             reason,
             partial: Some(partial),

@@ -2,15 +2,18 @@
 //! the engine through the request port, never through the engine binding.
 //!
 //! The engine's binding carries only the engine's own resources. Host-owned
-//! result stores — the per-framework surface DTO stores — and the host's
-//! inert output lease are reached by session code through this attachment,
-//! which the host builds once at construction from the SAME shared instances
-//! its framework registry and project store own. The engine names the
+//! result stores — the per-framework surface DTO stores — the host's inert
+//! output lease, and the engine's surface-claim authority are reached by
+//! session code through this attachment, which the host builds once at
+//! construction from the SAME shared instances its framework registry and
+//! project store own. The engine names the
 //! attachment only as the opaque
 //! [`ResolverCapabilities::HostAttachment`](verter_type_engine::resolver_core::ResolverCapabilities)
 //! of its capability family; it has no operation on it.
 
 use std::sync::Arc;
+
+use verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority;
 
 use crate::framework::surface_store::FrameworkSurfaceStore;
 use crate::typeinfo::framework_surface::{MacroSurfaceDtos, SvelteSurfaceKey, VueSurfaceKey};
@@ -30,17 +33,21 @@ pub struct SessionAttachment {
     vue_surfaces: Option<Arc<VueSurfaceStore>>,
     svelte_surfaces: Option<Arc<SvelteSurfaceStore>>,
     output: crate::output_sinks::OutputLease,
+    surface_claims: Arc<SurfaceClaimAuthority>,
 }
 
 impl SessionAttachment {
     /// Select the typed surface stores from the registry rows that own them,
-    /// beside a share of the project store's output lease.
+    /// beside a share of the project store's output lease and surface-claim
+    /// authority.
     pub(crate) fn new(
         registry: &crate::framework::FrameworkAdapterRegistry,
         output: crate::output_sinks::OutputLease,
+        surface_claims: Arc<SurfaceClaimAuthority>,
     ) -> Self {
         Self {
             output,
+            surface_claims,
             vue_surfaces: typed_surface_store(
                 registry,
                 &verter_language::FrameworkAdapterId::vue(),
@@ -70,6 +77,12 @@ impl SessionAttachment {
     /// The host's inert output lease; only a sealed sink capability opens it.
     pub(crate) fn output_lease(&self) -> &crate::output_sinks::OutputLease {
         &self.output
+    }
+
+    /// The engine's surface-claim authority, lent to the session code that
+    /// publishes resolved surfaces. Reachable only inside this crate.
+    pub(crate) fn surface_claims(&self) -> &SurfaceClaimAuthority {
+        &self.surface_claims
     }
 }
 

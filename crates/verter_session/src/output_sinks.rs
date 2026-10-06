@@ -306,7 +306,7 @@ mod tests {
     fn foreign_engine_authority_cannot_materialize_through_a_live_dispatch() {
         let host = crate::VerterHost::new_standalone(crate::types::HostConfig::default());
         let dispatch = ProjectSemanticDispatch::new(&host);
-        let (_stores, foreign) = EngineStores::create(
+        let (_stores, foreign, _claims) = EngineStores::create(
             None,
             verter_session_query::retention::StoreAccount::default(),
             &Arc::new(AtomicU64::new(0)),

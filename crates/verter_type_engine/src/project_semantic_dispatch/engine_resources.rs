@@ -13,6 +13,11 @@
 //! is handed to the host's composition code, which stores it privately and
 //! lends it only to its terminal output sinks. Neither the binding, the
 //! dispatch, nor the request ports can produce or recover it.
+//!
+//! The same construction is the only mint of the engine's
+//! [`SurfaceClaimAuthority`], the capability code outside the engine needs to
+//! state a surface-resolution claim. The host holds it privately beside the
+//! output authority and lends it to its surface-publication adapters.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Weak};
@@ -22,6 +27,7 @@ use super::ProjectSemanticDispatch;
 use crate::component_meta_caches::{
     DeclarationLookupDb, ImportedRegistryDb, OwnerCollectionDb, ResolvabilityDb, ShapeCacheDb,
 };
+use crate::semantic_query::surface_resolution::SurfaceClaimAuthority;
 use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -40,7 +46,8 @@ pub struct EngineStores {
 }
 
 impl EngineStores {
-    /// Construct one engine's stores and the output authority bound to them.
+    /// Construct one engine's stores, the output authority bound to them, and
+    /// the engine's surface-claim authority.
     ///
     /// `store_account` is the retention account every retaining store charges;
     /// `cache_live` is the live-entry counter the single-entry memo stores
@@ -50,7 +57,7 @@ impl EngineStores {
         provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
         store_account: verter_session_query::retention::StoreAccount,
         cache_live: &Arc<AtomicU64>,
-    ) -> (Self, OutputAuthority) {
+    ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
         let retention_account = Arc::clone(store_account.get());
         let graph = Arc::new(match provenance {
             Some(prov) => SemanticGraphStore::with_provenance(prov, store_account),
@@ -73,7 +80,7 @@ impl EngineStores {
             )),
             mapper_binders: Arc::new(crate::mapper_binder_registry::MapperBinderRegistry::new()),
         };
-        (stores, authority)
+        (stores, authority, SurfaceClaimAuthority::mint())
     }
 }
 

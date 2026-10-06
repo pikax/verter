@@ -144,10 +144,11 @@ impl SuppressionLedger {
     /// normalizing silently inside the claim type.
     fn suppress_partial_read(
         &mut self,
+        claims: &verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority,
         classes: verter_type_engine::semantic_query::PartialReasonSet,
     ) {
         use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
-        self.suppress(NonEmptyReasons::new(classes).unwrap_or_else(|| {
+        self.suppress(claims.non_empty_reasons(classes).unwrap_or_else(|| {
             NonEmptyReasons::of(verter_type_engine::semantic_query::PartialReason::Propagated)
         }));
     }
@@ -661,7 +662,10 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         // PARTIAL signal, not on inner-memo non-cacheability. A benign
         // non-cacheable nested read must NOT suppress a complete result.
         if macro_payload_read.result_is_partial {
-            ledger.suppress_partial_read(macro_payload_read.partial_reason_classes());
+            ledger.suppress_partial_read(
+                dispatch.host_attachment().surface_claims(),
+                macro_payload_read.partial_reason_classes(),
+            );
         }
 
         let macro_payload_node = match macro_payload_read.value {
@@ -845,7 +849,10 @@ pub(crate) fn compute_bindings_via_graph(
     }
     // A2 signal split: key the warm gate on the PARTIAL signal only.
     if slot_surface_read.result_is_partial {
-        ledger.suppress_partial_read(slot_surface_read.partial_reason_classes());
+        ledger.suppress_partial_read(
+            dispatch.host_attachment().surface_claims(),
+            slot_surface_read.partial_reason_classes(),
+        );
     }
     let slot_surface = match slot_surface_read.value {
         QueryResult::Value(id) => id,
@@ -1040,7 +1047,10 @@ pub(crate) fn compute_bindings_via_graph(
         }
         // A2 signal split: key the warm gate on the PARTIAL signal only.
         if param_surface_read.result_is_partial {
-            ledger.suppress_partial_read(param_surface_read.partial_reason_classes());
+            ledger.suppress_partial_read(
+                dispatch.host_attachment().surface_claims(),
+                param_surface_read.partial_reason_classes(),
+            );
         }
         let param_surface = match param_surface_read.value {
             QueryResult::Value(id) => id,
@@ -1136,7 +1146,10 @@ pub(crate) fn compute_bindings_via_graph(
                     );
                     emit_slot_binding_graph_dispatch_facts(dispatch, &value_read.dep_signature);
                     if value_read.result_is_partial {
-                        ledger.suppress_partial_read(value_read.partial_reason_classes());
+                        ledger.suppress_partial_read(
+                            dispatch.host_attachment().surface_claims(),
+                            value_read.partial_reason_classes(),
+                        );
                     }
                     match value_read.value {
                         QueryResult::Value(id) => id,

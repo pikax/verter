@@ -582,10 +582,12 @@ impl VerterHost {
             .map(crate::cooperative_scheduler::CooperativeSchedulerAdapter::with_yield_hook)
             .unwrap_or_default();
         // The request attachment shares the registry-owned surface stores and
-        // the project store's output lease; it constructs neither.
+        // the project store's output lease and surface-claim authority; it
+        // constructs none of them.
         let session_attachment = crate::session_attachment::SessionAttachment::new(
             framework_services.framework_registry(),
             project_type_store.output_lease().clone(),
+            std::sync::Arc::clone(project_type_store.surface_claims()),
         );
         let host = Self {
             #[cfg(any(test, feature = "test-support"))]

@@ -561,13 +561,14 @@ impl VerterHost {
 /// Bound to `ctx` (the borrowed request facade), so an overlay session resolves the
 /// slot-param object against its OVERLAY content.
 pub(crate) fn navigate_param_to_object_surface<
-    C: verter_type_engine::resolver_core::ResolverCapabilities,
+    C: crate::session_attachment::SessionCapabilities,
 >(
     ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     scope_canonical: &str,
     payload: &verter_type_expr::locators::AuthoredTypePayloadRef,
 ) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+    let claims = dispatch.host_attachment().surface_claims();
     let scope_owner = match &payload.locator {
         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot) => slot.anchor.owner,
         verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(body) => {
@@ -602,7 +603,7 @@ pub(crate) fn navigate_param_to_object_surface<
         .at_optional_boundary()
         .map(|raised| raised.node())
     else {
-        return verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::incomplete(
+        return claims.incomplete(
             verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
                 verter_type_engine::semantic_query::PartialReason::MissingDependency,
             ),
@@ -626,14 +627,14 @@ pub(crate) fn navigate_param_to_object_surface<
                 .as_deref(),
         )
     {
-        return verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::incomplete(reasons);
+        return claims.incomplete(reasons);
     }
     if verter_type_engine::project_semantic_dispatch::symbolic_root::slot_param_root_is_symbolic_only(
         dispatch, base,
     ) {
         // The open-generic gate DECLINES a committed surface by design — a
         // complete negative answer, not a failure.
-        return verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::no_surface();
+        return claims.no_surface();
     }
     crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
         ctx,

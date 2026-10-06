@@ -1,7 +1,18 @@
-error[E0423]: cannot initialize a tuple struct which contains private fields
-  --> tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs:23:39
+error[E0624]: associated function `new` is private
+  --> tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs:22:67
    |
-23 |     let _forged_proof: SurfaceProof = SurfaceProof(());
+22 |     let _empty_reason: Option<NonEmptyReasons> = NonEmptyReasons::new(PartialReasonSet::empty());
+   |                                                                   ^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/surface_resolution.rs
+   |
+   |     pub(crate) fn new(set: PartialReasonSet) -> Option<Self> {
+   |     -------------------------------------------------------- private associated function defined here
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs:24:39
+   |
+24 |     let _forged_proof: SurfaceProof = SurfaceProof(());
    |                                       ^^^^^^^^^^^^
    |
 note: constructor is not visible here due to private fields
@@ -11,7 +22,7 @@ note: constructor is not visible here due to private fields
    |                         ^^ private field
 
 error[E0277]: the trait bound `NonEmptyReasons: std::default::Default` is not satisfied
-  --> tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs:22:44
+  --> tests/cases/compile-fail/surface_resolution_reason_mint_is_sealed.rs:23:44
    |
-22 |     let _default_reason: NonEmptyReasons = Default::default();
+23 |     let _default_reason: NonEmptyReasons = Default::default();
    |                                            ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `NonEmptyReasons`

@@ -1090,6 +1090,10 @@ pub struct ProjectTypeStore {
     /// The private hold on the output authority minted with this store's
     /// engine stores. Never handed out except as an inert lease.
     output_lease: crate::output_sinks::OutputLease,
+    /// The private hold on the surface-claim authority minted with this
+    /// store's engine stores. Shared only with the request attachment.
+    surface_claims:
+        Arc<verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority>,
     /// The aggregate retained-byte account every store in this graph
     /// charges.
     ///
@@ -1192,8 +1196,9 @@ impl ProjectTypeStore {
             store_account.clone(),
         );
         // The engine's own stores and the one output authority minted for
-        // them. The store keeps the authority privately behind its lease.
-        let (engine, output_authority) =
+        // them, plus the engine's surface-claim authority. The store keeps both
+        // privately: the output authority behind its lease.
+        let (engine, output_authority, surface_claims) =
             verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores::create(
                 provenance.map(|provenance| Arc::clone(&provenance.engine)),
                 store_account,
@@ -1250,6 +1255,7 @@ impl ProjectTypeStore {
             mapper_binder_registry,
             identity_interner,
             output_lease: crate::output_sinks::OutputLease::new(output_authority),
+            surface_claims: Arc::new(surface_claims),
             retention_account,
             counters,
             activity_gate: semantic_activity::SemanticActivityGate::default(),
@@ -1286,6 +1292,13 @@ impl ProjectTypeStore {
     /// lease is inert; only a sealed sink capability opens it.
     pub(crate) fn output_lease(&self) -> &crate::output_sinks::OutputLease {
         &self.output_lease
+    }
+
+    /// The store's private hold on its engine's surface-claim authority.
+    pub(crate) fn surface_claims(
+        &self,
+    ) -> &Arc<verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority> {
+        &self.surface_claims
     }
 
     pub(crate) fn identity_interner(

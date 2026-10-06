@@ -258,9 +258,8 @@ pub(crate) fn resolve_payload_surface_with_scope(
     scope: PayloadSurfaceScope,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
-    use verter_type_engine::semantic_query::surface_resolution::{
-        NonEmptyReasons, SurfaceResolution,
-    };
+    use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
+    let claims = dispatch.host_attachment().surface_claims();
     if matches!(scope, PayloadSurfaceScope::Default) {
         return super::resolve_payload_surface(
             dispatch,
@@ -483,20 +482,18 @@ pub(crate) fn resolve_payload_surface_with_scope(
             // signal into the macro envelope
             // (`OpenSpreadProgram` → `IndeterminateConditional`).
             if true_open || false_open {
-                return SurfaceResolution::open_presence(conditional_node);
+                return claims.open_presence(conditional_node);
             }
             let merged = merge_emit_branch_members(&t, &f);
             let view = verter_type_engine::semantic_query::SurfaceView::from_members(merged, None);
-            SurfaceResolution::resolved(
-                dispatch.graph().intern_node(SemanticNodeData::Object(view)),
-            )
+            claims.resolved(dispatch.graph().intern_node(SemanticNodeData::Object(view)))
         }
         // One branch has an enumerable member surface, the other RESOLVED
         // to a member-less shape: publish the member-bearing branch's RAW
         // node (signatures survive) — the complete answer, exactly the
         // pre-merge behaviour for a primitive sibling branch.
         (Ok((node, _, Some(_))), Ok((_, _, None))) | (Ok((_, _, None)), Ok((node, _, Some(_)))) => {
-            SurfaceResolution::resolved(node)
+            claims.resolved(node)
         }
         // Partial coverage — better than dropping the inherited set
         // entirely, but never the COMPLETE emit set: the failed branch's
@@ -512,7 +509,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     reasons.get()
                 ),
             ));
-            SurfaceResolution::incomplete_with(reasons, node)
+            claims.incomplete_with(reasons, node)
         }
         // An UNRESOLVED branch beside a member-less one, or two unresolved
         // branches: the typed reasons ride the returned claim; nothing
@@ -523,7 +520,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 expansion_kind,
                 "macro-payload-surface-branch-merge-error::both-branches-unresolved".to_string(),
             ));
-            SurfaceResolution::incomplete(reasons)
+            claims.incomplete(reasons)
         }
         (Err(true_reasons), Err(false_reasons)) => {
             diag_sink.push(macro_expansion_for_query_error(
@@ -531,7 +528,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 expansion_kind,
                 "macro-payload-surface-branch-merge-error::both-branches-unresolved".to_string(),
             ));
-            SurfaceResolution::incomplete(true_reasons.union(false_reasons))
+            claims.incomplete(true_reasons.union(false_reasons))
         }
         // Both branches resolved member-less: no surface to merge — the
         // pre-existing degraded answer, complete (no fabricated recording).
@@ -541,7 +538,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 expansion_kind,
                 "macro-payload-surface-branch-merge-error::both-branches-unresolved".to_string(),
             ));
-            SurfaceResolution::no_surface()
+            claims.no_surface()
         }
     }
 }

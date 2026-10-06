@@ -1,19 +1,30 @@
 error[E0599]: no method named `unwrap_or_default` found for enum `SurfaceResolution<T>` in the current scope
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:31:13
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:37:13
    |
-31 |     outcome.unwrap_or_default()
+37 |     outcome.unwrap_or_default()
    |             ^^^^^^^^^^^^^^^^^ method not found in `SurfaceResolution<Vec<u8>>`
 
 error[E0277]: the trait bound `SurfaceResolution<Vec<u8>>: std::default::Default` is not satisfied
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:35:50
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:41:50
    |
-35 |     let _defaulted: SurfaceResolution<Vec<u8>> = Default::default();
+41 |     let _defaulted: SurfaceResolution<Vec<u8>> = Default::default();
    |                                                  ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `SurfaceResolution<Vec<u8>>`
 
-warning: unreachable call
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:36:47
+error[E0624]: associated function `incomplete` is private
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:42:66
    |
-36 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
+42 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
+   |                                                                  ^^^^^^^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/surface_resolution.rs
+   |
+   |     pub(crate) fn incomplete(reason: NonEmptyReasons) -> Self {
+   |     --------------------------------------------------------- private associated function defined here
+
+warning: unreachable call
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:42:47
+   |
+42 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
    |                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
    |                                               |
    |                                               unreachable call
@@ -21,9 +32,9 @@ warning: unreachable call
    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
 
 error[E0308]: mismatched types
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:38:37
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:44:37
    |
-38 |         SurfaceResolution::Resolved(TypeInfoSurface::empty());
+44 |         SurfaceResolution::Resolved(TypeInfoSurface::empty());
    |         --------------------------- ^^^^^^^^^^^^^^^^^^^^^^^^ expected `Witnessed<TypeInfoSurface>`, found `TypeInfoSurface`
    |         |
    |         arguments to this enum variant are incorrect
@@ -35,3 +46,25 @@ note: tuple variant defined here
    |
    |     Resolved(Witnessed<T>),
    |     ^^^^^^^^
+
+error[E0624]: associated function `resolved` is private
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:46:28
+   |
+46 |         SurfaceResolution::resolved(TypeInfoSurface::empty());
+   |                            ^^^^^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/surface_resolution.rs
+   |
+   |     pub(crate) fn resolved(value: T) -> Self {
+   |     ---------------------------------------- private associated function defined here
+
+error[E0624]: associated function `no_surface` is private
+  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:47:85
+   |
+47 |     let _sealed_no_surface: SurfaceResolution<TypeInfoSurface> = SurfaceResolution::no_surface();
+   |                                                                                     ^^^^^^^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/surface_resolution.rs
+   |
+   |     pub(crate) fn no_surface() -> Self {
+   |     ---------------------------------- private associated function defined here

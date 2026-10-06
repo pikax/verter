@@ -757,6 +757,7 @@ pub(crate) fn resolve_payload_surface(
     provenance: verter_type_engine::semantic_query::SurfaceProvenanceContext,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
+    let claims = dispatch.host_attachment().surface_claims();
     // The empty-path `ProjectPath` carries the macro's surface
     // provenance (by design): for a props payload that
     // resolved to a `DeclRef` carrier (`defineProps<FooProps>()`), the
@@ -796,9 +797,7 @@ pub(crate) fn resolve_payload_surface(
         ));
     }
     match surface_read.value {
-        QueryResult::Value(id) => {
-            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::resolved(id)
-        }
+        QueryResult::Value(id) => claims.resolved(id),
         QueryResult::Recursive(_) => {
             // Cycles are NON-FATAL by rule: they bound the publish surface
             // to the non-recursive arms — the degraded COMPLETE answer, not
@@ -808,7 +807,7 @@ pub(crate) fn resolve_payload_surface(
                 expansion_kind,
                 "cyclic-macro-payload-surface".to_string(),
             ));
-            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::no_surface()
+            claims.no_surface()
         }
         QueryResult::Error(e) => {
             diag_sink.push(macro_expansion_for_query_error(
@@ -822,11 +821,9 @@ pub(crate) fn resolve_payload_surface(
             // its typed reason on the returned claim.
             match verter_type_engine::semantic_query::surface_resolution::stable_query_error_partiality(&e) {
                 Some(reasons) => {
-                    verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::incomplete(
-                        reasons,
-                    )
+                    claims.incomplete(reasons)
                 }
-                None => verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::no_surface(),
+                None => claims.no_surface(),
             }
         }
     }
