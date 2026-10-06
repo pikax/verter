@@ -306,7 +306,7 @@ pub fn dispatch_execute_type_node_for_tests(
 /// The `Instantiate` payload is the opaque
 /// [`InstantiateKey`](verter_type_engine::semantic_query::InstantiateKey) (private
 /// fields) whose [`InstantiateContext`](verter_type_engine::semantic_query::InstantiateContext)
-/// carries the sealed, `pub(crate)` [`InstantiateBodySource`](verter_type_engine::semantic_query::InstantiateBodySource)
+/// carries the sealed [`InstantiateBodySource`](verter_type_engine::semantic_query::InstantiateBodySource)
 /// source-kind axis — none of which an external crate can construct.
 /// This helper is the ONLY way `tests/cases/**` can mint the key, and it
 /// hands back the OPAQUE `SemanticQueryKey` — never a raw

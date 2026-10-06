@@ -602,48 +602,91 @@ impl ForcedSemanticOperand {
     }
 }
 
-/// The projection precision one operand force requests.
-///
-/// Request-owned vocabulary, never an operand axis: it travels on the
-/// one-shot [`SemanticOperandForceRequest`] and enters the query-family
-/// identity the forcing boundary derives from operand identity — exactly
-/// once, alongside the request's unchanged complete
-/// [`ProjectionReductionContext`]. The operand carrier itself never
-/// stores or duplicates it, and no convenience path may default it: a
-/// force that names no precision is the explicit whole-surface case.
-///
-/// Content-free by construction: store-local node identity only — path
-/// segments over known keys plus, for a computed index, the issuing
-/// store's own [`SemanticNodeId`]. No content hash, version hash, source
-/// text, or span can appear in it.
-///
-/// Crate-internal: every force/mint entry point that consumes one is
-/// `pub(crate)`, so the vocabulary itself is too — an external crate can
-/// neither name nor construct a precision.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SemanticOperandForceProjection {
-    /// The explicit whole-surface case — the empty-path `ProjectPath`.
-    /// For an authored operand this is the only precision that may
-    /// converge on the declaration-source `Instantiate` family; every
-    /// selective precision keeps force-owned family identity.
-    WholeSurface,
-    /// Residual path demand. Intermediate segments run `Navigate`; only
-    /// the terminal segment runs at the request context's mode. The
-    /// requested key or residual path is thereby known BEFORE the
-    /// operand is forced, so no unrelated base surface is requested.
+mod force_vocabulary {
+    use super::*;
+
+    /// The projection precision one operand force requests.
     ///
-    /// DERIVED, never caller-supplied: a request spells its residual path
-    /// in the request-side [`ForceProjectionSegment`] vocabulary and the
-    /// forcing boundary lowers it here. That is what makes an
-    /// `IndexKey::Computed` segment safe to hash into family identity —
-    /// the boundary has already proven the index node belongs to the
-    /// issuing store at the live generation and merged its producer
-    /// evidence.
-    Path(Arc<[PathSegment]>),
-    /// Key-domain demand: the force answers the operand's `keyof`. It
-    /// forces only key-producing structure and never member values.
-    KeyDomain,
+    /// Request-owned vocabulary, never an operand axis: it travels on the
+    /// one-shot [`SemanticOperandForceRequest`] and enters the query-family
+    /// identity the forcing boundary derives from operand identity — exactly
+    /// once, alongside the request's unchanged complete
+    /// [`ProjectionReductionContext`]. The operand carrier itself never
+    /// stores or duplicates it, and no convenience path may default it: a
+    /// force that names no precision is the explicit whole-surface case.
+    ///
+    /// Content-free by construction: store-local node identity only — path
+    /// segments over known keys plus, for a computed index, the issuing
+    /// store's own [`SemanticNodeId`]. No content hash, version hash, source
+    /// text, or span can appear in it.
+    ///
+    /// Crate-internal outside the `test-support` seam: every force/mint entry
+    /// point that consumes one is `pub(crate)`, so the vocabulary is re-exported
+    /// `pub` only for the host's test suites — a production build of another
+    /// crate can neither name nor construct a precision.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub enum SemanticOperandForceProjection {
+        /// The explicit whole-surface case — the empty-path `ProjectPath`.
+        /// For an authored operand this is the only precision that may
+        /// converge on the declaration-source `Instantiate` family; every
+        /// selective precision keeps force-owned family identity.
+        WholeSurface,
+        /// Residual path demand. Intermediate segments run `Navigate`; only
+        /// the terminal segment runs at the request context's mode. The
+        /// requested key or residual path is thereby known BEFORE the
+        /// operand is forced, so no unrelated base surface is requested.
+        ///
+        /// DERIVED, never caller-supplied: a request spells its residual path
+        /// in the request-side [`ForceProjectionSegment`] vocabulary and the
+        /// forcing boundary lowers it here. That is what makes an
+        /// `IndexKey::Computed` segment safe to hash into family identity —
+        /// the boundary has already proven the index node belongs to the
+        /// issuing store at the live generation and merged its producer
+        /// evidence.
+        Path(Arc<[PathSegment]>),
+        /// Key-domain demand: the force answers the operand's `keyof`. It
+        /// forces only key-producing structure and never member values.
+        KeyDomain,
+    }
+
+    /// One segment of a force request's residual path — the REQUEST-side
+    /// vocabulary, distinct from the derived [`PathSegment`] path that
+    /// eventually enters family identity.
+    ///
+    /// A computed index is a SEALED operand, never a bare graph handle. The
+    /// base operand's store identity, generation, and evidence say nothing
+    /// about a node minted elsewhere: a handle from a foreign store, or from
+    /// a superseded generation of this one, is just an integer that the
+    /// current graph would happily interpret as some unrelated node, and its
+    /// producer's read facts would never reach the forced candidate. So
+    /// [`Self::Index`] carries the statically-known [`PropertyKey`] carrier,
+    /// which cannot spell a computed key at all, and [`Self::ComputedIndex`]
+    /// is the only spelling for one. The forcing boundary validates the index
+    /// operand's store/generation and merges its producer evidence BEFORE the
+    /// base is projected, and only then derives the `IndexKey` the shared
+    /// path vocabulary carries.
+    ///
+    /// Crate-internal outside the `test-support` seam, like
+    /// [`SemanticOperandForceProjection`]: a production build of another crate
+    /// cannot hand-build a residual-path segment.
+    #[derive(Debug, Clone)]
+    pub enum ForceProjectionSegment {
+        /// A declared member key (`Base.name`).
+        Member(PropertyKey),
+        /// A statically-known index key (`Base["name"]`, `Base[0]`). The
+        /// computed form is structurally unspellable here.
+        Index(PropertyKey),
+        /// A computed index (`Base[K]`) whose key type is itself a forced
+        /// operand — the only way to name a computed index in a force.
+        ComputedIndex(ForcedSemanticOperand),
+    }
 }
+
+// Named across the crate boundary only by the host's test suites.
+#[cfg(any(test, feature = "test-support"))]
+pub use force_vocabulary::{ForceProjectionSegment, SemanticOperandForceProjection};
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use force_vocabulary::{ForceProjectionSegment, SemanticOperandForceProjection};
 
 impl SemanticOperandForceProjection {
     /// The residual path this demand walks, or `None` when the demand is
@@ -670,34 +713,6 @@ impl SemanticOperandForceProjection {
     pub const fn is_whole_surface(&self) -> bool {
         matches!(self, Self::WholeSurface)
     }
-}
-
-/// One segment of a force request's residual path — the REQUEST-side
-/// vocabulary, distinct from the derived [`PathSegment`] path that
-/// eventually enters family identity.
-///
-/// A computed index is a SEALED operand, never a bare graph handle. The
-/// base operand's store identity, generation, and evidence say nothing
-/// about a node minted elsewhere: a handle from a foreign store, or from
-/// a superseded generation of this one, is just an integer that the
-/// current graph would happily interpret as some unrelated node, and its
-/// producer's read facts would never reach the forced candidate. So
-/// [`Self::Index`] carries the statically-known [`PropertyKey`] carrier,
-/// which cannot spell a computed key at all, and [`Self::ComputedIndex`]
-/// is the only spelling for one. The forcing boundary validates the index
-/// operand's store/generation and merges its producer evidence BEFORE the
-/// base is projected, and only then derives the `IndexKey` the shared
-/// path vocabulary carries.
-#[derive(Debug, Clone)]
-pub enum ForceProjectionSegment {
-    /// A declared member key (`Base.name`).
-    Member(PropertyKey),
-    /// A statically-known index key (`Base["name"]`, `Base[0]`). The
-    /// computed form is structurally unspellable here.
-    Index(PropertyKey),
-    /// A computed index (`Base[K]`) whose key type is itself a forced
-    /// operand — the only way to name a computed index in a force.
-    ComputedIndex(ForcedSemanticOperand),
 }
 
 /// The projection precision a force REQUEST names, before the boundary

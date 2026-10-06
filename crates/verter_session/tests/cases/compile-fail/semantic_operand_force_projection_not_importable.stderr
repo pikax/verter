@@ -1,11 +1,45 @@
-error[E0603]: enum `SemanticOperandForceDemand` is private
-  --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:10:50
+error[E0603]: enum `ForceProjectionSegment` is private
+  --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:14:51
    |
-10 | use verter_type_engine::semantic_query::operand::SemanticOperandForceDemand;
-   |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^ private enum
+14 | use verter_type_engine::semantic_query::operand::{ForceProjectionSegment, SemanticOperandForceDemand, SemanticOperandForceProjection};
+   |                                                   ^^^^^^^^^^^^^^^^^^^^^^ private enum
+   |
+note: the enum `ForceProjectionSegment` is defined here
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
+   |
+   | pub(crate) use force_vocabulary::{ForceProjectionSegment, SemanticOperandForceProjection};
+   |                                   ^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: enum `SemanticOperandForceDemand` is private
+  --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:14:75
+   |
+14 | use verter_type_engine::semantic_query::operand::{ForceProjectionSegment, SemanticOperandForceDemand, SemanticOperandForceProjection};
+   |                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ private enum
    |
 note: the enum `SemanticOperandForceDemand` is defined here
   --> $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
    |
    | pub(crate) enum SemanticOperandForceDemand {
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: enum `SemanticOperandForceProjection` is private
+  --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:14:103
+   |
+14 | use verter_type_engine::semantic_query::operand::{ForceProjectionSegment, SemanticOperandForceDemand, SemanticOperandForceProjection};
+   |                                                                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private enum
+   |
+note: the enum `SemanticOperandForceProjection` is defined here
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
+   |
+   | pub(crate) use force_vocabulary::{ForceProjectionSegment, SemanticOperandForceProjection};
+   |                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable call
+  --> tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs:22:13
+   |
+22 |     let _ = ForceProjectionSegment::Member(todo!());
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
+   |             |
+   |             unreachable call
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default

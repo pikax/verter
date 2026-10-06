@@ -3367,49 +3367,63 @@ impl ProjectionReductionContext {
     }
 }
 
-/// The SOURCE KIND of an `Instantiate` base body — a sealed two-state
-/// key axis folded into `FamilyKey::Instantiate` (deliberately NOT a bare
-/// `Option`: an `Option` hides meaning and is too easy to forge).
-///
-/// - [`FileBacked`](Self::FileBacked)`(P)` — the compute may read ANY
-///   real-file parse-derived input (shallow state, prepared declarations,
-///   the lazy decl-body memo, synthesized component default state), so the
-///   live `parse_env_hash` is family identity: two lowerings differing only
-///   in the FileBacked `P` are DISTINCT FAMILIES — a parse-env-only change
-///   (file content unchanged) is not caught by the `FileWholeHash`
-///   self-root rail, so it must be caught by the key.
-/// - [`NonFile`](Self::NonFile) — ONLY the true non-file bases (`""` /
-///   `"__builtin__"` / `"<synthetic>"`) whose values genuinely do not
-///   depend on the parse env; per R21 an unconditional `P` would
-///   false-miss every parse-env-insensitive instantiation.
-///
-/// The enum itself is `pub(crate)` — its variants are NOT externally
-/// constructible, so the source-kind axis cannot be forged from outside
-/// the crate. The dim type inside `FileBacked` is the sealed
-/// [`ParseEnvHash`] newtype (in-crate construction only), and
-/// [`InstantiateContext`]'s fields are private with
-/// [`InstantiateContext::file_backed`] / [`InstantiateContext::non_file`]
-/// as the ONLY source-kind constructors — `pub(crate)` and gated on the
-/// [`crate::project_semantic_dispatch::BodySourceWitness`] mintable only
-/// inside the dispatch module, so call sites CANNOT choose freely; the
-/// production mapping is owned by the
-/// `ProjectSemanticDispatch::instantiate_context_for` choke point. The
-/// context is bundled with its base/args into the opaque
-/// [`InstantiateKey`] so a caller cannot transplant a `NonFile` context
-/// onto a real-file base. Test fixtures build the context through the
-/// witnessed constructors (the `#[cfg(test)]`
-/// [`crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests`]
-/// mint) or, from integration crates, the production-shaped
-/// [`crate::for_tests::instantiate_key_for_tests`] helper.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InstantiateBodySource {
-    /// The base body may read real-file parse-derived input; carries the
-    /// live `parse_env_hash` as family identity.
-    FileBacked(ParseEnvHash),
-    /// A true non-file base (`""` / `"__builtin__"` / `"<synthetic>"`);
-    /// folds no parse-env dimension.
-    NonFile,
+mod instantiate_body_source {
+    use super::ParseEnvHash;
+
+    /// The SOURCE KIND of an `Instantiate` base body — a sealed two-state
+    /// key axis folded into `FamilyKey::Instantiate` (deliberately NOT a bare
+    /// `Option`: an `Option` hides meaning and is too easy to forge).
+    ///
+    /// - [`FileBacked`](Self::FileBacked)`(P)` — the compute may read ANY
+    ///   real-file parse-derived input (shallow state, prepared declarations,
+    ///   the lazy decl-body memo, synthesized component default state), so the
+    ///   live `parse_env_hash` is family identity: two lowerings differing only
+    ///   in the FileBacked `P` are DISTINCT FAMILIES — a parse-env-only change
+    ///   (file content unchanged) is not caught by the `FileWholeHash`
+    ///   self-root rail, so it must be caught by the key.
+    /// - [`NonFile`](Self::NonFile) — ONLY the true non-file bases (`""` /
+    ///   `"__builtin__"` / `"<synthetic>"`) whose values genuinely do not
+    ///   depend on the parse env; per R21 an unconditional `P` would
+    ///   false-miss every parse-env-insensitive instantiation.
+    ///
+    /// The enum is crate-private outside the `test-support` seam (it is
+    /// re-exported `pub` only there, for the host's test suites) — its variants
+    /// are NOT nameable from a production build of another crate, so the
+    /// source-kind axis cannot be forged from outside the crate. The dim type
+    /// inside `FileBacked` is the sealed [`ParseEnvHash`] newtype (in-crate
+    /// construction only), and
+    /// [`InstantiateContext`](super::InstantiateContext)'s fields are
+    /// private with
+    /// [`InstantiateContext::file_backed`](super::InstantiateContext::file_backed)
+    /// / [`InstantiateContext::non_file`](super::InstantiateContext::non_file)
+    /// as the ONLY source-kind constructors — gated on the
+    /// [`crate::project_semantic_dispatch::BodySourceWitness`] mintable only
+    /// inside the dispatch module, so call sites CANNOT choose freely; the
+    /// production mapping is owned by the
+    /// `ProjectSemanticDispatch::instantiate_context_for` choke point. The
+    /// context is bundled with its base/args into the opaque
+    /// [`InstantiateKey`](super::InstantiateKey) so a caller cannot transplant
+    /// a `NonFile` context onto a real-file base. Test fixtures build the context through the
+    /// witnessed constructors (the `#[cfg(test)]`
+    /// [`crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests`]
+    /// mint) or, from integration crates, the production-shaped
+    /// [`crate::for_tests::instantiate_key_for_tests`] helper.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum InstantiateBodySource {
+        /// The base body may read real-file parse-derived input; carries the
+        /// live `parse_env_hash` as family identity.
+        FileBacked(ParseEnvHash),
+        /// A true non-file base (`""` / `"__builtin__"` / `"<synthetic>"`);
+        /// folds no parse-env dimension.
+        NonFile,
+    }
 }
+
+// Named across the crate boundary only by the host's test suites.
+#[cfg(any(test, feature = "test-support"))]
+pub use instantiate_body_source::InstantiateBodySource;
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use instantiate_body_source::InstantiateBodySource;
 
 /// The authored-arm instantiate source payload: the sealed operand
 /// identity plus the force request's projection demand.
