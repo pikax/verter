@@ -203,13 +203,19 @@ fn demand_record(
 fn demand_step(host: &Arc<VerterHost>, requests: &[Demand], concurrent: bool) -> StepRecord {
     if !concurrent || requests.len() < 2 {
         let mut wall_micros = 0;
-        let requests = requests
+        let answered: Vec<_> = requests
             .iter()
             .map(|demand| {
                 let (record, node) = request(host, &canonical(&demand.file), &demand.alias, false);
                 wall_micros += record.micros;
-                demand_record(host, demand, record, node)
+                (record, node)
             })
+            .collect();
+        // Observed after the step, outside every timer (as the tsc arm does).
+        let requests = requests
+            .iter()
+            .zip(answered)
+            .map(|(demand, (record, node))| demand_record(host, demand, record, node))
             .collect();
         return StepRecord::Demand {
             concurrent: false,

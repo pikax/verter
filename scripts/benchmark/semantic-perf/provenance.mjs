@@ -35,7 +35,7 @@ export const FORBIDDEN_FEATURES = {
 export const OBSERVE_FEATURES = {
   verter_bench: ["semantic-observe", "attribution", "currency_probe", "hotpath"],
   verter_audit: ["semantic-observe", "attribution"],
-  verter_session: ["currency_probe"],
+  verter_session: ["semantic-observe", "attribution", "currency_probe", "hotpath"],
   verter_workspace: ["semantic-observe", "currency_probe"],
   verter_semantic: ["semantic-observe"],
   verter_compiler: ["semantic-observe"],
