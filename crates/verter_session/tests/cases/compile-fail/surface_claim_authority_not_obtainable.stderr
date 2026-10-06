@@ -1,20 +1,13 @@
-error[E0624]: method `surface_claims` is private
-  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:20:39
+error[E0599]: no method named `surface_claims` found for reference `&Arc<ProjectTypeStore>` in the current scope
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:22:39
    |
-20 |       let _ = host.project_type_store().surface_claims();
-   |                                         ^^^^^^^^^^^^^^ private method
-   |
-  ::: src/project_type_store.rs
-   |
-   | /     pub(crate) fn surface_claims(
-   | |         &self,
-   | |     ) -> &Arc<verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority> {
-   | |____________________________________________________________________________________________- private method defined here
+22 |     let _ = host.project_type_store().surface_claims();
+   |                                       ^^^^^^^^^^^^^^ method not found in `&Arc<ProjectTypeStore>`
 
 error[E0624]: associated function `mint` is private
-  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:25:42
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:27:42
    |
-25 |     let _minted = SurfaceClaimAuthority::mint();
+27 |     let _minted = SurfaceClaimAuthority::mint();
    |                                          ^^^^ private associated function
    |
   ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/surface_resolution.rs
@@ -23,21 +16,21 @@ error[E0624]: associated function `mint` is private
    |     ---------------------------- private associated function defined here
 
 error[E0277]: the trait bound `SurfaceClaimAuthority: std::default::Default` is not satisfied
-  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:26:45
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:28:45
    |
-26 |     let _defaulted: SurfaceClaimAuthority = Default::default();
+28 |     let _defaulted: SurfaceClaimAuthority = Default::default();
    |                                             ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `SurfaceClaimAuthority`
 
 error[E0277]: the trait bound `SurfaceClaimAuthority: Clone` is not satisfied
-  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:28:10
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:30:10
    |
-28 |         <SurfaceClaimAuthority as Clone>::clone(authority)
+30 |         <SurfaceClaimAuthority as Clone>::clone(authority)
    |          ^^^^^^^^^^^^^^^^^^^^^ the trait `Clone` is not implemented for `SurfaceClaimAuthority`
 
 error[E0423]: cannot initialize a tuple struct which contains private fields
-  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:30:19
+  --> tests/cases/compile-fail/surface_claim_authority_not_obtainable.rs:32:19
    |
-30 |     let _forged = SurfaceClaimAuthority(());
+32 |     let _forged = SurfaceClaimAuthority(());
    |                   ^^^^^^^^^^^^^^^^^^^^^
    |
 note: constructor is not visible here due to private fields
@@ -47,6 +40,6 @@ note: constructor is not visible here due to private fields
    |                                  ^^ private field
 help: you might have meant to use the `mint` associated function
    |
-30 -     let _forged = SurfaceClaimAuthority(());
-30 +     let _forged = SurfaceClaimAuthority::mint();
+32 -     let _forged = SurfaceClaimAuthority(());
+32 +     let _forged = SurfaceClaimAuthority::mint();
    |
