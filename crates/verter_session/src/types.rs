@@ -2775,15 +2775,15 @@ pub(crate) struct VueTemplateInputs {
     /// content rail, so a template derived from superseded bytes would
     /// be served as current by every subsequent template read.
     pub(crate) store_published: bool,
-    /// Scheduler node generation of the source read these inputs were
-    /// captured from — the value stamped onto
-    /// [`RawTemplateAnalysisEntry::source_generation`] at persist.
+    /// Scheduler source version (node object + generation) of the source
+    /// read these inputs were captured from — the value stamped onto
+    /// [`RawTemplateAnalysisEntry::source_version`] at persist.
     /// `None` when the capture site read no scheduler node (the
     /// from-source snapshot builder, the artifact-serve lane): with no
     /// generation to stamp, the computed template serves the caller
     /// but the persist declines — an entry without a rail cannot be
     /// validated by any reader, so it must not exist.
-    pub(crate) source_generation: Option<u64>,
+    pub(crate) source_version: Option<verter_scheduler::node::SourceVersion>,
 }
 
 #[derive(Debug, Clone)]
@@ -3508,26 +3508,29 @@ impl ProfileState {
 /// mirror of any artifact: `IndexedReady` retains no resolved target.
 /// Source-content change for the owner drops this DerivedRawState entry;
 /// profile-flag change preserves it.
-/// A lazily computed template analysis pinned to the scheduler node
-/// generation of the source it derives from — the
+/// A lazily computed template analysis pinned to the scheduler source
+/// version (node object + generation) of the source it derives from — the
 /// [`DerivedRawState::raw_template_analysis`] slot's validity rail.
 ///
 /// The slot is canonical-keyed and lazily persisted, so a persist can
 /// land AFTER the upsert that superseded its inputs already cleared
 /// the slot (capture authority proves the inputs were coherent when
 /// captured, not that the slot is still current at persist time). The
-/// generation makes correctness read-side authoritative: every reader
-/// already holds a generation-coherent scheduler snapshot
-/// (`try_get_source` / `try_get_analysis` carry the node generation)
-/// and accepts the entry only at its own snapshot's generation — a
-/// late persist stamped with the superseded generation lands inert
-/// and the next coherent compute replaces it.
+/// version makes correctness read-side authoritative: every reader
+/// already holds a version-coherent scheduler snapshot
+/// (`try_get_source` / `try_get_analysis` carry the node version)
+/// and accepts the entry only at its own snapshot's version — a late
+/// persist stamped with a superseded version lands inert and the next
+/// coherent compute replaces it. The version names the node object as
+/// well as its generation: a removed or reset file's successor restarts
+/// its generation sequence, so a late persist from the retired object
+/// can carry a generation the successor reaches again.
 #[derive(Debug)]
 pub(crate) struct RawTemplateAnalysisEntry {
     pub(crate) template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
-    /// Scheduler node generation of the source read the template's
+    /// Scheduler source version of the source read the template's
     /// inputs were captured from.
-    pub(crate) source_generation: u64,
+    pub(crate) source_version: verter_scheduler::node::SourceVersion,
     /// Exact semantic dependency read set for the dynamic-class projection.
     /// Readers validate this against a proven-current store view before
     /// serving the profileless slot.
@@ -3543,7 +3546,7 @@ pub(crate) struct RawTemplateAnalysisEntry {
 /// and every persist site — the lazy template-analysis computation and
 /// the Session compile-publish lane — states its context through this
 /// carrier instead of duplicating the gate. The decision rules live on
-/// [`RawTemplateSlotAdmission::admitted_generation`]; the fields here
+/// [`RawTemplateSlotAdmission::admitted_version`]; the fields here
 /// are the facts only the capture site can attest.
 pub(crate) struct RawTemplateSlotAdmission {
     /// Capture authority for the bytes the template derives from:
@@ -3553,11 +3556,11 @@ pub(crate) struct RawTemplateSlotAdmission {
     /// from overridden block content describes bytes the store never
     /// published.
     pub(crate) store_published: bool,
-    /// Scheduler node generation of the source read the template's
+    /// Scheduler source version of the source read the template's
     /// inputs were captured from — the validity rail readers key on.
     /// `None` declines: an entry without a rail cannot be validated
     /// by any reader, so it must not exist.
-    pub(crate) source_generation: Option<u64>,
+    pub(crate) source_version: Option<verter_scheduler::node::SourceVersion>,
     /// Whether the SFC carries external `src=` blocks. External-src
     /// templates never populate the slot: an external dep edit clears
     /// compile slots, not this slot, and the owner's node generation
@@ -3581,7 +3584,7 @@ pub(crate) struct RawTemplateSlotAdmission {
 impl RawTemplateSlotAdmission {
     /// THE admission decision for the
     /// [`DerivedRawState::raw_template_analysis`] slot: `Some(rail)`
-    /// with the generation to stamp when the statement admits, `None`
+    /// with the source version to stamp when the statement admits, `None`
     /// when it declines. The rules live here only:
     ///
     /// - inline templates only (`has_src_blocks` declines): editing an
@@ -3596,10 +3599,10 @@ impl RawTemplateSlotAdmission {
     /// - store-published inputs only (ReturnOnly never publishes — a
     ///   template derived from a fenced serve or overridden block
     ///   content describes bytes the store never published);
-    /// - a captured source generation to stamp as the entry's validity
+    /// - a captured source version to stamp as the entry's validity
     ///   rail: an entry without a rail cannot be validated by any
     ///   reader, so it must not exist.
-    pub(crate) fn admitted_generation(&self) -> Option<u64> {
+    pub(crate) fn admitted_version(&self) -> Option<verter_scheduler::node::SourceVersion> {
         if self.has_src_blocks
             || !self.default_extraction
             || !self.store_published
@@ -3607,7 +3610,7 @@ impl RawTemplateSlotAdmission {
         {
             return None;
         }
-        self.source_generation
+        self.source_version
     }
 }
 
@@ -3693,7 +3696,7 @@ pub struct DerivedRawState {
 impl DerivedRawState {
     /// Read access to the module-private `raw_template_analysis`
     /// slot. Readers validate the entry against their own snapshot's
-    /// generation (the entry's `source_generation` rail) before
+    /// version (the entry's `source_version` rail) before
     /// serving it.
     pub(crate) fn raw_template_analysis(&self) -> Option<&RawTemplateAnalysisEntry> {
         self.raw_template_analysis.as_ref()
@@ -3711,7 +3714,7 @@ impl DerivedRawState {
     /// `raw_template_analysis` slot — the structural write authority.
     /// The persist site states its facts through the by-value
     /// [`RawTemplateSlotAdmission`] and THIS method decides via
-    /// [`RawTemplateSlotAdmission::admitted_generation`]; a statement
+    /// [`RawTemplateSlotAdmission::admitted_version`]; a statement
     /// that declines never touches the slot, so no caller can install
     /// an entry the admission rules reject.
     ///
@@ -3723,7 +3726,7 @@ impl DerivedRawState {
         template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
         admission: RawTemplateSlotAdmission,
     ) {
-        let Some(source_generation) = admission.admitted_generation() else {
+        let Some(source_version) = admission.admitted_version() else {
             return;
         };
         let template_class_signature = admission
@@ -3732,11 +3735,11 @@ impl DerivedRawState {
         let supersedes = self
             .raw_template_analysis
             .as_ref()
-            .is_none_or(|entry| entry.source_generation <= source_generation);
+            .is_none_or(|entry| entry.source_version <= source_version);
         if supersedes {
             self.raw_template_analysis = Some(RawTemplateAnalysisEntry {
                 template,
-                source_generation,
+                source_version,
                 template_class_signature,
             });
         }

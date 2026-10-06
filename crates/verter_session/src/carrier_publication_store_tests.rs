@@ -312,6 +312,69 @@ fn registered_structure_views_resolve_noncanonical_alias_spelling() {
         .is_some());
 }
 
+/// A removed or reset file's successor restarts its scheduler generation
+/// sequence, so the host's base revision must also name the scheduler node
+/// object: the successor's first revision never repeats the retired one.
+#[test]
+fn base_revision_never_repeats_across_remove_and_reset() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    for (canonical, language, before, after) in [
+        (
+            "/src/App.vue",
+            verter_language::FileLanguage::vue(),
+            "<script setup>const x = 1</script>",
+            "<script setup>const x = 2</script>",
+        ),
+        (
+            "/src/util.ts",
+            verter_language::FileLanguage::script_ts(),
+            "export const x = 1;",
+            "export const x = 2;",
+        ),
+    ] {
+        for reset in [false, true] {
+            let workspace: Arc<dyn WorkspaceAccess> =
+                Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+            let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+            let upsert = |source: &str| {
+                let _ = host
+                    .upsert(crate::UpsertRequest {
+                        canonical_id: Some(canonical.to_string()),
+                        input_id: canonical.to_string(),
+                        source: Arc::from(source),
+                        file_language: language.clone(),
+                        aliases: Vec::new(),
+                    })
+                    .expect("upsert");
+                let generation = host
+                    .scheduler
+                    .try_get_source(canonical)
+                    .expect("committed source")
+                    .generation;
+                let token = host
+                    .registered_source_revision_token(canonical)
+                    .expect("revision token");
+                (generation, token)
+            };
+            let (retired_generation, retired) = upsert(before);
+            if reset {
+                host.close();
+            } else {
+                host.remove(canonical).expect("known file");
+            }
+            let (generation, current) = upsert(after);
+            assert_eq!(generation, retired_generation, "{canonical} reset={reset}");
+            assert_ne!(current, retired, "{canonical} reset={reset}");
+            assert_ne!(
+                current.public_token(),
+                retired.public_token(),
+                "{canonical} reset={reset}"
+            );
+        }
+    }
+}
+
 #[test]
 fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
     let persistence =

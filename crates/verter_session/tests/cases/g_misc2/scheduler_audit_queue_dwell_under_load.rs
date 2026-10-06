@@ -147,6 +147,7 @@ impl StageExecutor for GatedSourceExecutor {
         _file_language: SchedFileKind,
         content: Arc<str>,
         generation: u64,
+        _incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
         self.gate.enter_and_wait();
         Ok(SourceSnapshot::new_empty(content, generation))

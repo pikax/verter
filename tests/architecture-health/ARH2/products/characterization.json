@@ -293,11 +293,11 @@
       "narrowingOwner": { "id": "ARH4", "kind": "node" },
       "surface": {
         "kind": "fields",
-        "items": ["generation_floors", "deferred_blocker_ids"]
+        "items": ["deferred_blocker_ids"]
       },
       "pins": [
         {
-          "behavior": "incarnation identity rejects pre-remove source submission and late admission, lifecycle removal/reset drain work and capacity, unknown removals allocate no history, retained external generation floors are seeded by reset until SKR-RET-FLOORS migrates their consumers, and deferred blockers are replaced, not appended",
+          "behavior": "incarnation identity rejects pre-remove source submission and late admission, lifecycle removal/reset/cancellation drain work and capacity and leave no restart history, the scheduler-minted source witness rejects delayed external publication and cleanup across remove/reset while successor versions never alias the retired node, and deferred blockers are replaced, not appended",
           "command": "cargo nextest run -p verter_scheduler scheduler::",
           "filter": "scheduler::",
           "witnesses": [
@@ -307,7 +307,15 @@
             },
             {
               "file": "crates/verter_scheduler/src/scheduler.rs",
-              "test": "reset_seeds_generation_floors_for_cleared_nodes"
+              "test": "reset_successor_versions_never_alias_the_cleared_node"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler.rs",
+              "test": "remove_and_readd_uses_a_higher_version"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler/lifecycle.rs",
+              "test": "delayed_external_publication_cannot_cross_a_retired_incarnation"
             },
             {
               "file": "crates/verter_scheduler/src/scheduler.rs",
@@ -319,7 +327,7 @@
             },
             {
               "file": "crates/verter_scheduler/src/scheduler/lifecycle.rs",
-              "test": "unknown_removals_do_not_allocate_restart_history"
+              "test": "removal_reset_and_cancellation_leave_no_restart_history"
             },
             {
               "file": "crates/verter_scheduler/src/scheduler/lifecycle.rs",
@@ -782,7 +790,7 @@
         "evidence": [
           {
             "file": "crates/verter_scheduler/src/scheduler.rs",
-            "test": "remove_and_readd_uses_higher_generation"
+            "test": "remove_and_readd_uses_a_higher_version"
           }
         ],
         "note": "remove-and-readd is the edit/revert seam of the scheduler bookkeeping"

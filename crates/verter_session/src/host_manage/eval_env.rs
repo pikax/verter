@@ -629,7 +629,7 @@ impl VerterHost {
                 // This builder reads no scheduler node, so it can
                 // never attest a node generation; the computed
                 // template serves the caller but never persists.
-                source_generation: Some(source_snapshot.generation),
+                source_version: Some(source_snapshot.version()),
             };
             if parse.refused.is_some() {
                 return None;

@@ -552,6 +552,7 @@ mod tests {
             whole_hash: [7; 16],
             semantic_hash: [8; 16],
             generation,
+            incarnation: 0,
             data: Arc::new(EmptyData),
         }
     }

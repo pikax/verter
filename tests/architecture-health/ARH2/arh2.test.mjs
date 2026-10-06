@@ -438,7 +438,7 @@ test("ARH2-characterization dirty twin: duplicated route characterization is rej
 test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer pub is rejected", () => {
   const dirty = cloneProducts();
   const route = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2");
-  route.surface.items = ["generation_floors", "deferred_blocker_ids", "node"];
+  route.surface.items = ["deferred_blocker_ids", "node"];
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
@@ -454,9 +454,9 @@ test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer 
 test("ARH2-characterization dirty twin: dropping a required scheduler field-route witness is rejected", () => {
   assert.deepEqual([...new Set(SCHEDULER_FIELD_ROUTE_WITNESSES.map((w) => w.concern))].sort(), [
     "deferred-blocker replacement",
-    "generation-floor fence",
     "incarnation rejection",
     "removal drain",
+    "source-witness fence",
   ]);
   for (const dropped of SCHEDULER_FIELD_ROUTE_WITNESSES) {
     const dirty = cloneProducts();

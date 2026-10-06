@@ -253,7 +253,19 @@ impl HostStageExecutor {
         file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
+        incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
+        // The host's base revision names the scheduler node object as well
+        // as its generation: a removed or reset file's successor restarts
+        // its generation sequence, so the generation alone could repeat a
+        // retired revision for different bytes.
+        let base_revision =
+            |source_generation| crate::carrier_publication_store::HostSourceRevisionToken {
+                host_instance: self.host_instance,
+                file_incarnation:
+                    verter_language::registered_source_authority::FileIncarnation::new(incarnation),
+                source_generation,
+            };
         // Carrier dispatch: a framework CARRIER file whose catalog frontend
         // is installed routes source-stage parse through the publication
         // store. EVERY OTHER framework row (a framework TEMPLATE, an
@@ -305,10 +317,7 @@ impl HostStageExecutor {
                 crate::parse::retained_semantic_for_source_stage(adapter_id, carrier_language_id)
                     .ok_or_else(|| StageError::new("semantic catalog miss for carrier identity"))?;
             let ingested = self.registered_envelope_ingest.lock().remove(canonical_id);
-            let (framework_parse, structure, file_incarnation, source_generation) = if let Some(
-                structure,
-            ) = ingested
-            {
+            let (framework_parse, structure, revision_token) = if let Some(structure) = ingested {
                 let registered = structure.envelope().source();
                 if registered.canonical().as_str() != canonical_id
                     || registered.bytes() != content.as_ref()
@@ -318,14 +327,13 @@ impl HostStageExecutor {
                         "registered envelope/source identity mismatch",
                     ));
                 }
-                let file_incarnation = registered.file_incarnation();
-                let source_generation = registered.generation();
-                (
-                    Arc::clone(structure.artifact()),
-                    structure,
-                    file_incarnation,
-                    source_generation,
-                )
+                // The registering owner minted this envelope's identity.
+                let revision_token = crate::carrier_publication_store::HostSourceRevisionToken {
+                    host_instance: self.host_instance,
+                    file_incarnation: registered.file_incarnation(),
+                    source_generation: registered.generation(),
+                };
+                (Arc::clone(structure.artifact()), structure, revision_token)
             } else {
                 let registered = self
                     .source_authority
@@ -388,8 +396,7 @@ impl HostStageExecutor {
                 (
                     Arc::clone(envelope.artifact()),
                     crate::carrier_publication_store::RegisteredFileStructure::new(envelope),
-                    registered.file_incarnation(),
-                    registered.generation(),
+                    base_revision(registered.generation()),
                 )
             };
             let eval_source = crate::parse::invoke_retained_semantic_eval_source(
@@ -413,11 +420,6 @@ impl HostStageExecutor {
             // Sealed-identity wire tokens attach ONCE at record build, so
             // every serve reuses the stored styles Arc unchanged.
             crate::parse::attach_style_block_tokens(&structure, &mut parse_snapshot.style_analyses);
-            let revision_token = crate::carrier_publication_store::HostSourceRevisionToken {
-                host_instance: self.host_instance,
-                file_incarnation,
-                source_generation,
-            };
             crate::block_content::attach_external_request_tokens(
                 &structure,
                 revision_token,
@@ -431,6 +433,7 @@ impl HostStageExecutor {
                 whole_hash: parse_snapshot.whole_hash,
                 semantic_hash: parse_snapshot.semantic_hash,
                 generation,
+                incarnation,
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
                     framework_parse: Some(framework_parse),
@@ -462,22 +465,17 @@ impl HostStageExecutor {
                 whole_hash: parse_snapshot.whole_hash,
                 semantic_hash: parse_snapshot.semantic_hash,
                 generation,
+                incarnation,
                 data: Arc::new(HostSourceData {
                     parse: parse_snapshot,
                     framework_parse: None,
                     script_parse_key,
                     structure: None,
-                    revision_token: crate::carrier_publication_store::HostSourceRevisionToken {
-                        host_instance: self.host_instance,
-                        file_incarnation:
-                            verter_language::registered_source_authority::FileIncarnation::new(
-                                self.host_instance.get(),
-                            ),
-                        source_generation:
-                            verter_language::registered_source_authority::SourceGeneration::new(
-                                generation,
-                            ),
-                    },
+                    revision_token: base_revision(
+                        verter_language::registered_source_authority::SourceGeneration::new(
+                            generation,
+                        ),
+                    ),
                     file_language,
                     source_type,
                     eval_source: content,
@@ -540,9 +538,16 @@ impl StageExecutor for HostStageExecutor {
         file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
+        incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
         let (snapshot, refused) = verter_parser::oxc_parse::refusals_within(|| {
-            self.source_snapshot(canonical_id, file_language, content, generation)
+            self.source_snapshot(
+                canonical_id,
+                file_language,
+                content,
+                generation,
+                incarnation,
+            )
         });
         match refused {
             Some(refused) => Err(StageError::stack_unavailable(refused.needed)),
@@ -628,6 +633,7 @@ impl StageExecutor for HostStageExecutor {
             let arcs = AnalysisArcs::from_analysis(&host_data.parse.script_analysis);
             Ok(AnalysisSnapshot {
                 generation,
+                incarnation: source.incarnation,
                 data: Arc::new(HostAnalysisData {
                     // `Arc::clone` of the shared snapshot — refcount bump, not
                     // a deep copy of ~18 owned vectors.

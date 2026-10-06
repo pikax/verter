@@ -31,4 +31,4 @@ VSC0 start-attempt-scope evidence and the desktop/web shared boundary must name 
 
 No committed wall-clock/RSS/speedup. Required work is not removed; the locator is retired. Dirty twin plants `wallNs`.
 
-The shared predecessor join validates current scheduler lifecycle ownership and incarnation rejection/drain witnesses, while retaining the external generation-floor fence. These contracts carry no stored Git identity as acceptance evidence.
+The shared predecessor join validates current scheduler lifecycle ownership and incarnation rejection/drain witnesses and the source-witness fence on external publication. These contracts carry no stored Git identity as acceptance evidence.

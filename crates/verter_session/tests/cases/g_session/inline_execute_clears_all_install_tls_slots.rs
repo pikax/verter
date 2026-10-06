@@ -65,6 +65,7 @@ impl StageExecutor for InlineReentryExecutor {
         _file_language: SchedFileKind,
         content: Arc<str>,
         generation: u64,
+        _incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
         Ok(SourceSnapshot::new_empty(content, generation))
     }
