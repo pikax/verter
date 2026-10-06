@@ -569,7 +569,8 @@ export function rawFileProblems(run) {
       }
     };
     const sup = read(inv.supervisorOut);
-    if (sup) delete sup.samples;
+    if (!sup) problems.push(`${id}: cannot read ${inv.supervisorOut}`);
+    else delete sup.samples;
     const embedded = inv.supervisor ? { ...inv.supervisor } : null;
     if (embedded) {
       delete embedded.samples;

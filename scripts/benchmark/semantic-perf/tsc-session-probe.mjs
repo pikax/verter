@@ -161,9 +161,13 @@ async function main() {
       writeFileSync(path(step.file), step.text);
       texts.set(step.file, step.text);
       const fileChanges = { changed: [path(step.file)] };
+      const superseded = snapshot;
       const start = performance.now();
       snapshot = await api.updateSnapshot({ fileChanges });
       const roundTripMs = performance.now() - start;
+      // An undisposed snapshot stays active in the server and would inflate the
+      // memory reading taken after the steps.
+      await superseded.dispose();
       project = snapshot.getProject(configPath) ?? snapshot.getProjects()[0];
       steps.push({
         kind: "edit",

@@ -2213,3 +2213,22 @@ test("the Capacity row reports each arm's outcome, and a kill's tree peak and ti
   assert.equal(row.tscApi.timeToKillMs.median, 4321);
   assert.deepEqual(row.tscApi.killedBy, ["memory"]);
 });
+
+test("a session invocation whose supervisor file is unreadable is reported", () => {
+  const run = {
+    sessionInvocations: [
+      {
+        sessionId: "s",
+        arm: "verter",
+        warmup: false,
+        rep: 0,
+        supervisorOut: join(tmpdir(), "semantic-perf-absent-supervisor.json"),
+        sessionOut: join(tmpdir(), "semantic-perf-absent-session.json"),
+        supervisor: null,
+        session: null,
+      },
+    ],
+    invocations: [],
+  };
+  assert.ok(rawFileProblems(run).some((p) => /cannot read .*absent-supervisor/.test(p)));
+});

@@ -196,6 +196,15 @@ export function sessionAnswers(inv, session, limits) {
   return out;
 }
 
+const EXPECTED_DIGESTS = new Map();
+
+/** The catalog expectation's digest, computed once per text. */
+function expectedDigest(text) {
+  let found = EXPECTED_DIGESTS.get(text);
+  if (!found) EXPECTED_DIGESTS.set(text, (found = digestOrError(text)));
+  return found;
+}
+
 function classifyEntry(entry, tool, budgetBytes) {
   if (entry.kind === "meta") {
     const end = entry.end;
@@ -207,7 +216,10 @@ function classifyEntry(entry, tool, budgetBytes) {
       };
     return classifyMeta(entry.got, entry.expect);
   }
-  const reference = { digest: canonicalDigest(entry.expect), errorAny: false, codes: [] };
+  const { digest, canonicalError } = expectedDigest(entry.expect);
+  if (canonicalError)
+    return { class: "error", detail: `expected type does not parse: ${canonicalError}` };
+  const reference = { digest, errorAny: false, codes: [] };
   if (tool === "verter") return classifyVerterAnswer(entry.answer, { reference, budgetBytes });
   return tscAnswerStatus(entry.answer, reference, null, budgetBytes);
 }
