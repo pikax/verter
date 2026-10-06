@@ -494,7 +494,7 @@ pub(crate) struct NodeArena {
     /// wait time so downstream passes have evidence-grade contention
     /// data. `None` for test-default arenas constructed via
     /// `Default::default()`.
-    pub(super) provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
+    pub(super) provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
     /// The ONE payload every released slot resolves to through [`Self::get`]
     /// — an `Opaque(Miss)` node ("this value's resolution answered
     /// nothing"), never in the dedup index. Mirrors the

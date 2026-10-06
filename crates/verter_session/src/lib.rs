@@ -351,6 +351,7 @@ mod artifact_root_retention_tests;
 pub mod cancel_trace;
 pub(crate) mod compile_output_node;
 pub mod component_meta_cached_result;
+pub mod engine_provenance;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod engine_test_knobs;

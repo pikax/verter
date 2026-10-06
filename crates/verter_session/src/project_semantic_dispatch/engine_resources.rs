@@ -47,7 +47,7 @@ impl EngineStores {
     /// share; `provenance` instruments the semantic graph when present.
     #[must_use]
     pub fn create(
-        provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
+        provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
         store_account: verter_session_query::retention::StoreAccount,
         cache_live: &Arc<AtomicU64>,
     ) -> (Self, OutputAuthority) {

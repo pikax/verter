@@ -1718,7 +1718,7 @@ impl crate::VerterHost {
         crate::project_semantic_dispatch::EngineObservers::new(
             #[cfg(any(test, feature = "test-support"))]
             Arc::clone(&self.signature_overflow_at_install),
-            Arc::clone(&self.provenance),
+            Arc::clone(&self.provenance.engine),
             Arc::clone(&self.relation_knobs),
             #[cfg(any(test, feature = "test-support"))]
             Arc::clone(&self.flow_fault_injection),

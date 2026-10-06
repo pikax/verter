@@ -3536,7 +3536,7 @@ pub(crate) fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverC
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
-    provenance: &crate::meta_provenance::MetaProvenance,
+    provenance: &crate::engine_provenance::EngineProvenance,
     carrier_prelude: &CarrierNormalizationPrelude,
     // Gates the `ShallowDiagnostic::SignatureOverflow` walker diagnostic
     // below: `true` ONLY when this exact cold build is the direct build for

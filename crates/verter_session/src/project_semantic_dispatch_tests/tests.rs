@@ -2319,7 +2319,7 @@ fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
         &host,
         output,
         verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(Arc::from(traced)),
-        &host.provenance,
+        &host.provenance.engine,
         &CarrierNormalizationPrelude::none(),
         false,
     );

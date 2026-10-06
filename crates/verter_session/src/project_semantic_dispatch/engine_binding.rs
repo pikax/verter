@@ -90,7 +90,7 @@ pub(crate) struct EngineObservers {
     // (`test` / `test-support`), so it carries that same gate.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) overflow: Arc<AtomicU64>,
-    pub(super) provenance: Arc<crate::meta_provenance::MetaProvenance>,
+    pub(super) provenance: Arc<crate::engine_provenance::EngineProvenance>,
     pub(super) relation: Arc<crate::project_semantic_dispatch::relation_knobs::RelationHostKnobs>,
     #[cfg(any(test, feature = "test-support"))]
     pub(super) flow:
@@ -102,7 +102,7 @@ impl EngineObservers {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         #[cfg(any(test, feature = "test-support"))] overflow: Arc<AtomicU64>,
-        provenance: Arc<crate::meta_provenance::MetaProvenance>,
+        provenance: Arc<crate::engine_provenance::EngineProvenance>,
         relation: Arc<crate::project_semantic_dispatch::relation_knobs::RelationHostKnobs>,
         #[cfg(any(test, feature = "test-support"))] flow: Arc<
             super::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs,

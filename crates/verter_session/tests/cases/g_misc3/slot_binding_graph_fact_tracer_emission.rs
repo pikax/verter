@@ -62,7 +62,10 @@ fn slot_binding_graph_traversal_emits_fact_tracer_signatures() {
 
     // Baseline counters before the meta query.
     let prov = host.provenance();
-    let tracer_before = prov.slot_binding_graph_fact_tracer_emissions.load(Relaxed);
+    let tracer_before = prov
+        .engine
+        .slot_binding_graph_fact_tracer_emissions
+        .load(Relaxed);
 
     let meta = host
         .get_component_meta("/src/Comp.vue")
@@ -82,7 +85,10 @@ fn slot_binding_graph_traversal_emits_fact_tracer_signatures() {
             .collect::<Vec<_>>()
     );
 
-    let tracer_after = prov.slot_binding_graph_fact_tracer_emissions.load(Relaxed);
+    let tracer_after = prov
+        .engine
+        .slot_binding_graph_fact_tracer_emissions
+        .load(Relaxed);
     assert!(
         tracer_after > tracer_before,
         "the slot-binding-graph traversal MUST advance \

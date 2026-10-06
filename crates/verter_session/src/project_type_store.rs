@@ -1193,7 +1193,7 @@ impl ProjectTypeStore {
         // them. The store keeps the authority privately behind its lease.
         let (engine, output_authority) =
             crate::project_semantic_dispatch::engine_resources::EngineStores::create(
-                provenance,
+                provenance.map(|provenance| Arc::clone(&provenance.engine)),
                 store_account,
                 &counters.component_meta_cache_live,
             );

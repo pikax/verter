@@ -1,10 +1,5 @@
 //! Per-host provenance counters for component-meta and semantic-engine observability.
 
-/// Width of the per-variant push-count array in [`MetaProvenance`]: the
-/// exclusive bound of [`crate::semantic_query::SemanticNodeTag::bucket_index`].
-pub const SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT: usize =
-    crate::semantic_query::SEMANTIC_NODE_TAG_BOUND;
-
 /// Per-host provenance counters for component-meta observability.
 ///
 /// AtomicU64 for thread-safe increment. Reset on host close. Not persisted.
@@ -130,18 +125,6 @@ pub struct MetaProvenance {
     /// the validator: editing a dep MUST advance this counter on
     /// the second call.
     pub component_meta_result_cache_misses: std::sync::atomic::AtomicU64,
-    /// Count of dispatch fact fan-outs emitted from the slot-binding graph.
-    /// The traversal has no cache boundary of its own, so behavioral tests use
-    /// this counter to prove its dependency evidence reached the request tracer.
-    pub slot_binding_graph_fact_tracer_emissions: std::sync::atomic::AtomicU64,
-    /// Count of `observe_fact_signature` fan-out calls emitted from
-    /// `meta_resolve::dep_signature::emit_dispatch_dep_signature_facts`
-    /// — the helper invoked by dispatch reads that
-    /// have no result cache of their own (the projector sites,
-    /// `materialize_component_meta_type_expr_until_stable_full` and
-    /// `node_root_reaches_transitive_cycle_with_fence`). The helper bumps this
-    /// counter on every `observe_fact_signature` call.
-    pub dispatch_dep_signature_fact_tracer_emissions: std::sync::atomic::AtomicU64,
     pub indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64,
     pub bundle_cache_hits: std::sync::atomic::AtomicU64,
     /// Request-world prepared-decl bundle memo hits — bumped when a
@@ -192,6 +175,11 @@ pub struct MetaProvenance {
     /// shared with every declaration-body memo this host builds; this facade
     /// only aggregates it.
     pub decl_lowering: std::sync::Arc<verter_semantic_source::decl_lowering::DeclLoweringCounters>,
+    /// The semantic engine's work counters (graph arena, cooperative
+    /// executor, memo fact tracer). Owned by the engine and shared with every
+    /// graph store and observer set this host builds; this facade only
+    /// aggregates it.
+    pub engine: std::sync::Arc<crate::engine_provenance::EngineProvenance>,
     /// Carrier parses performed through the single counted carrier
     /// store-leader frontend boundary — every framework
     /// carrier (`.vue`, `.svelte`, …) increments this exactly once per
@@ -240,22 +228,6 @@ pub struct MetaProvenance {
     pub ensure_loaded_wait_ns: std::sync::atomic::AtomicU64,
     /// Time spent inside `integrate_scheduler_snapshot` from `ensure_loaded`.
     pub ensure_loaded_work_ns: std::sync::atomic::AtomicU64,
-    /// `SemanticGraphStore::execute_cooperative` calls that became the cold
-    /// owner (claimed in-flight slot).
-    pub execute_cooperative_owner_path: std::sync::atomic::AtomicU64,
-    /// `execute_cooperative` calls that joined an in-flight build.
-    pub execute_cooperative_joiner_path: std::sync::atomic::AtomicU64,
-    /// Time the cold owner held the in-flight slot (build duration).
-    pub execute_cooperative_held_ns: std::sync::atomic::AtomicU64,
-    /// `NodeArena::push_impl` total call count (every push, exempt or not).
-    pub node_arena_pushes: std::sync::atomic::AtomicU64,
-    /// `NodeArena::push_impl` calls that allocated a new arena slot
-    /// (equal to `node_arena_pushes` while every push allocates; diverges
-    /// once structural interning serves a push from an existing slot).
-    pub node_arena_intern_miss: std::sync::atomic::AtomicU64,
-    /// Time spent waiting on `ArenaInner` mutex acquisition during pushes
-    /// (lock-contention observability counter).
-    pub node_arena_inner_write_wait_ns: std::sync::atomic::AtomicU64,
     /// Scheduler submission count (mirrored from
     /// `verter_scheduler::scheduler::SchedulerCounters::submit_count` via
     /// `VerterHost::provenance_snapshot`). The direct-memoized field stays
@@ -263,11 +235,6 @@ pub struct MetaProvenance {
     pub scheduler_submit_count: std::sync::atomic::AtomicU64,
     /// Scheduler peak inbox depth (mirrored from `SchedulerCounters`).
     pub scheduler_inbox_depth_max: std::sync::atomic::AtomicU64,
-    /// Per-`SemanticNodeData` variant push count, indexed by
-    /// `SemanticNodeTag::bucket_index()`. Sized to
-    /// [`SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`] for variant headroom.
-    pub node_arena_pushes_per_discriminant:
-        [std::sync::atomic::AtomicU64; SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT],
 
     // ── Family B/C/D producer-install observability ───────────
     //
@@ -292,11 +259,6 @@ pub struct MetaProvenance {
     /// producer bumps it; the field stays on the public stats snapshot as
     /// a zero-valued row.
     pub materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64,
-    /// `install_fact_tracer` wrap count for `MemoEntry` (semantic
-    /// query memo cold builds).
-    pub memo_entry_fact_tracer_installs: std::sync::atomic::AtomicU64,
-    /// `install_fact_tracer` overflow-refusal count for `MemoEntry`.
-    pub memo_entry_overflow_refusals: std::sync::atomic::AtomicU64,
     /// `install_fact_tracer` wrap count for `AppConfigNoOverrideProofDb`.
     pub app_config_proof_fact_tracer_installs: std::sync::atomic::AtomicU64,
     /// `install_fact_tracer` overflow-refusal count for
@@ -355,8 +317,6 @@ impl Default for MetaProvenance {
             store_view_from_host_reads: std::sync::atomic::AtomicU64::new(0),
             component_meta_result_cache_hits: std::sync::atomic::AtomicU64::new(0),
             component_meta_result_cache_misses: std::sync::atomic::AtomicU64::new(0),
-            slot_binding_graph_fact_tracer_emissions: std::sync::atomic::AtomicU64::new(0),
-            dispatch_dep_signature_fact_tracer_emissions: std::sync::atomic::AtomicU64::new(0),
             indexed_ready_scheduler_snapshot_reuse: std::sync::atomic::AtomicU64::new(0),
             bundle_cache_hits: std::sync::atomic::AtomicU64::new(0),
             bundle_request_memo_hits: std::sync::atomic::AtomicU64::new(0),
@@ -366,6 +326,7 @@ impl Default for MetaProvenance {
             imported_macro_declaration_builds: std::sync::atomic::AtomicU64::new(0),
             compile_cold_runs: std::sync::atomic::AtomicU64::new(0),
             decl_lowering: std::sync::Arc::default(),
+            engine: std::sync::Arc::default(),
             carrier_parses: std::sync::atomic::AtomicU64::new(0),
             sfc_parses: std::sync::atomic::AtomicU64::new(0),
             non_sfc_snapshot_parses: std::sync::atomic::AtomicU64::new(0),
@@ -375,21 +336,10 @@ impl Default for MetaProvenance {
             ensure_loaded_calls: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_wait_ns: std::sync::atomic::AtomicU64::new(0),
             ensure_loaded_work_ns: std::sync::atomic::AtomicU64::new(0),
-            execute_cooperative_owner_path: std::sync::atomic::AtomicU64::new(0),
-            execute_cooperative_joiner_path: std::sync::atomic::AtomicU64::new(0),
-            execute_cooperative_held_ns: std::sync::atomic::AtomicU64::new(0),
-            node_arena_pushes: std::sync::atomic::AtomicU64::new(0),
-            node_arena_intern_miss: std::sync::atomic::AtomicU64::new(0),
-            node_arena_inner_write_wait_ns: std::sync::atomic::AtomicU64::new(0),
             scheduler_submit_count: std::sync::atomic::AtomicU64::new(0),
             scheduler_inbox_depth_max: std::sync::atomic::AtomicU64::new(0),
-            node_arena_pushes_per_discriminant: std::array::from_fn(|_| {
-                std::sync::atomic::AtomicU64::new(0)
-            }),
             materialize_structure_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
             materialize_structure_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
-            memo_entry_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
-            memo_entry_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
             app_config_proof_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
             app_config_proof_overflow_refusals: std::sync::atomic::AtomicU64::new(0),
             owner_import_surface_fact_tracer_installs: std::sync::atomic::AtomicU64::new(0),
@@ -539,24 +489,27 @@ impl std::fmt::Debug for MetaProvenance {
             )
             .field(
                 "execute_cooperative_owner_path",
-                &self.execute_cooperative_owner_path.load(Relaxed),
+                &self.engine.execute_cooperative_owner_path.load(Relaxed),
             )
             .field(
                 "execute_cooperative_joiner_path",
-                &self.execute_cooperative_joiner_path.load(Relaxed),
+                &self.engine.execute_cooperative_joiner_path.load(Relaxed),
             )
             .field(
                 "execute_cooperative_held_ns",
-                &self.execute_cooperative_held_ns.load(Relaxed),
+                &self.engine.execute_cooperative_held_ns.load(Relaxed),
             )
-            .field("node_arena_pushes", &self.node_arena_pushes.load(Relaxed))
+            .field(
+                "node_arena_pushes",
+                &self.engine.node_arena_pushes.load(Relaxed),
+            )
             .field(
                 "node_arena_intern_miss",
-                &self.node_arena_intern_miss.load(Relaxed),
+                &self.engine.node_arena_intern_miss.load(Relaxed),
             )
             .field(
                 "node_arena_inner_write_wait_ns",
-                &self.node_arena_inner_write_wait_ns.load(Relaxed),
+                &self.engine.node_arena_inner_write_wait_ns.load(Relaxed),
             )
             .field(
                 "scheduler_submit_count",
@@ -614,9 +567,11 @@ impl MetaProvenance {
                 .component_meta_result_cache_misses
                 .load(Relaxed),
             slot_binding_graph_fact_tracer_emissions: self
+                .engine
                 .slot_binding_graph_fact_tracer_emissions
                 .load(Relaxed),
             dispatch_dep_signature_fact_tracer_emissions: self
+                .engine
                 .dispatch_dep_signature_fact_tracer_emissions
                 .load(Relaxed),
             indexed_ready_scheduler_snapshot_reuse: self
@@ -641,15 +596,25 @@ impl MetaProvenance {
             ensure_loaded_calls: self.ensure_loaded_calls.load(Relaxed),
             ensure_loaded_wait_ns: self.ensure_loaded_wait_ns.load(Relaxed),
             ensure_loaded_work_ns: self.ensure_loaded_work_ns.load(Relaxed),
-            execute_cooperative_owner_path: self.execute_cooperative_owner_path.load(Relaxed),
-            execute_cooperative_joiner_path: self.execute_cooperative_joiner_path.load(Relaxed),
-            execute_cooperative_held_ns: self.execute_cooperative_held_ns.load(Relaxed),
-            node_arena_pushes: self.node_arena_pushes.load(Relaxed),
-            node_arena_intern_miss: self.node_arena_intern_miss.load(Relaxed),
-            node_arena_inner_write_wait_ns: self.node_arena_inner_write_wait_ns.load(Relaxed),
+            execute_cooperative_owner_path: self
+                .engine
+                .execute_cooperative_owner_path
+                .load(Relaxed),
+            execute_cooperative_joiner_path: self
+                .engine
+                .execute_cooperative_joiner_path
+                .load(Relaxed),
+            execute_cooperative_held_ns: self.engine.execute_cooperative_held_ns.load(Relaxed),
+            node_arena_pushes: self.engine.node_arena_pushes.load(Relaxed),
+            node_arena_intern_miss: self.engine.node_arena_intern_miss.load(Relaxed),
+            node_arena_inner_write_wait_ns: self
+                .engine
+                .node_arena_inner_write_wait_ns
+                .load(Relaxed),
             scheduler_submit_count: self.scheduler_submit_count.load(Relaxed),
             scheduler_inbox_depth_max: self.scheduler_inbox_depth_max.load(Relaxed),
             node_arena_pushes_per_discriminant: self
+                .engine
                 .node_arena_pushes_per_discriminant
                 .iter()
                 .map(|slot| slot.load(Relaxed))
@@ -660,8 +625,11 @@ impl MetaProvenance {
             materialize_structure_overflow_refusals: self
                 .materialize_structure_overflow_refusals
                 .load(Relaxed),
-            memo_entry_fact_tracer_installs: self.memo_entry_fact_tracer_installs.load(Relaxed),
-            memo_entry_overflow_refusals: self.memo_entry_overflow_refusals.load(Relaxed),
+            memo_entry_fact_tracer_installs: self
+                .engine
+                .memo_entry_fact_tracer_installs
+                .load(Relaxed),
+            memo_entry_overflow_refusals: self.engine.memo_entry_overflow_refusals.load(Relaxed),
             app_config_proof_fact_tracer_installs: self
                 .app_config_proof_fact_tracer_installs
                 .load(Relaxed),
@@ -716,9 +684,11 @@ impl MetaProvenance {
         self.store_view_from_host_reads.store(0, Relaxed);
         self.component_meta_result_cache_hits.store(0, Relaxed);
         self.component_meta_result_cache_misses.store(0, Relaxed);
-        self.slot_binding_graph_fact_tracer_emissions
+        self.engine
+            .slot_binding_graph_fact_tracer_emissions
             .store(0, Relaxed);
-        self.dispatch_dep_signature_fact_tracer_emissions
+        self.engine
+            .dispatch_dep_signature_fact_tracer_emissions
             .store(0, Relaxed);
         self.indexed_ready_scheduler_snapshot_reuse
             .store(0, Relaxed);
@@ -741,23 +711,27 @@ impl MetaProvenance {
         self.ensure_loaded_calls.store(0, Relaxed);
         self.ensure_loaded_wait_ns.store(0, Relaxed);
         self.ensure_loaded_work_ns.store(0, Relaxed);
-        self.execute_cooperative_owner_path.store(0, Relaxed);
-        self.execute_cooperative_joiner_path.store(0, Relaxed);
-        self.execute_cooperative_held_ns.store(0, Relaxed);
-        self.node_arena_pushes.store(0, Relaxed);
-        self.node_arena_intern_miss.store(0, Relaxed);
-        self.node_arena_inner_write_wait_ns.store(0, Relaxed);
+        self.engine.execute_cooperative_owner_path.store(0, Relaxed);
+        self.engine
+            .execute_cooperative_joiner_path
+            .store(0, Relaxed);
+        self.engine.execute_cooperative_held_ns.store(0, Relaxed);
+        self.engine.node_arena_pushes.store(0, Relaxed);
+        self.engine.node_arena_intern_miss.store(0, Relaxed);
+        self.engine.node_arena_inner_write_wait_ns.store(0, Relaxed);
         self.scheduler_submit_count.store(0, Relaxed);
         self.scheduler_inbox_depth_max.store(0, Relaxed);
-        for slot in &self.node_arena_pushes_per_discriminant {
+        for slot in &self.engine.node_arena_pushes_per_discriminant {
             slot.store(0, Relaxed);
         }
         self.materialize_structure_fact_tracer_installs
             .store(0, Relaxed);
         self.materialize_structure_overflow_refusals
             .store(0, Relaxed);
-        self.memo_entry_fact_tracer_installs.store(0, Relaxed);
-        self.memo_entry_overflow_refusals.store(0, Relaxed);
+        self.engine
+            .memo_entry_fact_tracer_installs
+            .store(0, Relaxed);
+        self.engine.memo_entry_overflow_refusals.store(0, Relaxed);
         self.app_config_proof_fact_tracer_installs.store(0, Relaxed);
         self.app_config_proof_overflow_refusals.store(0, Relaxed);
         self.owner_import_surface_fact_tracer_installs

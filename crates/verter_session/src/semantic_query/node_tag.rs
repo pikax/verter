@@ -397,7 +397,7 @@ mod tests {
         );
         assert_eq!(
             SEMANTIC_NODE_TAG_BOUND,
-            crate::meta_provenance::SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT
+            crate::engine_provenance::SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT
         );
     }
 
