@@ -42,3 +42,12 @@ mod macro_arg_producer;
 pub(crate) use macro_arg_producer::{
     macro_type_arg_hot_ref, MacroHotMirror, MacroHotProduct, MacroMirrorAttachment,
 };
+
+// Test entries for the host-driven producer suites.
+#[cfg(test)]
+pub(crate) use infer_binder_names::{BinderScope, StructuralLowerContext};
+#[cfg(test)]
+pub(crate) use macro_arg_producer::{
+    build_script_setup_seed_frames_for_tests, lower_type_expr_structural_for_tests,
+    StructuralLowerError,
+};

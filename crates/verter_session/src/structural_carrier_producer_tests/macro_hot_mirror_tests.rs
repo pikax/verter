@@ -1,4 +1,4 @@
-//! Tests for the macro hot mirror producer ([`super::macro_type_arg_hot_ref`]).
+//! Tests for the macro hot mirror producer (`macro_type_arg_hot_ref`).
 //!
 //! Each fixture is a REAL Vue SFC whose macro type-argument is lowered ONCE
 //! through the mirror to a mode-NEUTRAL [`HotTypeRef`]. The tests assert the

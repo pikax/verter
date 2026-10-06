@@ -1,8 +1,8 @@
 //! Isolation tests for the module-private shared binder-frame builder
-//! ([`super::build_script_setup_seed_frames`]).
+//! (the producer's `build_script_setup_seed_frames`).
 //!
-//! These call the module-private helper DIRECTLY (not through the macro hot
-//! mirror), as an in-module test child, to prove it produces the correct
+//! These call the helper through its test-support entry (not through the macro
+//! hot mirror) to prove it produces the correct
 //! binder shape — the helper the mirror's macro-arg builder builds the seed
 //! binder shape from. Each lowers a bare `Ref` through the returned frame and
 //! asserts it resolves to the script-setup `TypeParam` binder rather than an
@@ -13,10 +13,27 @@ use std::sync::Arc;
 
 use verter_type_expr::TypeExpr;
 
-use super::{build_script_setup_seed_frames, BinderScope, StructuralLowerContext};
 use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
+use crate::structural_carrier_producer::{
+    build_script_setup_seed_frames_for_tests, lower_type_expr_structural_for_tests, BinderScope,
+    StructuralLowerContext,
+};
 use crate::types::HostConfig;
 use crate::{FileLanguage, UpsertRequest, VerterHost};
+
+/// The binder seed for an indexed SFC: its `<script setup generic="…">` clause
+/// re-sourced from the route-free local data, then built into seed frames.
+fn seed_frames_for_indexed(
+    indexed: &crate::project_type_store::IndexedReady,
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    scope: &NodeScopeId,
+) -> Vec<BinderScope> {
+    let params = crate::host_resolve::sfc_script_setup_type_params(
+        indexed.raw_source.as_ref(),
+        indexed.framework_parse.as_deref(),
+    );
+    build_script_setup_seed_frames_for_tests(&params, graph, scope)
+}
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -49,8 +66,8 @@ fn lower_ref_through(
         name: Arc::from(name),
         type_arguments: Arc::from(Vec::new()),
     };
-    let ctx = StructuralLowerContext::new(frames);
-    let handle = super::lower_type_expr_structural(graph, &expr, scope.clone(), &ctx)
+    let ctx = StructuralLowerContext::new_for_tests(frames);
+    let handle = lower_type_expr_structural_for_tests(graph, &expr, scope.clone(), &ctx)
         .expect("a bare Ref must lower structurally");
     let node: SemanticNodeId = handle.node();
     (*graph
@@ -88,7 +105,7 @@ fn extracted_builder_seeds_typeparam_binders_for_script_setup_generics() {
     // helper the mirror's macro-arg builder builds the seed binder shape from
     // (the decl-body structural producer would build the same shape but does
     // NOT call it today).
-    let frames = build_script_setup_seed_frames(&indexed, graph, &scope);
+    let frames = seed_frames_for_indexed(&indexed, graph, &scope);
     assert_eq!(
         frames.len(),
         1,
@@ -159,7 +176,7 @@ fn extracted_builder_returns_empty_frames_without_script_setup_generics() {
         local_scope: None,
     };
 
-    let frames = build_script_setup_seed_frames(&indexed, graph, &scope);
+    let frames = seed_frames_for_indexed(&indexed, graph, &scope);
     assert!(
         frames.is_empty(),
         "an SFC with no `generic=\"…\"` clause seeds NO binder frame, got {} frame(s)",

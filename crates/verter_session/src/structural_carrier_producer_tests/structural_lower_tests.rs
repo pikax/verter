@@ -1,4 +1,4 @@
-//! Tests for the query-free structural lowerer ([`super`]).
+//! Tests for the query-free structural lowerer.
 //!
 //! Two kinds of test live here:
 //! - unit tests of the lowerer's own scaffolding (the binder stack), and
@@ -17,9 +17,6 @@ use verter_type_expr::{
     UnknownProvenance, UnknownValue, ValueRef,
 };
 
-use super::{
-    lower_type_expr_structural, BinderScope, StructuralLowerContext, StructuralLowerError,
-};
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
@@ -27,6 +24,9 @@ use crate::semantic_query::{
     ProjectionReductionContext, ReadonlyMod, SemanticNodeData, SemanticNodeId, SyntheticBindingId,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
+use crate::structural_carrier_producer::{
+    lower_type_expr_structural_for_tests, BinderScope, StructuralLowerContext, StructuralLowerError,
+};
 use crate::VerterHost;
 
 /// A real declaration-bound file scope for emission fixtures — deliberately
@@ -47,8 +47,8 @@ fn fixture_scope() -> NodeScopeId {
 fn lower_root(host: &VerterHost, expr: &TypeExpr) -> (Arc<SemanticGraphStore>, SemanticNodeId) {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
-    let ctx = StructuralLowerContext::new(&binders);
-    let handle = lower_type_expr_structural(&graph, expr, fixture_scope(), &ctx)
+    let ctx = StructuralLowerContext::new_for_tests(&binders);
+    let handle = lower_type_expr_structural_for_tests(&graph, expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed for a resolvable shape");
     (graph, handle.node())
 }
@@ -63,19 +63,19 @@ fn binder_scope_resolves_innermost_shadowing_name() {
     // An inner frame binding the same name shadows the outer one; an
     // unbound name misses (the caller then emits a `BareRef`).
     let mut outer = BinderScope::default();
-    outer.bind(Arc::from("T"), SemanticNodeId(1));
-    outer.bind(Arc::from("U"), SemanticNodeId(2));
+    outer.bind_for_tests(Arc::from("T"), SemanticNodeId(1));
+    outer.bind_for_tests(Arc::from("U"), SemanticNodeId(2));
     let mut inner = BinderScope::default();
-    inner.bind(Arc::from("T"), SemanticNodeId(9));
+    inner.bind_for_tests(Arc::from("T"), SemanticNodeId(9));
     let stack = [outer, inner];
-    let ctx = StructuralLowerContext::new(&stack);
+    let ctx = StructuralLowerContext::new_for_tests(&stack);
 
     // Innermost `T` wins over the outer `T`.
-    assert_eq!(ctx.lookup_binder("T"), Some(SemanticNodeId(9)));
+    assert_eq!(ctx.lookup_binder_for_tests("T"), Some(SemanticNodeId(9)));
     // `U` is only in the outer frame, still visible.
-    assert_eq!(ctx.lookup_binder("U"), Some(SemanticNodeId(2)));
+    assert_eq!(ctx.lookup_binder_for_tests("U"), Some(SemanticNodeId(2)));
     // An unbound name misses.
-    assert_eq!(ctx.lookup_binder("Missing"), None);
+    assert_eq!(ctx.lookup_binder_for_tests("Missing"), None);
 }
 
 #[test]
@@ -165,14 +165,14 @@ fn bound_type_param_ref_returns_binder_node_not_bare_ref() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binder_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let mut frame = BinderScope::default();
-    frame.bind(Arc::from("T"), binder_id);
+    frame.bind_for_tests(Arc::from("T"), binder_id);
     let stack = [frame];
-    let ctx = StructuralLowerContext::new(&stack);
+    let ctx = StructuralLowerContext::new_for_tests(&stack);
     let expr = TypeExpr::Ref {
         name: Arc::from("T"),
         type_arguments: verter_type_expr::empty_type_args(),
     };
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     assert_eq!(
         handle.node(),
@@ -196,16 +196,16 @@ fn applied_binder_ref_is_a_typed_error_not_a_bare_ref() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binder_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let mut frame = BinderScope::default();
-    frame.bind(Arc::from("T"), binder_id);
+    frame.bind_for_tests(Arc::from("T"), binder_id);
     let stack = [frame];
-    let ctx = StructuralLowerContext::new(&stack);
+    let ctx = StructuralLowerContext::new_for_tests(&stack);
     let expr = TypeExpr::Ref {
         name: Arc::from("T"),
         type_arguments: Arc::from(
             vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice(),
         ),
     };
-    let result = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx);
+    let result = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx);
     assert_eq!(
         result.err(),
         Some(StructuralLowerError::UnsupportedWithoutResolution {
@@ -784,9 +784,9 @@ fn lowers_conditional_as_deferred_shell() {
         fixture_scope(),
     );
     let mut frame = BinderScope::default();
-    frame.bind(Arc::from("T"), t_binder);
+    frame.bind_for_tests(Arc::from("T"), t_binder);
     let stack = [frame];
-    let ctx = StructuralLowerContext::new(&stack);
+    let ctx = StructuralLowerContext::new_for_tests(&stack);
     let expr = TypeExpr::Conditional {
         check: Arc::new(TypeExpr::Ref {
             name: Arc::from("T"),
@@ -796,7 +796,7 @@ fn lowers_conditional_as_deferred_shell() {
         true_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Number)),
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Boolean)),
     };
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     match &*node(&graph, handle.node()) {
         SemanticNodeData::Conditional {
@@ -845,9 +845,9 @@ fn conditional_binds_bare_infer_in_true_branch() {
         fixture_scope(),
     );
     let mut frame = BinderScope::default();
-    frame.bind(Arc::from("T"), t_binder);
+    frame.bind_for_tests(Arc::from("T"), t_binder);
     let stack = [frame];
-    let ctx = StructuralLowerContext::new(&stack);
+    let ctx = StructuralLowerContext::new_for_tests(&stack);
     let expr = TypeExpr::Conditional {
         check: Arc::new(TypeExpr::Ref {
             name: Arc::from("T"),
@@ -863,7 +863,7 @@ fn conditional_binds_bare_infer_in_true_branch() {
         }),
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     match &*node(&graph, handle.node()) {
         SemanticNodeData::Conditional {
@@ -902,7 +902,7 @@ fn conditional_binds_nested_infer_in_true_branch() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
-    let ctx = StructuralLowerContext::new(&binders);
+    let ctx = StructuralLowerContext::new_for_tests(&binders);
     let expr = TypeExpr::Conditional {
         check: Arc::new(TypeExpr::Ref {
             name: Arc::from("T"),
@@ -921,7 +921,7 @@ fn conditional_binds_nested_infer_in_true_branch() {
         }),
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     match &*node(&graph, handle.node()) {
         SemanticNodeData::Conditional {
@@ -967,7 +967,7 @@ fn conditional_binds_object_member_infer_in_true_branch() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
-    let ctx = StructuralLowerContext::new(&binders);
+    let ctx = StructuralLowerContext::new_for_tests(&binders);
     let expr = TypeExpr::Conditional {
         check: Arc::new(TypeExpr::Ref {
             name: Arc::from("T"),
@@ -992,7 +992,7 @@ fn conditional_binds_object_member_infer_in_true_branch() {
         }),
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     match &*node(&graph, handle.node()) {
         SemanticNodeData::Conditional {
@@ -1040,7 +1040,7 @@ fn conditional_binds_function_param_infer_in_true_branch() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
-    let ctx = StructuralLowerContext::new(&binders);
+    let ctx = StructuralLowerContext::new_for_tests(&binders);
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
             Some("x".to_string()),
@@ -1066,7 +1066,7 @@ fn conditional_binds_function_param_infer_in_true_branch() {
         }),
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     match &*node(&graph, handle.node()) {
         SemanticNodeData::Conditional {
@@ -1120,7 +1120,7 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
-    let ctx = StructuralLowerContext::new(&binders);
+    let ctx = StructuralLowerContext::new_for_tests(&binders);
     let expr = TypeExpr::Conditional {
         check: Arc::new(TypeExpr::Ref {
             name: Arc::from("T"),
@@ -1146,7 +1146,7 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
         }),
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     match &*node(&graph, handle.node()) {
         SemanticNodeData::Conditional {
@@ -1197,13 +1197,13 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     let expr = TypeExpr::Intersection(Arc::from(vec![base_ref, own_body].into_boxed_slice()));
     let binders: [BinderScope; 0] = [];
     // The consuming declaration's own-body role.
-    let ctx = StructuralLowerContext::new(&binders).with_merge_role(
+    let ctx = StructuralLowerContext::new_for_tests(&binders).with_merge_role(
         crate::semantic_query::ProjectionReductionContext::published(
             crate::semantic_query::ProjectionMode::Shallow,
         )
         .stamp_role(MemberMergeRole::OwnBody),
     );
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     let arms: Arc<[SemanticNodeId]> = match &*node(&graph, handle.node()) {
         SemanticNodeData::Intersection(arms) => arms.members_arc(),
@@ -1531,9 +1531,9 @@ fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
         fixture_scope(),
     );
     let mut outer = BinderScope::default();
-    outer.bind(Arc::from("U"), outer_u);
+    outer.bind_for_tests(Arc::from("U"), outer_u);
     let frames = [outer];
-    let ctx = StructuralLowerContext::new(&frames);
+    let ctx = StructuralLowerContext::new_for_tests(&frames);
     let pattern = TypeExpr::Tuple {
         elements: Arc::from(
             vec![
@@ -1566,7 +1566,7 @@ fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
         true_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
-    let root = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let root = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering succeeds")
         .node();
     let extends = match graph.node_data(root).as_deref() {
@@ -1891,7 +1891,7 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
-    let ctx = StructuralLowerContext::new(&binders);
+    let ctx = StructuralLowerContext::new_for_tests(&binders);
     let expr = TypeExpr::Conditional {
         check: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
         extends: Arc::new(TypeExpr::Infer {
@@ -1912,7 +1912,7 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
         }),
         false_type: Arc::new(TypeExpr::Primitive(PrimitiveName::Never)),
     };
-    let handle = lower_type_expr_structural(&graph, &expr, fixture_scope(), &ctx)
+    let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
 
     // Producer-level contract: the inner conditional's extends/true are

@@ -15,12 +15,18 @@ pub(super) use crate::semantic_query::infer_binder_names::{
 
 /// One lexical frame of type-parameter and conditional-`infer` bindings.
 #[derive(Debug, Default, Clone)]
-pub(super) struct BinderScope {
+pub(crate) struct BinderScope {
     names: FxHashMap<Arc<str>, SemanticNodeId>,
     infer_declarations: FxHashMap<Arc<str>, SemanticNodeId>,
 }
 
 impl BinderScope {
+    /// Test-support binding of a type-parameter name to its binder node.
+    #[cfg(test)]
+    pub(crate) fn bind_for_tests(&mut self, name: Arc<str>, node: SemanticNodeId) {
+        self.bind(name, node);
+    }
+
     /// Bind a syntactic type-parameter name to its interned binder node.
     pub(super) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
         self.names.insert(name, node);
@@ -42,7 +48,7 @@ impl BinderScope {
 
 /// Syntactic binder and provenance inputs to structural lowering.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct StructuralLowerContext<'a> {
+pub(crate) struct StructuralLowerContext<'a> {
     pub(super) binders: &'a [BinderScope],
     pub(super) merge_role: MergeRoleStamp,
     pub(super) macro_own_body: MacroOwnBodyStamp,
@@ -52,6 +58,12 @@ pub(super) struct StructuralLowerContext<'a> {
 }
 
 impl<'a> StructuralLowerContext<'a> {
+    /// Test-support construction of a root context with neutral provenance.
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(binders: &'a [BinderScope]) -> Self {
+        Self::new(binders)
+    }
+
     /// Construct a root context with neutral provenance.
     pub(super) fn new(binders: &'a [BinderScope]) -> Self {
         Self {
@@ -94,7 +106,7 @@ impl<'a> StructuralLowerContext<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn with_merge_role(mut self, merge_role: MergeRoleStamp) -> Self {
+    pub(crate) fn with_merge_role(mut self, merge_role: MergeRoleStamp) -> Self {
         self.merge_role = merge_role;
         self
     }
@@ -127,6 +139,12 @@ impl<'a> StructuralLowerContext<'a> {
             infer_binders: self.infer_binders,
             infer_source: self.infer_source,
         }
+    }
+
+    /// Test entry to the innermost-first binder lookup.
+    #[cfg(test)]
+    pub(crate) fn lookup_binder_for_tests(&self, name: &str) -> Option<SemanticNodeId> {
+        self.lookup_binder(name)
     }
 
     pub(super) fn lookup_binder(&self, name: &str) -> Option<SemanticNodeId> {

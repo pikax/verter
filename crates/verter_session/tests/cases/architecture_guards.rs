@@ -15246,7 +15246,10 @@ fn structural_carrier_producer_builder_privacy_violation(
 fn structural_builder_reexport_violation(body: &str, builder: &str) -> bool {
     body.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("pub use ") && trimmed.contains(builder)
+        trimmed.starts_with("pub use ")
+            && trimmed
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .any(|token| token == builder)
     })
 }
 
@@ -15840,7 +15843,7 @@ fn macro_arg_producer_derive_shadow_import_violations(src: &str) -> Vec<String> 
     }
     impl<'ast> syn::visit::Visit<'ast> for DeriveShadowVisitor {
         fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
-            if attrs_test_gate(&u.attrs) {
+            if attrs_test_or_test_support_gate(&u.attrs) {
                 return;
             }
             self.walk_use_tree(&u.tree, "");
@@ -15862,7 +15865,7 @@ fn macro_arg_producer_derive_shadow_import_violations(src: &str) -> Vec<String> 
             // The overridden `visit_item` does NOT skip a `#[cfg(test)]` extern-crate
             // (its attrs match omits `ExternCrate`), so this override gates cfg-test
             // itself — matching `visit_item_use`'s `attrs_test_gate` treatment.
-            if attrs_test_gate(&ec.attrs) {
+            if attrs_test_or_test_support_gate(&ec.attrs) {
                 return;
             }
             // CRATE-ROOT REBIND via extern-crate rename: `extern crate evil as std;`
@@ -17276,6 +17279,59 @@ fn attrs_test_gate(attrs: &[syn::Attribute]) -> bool {
     })
 }
 
+/// [`attrs_test_gate`] for the structural-carrier-producer seal guards, which
+/// additionally count an item gated on the `test-support` feature as test code:
+/// that feature exists only for test targets and no shipped artifact enables
+/// it, so a `#[cfg(any(test, feature = "test-support"))]` seam never widens a
+/// shipped build's producer surface. Every other feature, `debug_assertions`,
+/// `not(...)` and `cfg_attr` keep their [`attrs_test_gate`] classification.
+fn attrs_test_or_test_support_gate(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        let tokens = match &attr.meta {
+            syn::Meta::List(list) => list.tokens.clone(),
+            _ => return false,
+        };
+        match cfg_split_top_level_operands(tokens).into_iter().next() {
+            Some(pred) => predicate_entails_test_or_test_support(pred),
+            None => false,
+        }
+    })
+}
+
+/// [`predicate_entails_test`] with the `feature = "test-support"` atom also
+/// entailing test.
+fn predicate_entails_test_or_test_support(pred: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    let trees: Vec<TokenTree> = pred.into_iter().collect();
+    if let (Some(TokenTree::Ident(head)), Some(TokenTree::Group(group))) =
+        (trees.first(), trees.get(1))
+    {
+        let inner_operands = cfg_split_top_level_operands(group.stream());
+        return match head.to_string().as_str() {
+            "all" => inner_operands
+                .into_iter()
+                .any(predicate_entails_test_or_test_support),
+            "any" => {
+                !inner_operands.is_empty()
+                    && inner_operands
+                        .into_iter()
+                        .all(predicate_entails_test_or_test_support)
+            }
+            _ => false,
+        };
+    }
+    match trees.as_slice() {
+        [TokenTree::Ident(id)] => *id == "test",
+        [TokenTree::Ident(key), TokenTree::Punct(eq), TokenTree::Literal(value)] => {
+            *key == "feature" && eq.as_char() == '=' && value.to_string() == "\"test-support\""
+        }
+        _ => false,
+    }
+}
+
 /// Split a cfg token stream into its TOP-LEVEL comma-separated operands. The
 /// operands of `all(...)` / `any(...)` are separated by top-level commas; a
 /// comma INSIDE a nested group (e.g. inside `not(any(a, b))`) belongs to that
@@ -17414,7 +17470,7 @@ fn collect_crate_visible_fns_in_items(items: &[syn::Item], names: &mut Vec<Strin
         match item {
             // A module-level free function.
             syn::Item::Fn(f) => {
-                if attrs_test_gate(&f.attrs) {
+                if attrs_test_or_test_support_gate(&f.attrs) {
                     continue;
                 }
                 if visibility_is_crate_visible(&f.vis) {
@@ -17430,12 +17486,12 @@ fn collect_crate_visible_fns_in_items(items: &[syn::Item], names: &mut Vec<Strin
                 if imp.trait_.is_some() {
                     continue;
                 }
-                if attrs_test_gate(&imp.attrs) {
+                if attrs_test_or_test_support_gate(&imp.attrs) {
                     continue;
                 }
                 for impl_item in &imp.items {
                     if let syn::ImplItem::Fn(m) = impl_item {
-                        if attrs_test_gate(&m.attrs) {
+                        if attrs_test_or_test_support_gate(&m.attrs) {
                             continue;
                         }
                         if visibility_is_crate_visible(&m.vis) {
@@ -17447,7 +17503,7 @@ fn collect_crate_visible_fns_in_items(items: &[syn::Item], names: &mut Vec<Strin
             // Inline module — descend (skipping a test-gated module such as the
             // `for_tests` facade) so a producer entry can't hide one level in.
             syn::Item::Mod(m) => {
-                if attrs_test_gate(&m.attrs) {
+                if attrs_test_or_test_support_gate(&m.attrs) {
                     continue;
                 }
                 if let Some((_, inner)) = &m.content {
@@ -17506,7 +17562,7 @@ fn collect_value_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
     for item in items {
         match item {
             syn::Item::Const(c) => {
-                if attrs_test_gate(&c.attrs) {
+                if attrs_test_or_test_support_gate(&c.attrs) {
                     continue;
                 }
                 if visibility_is_crate_visible(&c.vis) && expr_references_producer_builder(&c.expr)
@@ -17519,7 +17575,7 @@ fn collect_value_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
                 }
             }
             syn::Item::Static(s) => {
-                if attrs_test_gate(&s.attrs) {
+                if attrs_test_or_test_support_gate(&s.attrs) {
                     continue;
                 }
                 if visibility_is_crate_visible(&s.vis) && expr_references_producer_builder(&s.expr)
@@ -17534,12 +17590,12 @@ fn collect_value_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
             // Inherent-impl associated consts: a crate-visible associated const
             // holding a producer fn-pointer is equally a value-exposure vector.
             syn::Item::Impl(imp) => {
-                if imp.trait_.is_some() || attrs_test_gate(&imp.attrs) {
+                if imp.trait_.is_some() || attrs_test_or_test_support_gate(&imp.attrs) {
                     continue;
                 }
                 for impl_item in &imp.items {
                     if let syn::ImplItem::Const(c) = impl_item {
-                        if attrs_test_gate(&c.attrs) {
+                        if attrs_test_or_test_support_gate(&c.attrs) {
                             continue;
                         }
                         if visibility_is_crate_visible(&c.vis)
@@ -17555,7 +17611,7 @@ fn collect_value_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
                 }
             }
             syn::Item::Mod(m) => {
-                if attrs_test_gate(&m.attrs) {
+                if attrs_test_or_test_support_gate(&m.attrs) {
                     continue;
                 }
                 if let Some((_, inner)) = &m.content {
@@ -17674,7 +17730,7 @@ fn collect_trait_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
         match item {
             // A trait IMPL — `impl Trait for Type`.
             syn::Item::Impl(imp) => {
-                if attrs_test_gate(&imp.attrs) {
+                if attrs_test_or_test_support_gate(&imp.attrs) {
                     continue;
                 }
                 if let Some((_, trait_path, _)) = &imp.trait_ {
@@ -17736,7 +17792,7 @@ fn collect_trait_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
             // module-private trait is an unexpected surface here, so ANY trait
             // def/alias in the producer module is rejected.
             syn::Item::Trait(t) => {
-                if attrs_test_gate(&t.attrs) {
+                if attrs_test_or_test_support_gate(&t.attrs) {
                     continue;
                 }
                 out.push(format!(
@@ -17746,7 +17802,7 @@ fn collect_trait_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
                 ));
             }
             syn::Item::TraitAlias(t) => {
-                if attrs_test_gate(&t.attrs) {
+                if attrs_test_or_test_support_gate(&t.attrs) {
                     continue;
                 }
                 out.push(format!(
@@ -17755,7 +17811,7 @@ fn collect_trait_exposure_in_items(items: &[syn::Item], out: &mut Vec<String>) {
                 ));
             }
             syn::Item::Mod(m) => {
-                if attrs_test_gate(&m.attrs) {
+                if attrs_test_or_test_support_gate(&m.attrs) {
                     continue;
                 }
                 if let Some((_, inner)) = &m.content {
@@ -17880,6 +17936,9 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
             }
             // A `use` item: the ONLY sanctioned one is
             // `pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`.
+            // A test-gated (`test` / `test-support`) re-export is test wiring,
+            // never compiled into a shipped artifact.
+            syn::Item::Use(u) if attrs_test_or_test_support_gate(&u.attrs) => {}
             syn::Item::Use(u) => {
                 if let Some(reason) = mod_rs_use_violation(u) {
                     out.push(reason);
@@ -18185,6 +18244,58 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
 /// `#[cfg(...)]` ENTAILS test (`#[cfg(test)]`, `#[cfg(all(test, …))]`) is
 /// excluded, while a PRODUCTION-satisfiable `#[cfg(any(test, …))]`,
 /// `#[cfg(not(test))]`, or bare `#[cfg(debug_assertions)]` item is COUNTED.
+/// The producer seal guards count a `test-support`-gated item as test code and
+/// nothing else: `any(test, feature = "test-support")` is excluded, while
+/// another feature, `debug_assertions`, `not(test)` and `cfg_attr` stay
+/// counted; a `pub use` naming a builder is reported, a `pub use` of a
+/// differently named seam is not.
+#[test]
+fn producer_seal_test_support_classifier_discriminates() {
+    let gated = |cfg: &str| -> bool {
+        let src = format!("{cfg}\npub(crate) fn seam() {{}}\n");
+        crate_visible_producer_fn_names(&src).is_empty()
+    };
+    assert!(gated("#[cfg(test)]"));
+    assert!(gated("#[cfg(feature = \"test-support\")]"));
+    assert!(gated("#[cfg(any(test, feature = \"test-support\"))]"));
+    assert!(gated("#[cfg(all(unix, feature = \"test-support\"))]"));
+    assert!(!gated("#[cfg(any(test, feature = \"x\"))]"));
+    assert!(!gated("#[cfg(any(test, debug_assertions))]"));
+    assert!(!gated(
+        "#[cfg(any(feature = \"test-support\", feature = \"x\"))]"
+    ));
+    assert!(!gated("#[cfg(not(test))]"));
+    assert!(!gated(
+        "#[cfg_attr(feature = \"test-support\", allow(dead_code))]"
+    ));
+    assert!(structural_builder_reexport_violation(
+        "pub use macro_arg_producer::{lower_type_expr_structural, Other};",
+        "lower_type_expr_structural"
+    ));
+    assert!(!structural_builder_reexport_violation(
+        "pub use macro_arg_producer::{lower_type_expr_structural_for_tests, Other};",
+        "lower_type_expr_structural"
+    ));
+    let gated_reexport = "mod infer_binder_names;\nmod macro_arg_producer;\n\
+        pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n\
+        #[cfg(any(test, feature = \"test-support\"))]\n\
+        pub(crate) use macro_arg_producer::lower_type_expr_structural_for_tests;\n";
+    let violations = mod_rs_reexport_shape_violations(gated_reexport);
+    assert!(
+        !violations
+            .iter()
+            .any(|v| v.contains("lower_type_expr_structural_for_tests")),
+        "a test-support-gated mod.rs re-export is test wiring: {violations:?}"
+    );
+    let ungated_reexport = "mod infer_binder_names;\nmod macro_arg_producer;\n\
+        pub(crate) use macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};\n\
+        pub(crate) use macro_arg_producer::lower_type_expr_structural_for_tests;\n";
+    assert!(
+        !mod_rs_reexport_shape_violations(ungated_reexport).is_empty(),
+        "an ungated extra mod.rs re-export must stay a violation"
+    );
+}
+
 #[test]
 fn mirror_entry_surface_classifier_discriminates() {
     // Baseline: one sanctioned free entry + a restricted-subtree helper + an

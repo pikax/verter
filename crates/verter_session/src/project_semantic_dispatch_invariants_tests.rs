@@ -6150,7 +6150,7 @@ fn signature_utilities_select_by_kind_over_direct_constructor() {
 /// Cross-producer parity for the constructor shape (the eager path and the
 /// structural producer interning the same root `Signature(Construct)`) is
 /// asserted in
-/// `structural_carrier_producer::structural_lower_tests::structural_equivalence_for_constructor_signature`.
+/// `structural_carrier_producer_tests::structural_lower_tests::structural_equivalence_for_constructor_signature`.
 #[test]
 fn signature_kind_semantics_and_cross_producer_parity() {
     use crate::semantic_query::SignatureKind;

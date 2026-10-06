@@ -148,7 +148,7 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// `RecursiveRef`, which is never produced by fresh OXC lowering and cannot
 /// be reconstructed structurally).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum StructuralLowerError {
+pub(crate) enum StructuralLowerError {
     /// `shape` names the offending `TypeExpr` variant for diagnostics.
     UnsupportedWithoutResolution { shape: &'static str },
 }
@@ -1125,20 +1125,7 @@ fn register_structural_function_alias(
 /// / default lowers through [`lower_type_expr_structural`] DIRECTLY — the
 /// binder-seed lowering is part of building the macro handle's scope, NOT a
 /// second macro-arg producer.
-#[cfg(test)]
 fn build_script_setup_seed_frames(
-    indexed: &crate::project_type_store::IndexedReady,
-    graph: &SemanticGraphStore,
-    scope: &NodeScopeId,
-) -> Vec<BinderScope> {
-    let params = crate::host_resolve::sfc_script_setup_type_params(
-        indexed.raw_source.as_ref(),
-        indexed.framework_parse.as_deref(),
-    );
-    build_script_setup_seed_frames_from_params(&params, graph, scope)
-}
-
-fn build_script_setup_seed_frames_from_params(
     params: &[verter_type_expr::TypeParam],
     graph: &SemanticGraphStore,
     scope: &NodeScopeId,
@@ -1291,7 +1278,7 @@ impl MacroHotMirror {
     }
 
     #[cfg(test)]
-    fn demanded_count(&self) -> usize {
+    pub(crate) fn demanded_count(&self) -> usize {
         self.cells.get().map_or(0, |cells| {
             cells
                 .iter()
@@ -1594,11 +1581,8 @@ fn build_macro_hot_ref(
     // a `BareRef(T)`. Built from the owner's ROUTE-FREE local `IndexedReady`
     // data (`raw_source` + `framework_parse`) — NO host route lookup, so the
     // mirror stays a pure producer.
-    let seed_frames = build_script_setup_seed_frames_from_params(
-        &ctx.script_setup_type_params(serve),
-        graph,
-        &scope,
-    );
+    let seed_frames =
+        build_script_setup_seed_frames(&ctx.script_setup_type_params(serve), graph, &scope);
     let infer_source =
         verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(payload_locator.clone());
     let lower_ctx = StructuralLowerContext::new(&seed_frames)
@@ -1639,14 +1623,25 @@ fn inline_macro_object_property_type<'a>(
     })
 }
 
+/// Test-support entry to the query-free structural lowerer, for the host-driven
+/// lowering suites.
 #[cfg(test)]
-#[path = "structural_lower_tests.rs"]
-mod structural_lower_tests;
+pub(crate) fn lower_type_expr_structural_for_tests(
+    graph: &SemanticGraphStore,
+    expr: &TypeExpr,
+    scope: NodeScopeId,
+    ctx: &StructuralLowerContext<'_>,
+) -> Result<HotTypeRef, StructuralLowerError> {
+    lower_type_expr_structural(graph, expr, scope, ctx)
+}
 
+/// Test-support entry to the `<script setup generic="…">` binder-seed builder,
+/// for the host-driven binder suites.
 #[cfg(test)]
-#[path = "macro_hot_mirror_tests.rs"]
-mod macro_hot_mirror_tests;
-
-#[cfg(test)]
-#[path = "script_setup_binder_tests.rs"]
-mod script_setup_binder_tests;
+pub(crate) fn build_script_setup_seed_frames_for_tests(
+    params: &[verter_type_expr::TypeParam],
+    graph: &SemanticGraphStore,
+    scope: &NodeScopeId,
+) -> Vec<BinderScope> {
+    build_script_setup_seed_frames(params, graph, scope)
+}
