@@ -8,6 +8,10 @@
 //! stores' instances, implements the request ports, and drives the engine.
 
 #![allow(clippy::too_many_arguments)]
+// Unsafe code is confined to the fact recorder stack in `fact_tracing::tracing`,
+// which opts back in explicitly. The output and surface-claim authorities rely
+// on safe visibility rules, which unsafe code elsewhere could bypass.
+#![deny(unsafe_code)]
 
 #[macro_use]
 extern crate verter_debug_assert;

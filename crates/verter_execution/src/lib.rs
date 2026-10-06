@@ -16,6 +16,8 @@
 //! Concrete queues, worker pools, admission and priorities stay in
 //! `verter_scheduler`.
 
+#![forbid(unsafe_code)]
+
 #[macro_use]
 extern crate verter_debug_assert;
 

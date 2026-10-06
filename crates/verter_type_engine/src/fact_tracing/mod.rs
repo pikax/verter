@@ -13,6 +13,10 @@
 //! dependency.
 
 pub mod refusal_scope;
+// The thread-local recorder stack holds raw pointers to stack-allocated
+// recorders, valid while their installing call runs; this is the one module
+// allowed unsafe code.
+#[allow(unsafe_code)]
 pub mod tracing;
 
 pub use refusal_scope::{replay_reuse_refusal, RefusalObservationScope};

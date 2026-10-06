@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_arguments)]
+#![forbid(unsafe_code)]
 //! # verter_semantic_source — source-side declaration and flow lowering
 //!
 //! Owns the lazy declaration-body memo ([`decl_body_memo`]), the retained
