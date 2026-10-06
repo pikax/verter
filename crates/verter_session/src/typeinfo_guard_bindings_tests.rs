@@ -36,7 +36,7 @@ macro_rules! lib_guard {
 static LIB_LIVE_GUARD_BINDINGS: &[LibGuardBinding] = &[
     lib_guard!(SlotFinalizationEntersEnvOnlyInQueryKey => crate::binder_identity_facts::tests::slot_finalization_enters_env_only_in_query_key),
     lib_guard!(FreshnessTracksPerPropertySpreadTaint => crate::project_semantic_dispatch_invariants_tests::fresh_excess_property_checking::freshness_tracks_per_property_spread_taint),
-    lib_guard!(ReverseMappedInferenceIsRelationOwnedInSession => crate::project_semantic_dispatch::relation::reverse_ownership_tests::reverse_mapped_inference_is_relation_owned_in_session),
+    lib_guard!(ReverseMappedInferenceIsRelationOwnedInSession => crate::project_semantic_dispatch_tests::relation_reverse_ownership_tests::reverse_mapped_inference_is_relation_owned_in_session),
     lib_guard!(KeyspaceBudgetExceededAdmitsNothing => crate::typeinfo::typeinfo_tests::mapped_template::keyspace_budget_exceeded_admits_nothing),
     lib_guard!(MappedMinusOptionalStripsOnlyOptionalOriginUndefined => crate::typeinfo::typeinfo_tests::mapped_modifiers::mapped_minus_optional_strips_only_optional_origin_undefined),
     lib_guard!(MappedMinusOptionalPreservesExplicitUndefinedOnRequiredProperty => crate::typeinfo::typeinfo_tests::mapped_modifiers::mapped_minus_optional_preserves_explicit_undefined_on_required_property),

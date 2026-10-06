@@ -14929,6 +14929,9 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     }
 }
 
+/// The reverse-mapped inference ownership check, run by the relation
+/// suites: a reverse aggregate binds only through the frozen session setup
+/// and reaches bindings only through session fixation.
 #[cfg(test)]
 pub(crate) mod reverse_ownership_tests {
     use super::super::dispatch_txn::SessionId;
@@ -14983,7 +14986,6 @@ pub(crate) mod reverse_ownership_tests {
         }
     }
 
-    #[test]
     pub(crate) fn reverse_mapped_inference_is_relation_owned_in_session() {
         // The signature half is the compile-time
         // `reverse_mapped_pass_returns_relation_result` witness above.

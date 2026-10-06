@@ -119,6 +119,7 @@ mod reactive_wrapper_tests;
 mod reference_inference_tests;
 mod relation_depth_tests;
 mod relation_operand_tests;
+pub(crate) mod relation_reverse_ownership_tests;
 mod relation_variance_tests;
 mod relation_work_tests;
 mod return_equation_tests;
