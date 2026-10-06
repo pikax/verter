@@ -335,22 +335,6 @@ fn ffi_module_reference_to_analysis(
     )
 }
 
-fn default_known_dependency_extensions() -> Vec<String> {
-    vec![
-        "".to_string(),
-        ".ts".to_string(),
-        ".tsx".to_string(),
-        ".js".to_string(),
-        ".jsx".to_string(),
-        ".mts".to_string(),
-        ".mjs".to_string(),
-        ".cts".to_string(),
-        ".cjs".to_string(),
-        ".vue".to_string(),
-        ".svelte".to_string(),
-    ]
-}
-
 // =============================================================================
 // Framework-discriminated host compile request (JS → canonical request)
 // =============================================================================
@@ -886,7 +870,7 @@ impl WasmVerterHost {
             .collect::<Result<Vec<_>, _>>()?;
         let known_ids: Vec<String> = parse_wasm_input(known_ids)?;
         let extensions = if extensions.is_undefined() || extensions.is_null() {
-            default_known_dependency_extensions()
+            self.inner.known_dependency_extensions()
         } else {
             parse_wasm_input::<Vec<String>>(extensions)?
         };
@@ -1893,24 +1877,12 @@ pub fn build_selector_match_results(
 
 #[cfg(test)]
 mod tests {
-    use super::{default_known_dependency_extensions, lint_diagnostics_to_utf16};
+    use super::lint_diagnostics_to_utf16;
     use super::{host, FfiConversionError, PublicApiProjectionSubject, WasmVerterHost};
     #[cfg(target_arch = "wasm32")]
     use super::{
         public_api_to_wasm_value, FfiPublicApiProjectionError, FfiPublicApiResult, FfiTscResponse,
     };
-
-    #[test]
-    fn default_dependency_resolution_extensions_include_svelte_carriers_once() {
-        let extensions = default_known_dependency_extensions();
-        assert_eq!(
-            extensions
-                .iter()
-                .filter(|ext| ext.as_str() == ".svelte")
-                .count(),
-            1
-        );
-    }
 
     /// A WASM host preloaded with a Vue SFC whose props type lives in a
     /// sibling `.ts` file — the same fixture shape the verter_session

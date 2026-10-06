@@ -23,7 +23,7 @@ use crate::documents::uri_to_canonical_id;
 use crate::provider_sync::ProviderPathKind;
 
 use super::background_init::spawn_heartbeat;
-use super::handler_guard::{block_in_place_if_available, HandlerGuard, ACTIVE_HANDLERS};
+use super::handler_guard::{block_in_place_if_available, HandlerGuard};
 use super::protocol_types::*;
 use super::server_utils::*;
 use super::VerterLanguageServer;
@@ -320,7 +320,7 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
 
     // A. Spawn heartbeat FIRST — ensures the extension sees heartbeats
     // even while background initialization is running.
-    spawn_heartbeat(server.client.clone());
+    spawn_heartbeat(server.client.clone(), Arc::clone(&server.handler_activity));
 
     // B. Send immediate non-blocking notifications
     let tp_label = server.type_provider_kind.to_string();
@@ -559,7 +559,7 @@ pub(super) async fn handle_did_open(
     server: &VerterLanguageServer,
     params: DidOpenTextDocumentParams,
 ) {
-    let _hg = HandlerGuard::new("did_open");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_open");
     let uri = &params.text_document.uri;
     let _timer = server
         .statistics
@@ -766,7 +766,7 @@ pub(super) async fn handle_did_change(
     server: &VerterLanguageServer,
     params: DidChangeTextDocumentParams,
 ) {
-    let _hg = HandlerGuard::new("did_change");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_change");
     let uri = params.text_document.uri.clone();
     let version = params.text_document.version;
     tracing::info!(
@@ -821,7 +821,7 @@ pub(super) async fn handle_did_change(
     // thread instead of blocking it. Only one handler holds the blocking lock at a time.
     tracing::info!(
         "did_change MUTEX_WAIT v{version} active={} thread={:?}",
-        ACTIVE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed),
+        server.handler_activity.active(),
         std::thread::current().id()
     );
     let mutex_wait_start = std::time::Instant::now();
@@ -987,7 +987,7 @@ pub(super) async fn handle_did_close(
     server: &VerterLanguageServer,
     params: DidCloseTextDocumentParams,
 ) {
-    let _hg = HandlerGuard::new("did_close");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_close");
     let uri = &params.text_document.uri;
     tracing::info!("did_close: {}", uri.as_str());
 
@@ -1181,7 +1181,7 @@ pub(super) async fn handle_did_change_workspace_folders(
     server: &VerterLanguageServer,
     params: DidChangeWorkspaceFoldersParams,
 ) {
-    let _hg = HandlerGuard::new("did_change_workspace_folders");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_change_workspace_folders");
     let event = &params.event;
 
     // Update workspace_roots (quick, non-blocking)
@@ -1236,7 +1236,7 @@ pub(super) async fn handle_did_change_watched_files(
     server: &VerterLanguageServer,
     params: DidChangeWatchedFilesParams,
 ) {
-    let _hg = HandlerGuard::new("did_change_watched_files");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_change_watched_files");
 
     let mut ts_js_resync_ids = Vec::new();
     let mut ts_js_delete_ids = Vec::new();
@@ -1497,7 +1497,7 @@ pub(super) async fn handle_did_create_files(
     server: &VerterLanguageServer,
     params: CreateFilesParams,
 ) {
-    let _hg = HandlerGuard::new("did_create_files");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_create_files");
     for file in &params.files {
         // Only index framework CARRIER files (`.vue`, `.svelte`, …).
         if carrier_language_for(server.documents.language_classifier(), &file.uri).is_none() {
@@ -1520,7 +1520,7 @@ pub(super) async fn handle_did_delete_files(
     server: &VerterLanguageServer,
     params: DeleteFilesParams,
 ) {
-    let _hg = HandlerGuard::new("did_delete_files");
+    let _hg = HandlerGuard::new(&server.handler_activity, "did_delete_files");
     for file in &params.files {
         // Only framework CARRIER files (`.vue`, `.svelte`, …).
         if carrier_language_for(server.documents.language_classifier(), &file.uri).is_none() {

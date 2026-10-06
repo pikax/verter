@@ -50,12 +50,10 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     "crates/verter_workspace/src/filesystem.rs",
     "crates/verter_workspace/src/memory.rs",
     "crates/verter_workspace/src/project_graph.rs",
-    "crates/verter_napi/src/lib.rs",
-    "crates/verter_wasm/src/lib.rs",
     // Vue-semantic session surfaces (Vue parse/extract paths; rows
-    // shrink as each surface moves behind the Vue carrier accessors).
-    "crates/verter_session/src/host_manage.rs",
-    "crates/verter_session/src/host_manage/prepared_decl.rs",
+    // shrink as each surface moves behind the Vue carrier accessors). The
+    // host-management and native/browser binding rows are gone: their
+    // framework choices route through the host's language classifier.
     "crates/verter_session/src/host_resolve/virtual_file_pipeline.rs",
     "crates/verter_session/src/resolver_core/component_meta/direct_macro.rs",
     // Workspace resolver `.vue`-aware routing (resolution data, not

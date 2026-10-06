@@ -8,7 +8,7 @@ use super::{drain_pending_snapshot_provider_sync_owned, PendingSyncDrain, PENDIN
 /// Spawn the heartbeat task. Sends `$/verter/heartbeat` every 5 seconds.
 /// Called first in `initialized()` so the extension always sees heartbeats,
 /// even during long background initialization.
-pub(super) fn spawn_heartbeat(client: Outbound) {
+pub(super) fn spawn_heartbeat(client: Outbound, handler_activity: Arc<HandlerActivity>) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
@@ -17,7 +17,7 @@ pub(super) fn spawn_heartbeat(client: Outbound) {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let active = ACTIVE_HANDLERS.load(std::sync::atomic::Ordering::Relaxed);
+            let active = handler_activity.active();
             tracing::info!(
                 "heartbeat TICK ts={ts} active_handlers={active} thread={:?}",
                 std::thread::current().id()
@@ -42,6 +42,9 @@ pub(super) struct BackgroundInitArgs {
     pub(super) workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
     pub(super) init_generation: Arc<std::sync::atomic::AtomicU64>,
+    /// The server's interactive-handler activity, handed to the scanner so
+    /// background admission waits on THIS server's handlers only.
+    pub(super) handler_activity: Arc<HandlerActivity>,
     pub(super) ownership_generation_fence: Arc<crate::configured_owner::OwnershipGenerationFence>,
     pub(super) project_sync: Option<ProjectSync>,
     pub(super) documents: Arc<DocumentRegistry>,
@@ -158,6 +161,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         type_provider,
         workspace_scanner,
         init_generation,
+        handler_activity,
         ownership_generation_fence,
         project_sync,
         documents,
@@ -441,6 +445,7 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
             tsconfig_patterns: Vec::new(),
             workspace_snapshot: scanner_snapshot,
             done_tx: Some(scanner_done_tx),
+            handler_activity,
         },
     );
 

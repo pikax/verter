@@ -903,7 +903,11 @@ impl VerterHost {
             state.as_ref(),
         )?;
 
-        let script_setup_type_bindings = if bundle_canonical_id.ends_with(".vue") {
+        let script_setup_type_bindings = if self
+            .language_classifier
+            .classify(bundle_canonical_id)
+            .is_vue()
+        {
             self.build_script_setup_type_bindings(bundle_canonical_id, state.as_ref(), &dep_edges)
         } else {
             rustc_hash::FxHashMap::default()
@@ -1344,7 +1348,8 @@ impl VerterHost {
 
         // 4. Build script-setup type bindings for Vue SFCs (once per bundle).
         // Non-Vue files get an empty map — zero cost.
-        let script_setup_type_bindings = if canonical_id.ends_with(".vue") {
+        let script_setup_type_bindings = if self.language_classifier.classify(canonical_id).is_vue()
+        {
             self.build_script_setup_type_bindings(canonical_id, state.as_ref(), &dep_edges)
         } else {
             rustc_hash::FxHashMap::default()

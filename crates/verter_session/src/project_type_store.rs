@@ -1087,13 +1087,6 @@ pub struct ProjectTypeStore {
     /// Bounded by retained payload bytes; see
     /// [`verter_type_engine::identity_interner::IdentityInterner`].
     identity_interner: Arc<verter_type_engine::identity_interner::IdentityInterner>,
-    /// The private hold on the output authority minted with this store's
-    /// engine stores. Never handed out except as an inert lease.
-    output_lease: crate::output_sinks::OutputLease,
-    /// The private hold on the surface-claim authority minted with this
-    /// store's engine stores. Shared only with the request attachment.
-    surface_claims:
-        Arc<verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority>,
     /// The aggregate retained-byte account every store in this graph
     /// charges.
     ///
@@ -1125,13 +1118,25 @@ impl std::fmt::Debug for ProjectTypeStore {
     }
 }
 
+/// The engine grants minted with a project store's engine: the inert output
+/// lease and the surface-claim authority. The store keeps neither; the
+/// host's composition root holds them and lends them to the request
+/// attachment alone.
+pub(crate) struct EngineGrants {
+    pub(crate) output_lease: crate::output_sinks::OutputLease,
+    pub(crate) surface_claims:
+        Arc<verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority>,
+}
+
 impl ProjectTypeStore {
     #[must_use]
     pub fn new() -> Self {
         Self::build(
             None,
             verter_session_query::retention::StoreAccount::default(),
+            verter_execution::tasks::TaskRegistry::default(),
         )
+        .0
     }
 
     /// Construct a store charging `retention_account` instead of the
@@ -1146,7 +1151,9 @@ impl ProjectTypeStore {
         Self::build(
             None,
             verter_session_query::retention::StoreAccount::new(retention_account),
+            verter_execution::tasks::TaskRegistry::default(),
         )
+        .0
     }
 
     /// The aggregate retained-byte account this store's caches charge.
@@ -1157,25 +1164,32 @@ impl ProjectTypeStore {
         &self.retention_account
     }
 
-    /// Construct a store wired to the host's
+    /// Compose the host's store: wired to the host's
     /// [`MetaProvenance`](crate::meta_provenance::MetaProvenance) so the embedded
     /// [`SemanticGraphStore`] reports its contention instrumentation
-    /// counters through the shared provenance surface. Test-only
+    /// counters through the shared provenance surface, and to the
+    /// composition root's `task_registry` cycle authority. Returns the
+    /// engine grants beside the store; the store keeps neither. Test-only
     /// `ProjectTypeStore::new()` callers stay uninstrumented
     /// (semantic-graph stats remain visible through their own
     /// `stats_snapshot` surface).
     #[must_use]
-    pub fn with_provenance(provenance: Arc<crate::meta_provenance::MetaProvenance>) -> Self {
+    pub(crate) fn compose(
+        provenance: Arc<crate::meta_provenance::MetaProvenance>,
+        task_registry: verter_execution::tasks::TaskRegistry,
+    ) -> (Self, EngineGrants) {
         Self::build(
             Some(provenance),
             verter_session_query::retention::StoreAccount::default(),
+            task_registry,
         )
     }
 
     fn build(
         provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
         store_account: verter_session_query::retention::StoreAccount,
-    ) -> Self {
+        task_registry: verter_execution::tasks::TaskRegistry,
+    ) -> (Self, EngineGrants) {
         let retention_account = Arc::clone(store_account.get());
         let counters = ProjectTypeStoreCounters::default();
         // Each backing DB holds the same `Arc<AtomicU64>` counters as
@@ -1196,13 +1210,15 @@ impl ProjectTypeStore {
             store_account.clone(),
         );
         // The engine's own stores and the one output authority minted for
-        // them, plus the engine's surface-claim authority. The store keeps both
-        // privately: the output authority behind its lease.
+        // them, plus the engine's surface-claim authority. Both authorities
+        // leave as grants for the composition root: the output authority
+        // behind its lease.
         let (engine, output_authority, surface_claims) =
             verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores::create(
                 provenance.map(|provenance| Arc::clone(&provenance.engine)),
                 store_account,
                 &counters.component_meta_cache_live,
+                task_registry,
             );
         let verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores {
             graph: semantic_graph,
@@ -1220,7 +1236,7 @@ impl ProjectTypeStore {
             crate::app_config_proof_db::AppConfigNoOverrideProofDb::with_counter(Arc::clone(
                 &counters.component_meta_cache_live,
             ));
-        Self {
+        let store = Self {
             project_generation: Arc::new(AtomicU64::new(0)),
             indexed,
             analysis,
@@ -1254,12 +1270,15 @@ impl ProjectTypeStore {
             ),
             mapper_binder_registry,
             identity_interner,
-            output_lease: crate::output_sinks::OutputLease::new(output_authority),
-            surface_claims: Arc::new(surface_claims),
             retention_account,
             counters,
             activity_gate: semantic_activity::SemanticActivityGate::default(),
-        }
+        };
+        let grants = EngineGrants {
+            output_lease: crate::output_sinks::OutputLease::new(output_authority),
+            surface_claims: Arc::new(surface_claims),
+        };
+        (store, grants)
     }
 
     /// The store-owned identity intern pool. Minting boundaries clone the
@@ -1286,19 +1305,6 @@ impl ProjectTypeStore {
             Arc::clone(&self.identity_interner),
             Arc::clone(&self.mapper_binder_registry),
         )
-    }
-
-    /// The host's private hold on this store's engine output authority. The
-    /// lease is inert; only a sealed sink capability opens it.
-    pub(crate) fn output_lease(&self) -> &crate::output_sinks::OutputLease {
-        &self.output_lease
-    }
-
-    /// The store's private hold on its engine's surface-claim authority.
-    pub(crate) fn surface_claims(
-        &self,
-    ) -> &Arc<verter_type_engine::semantic_query::surface_resolution::SurfaceClaimAuthority> {
-        &self.surface_claims
     }
 
     pub(crate) fn identity_interner(

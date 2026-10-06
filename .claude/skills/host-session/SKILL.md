@@ -47,6 +47,34 @@ session feature-variants compile-contract lane proves each actual port cannot
 expose ambient host/worker/store state. See the type-resolution
 [ownership reference](../type-resolution/references/relation-ownership.md).
 
+## Host Construction Root
+
+`VerterHost::new*` (`host_construction.rs`) is the one composition root. It
+builds each host service once and hands it to its consumers; nothing reaches
+back into the host for a service it was not given.
+
+- `EnginePolicy` is translated from `HostConfig` once (`VerterHost.engine_policy`);
+  request adapters clone it. The engine never reads `HostConfig`.
+- The root mints the one `verter_execution::TaskRegistry` and composes the
+  project store over it (`ProjectTypeStore::compose`). The store returns the
+  engine grants, the `OutputLease` and the `SurfaceClaimAuthority`, and keeps
+  neither. The root hands both to `SessionAttachment` alone. Scheduler adoption
+  of the same registry belongs to the parallel-execution work.
+- `WorkspaceServices` holds the resolve-extension policy and the one
+  process-local `ResolutionRetention` adapter. `WorkspaceServices::attach` is the
+  only route by which a workspace receives them, both at construction and on
+  `set_workspace`.
+- Known-file dependency resolution probes `VerterHost::known_dependency_extensions()`:
+  the bare specifier, then script extensions, then the classifier's admitted
+  carriers. The NAPI and WASM bindings default to it and spell no framework list
+  of their own.
+
+Session lifetimes are scoped. `MetaSession` lends three audited-lane operations
+(capture check, output-bearing resolution, record drain) and never hands out
+the host. Session views likewise expose no host accessor. LSP background
+admission waits on the owning server's `HandlerActivity`, held per server, not
+on process-global handler counters.
+
 ## Vue Macro Codegen Producer
 
 `typeinfo/vue_macro_codegen.rs` is the sole semantic producer for compiler-facing

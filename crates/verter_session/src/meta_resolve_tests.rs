@@ -8691,7 +8691,7 @@ export type C = { back: A }
         // Seed IndexedReady/analysis for /cycle.ts.
         let _ = session.evaluate_types("/cycle.ts");
 
-        let host = session.host();
+        let host = project.host();
 
         // `Pick<A, 'next'>` — the source argument `A` is the cyclic root.
         let pick_over_cycle = TypeExpr::named_with_args(

@@ -188,7 +188,7 @@ pub(super) async fn handle_hover(
     server: &VerterLanguageServer,
     params: HoverParams,
 ) -> Result<Option<Hover>> {
-    let _hg = HandlerGuard::new("hover");
+    let _hg = HandlerGuard::new(&server.handler_activity, "hover");
     let uri = &params.text_document_position_params.text_document.uri;
     let position = &params.text_document_position_params.position;
     tracing::info!(
@@ -678,7 +678,7 @@ async fn handle_completion_attempt(
     params: &CompletionParams,
     native_only: bool,
 ) -> Result<Option<CompletionResponse>> {
-    let _hg = HandlerGuard::new("completion");
+    let _hg = HandlerGuard::new(&server.handler_activity, "completion");
     let uri = &params.text_document_position.text_document.uri;
     let _timer = server
         .statistics
@@ -1601,7 +1601,7 @@ pub(super) async fn handle_completion_resolve(
     server: &VerterLanguageServer,
     mut item: CompletionItem,
 ) -> Result<CompletionItem> {
-    let _hg = HandlerGuard::new("completion_resolve");
+    let _hg = HandlerGuard::new(&server.handler_activity, "completion_resolve");
     // Check if this item requires auto-import (verter workspace components)
     if let Some(ref data) = item.data {
         if data.get("auto_import").and_then(|v| v.as_bool()) == Some(true) {

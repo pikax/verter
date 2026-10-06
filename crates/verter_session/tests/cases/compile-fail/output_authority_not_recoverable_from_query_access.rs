@@ -3,7 +3,8 @@
 //! The engine binding a request port attaches carries only query resources;
 //! the host attachment a request port hands out is opaque to the engine and,
 //! for the concrete host, holds only an inert lease that opens inside the
-//! host's sink module. The project store keeps its lease private as well.
+//! host's sink module. The project store holds no lease at all: the host's
+//! construction root hands the one lease to the attachment.
 
 use verter_type_engine::resolver_core::request_ports::{ExecutionSubmission, HostAttachmentPort};
 use verter_type_engine::project_semantic_dispatch::engine_resources::OutputAuthority;

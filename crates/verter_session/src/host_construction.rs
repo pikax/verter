@@ -142,6 +142,55 @@ impl HostResolverState {
     }
 }
 
+/// The workspace-scoped services every workspace attached to a host
+/// receives: the host's resolve-extension policy and the one resolution
+/// retention adapter over the process-local account.
+///
+/// Built once by the composition root. [`Self::attach`] is the single
+/// route through which a workspace receives them — at construction and on
+/// every [`VerterHost::set_workspace`] swap — so a swapped-in workspace
+/// can never miss a service the original received, and every attached
+/// workspace charges the same adapter.
+pub(crate) struct WorkspaceServices {
+    resolve_extensions: Vec<String>,
+    resolution_retention:
+        Arc<dyn verter_session_query::retention::resolution_charge::ResolutionRetentionAccount>,
+}
+
+impl WorkspaceServices {
+    fn new(config: &HostConfig) -> Self {
+        Self {
+            resolve_extensions: config.resolve_extensions.clone(),
+            resolution_retention: Arc::new(
+                verter_session_query::retention::ResolutionRetention::process_local(),
+            ),
+        }
+    }
+
+    /// Hand `workspace` this host's workspace-scoped services.
+    pub(crate) fn attach(&self, workspace: &dyn verter_workspace::WorkspaceAccess) {
+        // Reverse-dep stem stripping honours the host policy from the start.
+        workspace.set_default_resolve_extensions(self.resolve_extensions.clone());
+        // The workspace's resident request-overlay resolution state charges
+        // the process-local account — the same aggregate account every host
+        // store charges.
+        workspace.install_resolution_retention(Arc::clone(&self.resolution_retention));
+    }
+}
+
+/// Translate the host's configuration into the engine's immutable execution
+/// policy, once, at construction. The engine takes the selected values; it
+/// never reads the host configuration itself.
+fn engine_policy_for(
+    config: &HostConfig,
+) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
+    verter_type_engine::project_semantic_dispatch::EnginePolicy::new(
+        config.depth_budget,
+        config.recursion_budget_overrides.synthesis_steps,
+        config.recursion_budget_overrides.walker_pathological_cap,
+    )
+}
+
 /// SourceLoader that delegates to the host's current workspace.
 ///
 /// Holds a reference to the host's `RwLock<Arc<dyn WorkspaceAccess>>`
@@ -216,6 +265,29 @@ impl VerterHost {
     #[must_use]
     pub fn language_classifier(&self) -> &crate::framework::HostLanguageClassifier {
         &self.language_classifier
+    }
+
+    /// The extension probe order for resolving module references against a
+    /// caller-provided known-file set: the bare specifier, the script
+    /// extensions, then the framework carriers this host composed, in
+    /// registry order. The carriers come from the host's classifier, so an
+    /// unadmitted vertical's extension is never probed; the native and
+    /// browser bindings default to this list instead of spelling their own.
+    #[must_use]
+    pub fn known_dependency_extensions(&self) -> Vec<String> {
+        const SCRIPT_EXTENSIONS: [&str; 9] = [
+            "", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs",
+        ];
+        SCRIPT_EXTENSIONS
+            .iter()
+            .map(|extension| (*extension).to_string())
+            .chain(
+                self.language_classifier
+                    .carrier_extensions()
+                    .into_iter()
+                    .map(|extension| format!(".{extension}")),
+            )
+            .collect()
     }
 
     /// The typed framework options this host was constructed with — the
@@ -331,10 +403,11 @@ impl VerterHost {
         // subsequent host constructions.
         verter_type_engine::request_context::install_clear_tls_hook();
 
-        // Thread the host's configured `resolve_extensions` into the
-        // workspace at construction so reverse-dep stem stripping
-        // honours the host policy from the start.
-        workspace.set_default_resolve_extensions(config.resolve_extensions.clone());
+        // The workspace-scoped services, attached to the initial workspace
+        // through the same route every later swap uses.
+        let workspace_services = WorkspaceServices::new(&config);
+        workspace_services.attach(workspace.as_ref());
+        let engine_policy = engine_policy_for(&config);
 
         let workspace_lock = Arc::new(parking_lot::RwLock::new(workspace));
 
@@ -499,15 +572,18 @@ impl VerterHost {
             }
         };
 
-        let project_type_store = Arc::new(
-            crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
-        );
-        // The workspace's resident request-overlay resolution state charges
-        // the process-local account — the same aggregate account every host
-        // store charges.
-        workspace_lock.read().install_resolution_retention(Arc::new(
-            verter_session_query::retention::ResolutionRetention::process_local(),
-        ));
+        // The composition root mints the one execution-task registry — the
+        // cycle authority every layer whose producers may wait on one
+        // another shares — and composes the project store over it. The
+        // engine grants stay here: the root lends them to the request
+        // attachment alone.
+        let task_registry = verter_execution::tasks::TaskRegistry::default();
+        let (project_type_store, engine_grants) =
+            crate::project_type_store::ProjectTypeStore::compose(
+                Arc::clone(&provenance),
+                task_registry,
+            );
+        let project_type_store = Arc::new(project_type_store);
         // Pull RouteDb / ImportedRootDb handles from the project-type-store
         // BEFORE constructing the resolver runtime so the runtime borrows
         // the project-shared `Arc`s. This keeps
@@ -582,12 +658,12 @@ impl VerterHost {
             .map(crate::cooperative_scheduler::CooperativeSchedulerAdapter::with_yield_hook)
             .unwrap_or_default();
         // The request attachment shares the registry-owned surface stores and
-        // the project store's output lease and surface-claim authority; it
-        // constructs none of them.
+        // receives the root's engine grants — the output lease and the
+        // surface-claim authority; it constructs none of them.
         let session_attachment = crate::session_attachment::SessionAttachment::new(
             framework_services.framework_registry(),
-            project_type_store.output_lease().clone(),
-            std::sync::Arc::clone(project_type_store.surface_claims()),
+            engine_grants.output_lease,
+            engine_grants.surface_claims,
         );
         let host = Self {
             #[cfg(any(test, feature = "test-support"))]
@@ -604,6 +680,8 @@ impl VerterHost {
             block_content: crate::block_content::BlockContentHostLane::default(),
             language_classifier,
             workspace: workspace_lock,
+            workspace_services,
+            engine_policy,
             alias_to_canonical: default_shared(FxHashMap::default()),
             tick: std::sync::atomic::AtomicU64::new(1),
             store_view_epoch: std::sync::atomic::AtomicU64::new(1),
@@ -1268,15 +1346,6 @@ impl VerterHost {
             )
     }
 
-    /// The Svelte adapter's typed framework-surface DTO store — the host-owned
-    /// cache of `.svelte` per-source-family normalized DTOs.
-    ///
-    /// The ONE downcast at store acquisition to the typed
-    /// [`FrameworkSurfaceStore<SvelteSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
-    /// keyed by the Svelte adapter remainder (one source family per row).
-    /// Used by [`crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface`]
-    /// to materialize each Svelte source surface once per `(canonical, content,
-    /// source, level)`.
     /// The framework adapter registry — the executor / synth-injection /
     /// public-API-projection dispatch authority. Built once at host
     /// construction and immutable thereafter.
@@ -2044,6 +2113,28 @@ mod framework_options_construction_tests {
                 .framework_registry()
                 .contains(&verter_language::FrameworkAdapterId::svelte()),
             "the dispatch authority registers no unadmitted vertical"
+        );
+        let probes = host.known_dependency_extensions();
+        assert!(
+            probes.iter().any(|extension| extension == ".vue")
+                && !probes.iter().any(|extension| extension == ".svelte"),
+            "known-file dependency resolution probes only admitted carriers: {probes:?}"
+        );
+    }
+
+    #[test]
+    fn the_default_host_probes_scripts_then_every_composed_carrier() {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        assert_eq!(
+            host.known_dependency_extensions(),
+            [
+                "", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs", ".cts", ".cjs", ".svelte",
+                ".vue",
+            ]
+            .map(String::from)
+            .to_vec(),
+            "the bare specifier and scripts probe before carriers, which follow the \
+             classifier's longest-suffix-first registry order"
         );
     }
 

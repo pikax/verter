@@ -40,19 +40,6 @@ impl ResolverCapabilities for HostCapabilities {
     type MacroMirrors = super::request_inputs::MacroMirrorSelector;
 }
 
-/// Translate the host's configuration into the engine's immutable execution
-/// policy. The engine takes the selected values; it never reads the host
-/// configuration itself.
-fn engine_policy_for(
-    config: &crate::HostConfig,
-) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
-    verter_type_engine::project_semantic_dispatch::EnginePolicy::new(
-        config.depth_budget,
-        config.recursion_budget_overrides.synthesis_steps,
-        config.recursion_budget_overrides.walker_pathological_cap,
-    )
-}
-
 #[cfg(any(test, feature = "test-support"))]
 impl sealed::Sealed for crate::VerterHost {}
 
@@ -157,7 +144,7 @@ impl IndexedInputs for crate::VerterHost {
     }
 
     fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
-        engine_policy_for(&self.config)
+        self.engine_policy.clone()
     }
 
     // Cache accessors -------------------------------------------------
@@ -785,7 +772,7 @@ where
     }
 
     fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
-        engine_policy_for(&self.0.host().config)
+        self.0.host().engine_policy.clone()
     }
 
     fn normalized_analysis_canonical(&self, raw_canonical: &str) -> String {
