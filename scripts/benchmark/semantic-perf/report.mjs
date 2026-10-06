@@ -238,7 +238,7 @@ export function renderMarkdown(run) {
     );
     const armCells = (s) =>
       s
-        ? `${s.status} | ${s.codes ? s.codes.map((x) => `TS${x}`).join(", ") || "none" : "—"} | ${s.wallMs ? fmtMs(s.wallMs) : s.terminationMs ? `killed at ${fmtMs(s.terminationMs)}` : "—"} | ${fmtMs(s.tscCheckMs)} | ${fmtMb(s.peakBytes)} | ${fmtMb(s.tscMemoryUsedBytes)}`
+        ? `${s.status} | ${s.codes ? s.codes.map((x) => `TS${x}`).join(", ") || "none" : "—"} | ${s.wallMs ? fmtMs(s.wallMs) : s.terminationMs ? `killed at ${fmtMs(s.terminationMs)}` : "—"} | ${fmtMs(s.tscCheckMs)} | ${s.memoryUnavailable ? "unavailable (unattributable accounting)" : fmtMb(s.peakBytes)} | ${fmtMb(s.tscMemoryUsedBytes)}`
         : "not run | — | — | — | — | —";
     for (const c of cli)
       push(

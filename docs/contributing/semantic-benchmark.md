@@ -538,12 +538,19 @@ Results land in `target/semantic-perf/<timestamp>/`:
   (`cli/` holds the whole-program arms' program);
 - `bin/` — the pinned binaries that ran.
 
+CLI invocations must use the verified tsc executable, the cell's project, and
+the arm's exact thread mode. Runtime and build environment receipts require
+64-character hexadecimal SHA-256 digests. Whole-program OS memory peaks are
+attributed to the engine only for the Windows job commit-charge or macOS
+physical-footprint metric paired with its owning backend. Cgroup peaks remain
+raw containment telemetry; the summary and report mark engine memory unavailable.
+
 The command exits 0 only when validation passes. Standalone validation
 re-reads every raw record — the supervisor's, and for every probe invocation
 its own probe record and phase marker at the path derived from the
 invocation, whether or not `results.json` embeds them, and for every
-whole-program run the stdout file the supervisor recorded (from which its
-diagnostics, times and memory are read) — and fails on any that differs from
+whole-program run the complete stdout file the supervisor recorded — including
+middle diagnostics above 1 MiB — and fails on any that differs from
 `results.json` (a record on disk that `results.json` omits included). Re-validate any
 run with
 

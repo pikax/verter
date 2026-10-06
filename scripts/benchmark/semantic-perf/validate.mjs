@@ -34,7 +34,6 @@ import {
   probeRecordProblems,
   runLimits,
   supervisorDeadlineMs,
-  compactCliStdout,
   warmRepeatsFor,
 } from "./analyze.mjs";
 import { ROOT, sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
@@ -73,11 +72,18 @@ function stable(value) {
   );
 }
 
+// Scenario dirs are recorded with forward slashes while commands and program
+// roots reach the records through the platform's `join`: the same path is
+// legitimately spelled with either separator, so provenance comparisons are
+// separator-insensitive rather than bound to the recording worker's platform.
+const forwardSlashes = (p) => (typeof p === "string" ? p.replace(/\\/g, "/") : p);
+
 /**
  * Validate a run object. `expected` is the measured reference the run was
  * summarised against; `scenarios` the catalog it ran.
  */
 const finite = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0;
+const sha256Digest = (x) => typeof x === "string" && /^[a-f0-9]{64}$/.test(x);
 
 export function validateRun(run, expected, scenarios, { requireAllMatched = false } = {}) {
   const failures = [];
@@ -188,8 +194,8 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   }
   // Environment receipts: complete and consistent with the tuning option.
   if (
-    typeof meta.environment?.runtime?.valuesSha256 !== "string" ||
-    typeof meta.build?.environment?.valuesSha256 !== "string" ||
+    !sha256Digest(meta.environment?.runtime?.valuesSha256) ||
+    !sha256Digest(meta.build?.environment?.valuesSha256) ||
     meta.environment?.inherited !== Boolean(meta.options?.allowTuning)
   ) {
     fail("tuning: the environment receipts are incomplete or disagree with --allow-tuning");
@@ -344,6 +350,22 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       (!finite(inv.spawnedAtMs) || (inv.phase != null && !Array.isArray(inv.phaseHistory)))
     )
       fail(`${id}: no spawn time or phase history (the evidence for a deadline)`);
+    const arm = ARMS[inv.arm];
+    if (arm?.kind === "cli") {
+      const dir = meta.scenarios?.[`${inv.scenario}/${inv.setting}`]?.dir;
+      const command = [
+        ts.exe,
+        "-p",
+        join(dir ?? "", "cli", "tsconfig.json"),
+        "--extendedDiagnostics",
+        ...(inv.arm === "tsc-cli-1" ? ["--singleThreaded"] : []),
+      ].map(forwardSlashes);
+      if (
+        stable(Array.isArray(inv.command) ? inv.command.map(forwardSlashes) : inv.command) !==
+        stable(command)
+      )
+        fail(`${id}: CLI command does not match the verified executable, project and thread mode`);
+    }
     const end = invocationEnd(inv, runLimits(opts));
     const expectedExit = ["killed", "observe-killed", "unattributed-kill"].includes(end.kind)
       ? sup.killedBy === "timeout"
@@ -360,7 +382,6 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       fail(`${id}: failed child: ${end.detail}`);
       continue;
     }
-    const arm = ARMS[inv.arm];
     if (end.kind === "killed" || end.kind === "unattributed-kill") continue;
     if (end.kind === "observe-killed") {
       // The demand was measured and recorded before the kill: its record
@@ -409,7 +430,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
         /\\/g,
         "/",
       );
-      const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase());
+      const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase().replace(/\\/g, "/"));
       const want = [`${dir}/lib.bench.d.ts`, `${dir}/scenario.ts`].map((f) => f.toLowerCase());
       if (roots.length !== 2 || want.some((w) => !roots.includes(w)))
         fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
@@ -516,7 +537,7 @@ export function rawFileProblems(run) {
       let raw = null;
       try {
         const sup = JSON.parse(readFileSync(inv.supervisorOut, "utf8"));
-        raw = compactCliStdout(readFileSync(sup.stdoutPath, "utf8"));
+        raw = readFileSync(sup.stdoutPath, "utf8");
       } catch {
         raw = null;
       }
