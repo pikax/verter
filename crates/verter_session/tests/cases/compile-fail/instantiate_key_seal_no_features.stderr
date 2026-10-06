@@ -9,8 +9,8 @@ error[E0603]: enum `InstantiateBodySource` is private
 note: the enum `InstantiateBodySource` is defined here
   --> $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
    |
-   | pub(crate) use instantiate_body_source::InstantiateBodySource;
-   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   | pub(crate) use self::instantiate_body_source::InstantiateBodySource;
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0599]: no associated function or constant named `non_file_for_tests` found for struct `InstantiateContext` in the current scope
   --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:39:49
