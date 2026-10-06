@@ -83,7 +83,7 @@ pub(crate) struct LoweringOutcome<R> {
 /// Outcome of acquiring a [`SnapshotLease`]: the lease token (drop it to
 /// release the retained snapshot) plus whether acquiring it had to parse
 /// (vs. bumping the refcount on an already-retained snapshot).
-pub(crate) struct LeaseOutcome {
+pub struct LeaseOutcome {
     pub lease: SnapshotLease,
     pub parsed_now: bool,
     /// The retained parse was refused for want of stack: the program is
@@ -100,7 +100,7 @@ pub(crate) struct LeaseOutcome {
 /// `Send + Sync` (it holds only `Arc<DeclLoweringService>` + the owned
 /// key), so it can live in a host-owned `Send + Sync` artifact (the
 /// `DeclBodyMemo`).
-pub(crate) struct SnapshotLease {
+pub struct SnapshotLease {
     key: SnapshotKey,
     service: Arc<DeclLoweringService>,
 }
@@ -534,7 +534,7 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
 }
 
 /// The lazy declaration-lowering service. See module docs.
-pub(crate) struct DeclLoweringService {
+pub struct DeclLoweringService {
     /// Resolved worker count, captured at construction and used when the
     /// worker threads actually spawn (eagerly at construction or lazily on
     /// the first lowering demand).
@@ -609,9 +609,9 @@ pub struct DeclLoweringCounters {
 
 /// The default decl-lowering pool size — `clamp(available_parallelism / 4,
 /// 1, 4)` 8 MiB workers, the historical sizing. The single definition both
-/// [`crate::types::HostResourcePolicy::default`] and the decl-lowering
+/// the session's `HostResourcePolicy::default` and the decl-lowering
 /// service's no-arg constructor key off, so the two can never drift.
-pub(crate) const DECL_LOWERING_DEFAULT_POOL_SIZE: verter_execution::pool_size::PoolSize =
+pub const DECL_LOWERING_DEFAULT_POOL_SIZE: verter_execution::pool_size::PoolSize =
     verter_execution::pool_size::PoolSize::Fraction {
         divisor: 4,
         min: 1,
@@ -622,14 +622,15 @@ impl DeclLoweringService {
     /// Eager service at the default decl-lowering pool size — workers
     /// spawn at construction. Keyed off the same
     /// [`DECL_LOWERING_DEFAULT_POOL_SIZE`] the default
-    /// [`crate::types::HostResourcePolicy`] uses, so the no-arg default and
+    /// the session's `HostResourcePolicy` uses, so the no-arg default and
     /// the resource policy can never drift.
     ///
     /// Production host construction goes through [`Self::new_with`] (the
     /// resource-policy-driven path); this no-arg eager convenience is used
     /// only by the crate's `#[cfg(test)]` decl-lowering / memo suites.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn new() -> Self {
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
         Self::new_with(
             /* lazy = */ false,
             DECL_LOWERING_DEFAULT_POOL_SIZE.resolve(),
@@ -643,7 +644,7 @@ impl DeclLoweringService {
     /// the `batch_typecheck` policy, where cold host construction spawns
     /// zero decl-lowering threads.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn new_with(lazy: bool, worker_count: usize) -> Self {
+    pub fn new_with(lazy: bool, worker_count: usize) -> Self {
         Self::new_with_account(
             lazy,
             worker_count,
@@ -654,7 +655,7 @@ impl DeclLoweringService {
     /// [`Self::new_with`] against an explicit retention account. Test-only:
     /// production services pin against the one process-local account.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn new_with_account(
+    pub fn new_with_account(
         lazy: bool,
         worker_count: usize,
         account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
@@ -744,8 +745,8 @@ impl DeclLoweringService {
     /// demand, and always `true` for an eager service. Test-only signal of
     /// a REAL thread spawn — the `OnceLock` is populated only by
     /// `spawn_decl_workers`, never by hand.
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(crate) fn workers_spawned(&self) -> bool {
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    pub fn workers_spawned(&self) -> bool {
         self.workers.get().is_some()
     }
 
@@ -753,7 +754,7 @@ impl DeclLoweringService {
     /// While the returned lease is live, [`Self::run_leased`] calls for
     /// `key` serve the retained snapshot (and MISS, never parse, without
     /// one).
-    pub(crate) fn acquire_lease(
+    pub fn acquire_lease(
         self: &Arc<Self>,
         key: &SnapshotKey,
         source: &Arc<str>,
@@ -842,7 +843,7 @@ impl DeclLoweringService {
     /// number of superseded document versions is the signature of
     /// artifacts that outlive their reachability.
     #[must_use]
-    pub(crate) fn live_lease_count(&self) -> usize {
+    pub fn live_lease_count(&self) -> usize {
         self.live_leases.load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -972,8 +973,8 @@ impl DeclLoweringService {
     /// `SnapshotLease`, but the worker-side retained entry is gone) and
     /// prove the memo's demanded-lowering path fails CLOSED instead of
     /// transiently re-parsing.
-    #[cfg(test)]
-    pub(crate) fn release_retained_snapshot_for_test(&self, key: &SnapshotKey) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_retained_snapshot_for_test(&self, key: &SnapshotKey) {
         self.release_key(key);
     }
 
@@ -988,7 +989,7 @@ impl DeclLoweringService {
     /// Unlike the test-only parse-capable `run`, this takes NO `source` — a lease miss cannot be
     /// papered over by re-parsing. `job` MUST still be a PURE lowering closure
     /// (no host / service re-entry), per the same worker-purity contract.
-    pub(crate) fn run_leased<R, F>(&self, key: &SnapshotKey, job: F) -> Option<R>
+    pub fn run_leased<R, F>(&self, key: &SnapshotKey, job: F) -> Option<R>
     where
         F: FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send + 'static,
         R: Send + 'static,

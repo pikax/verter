@@ -9,14 +9,14 @@ use rustc_hash::FxHashSet;
 use verter_type_expr::facts::TypeDependencyPathFact;
 use verter_type_expr::TypeExpr;
 
-pub(crate) trait TypeofDependencyCollector {
+pub trait TypeofDependencyCollector {
     fn record(&mut self, value_ref: &verter_type_expr::ValueRef);
 }
 
 /// Runaway-safety fuse for session-owned semantic-inference tree walks.
 /// Parser syntax depth is substantially lower; this bound protects mutated or
 /// synthesized owned IR while leaving ordinary authored programs untouched.
-pub(crate) const SEMANTIC_INFERENCE_TRAVERSAL_BUDGET: usize = 4_096;
+pub const SEMANTIC_INFERENCE_TRAVERSAL_BUDGET: usize = 4_096;
 
 impl TypeofDependencyCollector for FxHashSet<String> {
     fn record(&mut self, value_ref: &verter_type_expr::ValueRef) {
@@ -36,7 +36,7 @@ impl TypeofDependencyCollector for BTreeSet<TypeDependencyPathFact> {
 
 /// Collect every `typeof <value>` dependency reachable in `expr`. Callers
 /// choose either root-name or full typed-path retention through the collector.
-pub(crate) fn collect_typeof_roots<C: TypeofDependencyCollector>(
+pub fn collect_typeof_roots<C: TypeofDependencyCollector>(
     expr: &TypeExpr,
     out: &mut C,
 ) -> Result<(), verter_type_expr::facts::InferenceUnavailableReason> {
@@ -58,7 +58,7 @@ pub(crate) fn collect_typeof_roots<C: TypeofDependencyCollector>(
 /// Whether every rendered leaf is declaration-safe. Inferred declaration
 /// splices must never hide an implicit `any`/unknown lowering inside a nested
 /// function, collection, object, or generic argument.
-pub(crate) fn type_expr_is_declaration_safe(
+pub fn type_expr_is_declaration_safe(
     expr: &TypeExpr,
 ) -> Result<bool, verter_type_expr::facts::InferenceUnavailableReason> {
     let mut pending = vec![expr];

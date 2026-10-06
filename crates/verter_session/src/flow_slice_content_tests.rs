@@ -20,7 +20,7 @@ use verter_session_query::function_program::{
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
-use crate::decl_body_memo::DeclBodyMemo;
+use verter_semantic_source::decl_body_memo::DeclBodyMemo;
 use verter_session_query::flow::slice::{
     FlowSliceSelection, ReturnPredicateTest, SliceArithmetic, SliceBindingKind, SliceCall,
     SliceCallSite, SliceContent, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral,
@@ -616,7 +616,8 @@ fn selected_annotation_descent_inspects_logarithmic_siblings() {
         .collect();
     let target = siblings[1900].span;
     let selected =
-        crate::flow_slice_content::selected_span_child(&siblings, target).expect("target sibling");
+        verter_semantic_source::flow_slice_content::selected_span_child(&siblings, target)
+            .expect("target sibling");
     assert_eq!(selected.span, target);
     assert!(
         reads.get() <= 16,

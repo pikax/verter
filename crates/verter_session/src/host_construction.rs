@@ -655,7 +655,7 @@ impl VerterHost {
             framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
-            decl_lowering: Arc::new(crate::decl_lowering::DeclLoweringService::new_with(
+            decl_lowering: Arc::new(verter_semantic_source::decl_lowering::DeclLoweringService::new_with(
                 matches!(
                     decl_lowering_policy.spawn,
                     crate::types::PoolSpawn::LazyOnFirstUse

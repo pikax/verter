@@ -90,7 +90,7 @@ pub trait ResolverObservation: sealed::Sealed {
 
     /// The lazily lowered body of the TYPE declaration `name` in
     /// `canonical`, owned by `owner`. Backed by
-    /// `verter_session::decl_body_memo::DeclBodyMemo::peek_type_decl` — a
+    /// `verter_semantic_source::decl_body_memo::DeclBodyMemo::peek_type_decl` — a
     /// non-blocking peek that NEVER triggers the worker-thread lowering
     /// rendezvous. `Complete(None)` covers both "not inventoried" and
     /// "already demanded, committed empty" (both stable, cacheable facts);

@@ -10,9 +10,9 @@ use verter_session_query::source::deref::LocatorBodyDerefError;
 use std::sync::Arc;
 use verter_session_query::function_program::{FunctionProgramDiscovery, FunctionProgramIndex};
 
-use crate::decl_body_memo::*;
-use crate::decl_lowering::DeclLoweringCounters;
 use verter_parser::utils::oxc::script::raw_surface::SymbolSpace;
+use verter_semantic_source::decl_body_memo::*;
+use verter_semantic_source::decl_lowering::DeclLoweringCounters;
 use verter_session_query::declarations::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
 use verter_session_query::source::demand::DemandOutcome;
 use verter_session_query::source::snapshot::SnapshotKey;
@@ -2431,8 +2431,8 @@ fn function_program_index_hash_folds_parse_env_identity() {
     };
     let memo_folded = alpha_of(&index);
 
-    let env_a = crate::source_hash::hash_16(b"env-a");
-    let env_b = crate::source_hash::hash_16(b"env-b");
+    let env_a = verter_semantic_source::source_hash::hash_16(b"env-a");
+    let env_b = verter_semantic_source::source_hash::hash_16(b"env-b");
     let refolded_a = fold_flow_body_env_identity(&index, &env_a, oxc_span::SourceType::ts());
     let refolded_a2 = fold_flow_body_env_identity(&index, &env_a, oxc_span::SourceType::ts());
     let refolded_b = fold_flow_body_env_identity(&index, &env_b, oxc_span::SourceType::ts());

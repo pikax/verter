@@ -77,7 +77,7 @@ fn vue_key(source: &str, options: &verter_language::ParseOptions) -> FileArtifac
     .expect("Vue parse key");
     FileArtifactKey {
         canonical: Arc::from("/component.vue"),
-        content_hash: crate::source_hash::hash_16(source.as_bytes()),
+        content_hash: verter_semantic_source::source_hash::hash_16(source.as_bytes()),
         parse_env_hash: verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         parse_key,
         build_toolchain_fingerprint: current_build_toolchain_fingerprint(),

@@ -780,7 +780,7 @@ impl VerterHost {
         // own refusals: a refused one publishes nothing, as a refused parse.
         let outcome = self.decl_lowering.run_leased(
             &snapshot_key,
-            move |program: Option<&crate::parsed_eval_program::ParsedEvalProgram>| {
+            move |program: Option<&verter_semantic_source::parsed_eval_program::ParsedEvalProgram>| {
                 verter_parser::oxc_parse::refusals_within(|| {
                     let owner_table = Arc::new(match program {
                         Some(parsed) => crate::parse::top_level_owner_table(
@@ -925,7 +925,7 @@ impl VerterHost {
         // memoized only on the overlay artifact that produced them and
         // can never answer a base demand. It holds the cold-index lease so
         // its body demands reuse that one pinned overlay parse.
-        let decl_bodies = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
+        let decl_bodies = Arc::new(verter_semantic_source::decl_body_memo::DeclBodyMemo::new(
             snapshot_key,
             Arc::clone(&eval_source),
             framework_parse

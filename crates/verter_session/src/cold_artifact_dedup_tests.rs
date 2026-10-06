@@ -3938,7 +3938,7 @@ fn vue_overlay_cold_flight_parses_the_script_program_once() {
 /// serves without loading the canonical into the scheduler.
 fn seed_artifact_only_vue(host: &VerterHost, canonical: &str, source: &str) {
     let mut artifact = crate::project_type_store::IndexedReady::new_for_test(
-        crate::source_hash::hash_16(source.as_bytes()),
+        verter_semantic_source::source_hash::hash_16(source.as_bytes()),
     );
     artifact.built_at_content_generation = host.ws().content_generation();
     // The reuse gate is parse-env equality, so a seeded artifact must

@@ -19,7 +19,7 @@ use verter_session_query::facts::{CrossDeclLens, CrossDeclRef, SymbolSpace};
 /// import-binding tables (header data). Falls back to `Unresolved` for
 /// free references.
 #[derive(Debug)]
-pub(crate) struct ShallowLens {
+pub struct ShallowLens {
     locals: FxHashSet<verter_type_expr::DeclBindingKey>,
     value_locals: FxHashSet<verter_type_expr::DeclBindingKey>,
     exported: FxHashSet<verter_type_expr::DeclBindingKey>,
@@ -39,7 +39,7 @@ impl ShallowLens {
     /// Assemble the lens from its owned header tables. The single builder
     /// over a finished shallow file state calls this exactly once per state;
     /// every consumer shares the resulting instance.
-    pub(crate) fn new(
+    pub fn new(
         locals: FxHashSet<verter_type_expr::DeclBindingKey>,
         value_locals: FxHashSet<verter_type_expr::DeclBindingKey>,
         exported: FxHashSet<verter_type_expr::DeclBindingKey>,
@@ -61,7 +61,7 @@ impl ShallowLens {
     /// The backing LOCAL declaration of the public exported name `key`
     /// (`export { Foo as Bar }` / `export { Foo }`); `None` for a reexport or
     /// a name that is not exported.
-    pub(crate) fn local_export_target(
+    pub fn local_export_target(
         &self,
         key: &verter_type_expr::DeclBindingKey,
     ) -> Option<&verter_type_expr::DeclBindingKey> {
@@ -69,7 +69,7 @@ impl ShallowLens {
     }
 
     /// Whether `key` names a public export of the file.
-    pub(crate) fn is_exported(&self, key: &verter_type_expr::DeclBindingKey) -> bool {
+    pub fn is_exported(&self, key: &verter_type_expr::DeclBindingKey) -> bool {
         self.exported.contains(key)
     }
 
@@ -136,7 +136,7 @@ impl CrossDeclLens for OwnedShallowLens<'_> {
 /// are pure parse domain; no resolved canonical is retained anywhere on the
 /// artifact.
 #[derive(Debug)]
-pub(crate) struct RouteLens {
+pub struct RouteLens {
     canonical_id: Arc<str>,
     type_symbols: FxHashSet<verter_type_expr::DeclBindingKey>,
     import_targets:
@@ -147,7 +147,7 @@ impl RouteLens {
     /// Assemble the lens from its owned tables. Built exactly once per
     /// shallow file state, from its final routed state, beside the
     /// fingerprint [`ShallowLens`].
-    pub(crate) fn new(
+    pub fn new(
         canonical_id: Arc<str>,
         type_symbols: FxHashSet<verter_type_expr::DeclBindingKey>,
         import_targets: FxHashMap<
@@ -162,12 +162,12 @@ impl RouteLens {
         }
     }
 
-    pub(crate) fn for_owner(&self, owner: verter_type_expr::TopLevelOwnerId) -> OwnedRouteLens<'_> {
+    pub fn for_owner(&self, owner: verter_type_expr::TopLevelOwnerId) -> OwnedRouteLens<'_> {
         OwnedRouteLens { base: self, owner }
     }
 }
 
-pub(crate) struct OwnedRouteLens<'a> {
+pub struct OwnedRouteLens<'a> {
     base: &'a RouteLens,
     owner: verter_type_expr::TopLevelOwnerId,
 }

@@ -64,7 +64,7 @@ fn with_session_under<T>(
         sources.insert((*canonical).to_string(), Arc::from(*source));
         hashes.insert(
             (*canonical).to_string(),
-            crate::source_hash::hash_16(source.as_bytes()),
+            verter_semantic_source::source_hash::hash_16(source.as_bytes()),
         );
     }
     let deleted: std::collections::HashSet<String> = tombstones
@@ -488,7 +488,7 @@ fn a_pinned_session_request_outlives_overlay_churn() {
     let mut hashes = FxHashMap::default();
     hashes.insert(
         HELPER.to_string(),
-        crate::source_hash::hash_16(HELPER_SOURCE.as_bytes()),
+        verter_semantic_source::source_hash::hash_16(HELPER_SOURCE.as_bytes()),
     );
     let deleted = std::collections::HashSet::new();
     let view = OverlaidViewRef::new(&host, &sources, &hashes, &deleted);

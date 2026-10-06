@@ -20,7 +20,7 @@ use verter_language::FileLanguage;
 use verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet;
 use verter_session_query::analysis::types::AnalyzedMacro;
 
-use crate::decl_body_memo::LoweredValueDecl;
+use verter_semantic_source::decl_body_memo::LoweredValueDecl;
 
 /// One framework's synthesized-default policy.
 ///

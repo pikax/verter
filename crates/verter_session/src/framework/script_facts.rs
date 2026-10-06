@@ -1379,7 +1379,7 @@ fn capability_bits_hash(host: &VerterHost, consumed: &[&'static str]) -> Hash16 
         buf.push(if on { 1 } else { 0 });
         buf.push(0);
     }
-    crate::source_hash::hash_16(&buf)
+    verter_semantic_source::source_hash::hash_16(&buf)
 }
 
 impl VerterHost {

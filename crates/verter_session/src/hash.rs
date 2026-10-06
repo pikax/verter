@@ -84,7 +84,7 @@ pub(crate) fn diff_indices<T: PartialEq>(old: &[T], new: &[T]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source_hash::hash_16;
+    use verter_semantic_source::source_hash::hash_16;
 
     #[test]
     fn diff_indices_same_content() {

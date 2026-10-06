@@ -1912,7 +1912,7 @@ impl VerterHost {
         route_inventory: &Arc<
             verter_session_query::analysis::route_inventory::ScriptRouteInventory,
         >,
-        decl_bodies: &Arc<crate::decl_body_memo::DeclBodyMemo>,
+        decl_bodies: &Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo>,
         framework_parse: Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         eval_source: Option<&str>,
     ) -> Arc<crate::resolver_core::ShallowFileState> {
@@ -2357,7 +2357,7 @@ impl VerterHost {
             // own refusals: a refused one publishes nothing, as a refused parse.
             let outcome = self.decl_lowering.run_leased(
                 &snapshot_key,
-                move |program: Option<&crate::parsed_eval_program::ParsedEvalProgram>| {
+                move |program: Option<&verter_semantic_source::parsed_eval_program::ParsedEvalProgram>| {
                     verter_parser::oxc_parse::refusals_within(|| {
                         let owner_table = Arc::new(match program {
                             Some(parsed) => crate::parse::top_level_owner_table(
@@ -2454,7 +2454,7 @@ impl VerterHost {
             // through the retained snapshot on first semantic demand. It
             // holds the cold-index lease so its body demands reuse that
             // one pinned parse.
-            let decl_bodies = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
+            let decl_bodies = Arc::new(verter_semantic_source::decl_body_memo::DeclBodyMemo::new(
                 snapshot_key,
                 Arc::clone(&eval_source),
                 framework_parse

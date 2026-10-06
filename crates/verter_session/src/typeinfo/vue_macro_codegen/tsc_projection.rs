@@ -522,7 +522,7 @@ fn inferred_class_members(
         is_static: bool,
         groups: &mut BTreeSet<(String, bool)>,
     ) -> Result<(), verter_type_expr::facts::InferenceUnavailableReason> {
-        use crate::typeof_dependencies::SEMANTIC_INFERENCE_TRAVERSAL_BUDGET;
+        use verter_semantic_source::typeof_dependencies::SEMANTIC_INFERENCE_TRAVERSAL_BUDGET;
 
         let mut pending = vec![ty];
         let mut visited = 0usize;
@@ -951,7 +951,9 @@ fn inferred_class_members(
                 UnsupportedReason::SemanticConstruct,
             ));
         };
-        match crate::typeof_dependencies::type_expr_is_declaration_safe(candidate_type) {
+        match verter_semantic_source::typeof_dependencies::type_expr_is_declaration_safe(
+            candidate_type,
+        ) {
             Ok(true) => {}
             Ok(false) => {
                 return Err(ClassInferenceFailure::Unsupported(
@@ -970,8 +972,11 @@ fn inferred_class_members(
         let type_text = verter_type_expr::render_type_expr_display(candidate_type)
             .map_err(|_| ClassInferenceFailure::Unsupported(UnsupportedReason::SemanticConstruct))?
             .text;
-        crate::typeof_dependencies::collect_typeof_roots(candidate_type, &mut value_dependencies)
-            .map_err(ClassInferenceFailure::InferenceUnavailable)?;
+        verter_semantic_source::typeof_dependencies::collect_typeof_roots(
+            candidate_type,
+            &mut value_dependencies,
+        )
+        .map_err(ClassInferenceFailure::InferenceUnavailable)?;
         inferred.push(TscInferredClassMember {
             name: candidate.name,
             occurrence: *occurrence,

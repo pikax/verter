@@ -123,7 +123,7 @@ test("ARH0-god-evidence dirty twin: size-only god module is rejected (AC2)", () 
 test("ARH0-god-evidence dirty twin: touches-only coupling evidence is rejected (AC2)", () => {
   const dirty = cloneProducts();
   const row = dirty["responsibility-map"].godModuleCandidates.find(
-    (r) => r.path === "crates/verter_session/src/flow_slice_content.rs",
+    (r) => r.path === "crates/verter_semantic_source/src/flow_slice_content.rs",
   );
   // Touch count is churn, not coupling: strip fanIn/shared-commits, keep touches.
   row.couplingEvidence = { touchesSinceJune: row.couplingEvidence.touchesSinceJune };

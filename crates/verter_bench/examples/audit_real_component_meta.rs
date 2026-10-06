@@ -656,7 +656,7 @@ fn parse_targets(project_root: &Path) -> io::Result<Vec<String>> {
 /// Dump (and reset) the env-gated decl-lowering handoff rendezvous profile
 /// at a pass boundary. Silent when `VERTER_DECL_HANDOFF_PROFILE` is off.
 fn print_decl_handoff(label: &str) {
-    let Some(s) = verter_session::dump_decl_handoff_stats() else {
+    let Some(s) = verter_semantic_source::decl_lowering::dump_decl_handoff_stats() else {
         return;
     };
     let ms = |ns: u64| ns as f64 / 1e6;
@@ -680,7 +680,7 @@ fn print_decl_handoff(label: &str) {
             + s.run_service_ns
             + s.run_response_ns),
     );
-    verter_session::reset_decl_handoff_stats();
+    verter_semantic_source::decl_lowering::reset_decl_handoff_stats();
 }
 
 fn parse_passes() -> Vec<String> {
@@ -856,7 +856,7 @@ fn main() -> io::Result<()> {
                 // Reset AGAIN after prime so the per-pass dump excludes
                 // the silent prime work for the no-prior-host case.
                 verter_session::reset_from_host_call_sites();
-                verter_session::reset_decl_handoff_stats();
+                verter_semantic_source::decl_lowering::reset_decl_handoff_stats();
                 let started = Instant::now();
                 let rows = run_pass_seq(&host, &project_root, &targets, "warm", &out_dir);
                 eprintln!("warm pass took {:?}\n", started.elapsed());

@@ -15,9 +15,9 @@
 //! materialization refusal fails closed and cannot serve or publish the base
 //! artifact. The authored-body-lowering demand
 //! delegates to the decl-body memo's locator deref
-//! ([`crate::decl_body_memo::DeclBodyMemo::deref_locator_body`]), whose
+//! ([`verter_semantic_source::decl_body_memo::DeclBodyMemo::deref_locator_body`]), whose
 //! demanded lowering runs LEASE-ONLY through
-//! [`crate::decl_lowering::DeclLoweringService::run_leased`] against the
+//! [`verter_semantic_source::decl_lowering::DeclLoweringService::run_leased`] against the
 //! scheduler-retained parse snapshot. The port adds NO second lowering path
 //! and NO resolution of its own — it routes, delegates, maps the typed
 //! product onto the neutral wire vocabulary, and carries the serve's

@@ -183,10 +183,8 @@ pub mod cross_file;
 mod cross_file_augmentation_merge_equivalence_tests;
 #[cfg(test)]
 mod decl_body_dispatch_equivalence_tests;
-pub(crate) mod decl_body_memo;
 #[cfg(test)]
 mod decl_body_memo_tests;
-pub(crate) mod decl_lowering;
 pub mod fact_emission;
 pub mod flow_return_audit;
 pub mod framework;
@@ -194,10 +192,6 @@ pub mod global_contributors;
 pub(crate) mod host_source_demand;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
-pub(crate) mod rune_ambient;
-pub(crate) mod source_hash;
-pub(crate) mod source_lens;
-pub(crate) mod typeof_dependencies;
 #[cfg(test)]
 mod value_symbol_depth_equivalence_tests;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
@@ -213,7 +207,6 @@ pub mod external_ts;
 pub mod file_artifact_store;
 #[cfg(test)]
 mod flow_completion_inventory_tests;
-pub(crate) mod flow_slice_content;
 #[cfg(test)]
 mod flow_slice_content_tests;
 pub(crate) mod graph_walk;
@@ -236,11 +229,6 @@ pub use crate::locator_identity::{assert_r6_key_dimension, assert_r6_key_safe};
 /// neither contains nor converts to a `ProjectionReductionContext`, so the
 /// reducing lowering entry is unreachable from the locator path by type.
 pub use crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx;
-/// Snapshot-backed span-recovery helpers (recover authored spans from a
-/// retained parse via a producer-emitted origin locator, before identity).
-pub(crate) mod locator_span_recovery;
-#[cfg(test)]
-mod locator_span_recovery_tests;
 pub mod member_display_fact_store;
 pub mod member_semantic_fact_store;
 pub mod parse_stable_hash;
@@ -376,7 +364,6 @@ pub mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
 mod parse;
-pub(crate) mod parsed_eval_program;
 /// Portable platform-services boundary: the per-target inventory of
 /// the io/time/scheduling/persistence/process service classes and the
 /// browser-closure dependency guard.
@@ -487,7 +474,6 @@ pub use verter_language::{
 // Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation.
 // The coherent-build sweep counter is the batch-saturation gate's actual base-view sweep count; warm batches sweep ~O(1).
 #[cfg(not(target_arch = "wasm32"))]
-pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
 pub use resolver_store::{
     dump_from_host_call_sites, reset_from_host_call_sites, reset_store_view_coherent_build_sweeps,
     store_view_coherent_build_sweeps,
@@ -796,7 +782,7 @@ pub struct VerterHost {
     /// field, so the retained snapshot lives in a single-thread
     /// thread-local shard (`WASM_DECL_LOWERING_SHARD`) the job runs
     /// inline against — still lease-pinned, NOT a re-parse per demand.
-    pub(crate) decl_lowering: Arc<crate::decl_lowering::DeclLoweringService>,
+    pub(crate) decl_lowering: Arc<verter_semantic_source::decl_lowering::DeclLoweringService>,
     /// Per-host test-injection knob for the compile-tier cold-build
     /// path. When set to `N > 0`, the `Session` cold-compute closure
     /// observes `N` synthetic `FileWholeHash` facts via `observe_fan_out`

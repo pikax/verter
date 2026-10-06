@@ -84,7 +84,7 @@
 //! ## Laziness / content addressing / singleflight
 //!
 //! [`MacroHotMirror`] is a FILE-ARTIFACT child stored adjacent to the
-//! macros + lazy [`DeclBodyMemo`](crate::decl_body_memo::DeclBodyMemo) on
+//! macros + lazy [`DeclBodyMemo`](verter_semantic_source::decl_body_memo::DeclBodyMemo) on
 //! [`IndexedReady`](crate::project_type_store::IndexedReady) — it mirrors the
 //! memo shape. Its identity is the owning artifact's `(canonical,
 //! whole_hash)` plus the `macro_index`; a content edit publishes a fresh

@@ -26,7 +26,7 @@ const SCHEDULER = "crates/verter_scheduler/src/scheduler.rs";
 const FLOW_RETURN = "crates/verter_session/src/project_semantic_dispatch/flow_return.rs";
 const PSD_BUILD = "crates/verter_session/src/project_semantic_dispatch/build.rs";
 const SEMANTIC_QUERY = "crates/verter_session/src/semantic_query.rs";
-const FLOW_SLICE = "crates/verter_session/src/flow_slice_content.rs";
+const FLOW_SLICE = "crates/verter_semantic_source/src/flow_slice_content.rs";
 
 test("ARH1-ratification: clean products validate and cover every mandatory case surface", () => {
   const result = validate(clean, loadManifest(), arh0);

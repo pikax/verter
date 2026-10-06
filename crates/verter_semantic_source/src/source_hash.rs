@@ -5,7 +5,7 @@
 
 use verter_session_query::analysis::types::Hash16;
 
-pub(crate) fn hash_16(input: &[u8]) -> Hash16 {
+pub fn hash_16(input: &[u8]) -> Hash16 {
     verter_audit::attribute_n!(ContentHash, input.len());
     xxhash_rust::xxh3::xxh3_128(input).to_le_bytes()
 }

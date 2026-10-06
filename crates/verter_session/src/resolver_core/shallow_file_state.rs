@@ -22,7 +22,7 @@ use std::sync::Arc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::route_demand::RouteDemand;
-use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
+use verter_semantic_source::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use verter_session_query::analysis::route_inventory::{
     RouteCapability, RouteImportForm, RouteImportedName, ScriptRouteInventory,
 };
@@ -53,7 +53,7 @@ enum RequiredImportClosure {
 #[derive(Debug, Clone)]
 pub struct ShallowFileState {
     inputs: ShallowInputAssembly,
-    decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
+    decl_bodies: Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo>,
     type_deps_cache: dashmap::DashMap<DeclBindingKey, Option<Arc<ClassifiedTypeDeps>>>,
     synthesised_value_bodies: FxHashMap<DeclBindingKey, Arc<LoweredValueDecl>>,
     route_surface_hash: RouteSurfaceHashMemo,
@@ -250,31 +250,35 @@ impl ShallowFileState {
     /// constructors: no symbol inventory, no bodies, every body demand a
     /// genuine miss. Same gate as [`Self::header_routing_only_for_test`].
     #[cfg(any(test, feature = "test-support"))]
-    fn empty_header_only_memo(whole_hash: Hash16) -> Arc<crate::decl_body_memo::DeclBodyMemo> {
+    fn empty_header_only_memo(
+        whole_hash: Hash16,
+    ) -> Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo> {
         let env = verter_session_query::declarations::EvalEnv::default();
         let header_index = Arc::new(
             verter_session_query::declarations::header_index::DeclHeaderIndex::from_eval_env(&env),
         );
-        Arc::new(crate::decl_body_memo::DeclBodyMemo::seeded_from_env(
-            verter_session_query::source::snapshot::SnapshotKey {
-                canonical: Arc::from(""),
-                whole_hash,
-                parse_env_hash: [0u8; 16],
-            },
-            &env,
-            header_index,
-        ))
+        Arc::new(
+            verter_semantic_source::decl_body_memo::DeclBodyMemo::seeded_from_env(
+                verter_session_query::source::snapshot::SnapshotKey {
+                    canonical: Arc::from(""),
+                    whole_hash,
+                    parse_env_hash: [0u8; 16],
+                },
+                &env,
+                header_index,
+            ),
+        )
     }
 
     /// Test-only builder for a SERVICE-backed [`ShallowFileState`] — the
     /// production lazy-memo shape: a live
-    /// [`crate::decl_lowering::DeclLoweringService`] retains the parse
+    /// [`verter_semantic_source::decl_lowering::DeclLoweringService`] retains the parse
     /// snapshot, construction lowers ZERO declaration bodies, and every
     /// declaration body materialises on first demand through the memo
     /// exactly as production (the shared lens pair installs from the
     /// finished state). Broken-lease no-warm regressions break the lease
     /// out-of-band via
-    /// [`crate::decl_body_memo::DeclBodyMemo::release_retained_snapshot_for_test`].
+    /// [`verter_semantic_source::decl_body_memo::DeclBodyMemo::release_retained_snapshot_for_test`].
     /// Gated `#[cfg(any(test, feature = "test-support"))]` — integration tests in
     /// `tests/` compile without `cfg(test)`; release production builds
     /// compile this out.
@@ -365,10 +369,10 @@ impl ShallowFileState {
         let header_index = Arc::new(shallow_index.declaration_headers);
         let route_inventory = Arc::new(shallow_index.routes);
         let eval_source: Arc<str> = Arc::from(source);
-        let whole_hash =
-            whole_hash.unwrap_or_else(|| crate::source_hash::hash_16(source.as_bytes()));
+        let whole_hash = whole_hash
+            .unwrap_or_else(|| verter_semantic_source::source_hash::hash_16(source.as_bytes()));
         let provenance = Arc::new(crate::meta_provenance::MetaProvenance::default());
-        let memo = Arc::new(crate::decl_body_memo::DeclBodyMemo::new(
+        let memo = Arc::new(verter_semantic_source::decl_body_memo::DeclBodyMemo::new(
             verter_session_query::source::snapshot::SnapshotKey {
                 canonical: Arc::from(canonical),
                 whole_hash,
@@ -379,7 +383,7 @@ impl ShallowFileState {
             oxc_span::SourceType::ts(),
             owner_table,
             false,
-            Arc::new(crate::decl_lowering::DeclLoweringService::new()),
+            Arc::new(verter_semantic_source::decl_lowering::DeclLoweringService::new()),
             header_index,
             Arc::clone(&provenance.decl_lowering),
             None,
@@ -450,7 +454,7 @@ impl ShallowFileState {
     pub fn from_route_inventory(
         whole_hash: Hash16,
         route_inventory: Arc<ScriptRouteInventory>,
-        decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
+        decl_bodies: Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo>,
     ) -> Self {
         Self::from_route_inventory_with_memo(whole_hash, route_inventory, decl_bodies)
     }
@@ -467,7 +471,7 @@ impl ShallowFileState {
     fn from_route_inventory_with_memo(
         whole_hash: Hash16,
         route_inventory: Arc<ScriptRouteInventory>,
-        decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
+        decl_bodies: Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo>,
     ) -> Self {
         verter_audit::attribute_scope!(ShallowStateBuild);
         let state =
@@ -486,7 +490,7 @@ impl ShallowFileState {
     fn assemble_from_route_inventory_with_memo(
         whole_hash: Hash16,
         route_inventory: Arc<ScriptRouteInventory>,
-        decl_bodies: Arc<crate::decl_body_memo::DeclBodyMemo>,
+        decl_bodies: Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo>,
     ) -> Self {
         // Capacity bounds are exact per-source counts (cheap header-inventory
         // walks, no allocation); `entry` collisions across the export sources
@@ -644,7 +648,7 @@ impl ShallowFileState {
                 owners: Arc::clone(decl_bodies.owner_table()),
                 rune_ambient: decl_bodies
                     .rune_ambient_visible()
-                    .then_some(crate::rune_ambient::RUNE_AMBIENT_LOOKUP),
+                    .then_some(verter_semantic_source::rune_ambient::RUNE_AMBIENT_LOOKUP),
                 synthesised_value_symbols: FxHashMap::default(),
             },
             decl_bodies,
@@ -677,7 +681,7 @@ impl ShallowFileState {
 
     /// The lazy declaration-body memo this state reads from (the body
     /// authority for this content generation).
-    pub fn decl_bodies(&self) -> &Arc<crate::decl_body_memo::DeclBodyMemo> {
+    pub fn decl_bodies(&self) -> &Arc<verter_semantic_source::decl_body_memo::DeclBodyMemo> {
         &self.decl_bodies
     }
 
@@ -874,7 +878,7 @@ impl ShallowFileState {
                 SourceRead::clean(
                     (owner == TopLevelOwnerId::ordinary_file()
                         && self.decl_bodies.rune_ambient_visible())
-                    .then(|| crate::rune_ambient::rune_ambient_value_decl(name))
+                    .then(|| verter_semantic_source::rune_ambient::rune_ambient_value_decl(name))
                     .flatten(),
                 )
             },
@@ -900,7 +904,7 @@ impl ShallowFileState {
                 SourceRead::clean(
                     (owner == TopLevelOwnerId::ordinary_file()
                         && self.decl_bodies.rune_ambient_visible())
-                    .then(|| crate::rune_ambient::rune_ambient_type_decl(name))
+                    .then(|| verter_semantic_source::rune_ambient::rune_ambient_type_decl(name))
                     .flatten(),
                 )
             }),

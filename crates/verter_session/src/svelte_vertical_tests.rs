@@ -226,7 +226,9 @@ fn module_script_export_is_not_an_instance_member() {
 /// The synthesized BODY (`LoweredValueDecl`, fetched via
 /// `shallow_state.value_decl("default")`) carries the instance members on its
 /// annotation-borne synthesized source.
-fn instance_member_names(default_decl: &crate::decl_body_memo::LoweredValueDecl) -> Vec<String> {
+fn instance_member_names(
+    default_decl: &verter_semantic_source::decl_body_memo::LoweredValueDecl,
+) -> Vec<String> {
     match default_decl.type_annotation.annotation.as_ref() {
         Some(verter_type_expr::facts::SemanticTypeSource::Synthesized(
             verter_type_expr::facts::ResolvedLocalShape::Object(members),

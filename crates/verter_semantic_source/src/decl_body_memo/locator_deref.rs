@@ -45,7 +45,7 @@ impl DeclBodyMemo {
     /// Authored macro payloads reuse THIS memo (the producing canonical's
     /// snapshot) — never a separate payload memo. Every failure is a typed
     /// [`LocatorBodyDerefError`], never a fabricated body.
-    pub(crate) fn deref_locator_body(
+    pub fn deref_locator_body(
         &self,
         locator: &AuthoredBodyLocator,
     ) -> Result<DerefedAuthoredBody, LocatorBodyDerefError> {
@@ -558,7 +558,7 @@ impl DeclBodyMemo {
     /// type argument. Fail-closed: a non-`Ref` position or an out-of-range
     /// ordinal is the typed [`LocatorBodyDerefError::PathUnresolved`] — never
     /// a fabricated argument.
-    pub(crate) fn deref_type_arg(
+    pub fn deref_type_arg(
         &self,
         locator: &verter_type_expr::locators::TypeArgLocator,
     ) -> Result<TypeExpr, LocatorBodyDerefError> {

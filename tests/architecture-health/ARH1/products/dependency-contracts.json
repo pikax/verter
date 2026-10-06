@@ -135,6 +135,7 @@
         "verter_resolution",
         "verter_scheduler",
         "verter_semantic",
+        "verter_semantic_source",
         "verter_session_query",
         "verter_span",
         "verter_type_expr",
@@ -179,6 +180,40 @@
       ],
       "evidence": "crates/verter_resolution/Cargo.toml production dependencies and crate-private ResolverObservation seal",
       "nonHotspotRationale": "The reusable workspace module-resolution implementation is a cohesive kernel below workspace/session consumers; supplied values remain in the query boundary.",
+      "heir": {
+        "id": "ARH12",
+        "kind": "node"
+      }
+    },
+    {
+      "id": "ARH1-LAYER-5",
+      "crate": "crates/verter_semantic_source",
+      "rule": "source-side declaration and flow lowering consumes the syntax front-end and the query boundary only, never the type engine or host orchestration",
+      "mayImport": [
+        "verter_audit",
+        "verter_debug_assert",
+        "verter_ecma",
+        "verter_execution",
+        "verter_language",
+        "verter_parser",
+        "verter_semantic",
+        "verter_session_query",
+        "verter_span",
+        "verter_type_expr",
+        "verter_type_expr_oxc"
+      ],
+      "mustNotImport": [
+        "verter_session",
+        "verter_workspace",
+        "verter_compiler",
+        "verter_scheduler",
+        "verter_protocol",
+        "verter_resolution",
+        "verter_lsp",
+        "verter_tsgo_api",
+        "verter_type_runtime"
+      ],
+      "evidence": "crates/verter_semantic_source/Cargo.toml production dependencies",
       "heir": {
         "id": "ARH12",
         "kind": "node"
@@ -1422,17 +1457,17 @@
       }
     },
     {
-      "path": "crates/verter_session/src/flow_slice_content.rs",
+      "path": "crates/verter_semantic_source/src/flow_slice_content.rs",
       "surfaceDeclarations": [
         {
-          "file": "crates/verter_session/src/lib.rs",
-          "declaration": "pub(crate) mod flow_slice_content;"
+          "file": "crates/verter_semantic_source/src/lib.rs",
+          "declaration": "pub mod flow_slice_content;"
         }
       ],
       "authority": [
         {
           "responsibility": "flow slice content projection",
-          "survivingOwner": "crates/verter_session/src/flow_slice_content.rs",
+          "survivingOwner": "crates/verter_semantic_source/src/flow_slice_content.rs",
           "evidence": "flow_slice_content.rs module contract: the OWNED, arena-free content lowering of exactly one planned flow slice (the content half of the flow-slice substrate)"
         },
         {
@@ -1451,6 +1486,7 @@
           "verter_type_expr_oxc"
         ],
         "external": [
+          "lowering_probe",
           "oxc_allocator",
           "oxc_ast",
           "oxc_ast_visit",
@@ -1467,8 +1503,10 @@
           "verter_ffi",
           "verter_wasm"
         ],
-        "importers": [],
-        "ownerCratePopulation": "6 verter_session files reference flow_slice_content:: at ratification; the module is pub(crate), so there is no cross-crate importer",
+        "importers": [
+          "crates/verter_session/src/flow_slice_content_tests.rs"
+        ],
+        "ownerCratePopulation": "the module lives in verter_semantic_source and is pub; the session reaches it through the declaration-body memo, and its one direct cross-crate importer is the session-resident slice content suite",
         "measurementBasis": "production import tree: cfg(test) and cfg(all(test, ..)) items are stripped before measuring and both use statements and inline crate paths (oxc-qualified items and crate::module::Item paths like crate::semantic_query:: and crate::decl_lowering:: references in lowering helpers) are measured, so the declared sets equal the production direction both ways"
       },
       "constructorCapabilities": [],
@@ -1490,10 +1528,15 @@
         }
       ],
       "minimalPublicSurface": {
-        "retainedFns": [],
-        "retainedTypes": [],
+        "retainedFns": [
+          "selected_span_child"
+        ],
+        "retainedTypes": [
+          "ObjectMemberPolicy",
+          "LoweringWork"
+        ],
         "narrow": [],
-        "rationale": "pub(crate) module with zero cross-crate consumers; the contract is the surfaceDeclarations boundary itself"
+        "rationale": "pub module of the source crate: the session consumes slice content through the declaration-body memo; the retained items are the object-member policy the memo's lowering entry takes, the sibling-selection helper the session-resident slice suite pins, and the test-support lowering work probe"
       },
       "cohesiveModules": [
         {
@@ -1507,7 +1550,7 @@
           ]
         },
         {
-          "module": "crates/verter_session/src/flow_slice_content.rs",
+          "module": "crates/verter_semantic_source/src/flow_slice_content.rs",
           "responsibility": "flow slice content projection",
           "stateOwnership": [
             {

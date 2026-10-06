@@ -13,8 +13,8 @@ use verter_session_query::source::demand::{DemandOutcome, ExpressionSourceDemand
 use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 use verter_type_expr::TypeExpr;
 
-use crate::decl_body_memo::IndexedExpressionDemand;
-use crate::parsed_eval_program::WalkedRead;
+use verter_semantic_source::decl_body_memo::IndexedExpressionDemand;
+use verter_semantic_source::parsed_eval_program::WalkedRead;
 
 /// Take a source read's value, first marking the running request's result
 /// partial when a program walk the read depends on was refused its
@@ -31,7 +31,7 @@ pub(crate) fn consume_walked_read<T>(read: WalkedRead<T>) -> T {
 /// flow-slice store mints one over the memo's retained flow structure.
 #[cfg(test)]
 pub(crate) fn flow_bound_graph_for_tests(
-    memo: &crate::decl_body_memo::DeclBodyMemo,
+    memo: &verter_semantic_source::decl_body_memo::DeclBodyMemo,
     entry: &verter_session_query::function_program::FunctionProgramEntry,
 ) -> verter_session_query::flow::bundle::BoundFlowGraph {
     let key = memo.flow_slice_function_key_for_tests(entry);
@@ -135,7 +135,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::parsed_eval_program::WalkStackRefused;
+    use verter_semantic_source::parsed_eval_program::WalkStackRefused;
 
     /// A module whose first constant nests `depth` parentheses deep, beside
     /// one function. The depth sizes the walk-stack lease of its index walks

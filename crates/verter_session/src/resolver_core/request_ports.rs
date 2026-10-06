@@ -717,19 +717,19 @@ pub trait OwnedLowering {
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredValueDecl>>;
+    ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredValueDecl>>;
     fn effective_type_decl(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>>;
+    ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredTypeDecl>>;
     fn effective_value_decl(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredValueDecl>>;
+    ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredValueDecl>>;
     fn type_dependencies(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,

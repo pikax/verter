@@ -1,0 +1,49 @@
+[package]
+name = "verter_semantic_source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Source-side declaration and flow lowering for Verter: the lazy declaration-body memo, the retained-parse lowering service, flow slice content, and their source helpers"
+publish = false
+
+[features]
+# Exposes the source layer's test seams (work probes, materialization
+# inspectors, fixture constructors) to cross-crate test code. Production
+# builds MUST NOT enable this feature; `verter_session`'s own `test-support`
+# forwards it so one session opt-in turns on the matching seam here.
+test-support = ["verter_session_query/test-support", "verter_semantic/test-support"]
+
+# Dependency closure is a layering contract: this crate sits below the type
+# engine and the session, and depends on neither, nor on the workspace, the
+# compiler, the concrete scheduler, the protocol or any provider.
+[dependencies]
+verter_audit = { path = "../verter_audit" }
+verter_debug_assert = { workspace = true }
+verter_ecma = { workspace = true }
+verter_execution = { path = "../verter_execution" }
+verter_language = { path = "../verter_language" }
+verter_parser = { path = "../verter_parser" }
+verter_semantic = { path = "../verter_semantic" }
+verter_session_query = { workspace = true }
+verter_span = { path = "../verter_span" }
+verter_type_expr = { workspace = true }
+verter_type_expr_oxc = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_ast_visit = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+oxc_syntax = { workspace = true }
+crossbeam-channel = "0.5.15"
+dashmap = "6.2"
+parking_lot = "0.12.5"
+rustc-hash = { workspace = true }
+self_cell = { workspace = true }
+tracing = "0.1.44"
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+[dev-dependencies]
+verter_session_query = { workspace = true, features = ["test-support"] }

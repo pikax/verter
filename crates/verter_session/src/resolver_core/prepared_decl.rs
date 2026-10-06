@@ -10,8 +10,8 @@ use verter_session_query::type_solver::{
 use verter_type_expr::TopLevelOwnerId;
 
 use super::ShallowFileState;
-use crate::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use crate::identity_interner::IdentityInterner;
+use verter_semantic_source::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use verter_session_query::inputs::prepared::{
     ImportBinding, PreparationFailure, PreparedDeclOutcome, PreparedOwnerScope,
     PreparedTypeDeclResolution, TypeParamBinding,

@@ -128,10 +128,14 @@ binding table lives in
 `crates/verter_session/src/semantic_query/query_key_spec.rs` and is
 written only by its generator.
 
-### Flow slice content — `crates/verter_session/src/flow_slice_content.rs`
+### Flow slice content — `crates/verter_semantic_source/src/flow_slice_content.rs`
 
 The owned, arena-free content lowering of exactly one planned flow slice.
-A `pub(crate)` module with zero cross-crate consumers; slice publication
+A `pub` module of the source crate; the session reaches it through the
+declaration-body memo. Its retained surface is the object-member policy the
+memo's lowering entry takes (`ObjectMemberPolicy`), the sibling-selection
+helper the session-resident slice suite pins (`selected_span_child`) and the
+test-support lowering work probe (`LoweringWork`). Slice publication
 admission stays with `flow_return.rs`, where the budget outcome gates
 admission.
 
@@ -149,7 +153,7 @@ matrix linked above.
 | `crates/verter_session/src/semantic_query.rs` (every retained type/assoc item above) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
 | `crates/verter_session/src/project_semantic_dispatch/flow_return.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
 | `crates/verter_session/src/project_semantic_dispatch/build.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
-| `crates/verter_session/src/flow_slice_content.rs` (pub(crate) module boundary) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
+| `crates/verter_semantic_source/src/flow_slice_content.rs` (every retained fn/type above) | `vue.language_service.typing`, `svelte.language_service.typing`, `vue.tsc.project_check`, `svelte.tsc.project_check` |
 
 The contributor-docs model joins that table to every retained fn/type/assoc
 item (and to the hotspot path itself when the retained list is empty). A

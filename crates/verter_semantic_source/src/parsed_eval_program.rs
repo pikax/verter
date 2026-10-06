@@ -125,7 +125,7 @@ self_cell::self_cell!(
 
 /// A retained eval-program parse: the `self_cell` owner/dependent pair plus
 /// the parse-outcome facts walkers need (`had_errors`).
-pub(crate) struct ParsedEvalProgram {
+pub struct ParsedEvalProgram {
     cell: Rc<ParsedEvalProgramCell>,
     functions: OnceCell<IndexedProgramFunctionsCell>,
     /// The program's nesting scan, shared by every walk stack over it
@@ -196,7 +196,7 @@ impl ParsedEvalProgram {
     }
 
     /// The parsed program AST, borrowed from the retained arena.
-    pub(crate) fn borrow_dependent(&self) -> &CachedEvalProgramAst<'_> {
+    pub fn borrow_dependent(&self) -> &CachedEvalProgramAst<'_> {
         self.cell.borrow_dependent()
     }
 
@@ -207,7 +207,7 @@ impl ParsedEvalProgram {
     /// the one fallible step: a refused lease is [`WalkStackRefused`], returned
     /// for the operation around it, and leaves nothing indexed, so a later
     /// demand whose lease is granted indexes the program.
-    pub(crate) fn function_program_index(
+    pub fn function_program_index(
         &self,
         owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
         canonical: Arc<str>,
@@ -322,7 +322,7 @@ impl ParsedEvalProgram {
 
     /// Whether the parse recovered from errors (`ParserReturn::errors`
     /// non-empty). See the field docs — non-usage provers fail open on this.
-    pub(crate) fn had_errors(&self) -> bool {
+    pub fn had_errors(&self) -> bool {
         self.had_errors
     }
 
@@ -330,13 +330,13 @@ impl ParsedEvalProgram {
     /// `.vue` eval program, the position-preserving extracted script
     /// (script bytes at raw SFC offsets), so every span the program
     /// carries is already SFC-absolute.
-    pub(crate) fn source_str(&self) -> &str {
+    pub fn source_str(&self) -> &str {
         self.cell.borrow_owner().source.as_ref()
     }
 
     /// The `SourceType` the parse ran under — the self-consistent type
     /// for any walker consuming this program.
-    pub(crate) fn source_type(&self) -> oxc_span::SourceType {
+    pub fn source_type(&self) -> oxc_span::SourceType {
         self.cell.borrow_owner().source_type
     }
 }

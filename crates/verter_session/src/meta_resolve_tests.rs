@@ -4940,7 +4940,7 @@ export interface Props { overlay: number }"#;
     assert_eq!(description, Some("Session documentation"));
     assert_ne!(description, Some("Base documentation"));
 
-    let overlay_hash = crate::source_hash::hash_16(overlay_source.as_bytes());
+    let overlay_hash = verter_semantic_source::source_hash::hash_16(overlay_source.as_bytes());
     assert!(
         resolved.fact_versions.iter().any(|fact| matches!(
             fact,

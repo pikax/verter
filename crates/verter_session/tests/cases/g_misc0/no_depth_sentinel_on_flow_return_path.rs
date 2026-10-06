@@ -3,7 +3,7 @@
 //! The demand-sliced `FlowReturn` producer
 //! (`crates/verter_session/src/project_semantic_dispatch/flow_return.rs`)
 //! evaluates a demanded function through the slice-gated owned content
-//! (`crates/verter_session/src/flow_slice_content.rs`). The evaluation
+//! (`crates/verter_semantic_source/src/flow_slice_content.rs`). The evaluation
 //! walk — region/statement recursion, the contributor join, the
 //! coinductive hold discharge, and the tagged SCC close — carries NO
 //! depth counter and NO depth sentinel: recursion is discharged
@@ -33,7 +33,7 @@ use std::path::Path;
 /// The producer files the sentinel is forbidden in.
 const PRODUCER_FILES: &[&str] = &[
     "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
-    "crates/verter_session/src/flow_slice_content.rs",
+    "crates/verter_semantic_source/src/flow_slice_content.rs",
 ];
 
 /// The forbidden sentinel markers.

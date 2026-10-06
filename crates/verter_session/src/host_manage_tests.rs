@@ -20099,7 +20099,7 @@ fn overlay_views_of_an_open_owner_keep_two_component_meta_views() {
         let mut overlay_hashes = rustc_hash::FxHashMap::default();
         overlay_hashes.insert(
             DEPENDENCY.to_string(),
-            crate::source_hash::hash_16(source.as_bytes()),
+            verter_semantic_source::source_hash::hash_16(source.as_bytes()),
         );
         overlays.insert(DEPENDENCY.to_string(), source);
         let view = OverlaidViewRef::new(&host, &overlays, &overlay_hashes, &tombstones);

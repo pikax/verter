@@ -33,7 +33,9 @@ use verter_type_expr::facts::{
 };
 use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
-use crate::decl_body_memo::{lowered_value_decl_for_synthesised_default, LoweredValueDecl};
+use verter_semantic_source::decl_body_memo::{
+    lowered_value_decl_for_synthesised_default, LoweredValueDecl,
+};
 
 /// Property name on the synthesised SFC instance that carries the
 /// `defineProps<T>()` shape.

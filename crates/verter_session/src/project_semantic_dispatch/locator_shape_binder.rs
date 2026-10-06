@@ -266,7 +266,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `ensure_indexed_ready_serve` (exactly as `build_instantiate` does)
     /// and recorded on the read-set via the observed self-root — never
     /// carried in the key (R6). The WORKER phase
-    /// ([`crate::decl_body_memo::DeclBodyMemo::deref_locator_body`]) derefs
+    /// ([`verter_semantic_source::decl_body_memo::DeclBodyMemo::deref_locator_body`]) derefs
     /// the locator through the artifact's retained snapshot (lease-only)
     /// and returns owned typed IR; this build graph-lowers that IR into
     /// ROLE-FREE locator-shape nodes with the decl's type parameters bound

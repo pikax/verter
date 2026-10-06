@@ -24,12 +24,12 @@ use verter_compiler::types::NodeProp;
 
 use crate::hash::semantic_hash;
 use crate::id::resolve_external;
-use crate::source_hash::hash_16;
 use crate::types::{
     DescriptorMin, DiagnosticsSnapshot, ExternalBlockKind, ExternalSourceRequest, FileMeta,
     HostDiagnostic, HostSeverity, ParseSnapshot, PendingPreprocessorRequest, SliceHashes,
     SrcBlockInfo,
 };
+use verter_semantic_source::source_hash::hash_16;
 
 /// Closed failure while assigning carrier statements to typed script regions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -1219,7 +1219,7 @@ pub(crate) enum FrameworkScriptProgram<'a> {
     /// The flight's eval program IS the snapshot's script program (the eval
     /// source was the position-preserving extracted script): walk it, parse
     /// nothing.
-    Shared(&'a crate::parsed_eval_program::ParsedEvalProgram),
+    Shared(&'a verter_semantic_source::parsed_eval_program::ParsedEvalProgram),
     /// The flight's single eval-program parse was fatal (recovered panic). A
     /// re-parse over the same bytes under the same source type fails
     /// identically, so the snapshot defaults directly with zero additional
@@ -2189,7 +2189,7 @@ pub(crate) enum VueScriptProgram<'a> {
     /// The flight's eval program IS the script program (the eval
     /// source was the position-preserving extracted script): walk it,
     /// parse nothing.
-    Shared(&'a crate::parsed_eval_program::ParsedEvalProgram),
+    Shared(&'a verter_semantic_source::parsed_eval_program::ParsedEvalProgram),
     /// The flight's single parse attempt over the extracted script was
     /// fatal (recovered panic). A re-parse over the same bytes under
     /// the same source type fails identically, so every script output

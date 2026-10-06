@@ -1279,7 +1279,7 @@
       "provenance": "hand-written"
     },
     {
-      "path": "crates/verter_session/src/flow_slice_content.rs",
+      "path": "crates/verter_semantic_source/src/flow_slice_content.rs",
       "loc": 9427,
       "classification": "god-module-candidate",
       "responsibilities": [
@@ -1366,7 +1366,7 @@
         "generated": true
       },
       {
-        "path": "crates/verter_session/src/flow_slice_content.rs",
+        "path": "crates/verter_semantic_source/src/flow_slice_content.rs",
         "loc": 9427,
         "generated": false
       },

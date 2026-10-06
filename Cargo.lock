@@ -3335,6 +3335,7 @@ dependencies = [
  "verter_diagnostics",
  "verter_parser",
  "verter_semantic",
+ "verter_semantic_source",
  "verter_session",
  "verter_session_query",
  "verter_span",
@@ -3861,6 +3862,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_semantic_source"
+version = "0.0.1-beta.6"
+dependencies = [
+ "crossbeam-channel",
+ "dashmap",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_parser",
+ "oxc_span",
+ "oxc_syntax",
+ "parking_lot",
+ "rustc-hash",
+ "self_cell",
+ "tracing",
+ "verter_audit",
+ "verter_debug_assert",
+ "verter_ecma",
+ "verter_execution",
+ "verter_language",
+ "verter_parser",
+ "verter_semantic",
+ "verter_session_query",
+ "verter_span",
+ "verter_type_expr",
+ "verter_type_expr_oxc",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "verter_session"
 version = "0.0.1-beta.6"
 dependencies = [
@@ -3922,6 +3953,7 @@ dependencies = [
  "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
+ "verter_semantic_source",
  "verter_session",
  "verter_session_oracle_macro",
  "verter_session_query",

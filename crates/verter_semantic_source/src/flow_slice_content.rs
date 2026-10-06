@@ -100,7 +100,7 @@ use verter_semantic::analysis::type_eval_build::{
 use verter_session_query::flow::completion::{
     CompletionConstruction, CompletionDischarge, NormalCompletion,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use verter_session_query::flow::slice::capture_lookup_probe;
 use verter_session_query::flow::{
     binding::FlowBindingRef,
@@ -3297,19 +3297,19 @@ fn suffix_return_of(statement: &Statement<'_>) -> SuffixReturn {
 /// ([`Lowerer::classify_guard`]), the expressions it lowers
 /// ([`Lowerer::lower_expr`]) and the classes its same-frame effect scans
 /// enter ([`LeafCallScanner`]); test-only.
-#[cfg(test)]
-pub(crate) mod lowering_probe {
+#[cfg(any(test, feature = "test-support"))]
+pub mod lowering_probe {
     use std::cell::RefCell;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
     #[derive(Debug, Default)]
-    pub(crate) struct LoweringWork {
-        pub(crate) guard_classifications: AtomicUsize,
-        pub(crate) expressions: AtomicUsize,
-        pub(crate) declaration_lookup_visits: AtomicUsize,
-        pub(crate) scanned_classes: AtomicUsize,
+    pub struct LoweringWork {
+        pub guard_classifications: AtomicUsize,
+        pub expressions: AtomicUsize,
+        pub declaration_lookup_visits: AtomicUsize,
+        pub scanned_classes: AtomicUsize,
     }
     thread_local! {
         static ACTIVE: RefCell<Option<Arc<LoweringWork>>> = const { RefCell::new(None) };
@@ -3769,7 +3769,7 @@ enum SliceBreakTarget {
 
 /// Source-ordered syntax siblings are disjoint; only the one containing the
 /// exact indexed binding can supply its annotation. Each level costs log(N).
-pub(crate) fn selected_span_child<T: GetSpan>(items: &[T], target: oxc_span::Span) -> Option<&T> {
+pub fn selected_span_child<T: GetSpan>(items: &[T], target: oxc_span::Span) -> Option<&T> {
     let at = items.partition_point(|item| item.span().end <= target.start);
     items.get(at).filter(|item| {
         let span = item.span();
@@ -5100,7 +5100,7 @@ impl<'a> Lowerer<'a> {
     fn classify_binding(&self, binding: SkeletonBindingId) -> NameBinding {
         let binding = self.bindings.canonical_local(binding);
         let shape = self.bindings.runtime_shape(binding);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         capture_lookup_probe::inspect();
         if shape.has_destructured_var && !self.frame_gate.destructured_var_is_modelled(binding) {
             return NameBinding::Unmodeled;
@@ -7032,7 +7032,7 @@ impl<'a> Lowerer<'a> {
     /// operand whose disposition it composes, with the wait that composes
     /// it (none where the form's disposition IS the operand's).
     fn classify_guard_step<'t>(&mut self, test: &'t Expression<'t>) -> GuardStep<'t> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         lowering_probe::classify();
         // The whole test rides the same reference-transparent wrappers a
         // leaf reference does — parentheses and the postfix non-null
@@ -11659,7 +11659,7 @@ impl<'a> Lowerer<'a> {
         while let Some(task) = tasks.pop() {
             match task {
                 Task::Lower(expr, mode) => {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     lowering_probe::expression();
                     // A parenthesised operator form lowers as the form
                     // (the fall-through of [`Self::lower_expr_level`] peels
@@ -14101,7 +14101,7 @@ impl<'a> Lowerer<'a> {
         }
         impl<'a> Visit<'a> for Finder<'a> {
             fn visit_statement(&mut self, statement: &Statement<'a>) {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 lowering_probe::declaration_lookup_visit();
                 let span = statement.span();
                 if self.found.is_none()
@@ -14112,7 +14112,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             fn visit_expression(&mut self, expression: &Expression<'a>) {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 lowering_probe::declaration_lookup_visit();
                 let span = expression.span();
                 if self.found.is_none()
@@ -16405,7 +16405,7 @@ impl<'a> Visit<'a> for LeafCallScanner<'a> {
         //
         // The skeleton records no write of the class subtree, so every
         // write under this visit — heritage included — is skeleton-hidden.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         lowering_probe::scanned_class();
         self.class_nesting += 1;
         self.visit_decorators(&it.decorators);

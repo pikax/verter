@@ -199,7 +199,7 @@ pub struct IndexedReady {
     /// MACRO type-argument graph handles — the
     /// [`MacroHotMirror`](crate::structural_carrier_producer::MacroHotMirror).
     ///
-    /// A FILE-ARTIFACT child (mirrors the [`DeclBodyMemo`](crate::decl_body_memo::DeclBodyMemo)
+    /// A FILE-ARTIFACT child (mirrors the [`DeclBodyMemo`](verter_semantic_source::decl_body_memo::DeclBodyMemo)
     /// shape): keyed per `macro_index`, the mode-NEUTRAL `HotTypeRef` is
     /// produced on FIRST demand through the shared query-free structural
     /// lowerer, NOT eagerly at publish. Its identity is the owning

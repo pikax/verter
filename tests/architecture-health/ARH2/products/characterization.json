@@ -242,12 +242,12 @@
       ]
     },
     {
-      "path": "crates/verter_session/src/flow_slice_content.rs",
+      "path": "crates/verter_semantic_source/src/flow_slice_content.rs",
       "crate": "verter_session",
       "responsibilities": [
         {
           "responsibility": "flow slice content projection",
-          "survivingOwner": "crates/verter_session/src/flow_slice_content.rs"
+          "survivingOwner": "crates/verter_semantic_source/src/flow_slice_content.rs"
         },
         {
           "responsibility": "slice publication admission",

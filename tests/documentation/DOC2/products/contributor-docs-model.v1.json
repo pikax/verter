@@ -21,7 +21,7 @@
         "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
         "crates/verter_session/src/project_semantic_dispatch/build.rs",
         "crates/verter_session/src/semantic_query.rs",
-        "crates/verter_session/src/flow_slice_content.rs"
+        "crates/verter_semantic_source/src/flow_slice_content.rs"
       ]
     },
     {
@@ -46,7 +46,7 @@
         "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
         "crates/verter_session/src/project_semantic_dispatch/build.rs",
         "crates/verter_session/src/semantic_query.rs",
-        "crates/verter_session/src/flow_slice_content.rs"
+        "crates/verter_semantic_source/src/flow_slice_content.rs"
       ]
     },
     {
@@ -221,7 +221,7 @@
       ]
     },
     {
-      "hotspot": "crates/verter_session/src/flow_slice_content.rs",
+      "hotspot": "crates/verter_semantic_source/src/flow_slice_content.rs",
       "item": "*",
       "catalogIds": [
         "vue.language_service.typing",

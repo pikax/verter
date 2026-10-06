@@ -8,8 +8,8 @@ use rustc_hash::FxHashMap;
 
 use thiserror::Error;
 
-use crate::decl_lowering::DECL_LOWERING_DEFAULT_POOL_SIZE;
 pub use verter_language::FileLanguage;
+use verter_semantic_source::decl_lowering::DECL_LOWERING_DEFAULT_POOL_SIZE;
 
 /// Compact hex rendering of a [`Hash16`] for audit trace detail strings.
 /// The `{:?}` byte-array form costs ~4 chars per byte (`"255, "`) — on
@@ -191,7 +191,7 @@ impl CompileCacheMode {
             Self::Content => 0x01,
             Self::Session => 0x02,
         });
-        crate::source_hash::hash_16(&buf)
+        verter_semantic_source::source_hash::hash_16(&buf)
     }
 }
 
@@ -221,7 +221,7 @@ impl DowngradeReason {
             Self::HasDevLastGood => 0x07,
             Self::CssHashOverridePresent => 0x08,
         });
-        crate::source_hash::hash_16(&buf)
+        verter_semantic_source::source_hash::hash_16(&buf)
     }
 }
 
@@ -251,7 +251,7 @@ impl SourceMapPolicy {
             Self::External => 0x01,
             Self::None => 0x02,
         });
-        crate::source_hash::hash_16(&buf)
+        verter_semantic_source::source_hash::hash_16(&buf)
     }
 }
 
@@ -381,7 +381,7 @@ mod stable_hash_snapshot_tests {
         let mut buf = Vec::with_capacity(40);
         buf.extend_from_slice(b"verter.compile_cache_mode.v1:");
         buf.push(0x02);
-        let expected = crate::source_hash::hash_16(&buf);
+        let expected = verter_semantic_source::source_hash::hash_16(&buf);
         assert_eq!(CompileCacheMode::Session.stable_hash(), expected);
     }
 
@@ -390,7 +390,7 @@ mod stable_hash_snapshot_tests {
         let mut buf = Vec::with_capacity(40);
         buf.extend_from_slice(b"verter.downgrade_reason.v1:");
         buf.push(0x03); // HasModuleAugmentation
-        let expected = crate::source_hash::hash_16(&buf);
+        let expected = verter_semantic_source::source_hash::hash_16(&buf);
         assert_eq!(
             DowngradeReason::HasModuleAugmentation.stable_hash(),
             expected
@@ -402,7 +402,7 @@ mod stable_hash_snapshot_tests {
         let mut buf = Vec::with_capacity(40);
         buf.extend_from_slice(b"verter.source_map_policy.v1:");
         buf.push(0x00); // Inline
-        let expected = crate::source_hash::hash_16(&buf);
+        let expected = verter_semantic_source::source_hash::hash_16(&buf);
         assert_eq!(SourceMapPolicy::Inline.stable_hash(), expected);
     }
 
@@ -803,7 +803,7 @@ pub struct HostResourcePolicy {
     /// ([`verter_scheduler::HostCpuPool`]). Throughput-only.
     pub host_cpu_pool: PoolPolicy,
     /// Scheduler-side lazy declaration-lowering worker pool
-    /// ([`crate::decl_lowering`]).
+    /// ([`verter_semantic_source::decl_lowering`]).
     pub decl_lowering: PoolPolicy,
 }
 
@@ -4100,7 +4100,7 @@ mod tests {
     #[test]
     fn anchor_revision_from_whole_hash_agrees_with_of_source() {
         let source = "<script setup lang=\"ts\">\ndefineSlots<{}>()\n</script>";
-        let whole_hash = crate::source_hash::hash_16(source.as_bytes());
+        let whole_hash = verter_semantic_source::source_hash::hash_16(source.as_bytes());
         assert_eq!(
             AnalysisSourceRevision::from_whole_hash(whole_hash),
             AnalysisSourceRevision::of_source(source),

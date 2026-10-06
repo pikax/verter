@@ -5022,11 +5022,6 @@ pub(crate) mod foundations_guards {
         // default build never compiles them. `upgrade_snapshots_to_v4` is the
         // schema-v4 tsgo-free re-key (supersedes the v2→v3 re-key export).
         "pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to_v4, GenError}",
-        // Env-gated declaration-lowering rendezvous instrumentation. The
-        // audit/profile examples consume this narrow snapshot API across the
-        // crate boundary; ordinary runtime code never consults it, and the
-        // disabled path records no counters or timestamps.
-        "pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot}",
         // Resolver-store instrumentation re-exports, one wrapped statement:
         // the per-call-site `HostStoreView::from_host` attribution table
         // (`dump_from_host_call_sites` / `reset_from_host_call_sites`,
@@ -6797,7 +6792,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         // funnel; `host_manage::eval_program::parse_eval_program` is
         // its sole production caller and counts every execution on the
         // `eval_program_parses` provenance rail.
-        ("crates/verter_session/src/parsed_eval_program.rs", 1),
+        ("crates/verter_semantic_source/src/parsed_eval_program.rs", 1),
         // The `#[cfg(any(test, debug_assertions))]` service-backed test
         // constructor (`service_backed_core_for_test`): parses the
         // fixture source ONCE at construction to build the header index
@@ -6814,7 +6809,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         // ONCE into a `OnceLock` via a one-shot OXC parse. It is not a per-file
         // materialise flight, so the scheduler is not its authority — the parse
         // is the static prelude build, run at most once per process.
-        ("crates/verter_session/src/rune_ambient.rs", 1),
+        ("crates/verter_semantic_source/src/rune_ambient.rs", 1),
         // The framework two-pass script-fact seam's syntax-capture half
         // (`capture_candidates_for`): a PARSE-DOMAIN-only re-parse that runs a
         // provider's syntax-only candidate capture over a fresh OXC program. The
@@ -7031,11 +7026,15 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         false
     }
 
-    let crate_root = workspace_path("crates/verter_session/src");
+    let crate_roots = [
+        workspace_path("crates/verter_session/src"),
+        workspace_path("crates/verter_semantic_source/src"),
+    ];
     let mut violators: Vec<String> = Vec::new();
     let mut allowed_hits: Vec<String> = Vec::new();
-    for entry in walkdir::WalkDir::new(&crate_root)
-        .into_iter()
+    for entry in crate_roots
+        .iter()
+        .flat_map(|root| walkdir::WalkDir::new(root).into_iter())
         .filter_map(Result::ok)
         .filter(|e| e.path().is_file())
     {
@@ -13671,7 +13670,7 @@ mod lazy_decl_body_storage_guards {
 /// build.
 #[test]
 fn decl_lowering_wasm_path_retains_snapshot_source_guard() {
-    let src = read_workspace_file("crates/verter_session/src/decl_lowering.rs");
+    let src = read_workspace_file("crates/verter_semantic_source/src/decl_lowering.rs");
 
     // Stale "no retention" / "parse inline per call" wording is gone.
     for stale in ["parse inline per call", "No retention", "no retention"] {
@@ -15059,7 +15058,9 @@ fn oxc_worker_emits_no_session_graph_node() {
         &workspace_path("crates/verter_semantic/src/analysis"),
         &mut files,
     );
-    files.push(workspace_path("crates/verter_session/src/decl_lowering.rs"));
+    files.push(workspace_path(
+        "crates/verter_semantic_source/src/decl_lowering.rs",
+    ));
     // Anti-vacuity: the walker found a real, non-trivial worker surface.
     assert!(
         files.len() > 5,

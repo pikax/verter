@@ -437,7 +437,7 @@ pub(crate) trait HostSourcePort {
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>>;
+    ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredTypeDecl>>;
     /// The owner's raw-source surfaces in one `SymbolSpace` — the escape-free
     /// read of the syntactic symbol inventory the `typeinfo::oracle_core`
     /// source walk consumes. Same gate as [`Self::lowered_type_decl`].
@@ -484,7 +484,7 @@ impl<T: SourceInputProvider> HostSourcePort for T {
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>> {
+    ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredTypeDecl>> {
         let Some(source) = self.source(source) else {
             missing_source();
             return None;
@@ -888,7 +888,7 @@ impl<
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredValueDecl>> {
+    ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredValueDecl>> {
         let Some(source) = self.source(source) else {
             missing_source();
             return None;
@@ -900,7 +900,7 @@ impl<
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredTypeDecl>> {
+    ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredTypeDecl>> {
         let Some(source) = self.source(source) else {
             missing_source();
             return None;
@@ -912,7 +912,7 @@ impl<
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
-    ) -> Option<Arc<crate::decl_body_memo::LoweredValueDecl>> {
+    ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredValueDecl>> {
         let Some(source) = self.source(source) else {
             missing_source();
             return None;

@@ -29,7 +29,9 @@ use verter_type_expr::locators::{
 use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 use verter_type_expr::PrimitiveName;
 
-use crate::decl_body_memo::{lowered_value_decl_for_synthesised_default, LoweredValueDecl};
+use verter_semantic_source::decl_body_memo::{
+    lowered_value_decl_for_synthesised_default, LoweredValueDecl,
+};
 
 use super::vue_default_synth::VUE_INSTANCE_PROPS_MEMBER;
 

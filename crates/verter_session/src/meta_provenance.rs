@@ -191,7 +191,7 @@ pub struct MetaProvenance {
     /// builds, lowered declaration bodies). Owned by the lowering side and
     /// shared with every declaration-body memo this host builds; this facade
     /// only aggregates it.
-    pub decl_lowering: std::sync::Arc<crate::decl_lowering::DeclLoweringCounters>,
+    pub decl_lowering: std::sync::Arc<verter_semantic_source::decl_lowering::DeclLoweringCounters>,
     /// Carrier parses performed through the single counted carrier
     /// store-leader frontend boundary — every framework
     /// carrier (`.vue`, `.svelte`, …) increments this exactly once per

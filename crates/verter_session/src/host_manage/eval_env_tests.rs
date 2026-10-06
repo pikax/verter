@@ -505,7 +505,7 @@ fn c4_dependency_value_symbol_graph_native_matches_oracle_and_is_bounded() {
 /// peel completes.
 ///
 /// Discrimination proof (verified by break → red → revert): removing the
-/// `if !crate::rune_ambient::is_svelte_rune_module(...)` gate makes the
+/// `if !verter_semantic_source::rune_ambient::is_svelte_rune_module(...)` gate makes the
 /// oracle `peel_value_decl_alias` debug cross-check fire on the
 /// `(rune-module, reexp)` divergence → this test PANICS (RED) in a debug
 /// build. With the gate, the peel returns `$state` (oracle terminal)

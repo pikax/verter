@@ -380,7 +380,7 @@ const OVERSIZE_SOURCE_EXEMPTIONS = new Set([
   "crates/verter_session/src/project_semantic_dispatch/mod.rs",
   "crates/verter_session/src/project_semantic_dispatch/raise.rs",
   "crates/verter_session/src/project_type_store.rs",
-  "crates/verter_session/src/decl_body_memo.rs",
+  "crates/verter_semantic_source/src/decl_body_memo.rs",
   "crates/verter_session/src/host_manage/eval_env.rs",
   "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
   "crates/verter_type_expr/src/facts.rs",

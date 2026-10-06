@@ -401,21 +401,21 @@ pub struct IndexedExpressionDemand {
     snapshot: Arc<SnapshotDemandLease>,
     index: Arc<FunctionIndexDemand>,
     carrier_module: bool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
 }
 /// See module docs.
 pub struct DeclBodyMemo {
-    #[cfg(test)]
-    pub(crate) capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
     /// This memo's slice lowerings' work
     /// ([`crate::flow_slice_content::lowering_probe`]).
-    #[cfg(test)]
-    pub(crate) lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
     key: SnapshotKey,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     eval_source: Arc<str>,
     framework_parse: Option<verter_session_query::source::framework_parse::FrameworkParseFacts>,
     owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
@@ -436,7 +436,7 @@ pub struct DeclBodyMemo {
     header_index: Arc<DeclHeaderIndex>,
     counters: Arc<DeclLoweringCounters>,
     /// The ONE shared shallow cross-decl lens, built ONCE per state by
-    /// [`crate::fact_emission::build_shallow_lens`] and installed at the end of
+    /// the session's `fact_emission::build_shallow_lens` and installed at the end of
     /// `ShallowFileState` construction (the lens derives from the FINISHED
     /// state, which owns this memo — so it cannot be a plain constructor
     /// argument). Consulted by the lowering-time body-fingerprint producer;
@@ -482,7 +482,7 @@ impl DeclBodyMemo {
     /// `None`, the memo acquires its own lease lazily on first body demand
     /// (see [`Self::ensure_lease`]).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         key: SnapshotKey,
         eval_source: Arc<str>,
         framework_parse: Option<verter_session_query::source::framework_parse::FrameworkParseFacts>,
@@ -513,12 +513,12 @@ impl DeclBodyMemo {
             function_program_index: OnceLock::new(),
         });
         Self {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             capture_lookup_work: Arc::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             lowering_work: Arc::default(),
             key,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             eval_source,
             framework_parse,
             owner_table,
@@ -545,7 +545,7 @@ impl DeclBodyMemo {
     /// the lazy path performs, and the whole env is pre-set. No service;
     /// nothing lowers lazily.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn seeded_from_env(
+    pub fn seeded_from_env(
         key: SnapshotKey,
         env: &EvalEnv,
         header_index: Arc<DeclHeaderIndex>,
@@ -570,12 +570,12 @@ impl DeclBodyMemo {
             function_program_index: OnceLock::new(),
         });
         let memo = Self {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             capture_lookup_work: Arc::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             lowering_work: Arc::default(),
             key,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             eval_source: Arc::from(""),
             framework_parse: None,
             owner_table: Arc::new(
@@ -678,11 +678,11 @@ impl DeclBodyMemo {
         memo
     }
 
-    pub(crate) fn header_index(&self) -> &Arc<DeclHeaderIndex> {
+    pub fn header_index(&self) -> &Arc<DeclHeaderIndex> {
         &self.header_index
     }
 
-    pub(crate) fn owner_table(
+    pub fn owner_table(
         &self,
     ) -> &Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable> {
         &self.owner_table
@@ -692,14 +692,14 @@ impl DeclBodyMemo {
     /// the end of `ShallowFileState` construction (the lens derives from the
     /// finished state), strictly before any body demand can reach
     /// [`Self::lower_demanded`]. Idempotent on a repeat set (first wins).
-    pub(crate) fn install_shallow_lens(&self, lens: Arc<ShallowLens>) {
+    pub fn install_shallow_lens(&self, lens: Arc<ShallowLens>) {
         let _ = self.lens.set(lens);
     }
 
     /// The shared shallow lens — the SAME `Arc` the lazy body-fact source
     /// carries, so the lowering-time fingerprint and the fact emission read
     /// one lens instance.
-    pub(crate) fn shallow_lens(&self) -> Arc<ShallowLens> {
+    pub fn shallow_lens(&self) -> Arc<ShallowLens> {
         Arc::clone(self.lens.get().expect(
             "ShallowLens is installed at ShallowFileState construction, before any body demand",
         ))
@@ -710,12 +710,12 @@ impl DeclBodyMemo {
     /// as [`Self::install_shallow_lens`]: installed exactly once at the end of
     /// `ShallowFileState` construction, strictly before any body demand;
     /// idempotent on a repeat set (first wins).
-    pub(crate) fn install_route_fact_lens(&self, lens: Arc<RouteLens>) {
+    pub fn install_route_fact_lens(&self, lens: Arc<RouteLens>) {
         let _ = self.route_lens.set(lens);
     }
 
     /// The shared route-fact lens.
-    pub(crate) fn route_fact_lens(&self) -> Arc<RouteLens> {
+    pub fn route_fact_lens(&self) -> Arc<RouteLens> {
         Arc::clone(self.route_lens.get().expect(
             "RouteLens is installed at ShallowFileState construction, before any body demand",
         ))
@@ -725,16 +725,16 @@ impl DeclBodyMemo {
     /// recipe locators).
     /// The lowering service this memo demands bodies through (`None` for a
     /// seeded memo).
-    #[cfg(test)]
-    pub(crate) fn lowering_service_for_test(&self) -> Option<&Arc<DeclLoweringService>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lowering_service_for_test(&self) -> Option<&Arc<DeclLoweringService>> {
         self.service.as_ref()
     }
 
-    pub(crate) fn snapshot_identity(&self) -> verter_session_query::source::snapshot::SnapshotKey {
+    pub fn snapshot_identity(&self) -> verter_session_query::source::snapshot::SnapshotKey {
         self.key.clone()
     }
 
-    pub(crate) fn canonical_id(&self) -> Arc<str> {
+    pub fn canonical_id(&self) -> Arc<str> {
         Arc::clone(&self.key.canonical)
     }
 
@@ -761,13 +761,13 @@ impl DeclBodyMemo {
     /// ambient for this file. Standalone rune modules are classified by their
     /// language id; component carriers use the scope-aware mode fact captured
     /// from their retained combined script program during cold indexing.
-    pub(crate) fn rune_ambient_visible(&self) -> bool {
+    pub fn rune_ambient_visible(&self) -> bool {
         self.is_rune_module() || self.svelte_component_runes_mode
     }
 
     /// The owned framework parse facts of this content generation, when the
     /// file is a framework carrier.
-    pub(crate) fn framework_parse_facts(
+    pub fn framework_parse_facts(
         &self,
     ) -> Option<&verter_session_query::source::framework_parse::FrameworkParseFacts> {
         self.framework_parse.as_ref()
@@ -786,14 +786,14 @@ impl DeclBodyMemo {
         self.snapshot.ensure_lease();
     }
 
-    pub(crate) fn indexed_expression_demand(&self) -> IndexedExpressionDemand {
+    pub fn indexed_expression_demand(&self) -> IndexedExpressionDemand {
         IndexedExpressionDemand {
             snapshot: Arc::clone(&self.snapshot),
             index: Arc::clone(&self.function_index),
             carrier_module: self.framework_parse.is_some(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             capture_lookup_work: Arc::clone(&self.capture_lookup_work),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             lowering_work: Arc::clone(&self.lowering_work),
         }
     }
@@ -802,7 +802,7 @@ impl DeclBodyMemo {
     /// lease to an absent value that carries its `LeaseMiss` refusal by
     /// value ([`DemandOutcome::into_source_read`]); the engine consumer
     /// applies the refusal.
-    pub(crate) fn type_decl_in(
+    pub fn type_decl_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
@@ -810,7 +810,7 @@ impl DeclBodyMemo {
         self.type_decl_outcome_in(owner, name).into_source_read()
     }
 
-    pub(crate) fn type_decl_outcome_in(
+    pub fn type_decl_outcome_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
@@ -854,11 +854,11 @@ impl DeclBodyMemo {
     }
 
     /// Demand the lowered body of one file-scope VALUE symbol.
-    pub(crate) fn value_decl(&self, name: &str) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
+    pub fn value_decl(&self, name: &str) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
         self.value_decl_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
-    pub(crate) fn value_decl_in(
+    pub fn value_decl_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
@@ -866,7 +866,7 @@ impl DeclBodyMemo {
         self.value_decl_outcome_in(owner, name).into_source_read()
     }
 
-    pub(crate) fn value_decl_outcome_in(
+    pub fn value_decl_outcome_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
@@ -926,7 +926,7 @@ impl DeclBodyMemo {
     /// Provides data for immutable attempt snapshots without blocking the
     /// semantic kernel.
     #[allow(dead_code)]
-    pub(crate) fn peek_type_decl(
+    pub fn peek_type_decl(
         &self,
         canonical: &str,
         owner: TopLevelOwnerId,
@@ -956,7 +956,7 @@ impl DeclBodyMemo {
     /// space mirror of [`Self::peek_type_decl`]; see its doc comment for
     /// the full `AttemptOutcome` mapping rationale.
     #[allow(dead_code)]
-    pub(crate) fn peek_value_decl(
+    pub fn peek_value_decl(
         &self,
         canonical: &str,
         owner: TopLevelOwnerId,
@@ -1022,15 +1022,12 @@ impl DeclBodyMemo {
     /// memo-owned fact — no lens, no locator deref, no re-lowering. Demanding
     /// the symbol's body (the one lazy lowering) is the only work this read
     /// can trigger.
-    pub(crate) fn compat_type_body_hash_input(
-        &self,
-        name: &str,
-    ) -> SourceRead<Option<HashOutcome>> {
+    pub fn compat_type_body_hash_input(&self, name: &str) -> SourceRead<Option<HashOutcome>> {
         self.compat_type_body_hash_input_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
     /// Exact-owner form of [`Self::compat_type_body_hash_input`].
-    pub(crate) fn compat_type_body_hash_input_in(
+    pub fn compat_type_body_hash_input_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
@@ -1039,7 +1036,7 @@ impl DeclBodyMemo {
             .map(|decl| decl.map(|decl| decl.body_hash.clone()))
     }
 
-    pub(crate) fn augmentation_type_decl_in(
+    pub fn augmentation_type_decl_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
@@ -1049,7 +1046,7 @@ impl DeclBodyMemo {
             .into_source_read()
     }
 
-    pub(crate) fn augmentation_type_decl_outcome_in(
+    pub fn augmentation_type_decl_outcome_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
@@ -1101,7 +1098,7 @@ impl DeclBodyMemo {
     }
 
     /// Demand the lowered body of one augmentation-scoped VALUE symbol.
-    pub(crate) fn augmentation_value_decl(
+    pub fn augmentation_value_decl(
         &self,
         scope: &AugmentationScopeKind,
         name: &str,
@@ -1109,7 +1106,7 @@ impl DeclBodyMemo {
         self.augmentation_value_decl_in(scope, TopLevelOwnerId::ordinary_file(), name)
     }
 
-    pub(crate) fn augmentation_value_decl_in(
+    pub fn augmentation_value_decl_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
@@ -1119,7 +1116,7 @@ impl DeclBodyMemo {
             .into_source_read()
     }
 
-    pub(crate) fn augmentation_value_decl_outcome_in(
+    pub fn augmentation_value_decl_outcome_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
@@ -1270,8 +1267,8 @@ impl DeclBodyMemo {
 
     /// The flow-slice function key of a fixture memo's `entry`: the key a
     /// bound flow graph over this memo's retained structure is minted under.
-    #[cfg(test)]
-    pub(crate) fn flow_slice_function_key_for_tests(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_slice_function_key_for_tests(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
     ) -> verter_session_query::flow::bundle::FlowSliceFunctionKey {
@@ -1298,8 +1295,8 @@ impl DeclBodyMemo {
     /// optional parameter under its `strictNullChecks` algebra and an
     /// object literal member's `this` under its `noImplicitThis` (the rest
     /// of the content is policy-free syntax).
-    #[cfg(test)]
-    pub(crate) fn flow_slice_content(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_slice_content(
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: verter_session_query::flow::slice::FlowSliceSelection,
@@ -1311,8 +1308,8 @@ impl DeclBodyMemo {
             .value
     }
 
-    #[cfg(test)]
-    pub(crate) fn flow_slice_content_with_context(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_slice_content_with_context(
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
@@ -1327,8 +1324,8 @@ impl DeclBodyMemo {
 
     /// Lower selected missing annotations in one retained-source lease. Slots
     /// preserve authored absence separately from a source/locator mismatch.
-    #[cfg(test)]
-    pub(crate) fn flow_capture_authorities(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_capture_authorities(
         &self,
         locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
     ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
@@ -1337,8 +1334,8 @@ impl DeclBodyMemo {
             .value
     }
 
-    #[cfg(test)]
-    pub(crate) fn flow_capture_authority(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_capture_authority(
         &self,
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
     ) -> Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>> {
@@ -1462,8 +1459,8 @@ impl DeclBodyMemo {
     /// flow-selected call is inside a served function by construction); no
     /// body `TypeExpr` is memo-owned. The lowered call's `kind` says whether
     /// it calls or constructs.
-    #[cfg(test)]
-    pub(crate) fn indexed_call_expression_at(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn indexed_call_expression_at(
         &self,
         span: verter_span::Span,
     ) -> Option<Arc<IndexedFlowCallExpression>> {
@@ -1474,8 +1471,8 @@ impl DeclBodyMemo {
     /// and evaluates the arguments `frame_lowered` names by ordinal itself:
     /// a direct call among them keeps no record of its own
     /// (`lower_indexed_call_expression_with_read_roots`).
-    #[cfg(test)]
-    pub(crate) fn indexed_call_expression_over_frame_at(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn indexed_call_expression_over_frame_at(
         &self,
         span: verter_span::Span,
         frame_lowered: Arc<[bool]>,
@@ -1487,16 +1484,16 @@ impl DeclBodyMemo {
 
     /// Whether the whole-file env has already been materialised (test
     /// observability — never a validity signal).
-    #[cfg(test)]
-    pub(crate) fn whole_env_materialized(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn whole_env_materialized(&self) -> bool {
         self.whole_env.get().is_some()
     }
 
     /// Whether a per-symbol TYPE cell has a COMMITTED entry (test
     /// observability — never a validity signal). A lease-miss ReturnOnly
     /// leaves the (lazily-created) cell uninitialised, so this returns `false`.
-    #[cfg(test)]
-    pub(crate) fn type_entry_materialized(&self, name: &str) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn type_entry_materialized(&self, name: &str) -> bool {
         let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name);
         self.type_entries
             .get(&key)
@@ -1505,8 +1502,8 @@ impl DeclBodyMemo {
 
     /// Whether a per-symbol VALUE cell has a COMMITTED entry (test
     /// observability — never a validity signal).
-    #[cfg(test)]
-    pub(crate) fn value_entry_materialized(&self, name: &str) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn value_entry_materialized(&self, name: &str) -> bool {
         let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name);
         self.value_entries
             .get(&key)
@@ -1516,8 +1513,8 @@ impl DeclBodyMemo {
     /// Whether a `(name, space)` raw-surface capture has a COMMITTED entry
     /// (test observability — never a validity signal). A lease-miss ReturnOnly
     /// never inserts, so this returns `false`.
-    #[cfg(test)]
-    pub(crate) fn raw_surfaces_materialized(&self, name: &str, space: SymbolSpace) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn raw_surfaces_materialized(&self, name: &str, space: SymbolSpace) -> bool {
         self.raw_surfaces.contains_key(&(
             DeclarationPath::root(DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name)),
             space,
@@ -1530,8 +1527,8 @@ impl DeclBodyMemo {
     /// will not re-acquire), but the worker-side retained snapshot is
     /// released — mirroring the invariant-violation scenario. No-op on a
     /// seeded memo (no service).
-    #[cfg(test)]
-    pub(crate) fn release_retained_snapshot_for_test(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_retained_snapshot_for_test(&self) {
         if let Some(service) = self.service.as_ref() {
             service.release_retained_snapshot_for_test(&self.key);
         }
@@ -2136,11 +2133,11 @@ impl DeclBodyMemo {
     /// authored-body borrow. `Ready(None)` = not inventoried / no service /
     /// fatal parse (genuine, cacheable); `LeaseMiss` = broken lease pin
     /// (transient ReturnOnly).
-    pub(crate) fn transient_type_parts(&self, name: &str) -> DemandOutcome<TransientTypeParts> {
+    pub fn transient_type_parts(&self, name: &str) -> DemandOutcome<TransientTypeParts> {
         self.transient_type_parts_in(TopLevelOwnerId::ordinary_file(), name)
     }
 
-    pub(crate) fn transient_type_parts_in(
+    pub fn transient_type_parts_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
@@ -2524,8 +2521,8 @@ impl DeclBodyMemo {
     /// no macro-shaped call at that span / no authored type argument (a
     /// genuine typed absence); a broken lease pin is the DISTINCT
     /// `LeaseMiss` (transient ReturnOnly).
-    #[cfg(test)]
-    pub(crate) fn transient_macro_type_argument(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn transient_macro_type_argument(
         &self,
         macro_span: verter_span::Span,
     ) -> DemandOutcome<TypeExpr> {
@@ -2540,7 +2537,7 @@ impl DeclBodyMemo {
     /// failure (a seeded service-less memo, a broken lease pin, a stale
     /// origin) yields the DEFAULT (all-absent) spans — an honest absence,
     /// never a fabricated byte range.
-    pub(crate) fn recover_member_spans_or_absent(
+    pub fn recover_member_spans_or_absent(
         &self,
         origin: &verter_type_expr::span_origins::MemberSpansOrigin,
     ) -> verter_type_expr::MemberSpans {
@@ -2557,7 +2554,7 @@ impl DeclBodyMemo {
     /// re-lowered from the retained snapshot in a LEASE-ONLY job for the
     /// locator-deref worker. Same outcome semantics as
     /// [`Self::transient_type_parts`].
-    pub(crate) fn transient_value_parts_in(
+    pub fn transient_value_parts_in(
         &self,
         owner: TopLevelOwnerId,
         name: &str,
@@ -2573,7 +2570,7 @@ impl DeclBodyMemo {
     }
 
     /// Augmentation-scoped sibling of [`Self::transient_value_parts_in`].
-    pub(crate) fn transient_augmentation_value_parts_in(
+    pub fn transient_augmentation_value_parts_in(
         &self,
         scope: &AugmentationScopeKind,
         owner: TopLevelOwnerId,
@@ -3192,8 +3189,8 @@ fn fold_lowered_value_decl(
 /// Build the synthesized COMPONENT-DEFAULT value record (`class default` with
 /// one construct signature) from its fabricated public-instance SOURCE — the
 /// framework synth legs' single [`LoweredValueDecl`] constructor
-/// ([`crate::resolver_core::vue_default_synth`] /
-/// [`crate::resolver_core::svelte_default_synth`]).
+/// (the session's `resolver_core::vue_default_synth` /
+/// `resolver_core::svelte_default_synth`).
 ///
 /// The instance shape rides the annotation FACT as the closed/synthesized
 /// four-source arm ([`ValueAnnotationClass::Direct`] — the documented
@@ -3215,7 +3212,7 @@ fn fold_lowered_value_decl(
 /// syntax-only producer forbidden from resolving imports (guard
 /// `component_default_synth_parse_domain_only`), and the signature-bearing
 /// fingerprint arm performs no reference resolution.
-pub(crate) fn lowered_value_decl_for_synthesised_default(
+pub fn lowered_value_decl_for_synthesised_default(
     instance: verter_type_expr::facts::SemanticTypeSource,
 ) -> LoweredValueDecl {
     use verter_type_expr::span_origins::{FunctionSpansOrigin, SourceSynthetic};
@@ -3294,7 +3291,7 @@ fn collect_augmentation_statement_dependencies(
 /// walk's `flow_body_stable_hash` covers body content only; this boundary
 /// mix is what makes a parse-env move or a parser/language flip miss
 /// exactly the affected artifact slots without re-walking the body.
-pub(crate) fn fold_flow_body_env_identity(
+pub fn fold_flow_body_env_identity(
     index: &verter_session_query::function_program::FunctionProgramIndex,
     parse_env_hash: &verter_session_query::analysis::types::Hash16,
     source_type: oxc_span::SourceType,
@@ -3319,13 +3316,13 @@ pub(crate) fn fold_flow_body_env_identity(
 /// ([`WalkedRead`]); the request-side capability that serves these reads to
 /// the engine applies it.
 impl IndexedExpressionDemand {
-    pub(crate) fn function_program_index(
+    pub fn function_program_index(
         &self,
     ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
         self.index.function_program_index()
     }
 
-    pub(crate) fn indexed_program_expression_ir(
+    pub fn indexed_program_expression_ir(
         &self,
         record: &verter_session_query::function_program::ProgramExpressionRecord,
     ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
@@ -3344,7 +3341,7 @@ impl IndexedExpressionDemand {
         Some(Arc::new(node))
     }
 
-    pub(crate) fn indexed_call_expression_over_frame_at(
+    pub fn indexed_call_expression_over_frame_at(
         &self,
         span: verter_span::Span,
         frame_lowered: Arc<[bool]>,
@@ -3408,7 +3405,7 @@ impl IndexedExpressionDemand {
             .map(|node| node.map(Arc::new))
     }
 
-    pub(crate) fn function_type_param_clause(
+    pub fn function_type_param_clause(
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
     ) -> WalkedRead<Option<Vec<verter_session_query::flow::slice::SliceTypeParam>>> {
@@ -3453,7 +3450,7 @@ impl IndexedExpressionDemand {
         WalkedRead::from_program_walk(clause).with_prior_refusal(refusal)
     }
 
-    pub(crate) fn flow_slice_content(
+    pub fn flow_slice_content(
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: verter_session_query::flow::slice::FlowSliceSelection,
@@ -3463,7 +3460,7 @@ impl IndexedExpressionDemand {
         self.flow_slice_content_with_context(matched, Some(selection), bound, None, policy)
     }
 
-    pub(crate) fn flow_slice_content_with_context(
+    pub fn flow_slice_content_with_context(
         &self,
         matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
         selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
@@ -3504,14 +3501,14 @@ impl IndexedExpressionDemand {
         // only through its own top-level syntax.
         let carrier_module = self.carrier_module;
         let snapshot = self.snapshot.key.clone();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let work = Arc::clone(&self.capture_lookup_work);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let lowering_work = Arc::clone(&self.lowering_work);
         let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
             program.map(|p| {
                 p.with_indexed_function(&entry, |resolved, entry| {
@@ -3553,7 +3550,7 @@ impl IndexedExpressionDemand {
             .map(|node| node.map(Arc::new))
     }
 
-    pub(crate) fn flow_capture_authorities(
+    pub fn flow_capture_authorities(
         &self,
         locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
     ) -> WalkedRead<
@@ -3566,12 +3563,12 @@ impl IndexedExpressionDemand {
         let index = self.function_program_index().absorb_into(&mut refusal);
         let snapshot = self.snapshot.key.clone();
         let locators = locators.to_vec();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let work = Arc::clone(&self.capture_lookup_work);
         self.snapshot.ensure_lease();
         let authorities = service
             .run_leased(&self.snapshot.key, move |program| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
                 let program = program?;
                 Some(
@@ -3599,7 +3596,7 @@ impl IndexedExpressionDemand {
         }
     }
 
-    pub(crate) fn transient_macro_type_argument(
+    pub fn transient_macro_type_argument(
         &self,
         macro_span: verter_span::Span,
     ) -> DemandOutcome<TypeExpr> {

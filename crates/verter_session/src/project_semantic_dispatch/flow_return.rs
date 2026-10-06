@@ -5104,7 +5104,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// Whether a BINDER or a same-named frame LOCAL wins is not decided
     /// here — it is a lexical question, settled by the content half's
-    /// [`crate::flow_slice_content`] gate before an answer ever reaches
+    /// [`verter_semantic_source::flow_slice_content`] gate before an answer ever reaches
     /// this environment. TS2300 constrains only one frame
     /// (`function f<T>() { class T {} }`); across frames the two
     /// genuinely coexist and the nearest wins, in both directions.

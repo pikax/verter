@@ -777,7 +777,10 @@ fn route_owned_eval_state_carries_parse_payload_for_vue() {
         parse_payload.is_some(),
         "a .vue route-owned entry must carry its parse payload"
     );
-    assert_eq!(whole_hash, crate::source_hash::hash_16(vue_src.as_bytes()));
+    assert_eq!(
+        whole_hash,
+        verter_semantic_source::source_hash::hash_16(vue_src.as_bytes())
+    );
 
     // Non-SFC route-owned eval state: no parse payload.
     let (_, parse_payload, _) = host
@@ -817,7 +820,7 @@ fn ide_virtual_output_for_fixture_sfc_is_byte_stable() {
     // compiler's own `optional_boolean_prop_emits_no_default` /
     // `optional non-Boolean prop keeps the official dev shape` assertions
     // in `crates/verter_compiler/src/script/tests.rs`.
-    let hash_hex: String = crate::source_hash::hash_16(content.as_bytes())
+    let hash_hex: String = verter_semantic_source::source_hash::hash_16(content.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();

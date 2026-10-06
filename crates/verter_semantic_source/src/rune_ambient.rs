@@ -8,7 +8,7 @@
 //! module's declarations are resolved.
 //!
 //! The runes enter through the CENTRALIZED effective-lookup
-//! ([`crate::resolver_core::ShallowFileState::effective_value_decl`] and its
+//! (the session's `ShallowFileState::effective_value_decl` and its
 //! siblings): a name the user did NOT declare, in a file classified as a
 //! Svelte rune module, resolves to the rune ambient inventory — WITHOUT
 //! touching the real module source (its bytes stay the verbatim module, so
@@ -155,18 +155,18 @@ fn rune_ambient_inventory() -> &'static RuneAmbientInventory {
 /// The lowered VALUE declaration for `name` from the rune ambient inventory.
 /// The centralized effective-lookup consults this AFTER a user/synthesized
 /// declaration miss, gated on the file's rune-module classification.
-pub(crate) fn rune_ambient_value_decl(name: &str) -> Option<Arc<LoweredValueDecl>> {
+pub fn rune_ambient_value_decl(name: &str) -> Option<Arc<LoweredValueDecl>> {
     rune_ambient_inventory().value_decl(name)
 }
 
 /// The lowered TYPE declaration for `name` from the rune ambient inventory.
-pub(crate) fn rune_ambient_type_decl(name: &str) -> Option<Arc<LoweredTypeDecl>> {
+pub fn rune_ambient_type_decl(name: &str) -> Option<Arc<LoweredTypeDecl>> {
     rune_ambient_inventory().type_decl(name)
 }
 
 /// The rune ambient inventory's presence lookups, carried by the shallow
 /// record of every rune module.
-pub(crate) const RUNE_AMBIENT_LOOKUP: verter_session_query::inputs::shallow::RuneAmbientLookup =
+pub const RUNE_AMBIENT_LOOKUP: verter_session_query::inputs::shallow::RuneAmbientLookup =
     verter_session_query::inputs::shallow::RuneAmbientLookup {
         has_value: rune_ambient_has_value,
         has_type: rune_ambient_has_type,

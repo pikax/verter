@@ -47,11 +47,11 @@ use verter_session_query::facts::{
     HashOutcome, MemberKind, SymbolSpace,
 };
 
-use crate::decl_body_memo::{DeclBodyMemo, LoweredValueDecl};
 use crate::file_artifact_store::{FileFacts, InternedName, InternedSpecifier};
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::shallow_file_state::ShallowFileState;
-use crate::source_lens::{RouteLens, ShallowLens};
+use verter_semantic_source::decl_body_memo::{DeclBodyMemo, LoweredValueDecl};
+use verter_semantic_source::source_lens::{RouteLens, ShallowLens};
 use verter_session_query::inputs::shallow::ExportTarget;
 use verter_session_query::source::augmentation::ModuleAugmentationFact;
 
@@ -514,7 +514,7 @@ impl LazyBodyFactSource {
 /// once from the transient lowered annotation / object shape through the
 /// shared `value_body_fingerprint` producer and the shared lens — no locator
 /// deref, no query-time re-lowering (the value-space mirror of
-/// [`crate::decl_body_memo::DeclBodyMemo::compat_type_body_hash_input`]).
+/// [`verter_semantic_source::decl_body_memo::DeclBodyMemo::compat_type_body_hash_input`]).
 pub(crate) fn compat_value_body_hash_input(lowered: &LoweredValueDecl) -> HashOutcome {
     lowered.body_hash.to_outcome()
 }

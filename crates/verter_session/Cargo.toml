@@ -50,7 +50,7 @@ attribution = ["verter_audit/attribution"]
 # The reusable worker-substrate seam exposes scheduler pool identities, so an
 # explicit session test-support opt-in must carry the scheduler's matching
 # default-off identity surface for downstream test crates too.
-test-support = ["verter_scheduler/test-support", "verter_session_query/test-support"]
+test-support = ["verter_scheduler/test-support", "verter_session_query/test-support", "verter_semantic_source/test-support"]
 # Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
 # downstream crates' tests. Enabled ONLY via a downstream `[dev-dependencies]`
 # entry — never in a production build, so it cannot weaken a witness discipline.
@@ -139,6 +139,7 @@ verter_parser = { path = "../verter_parser" }
 verter_protocol = { path = "../verter_protocol" }
 prost = "0.14.3"
 verter_semantic = { path = "../verter_semantic" }
+verter_semantic_source = { workspace = true }
 # The query-owned host port (inversion of control): the query boundary crate
 # defines the demand trait + neutral DTOs; this crate implements them in
 # `src/query_host_port.rs`. The dependency points host -> query only.

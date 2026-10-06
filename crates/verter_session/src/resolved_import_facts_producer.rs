@@ -72,8 +72,8 @@ use crate::resolved_import_facts::{
     ResolvedImportClauseEntry, ResolvedImportFacts, ResolvedImportFactsKey, ResolvedSpecifier,
     RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
-use crate::source_hash::hash_16;
 use crate::VerterHost;
+use verter_semantic_source::source_hash::hash_16;
 
 impl VerterHost {
     /// Production producer for
