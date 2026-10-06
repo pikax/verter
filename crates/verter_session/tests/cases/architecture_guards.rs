@@ -4509,20 +4509,11 @@ pub(crate) mod foundations_guards {
         // Public so `tests/cases/g_binder/binder_identity_facts.rs` can
         // drive the demand producer + read the artifact payload.
         "pub mod binder_identity_facts",
-        // Session-owned private-shape identity used by the cache-key invariant
-        // and module-augmentation integration fixtures.
-        "pub mod build_toolchain_fingerprint",
         // Frozen eight-field carrier-owned compatibility cohort consumed by
         // B2 persistence/adoption and exercised by its owning module tests.
         "pub mod carrier_artifact_cohort",
         // T-B R5 §2 carrier-only publication identity/store and typed interim outcomes.
         "pub mod carrier_publication_store",
-        // Workspace-wide cache-cluster schema-version constant + the
-        // `CacheSchemaVersioned` trait. Public so
-        // `tests/cases/g_cache/cache_invariant_migration.rs` (the W0.5 fixture cohort)
-        // can read `CACHE_CLUSTER_SCHEMA_VERSION` and call the trait
-        // methods to verify the cohort's eviction invariant.
-        "pub mod cache_schema",
         // verter_lsp::features::hover_provenance,
         // `assemble_vue_main_module` — re-exported so the Vue conformance
         // seed harness (`verter_vue_conformance/tests/cases/seed_conformance.rs`)
@@ -4579,10 +4570,6 @@ pub(crate) mod foundations_guards {
         // for type-resolution requests. Producer side of the
         // `RequestKind::TypeResolution` audit kind.
         "pub mod host_resolve_type_audit",
-        // Flow-return audit substrate: the per-request TLS emission
-        // helpers (`FlowReturnStarted` / budget / cycle events and the
-        // per-request counters) the cold flow path records through.
-        "pub mod flow_return_audit",
         // Public audited entry-point that wires
         // `VerterHost::get_flow_return_type_with_audit` (the single
         // public flow-return seam) and its typed `FlowReturnError`.
@@ -4729,8 +4716,6 @@ pub(crate) mod foundations_guards {
         "pub mod meta",
         // tests/cases/g_misc0/host_tests.rs (project_type_store::*)
         "pub mod project_type_store",
-        // tests/cases/g_misc0/audited_request_e2e.rs, tests/cases/g_misc0/host_tests.rs
-        "pub mod request_context",
         // verter_type_runtime, verter_napi (TypeExpander API);
         // tests/cases/g_misc0/host_tests.rs
         "pub mod resolver_core",
@@ -4738,8 +4723,6 @@ pub(crate) mod foundations_guards {
         // module builds: the extractors take `&RouteAnalysisInputs`
         // instead of a live `&dyn WorkspaceRead`.
         "pub mod route_analysis_inputs",
-        // tests/cases/g_misc0/host_tests.rs (semantic_query::* in integration tests)
-        "pub mod semantic_query",
         // The TypeScript semantic capability closure (dormant until TCM4) —
         // the closed capability catalog plus the certified engine binding
         // that is the sole route a TypeScript engine's answer enters the
@@ -4756,10 +4739,6 @@ pub(crate) mod foundations_guards {
         // wrap, so the line-based extractor records the bare prefix).
         "pub mod input_basis",
         "pub use input_basis::",
-        // Engine-owned test forcing state (`TestKnobs`, `SeamHook`, the named
-        // tracer-scope one-shot), gated `any(test, feature = "test-support")`
-        // and `#[doc(hidden)]`: absent from every production build.
-        "pub mod engine_test_knobs",
         // crates/verter_wasm/src/input_snapshot.rs — the browser
         // acquisition boundary commits asynchronously-acquired rows
         // through the session handoff core (AcquiredFile /
@@ -4779,25 +4758,12 @@ pub(crate) mod foundations_guards {
         // VerterHost::cooperative_drive and implement its
         // CooperativeYield hook from the integration binary.
         "pub mod cooperative_scheduler",
-        // tests/cases/g_misc0/invalidation_coverage.rs, tests/cases/g_misc0/invalidation_perf.rs
-        "pub mod invalidation_domain",
-        // tests/cases/g_misc0/invalidation_perf.rs (ImportedRegistryDb /
-        // ImportedRegistryEntry / ImportedRegistryKey for the §12.A12
-        // InvalidationByCanonical perf gate)
-        "pub mod component_meta_caches",
         // Block 1.H Track 2.4 — `AppConfigNoOverrideProofKey`,
         // `AppConfigNoOverrideProofEntry`, `AppConfigNoOverrideProofDb`
         // surface for the family_bcd_* integration tests that drive
         // the production producer end-to-end via
         // `for_tests::app_config_no_override_proof_get_or_compute_for_tests`.
         "pub mod app_config_proof_db",
-        // crates/verter_bench/examples/audit_real_component_meta.rs
-        // calls `dump_loop5_instrumentation_counters` to record
-        // inner-dispatch counter snapshots alongside the audit JSON.
-        // The module is public because the bench example is an
-        // out-of-crate consumer; production callers route only through
-        // the atomic-counter increments which are inert.
-        "pub mod loop5_instrumentation",
         // verter_napi::typeinfo, verter_wasm::typeinfo, packages/typeinfo
         // — the §5 Phase 3 typeinfo public host substrate
         // (list_file_symbols, resolve_named_symbol*, evaluate_type_expression*)
@@ -4830,74 +4796,6 @@ pub(crate) mod foundations_guards {
         // public compile result surface carries only the projected
         // `actual_mode` + `Option<DowngradeReason>` fields.
         "pub(crate) mod compile_cache_mode",
-        // Shared bounded query-identity retention substrate — the
-        // `GlobalRetentionBudget` FIFO total-size cap + the
-        // `BoundedCandidateMap` per-slot candidate list. Crate-private:
-        // consumed only by `component_meta_result_db`,
-        // `component_meta_caches`, and `semantic_query_memo` within this
-        // crate; no downstream consumer reaches it directly.
-        "pub(crate) mod bounded_query_retention",
-        // Cache-runtime substrate — the `WorldSnapshot` carrier +
-        // scoped `*Dims` accessors that later blocks wire through
-        // every cache-runtime entry-point. `pub(crate)` so the
-        // type / accessors do not enter the production binding
-        // surface. There is NO `for_tests` re-export for these
-        // types; the construction contract is exercised by
-        // `#[cfg(test)] mod tests` inline in
-        // `cache_runtime/world_snapshot.rs`.
-        "pub(crate) mod cache_runtime",
-        // Lazy declaration-body memo — the per-artifact
-        // content-addressed body store (`DeclBodyMemo`) bodies lower
-        // into on first semantic demand. Crate-private: consumers
-        // reach it via `ShallowFileState::decl_bodies()` /
-        // `IndexedReady.decl_bodies`; no downstream crate touches it.
-        "pub(crate) mod decl_body_memo",
-        // Demand-sliced flow content — the owned, arena-free
-        // `SliceContent` slice-gated body lowering the `FlowReturn`
-        // family evaluates. Crate-private: the flow-return producer is
-        // its only consumer (via `DeclBodyMemo::flow_slice_content`).
-        // The closed inventory of every carrier that transports a
-        // flow-completion fact. Crate-private: the opaque completion
-        // fact and its construction / discharge vocabularies are
-        // substrate internals, and a consumer outside the flow pipeline
-        // has no business minting or reading one.
-        "pub(crate) mod flow_completion_inventory",
-        "pub(crate) mod flow_slice_content",
-        // Existential and three-valued questions about a type answered
-        // through its parts from a work list (`reaches` / `classify`).
-        // Crate-private: generic walk machinery for the dispatch and
-        // meta-resolve helpers.
-        "pub(crate) mod graph_walk",
-        // Scheduler-side lazy lowering service — worker-shard
-        // retained eval-program parses (`DeclLoweringService`).
-        // Crate-private: the materialise closure and the memo are its
-        // only callers.
-        "pub(crate) mod decl_lowering",
-        // Store-owned identity string intern pool (canonical ids + symbol
-        // names minted into `ResolvedRootIdentity` / prepared-decl maps).
-        // Crate-private: the prepared-decl builders, bare-name resolution,
-        // and host_manage canonicalization reach it through
-        // `ProjectTypeStore::identity_interner()`; no downstream crate
-        // touches it.
-        "pub(crate) mod identity_interner",
-        // Structural-carrier producer — the single owner of the query-free
-        // `TypeExpr` → dormant-graph-carrier lowering. Owns the module-private
-        // raw lowerer plus the witness-gated macro producer surface (the macro
-        // hot mirror). Crate-private: the four macro graph-lowering sites read
-        // its `macro_type_arg_hot_ref` re-export; no downstream crate touches
-        // it.
-        "pub(crate) mod structural_carrier_producer",
-        // R3/R26/R28 — fact-validation helpers shared by the inner
-        // component-meta caches (Family A/B). Carries
-        // `validate_fact_signature`, `bubble_fact_signature`, and the
-        // path-precise `fact_signature_for_canonical_member` /
-        // `fact_signature_for_exported_type` constructors used by
-        // every cache that migrated from `DepSignature` to
-        // `Arc<[FactVersionRef]>`, plus the provenance-pure
-        // `parse_fact_ref_for_observed_current_content` primitive the
-        // `MaterializeMemoDb` producer pins its observed-version parse
-        // fact through.
-        "pub(crate) mod fact_signature_helpers",
         // host batch-coordinator primitive — the single owner of
         // outer-coordinator batch fan-out (component-meta batch + batch
         // compile route through it). Crate-internal: callers reach it
@@ -4910,30 +4808,9 @@ pub(crate) mod foundations_guards {
         // `VerterHost` field are test-support gated, so a release build carries
         // none of it; the `mod` declaration itself is the only public-surface trace.
         "pub(crate) mod host_test_force",
-        "pub(crate) mod instant",
-        "pub(crate) mod intrinsic_registry",
-        // B1 locator substrate — session-side key identities for
-        // locator-backed body lowering (`LocatorLoweringKey` + the sealed
-        // R6 key-dimension witness + `SessionDemandIdentity`). Crate-private:
-        // the substrate is B1-internal; only the two narrow R6-witness
-        // helpers (`pub use crate::locator_identity::{...}` below) enter the
-        // public surface for the `r6_key_*` trybuild fixtures.
-        "pub(crate) mod locator_identity",
-        // B1 locator substrate — snapshot-backed span-recovery helpers
-        // (recover authored spans from a retained parse via a
-        // producer-emitted origin locator, before identity). Crate-private:
-        // no downstream consumer; reached only within the crate.
-        "pub(crate) mod locator_span_recovery",
-        // Phase G — host-owned mapped-binder ordinal registry
-        // for stable `MapperKey` cache identity across dispatcher
-        // instances. Internal substrate; consumed only by
-        // `project_semantic_dispatch::lower`'s `TypeExpr::Mapped`
-        // arm via `ProjectTypeStore::mapper_binder_registry()`.
-        "pub(crate) mod mapper_binder_registry",
         // tests/cases/g_cache/cache_invariant_migration.rs — the W0.5 schema-bump
         // cohort fixture exercises `OwnerImportSurfaceDb::evict_if_schema_mismatch`.
         "pub mod owner_import_surface",
-        "pub(crate) mod project_semantic_dispatch",
         // The session-side implementation of the query-owned host port
         // (`verter_session_query::QueryHostPort`): `pub` because the
         // composition root above BOTH crates constructs
@@ -4941,17 +4818,6 @@ pub(crate) mod foundations_guards {
         // inversion-of-control seam is a public surface by design (caller
         // wiring lands with the query-layer adoption).
         "pub mod query_host_port",
-        "pub(crate) mod semantic_query_memo",
-        // The request-scoped continuation runtime semantic evaluation runs
-        // its frames on; crate-internal.
-        "pub(crate) mod semantic_execution",
-        // The one process-local aggregate retained-byte account every
-        // host-owned semantic store charges. `pub` because the account is
-        // PROCESS-wide rather than crate-wide: the LSP server's
-        // `ProviderSurfaceStore` retains provider surfaces on the user's
-        // behalf and must charge THIS account, or the ratified ceiling
-        // would be enforced once per crate instead of once per process.
-        "pub mod semantic_retention_account",
         "pub(crate) mod session_runtime",
         // Stage 4a SessionView trait surface — `HostView` and
         // `OverlaidView` impls. `pub` because the integration smoke
@@ -4961,12 +4827,7 @@ pub(crate) mod foundations_guards {
         // and `HostFenceValidator`; Stage 4d retires the
         // overlay-mutation machinery the trait replaces.
         "pub mod session_view",
-        // Signature records/substitutions/epoch-safe storage. Crate-private:
-        // no consumer is cut over; integration tests reach fixtures through
-        // `for_tests`. Adding this seam is a deliberate Guard 5 snapshot bump.
-        "pub(crate) mod signature_kernel",
         "pub(crate) mod template_convert",
-        "pub(crate) mod capture_token",
         // ─── test-only re-export shim ──────────────────────────────
         "pub mod for_tests",
         // ─── test-support submodules (gated cfg(any(test, debug_assertions))) ──
@@ -5017,31 +4878,6 @@ pub(crate) mod foundations_guards {
         "pub use verter_protocol::types::PublicApiProjectionSubject",
         // tests/cases/g_misc0/relative_path_session_parity.rs
         "pub use id::resolve_external",
-        // `ReadSetSignature` is the typed return type of the public
-        // `compile_slot_fact_dep_signature` inspector. The owning
-        // module `fact_signature_helpers` stays `pub(crate)` because
-        // its internals (validators, signature constructors) are
-        // implementation detail; only the inspector's return type
-        // needs to enter the public surface so external callers can
-        // name it.
-        "pub use crate::fact_signature_helpers::ReadSetSignature",
-        // B1 R6-witness compile-fail test surface. `assert_r6_key_dimension`
-        // / `assert_r6_key_safe` are the ONLY items re-exported from the
-        // otherwise `pub(crate)` `locator_identity` module; they are consumed
-        // exclusively by the out-of-crate `r6_key_*` trybuild fixtures
-        // (`tests/cases/compile-fail/`), which prove a forbidden dimension
-        // cannot occupy a session query-identity key position. The whole
-        // substrate module stays `pub(crate)`; only these two witnesses need
-        // to be nameable across the crate boundary.
-        "pub use crate::locator_identity::{assert_r6_key_dimension, assert_r6_key_safe}",
-        // Sealed locator-shape lowering context — public NAME only (private
-        // fields, in-crate construction). Consumed exclusively by the
-        // out-of-crate sealed-context trybuild fixture
-        // (`tests/cases/compile-fail/locator_shape_ctx_no_prc_conversion.rs`),
-        // which proves the type neither contains nor converts to a
-        // `ProjectionReductionContext`, so the reducing lowering entry is
-        // unreachable from the locator path by type.
-        "pub use crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx",
         // TS7 oracle harness snapshot GENERATOR entries — `pub` ONLY under the
         // `oracle-gen` feature (off the default closure), so the
         // `src/bin/oracle_gen` + `src/bin/oracle_upgrade` binaries (separate
@@ -5070,6 +4906,18 @@ pub(crate) mod foundations_guards {
         // measures only its own host's overlay COWs — worker-side per-job
         // COWs included, other hosts' (other tests') excluded. No
         // `pub use resolver_store::{*session_overlay_cows*}` entry exists.
+        // ─── crate-private host modules ──────────────────────────────
+        "pub(crate) mod compile_output_node",
+        "pub(crate) mod component_meta_cached_result",
+        "pub(crate) mod component_meta_result_admission",
+        "pub(crate) mod host_source_demand",
+        "pub(crate) mod meta_provenance",
+        "pub(crate) mod output_sinks",
+        "pub(crate) mod session_attachment",
+        "pub(crate) mod session_vfs_sink",
+        // `ReadSetSignature` — the return type of the public fact-signature
+        // inspectors, named by the host crate's integration tests.
+        "pub use verter_session_query::facts::fact_cache::ReadSetSignature",
     ];
 
     /// Compare the live surface against the snapshot; report any

@@ -315,14 +315,14 @@ mod test_worker_pools;
 #[cfg(test)]
 mod artifact_root_retention_tests;
 pub(crate) mod compile_output_node;
-pub mod component_meta_cached_result;
+pub(crate) mod component_meta_cached_result;
 pub mod input_basis;
 /// Asynchronous input acquisition to committed-snapshot handoff: one
 /// immutable committed `InputBasis` per acquisition wave, typed
 /// `NeedInputs` for unacquired keys, no acquisition capability inside
 /// the seam.
 pub mod input_handoff;
-pub mod meta_provenance;
+pub(crate) mod meta_provenance;
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
