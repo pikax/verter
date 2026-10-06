@@ -1523,10 +1523,17 @@ impl VerterHost {
         // `semantic_hash`, and the artifact-commit generation.
         // Independent re-reads could each observe a different source
         // version, pairing bytes from one version with the key hash of
-        // another.
-        let source_snap = self
+        // another. The scheduler witness captured with it names the node
+        // incarnation the bytes came from; publication and artifact
+        // cleanup are fenced on it, so a delete/re-add or reset that
+        // reuses the generation for the same content cannot accept this
+        // flight's output.
+        let verter_scheduler::node::WitnessedSource {
+            snapshot: source_snap,
+            witness: source_witness,
+        } = self
             .scheduler
-            .try_get_source(&canonical_id)
+            .try_get_witnessed_source(&canonical_id)
             .ok_or_else(|| HostError::MissingSource {
                 canonical_id: canonical_id.clone(),
             })?;
@@ -2075,6 +2082,7 @@ impl VerterHost {
                 if self.compiler_block_content_capture_is_current(
                     &canonical_id,
                     crate::block_content::SuppliedBlockScope::Profile(profile),
+                    &source_witness,
                     captured_whole_hash,
                     &captured_block_content_stamp,
                 ) {
@@ -2187,6 +2195,7 @@ impl VerterHost {
         let compile_capture_is_current = self.compiler_block_content_capture_is_current(
             &canonical_id,
             crate::block_content::SuppliedBlockScope::Profile(profile),
+            &source_witness,
             captured_whole_hash,
             &captured_block_content_stamp,
         );
@@ -2336,16 +2345,12 @@ impl VerterHost {
                     match compiled_products.outputs().filter(|_| commits_artifact) {
                         Some(outputs) => {
                             self.scheduler.commit_artifact(
-                                &canonical_id,
+                                &source_witness,
                                 profile_hash,
-                                verter_scheduler::node::ArtifactSnapshot {
-                                    generation: source_snap.generation,
-                                    profile_hash,
-                                    data: Arc::new(crate::host_executor::HostArtifactData {
-                                        outputs: outputs.clone(),
-                                        diagnostics: diagnostics.clone(),
-                                    }),
-                                },
+                                Arc::new(crate::host_executor::HostArtifactData {
+                                    outputs: outputs.clone(),
+                                    diagnostics: diagnostics.clone(),
+                                }),
                             );
                         }
                         None => {
@@ -2357,21 +2362,17 @@ impl VerterHost {
                             // stale result on the companion warm-hit substrate;
                             // no fresh artifact is committed.
                             //
-                            // The eviction is gated on the compile's
-                            // start-of-compile generation captured on the
-                            // request's single source snapshot: a slow compile
-                            // that started at generation N can race with a fast
-                            // successful compile at N+k that already committed a
-                            // newer artifact, and an unconditional evict would
-                            // clobber it. Passing the captured start generation
-                            // as `max_generation` makes the eviction symmetric
-                            // with `commit_artifact`'s own node-generation
-                            // rejection.
-                            self.scheduler.remove_artifact_if_not_newer_than(
-                                &canonical_id,
-                                profile_hash,
-                                source_snap.generation,
-                            );
+                            // The eviction is gated on the source witness
+                            // captured with the request's single source
+                            // snapshot: a slow compile that started at
+                            // generation N can race with a fast successful
+                            // compile at N+k that already committed a newer
+                            // artifact, and an unconditional evict would
+                            // clobber it; a witness whose node was retired
+                            // evicts nothing from its successor. Symmetric
+                            // with `commit_artifact`'s witness rejection.
+                            self.scheduler
+                                .remove_artifact_not_newer_than(&source_witness, profile_hash);
                         }
                     }
                 }
