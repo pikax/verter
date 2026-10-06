@@ -7,10 +7,10 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-/// One feature, keyed by the Cargo identity (name, version) of the package
-/// that owns it, so distinct versions of one package never share a comparison
-/// identity.
-type PackageFeature = (String, String, String);
+/// One feature, keyed by the full Cargo package id of the package that owns
+/// it, so distinct versions or sources of one package never share a
+/// comparison identity.
+type PackageFeature = (String, String);
 
 #[derive(Deserialize)]
 struct Metadata {
@@ -30,9 +30,14 @@ struct Package {
 
 /// The dependency declaration as written in a manifest: what the edge itself
 /// requests, which activation-only semantics never show in feature tables.
+/// `name` is the dependency package's real name; `rename` is the alias the
+/// manifest table keys it under (also how Cargo's resolve graph names the
+/// edge), and `kind` separates normal from build declarations.
 #[derive(Deserialize)]
 struct ManifestDependency {
     name: String,
+    #[serde(default)]
+    rename: Option<String>,
     features: Vec<String>,
     #[serde(default)]
     kind: Option<String>,
@@ -53,6 +58,23 @@ struct Node {
 struct Dependency {
     name: String,
     pkg: String,
+    #[serde(default)]
+    dep_kinds: Vec<DepKind>,
+}
+
+#[derive(Deserialize)]
+struct DepKind {
+    kind: Option<String>,
+}
+
+impl Dependency {
+    /// Cargo never resolves a `dep:` reference onto a dev edge; the guard
+    /// polices normal and build declarations only.
+    fn activates(&self) -> bool {
+        self.dep_kinds
+            .iter()
+            .any(|kind| kind.kind.as_deref() != Some("dev"))
+    }
 }
 
 fn cargo(root: &Path, args: &[&str]) -> String {
@@ -73,15 +95,18 @@ fn cargo(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("Cargo output is UTF-8")
 }
 
-fn metadata(root: &Path, target: &str, config: &[String]) -> Metadata {
+// Unfiltered metadata: the resolve graph must be a superset of every tree
+// the guard walks, including host-side build edges that `--filter-platform`
+// would drop while `cargo tree --target` still shows them. Declared rows it
+// adds for other platforms never survive the per-target activation
+// intersection in `forbidden_closure`.
+fn metadata(root: &Path, config: &[String]) -> Metadata {
     let mut args: Vec<String> = [
         "metadata",
         "--locked",
         "--all-features",
         "--format-version",
         "1",
-        "--filter-platform",
-        target,
     ]
     .iter()
     .map(|arg| arg.to_string())
@@ -98,7 +123,11 @@ fn metadata(root: &Path, target: &str, config: &[String]) -> Metadata {
 // activates there. Activation is the only authority for `dep:` edges,
 // edge-requested features and dependency defaults — none of those exist in
 // a manifest's feature tables, and metadata's resolve graph unifies the
-// entire workspace instead of one root's edges.
+// entire workspace instead of one root's edges. Rows print as
+// `depth name vX.Y.Z [source]|features`; the display name and version only
+// narrow the row down to its metadata package, and the resolve edge from the
+// parent row pins the full Cargo package id, so equal name/version pairs
+// from different sources stay distinct identities.
 fn closure(
     root: &Path,
     package: &str,
@@ -106,6 +135,7 @@ fn closure(
     feature: Option<&str>,
     include_dev: bool,
     config: &[String],
+    metadata: &Metadata,
 ) -> BTreeSet<PackageFeature> {
     let mut args: Vec<String> = [
         "tree",
@@ -121,7 +151,7 @@ fn closure(
             "normal,build"
         },
         "--prefix",
-        "none",
+        "depth",
         "--format",
         "{p}|{f}",
     ]
@@ -137,27 +167,71 @@ fn closure(
         root,
         &args.iter().map(|arg| arg.as_str()).collect::<Vec<_>>(),
     );
+    let mut candidates: BTreeMap<(String, String), Vec<&str>> = BTreeMap::new();
+    for package in &metadata.packages {
+        candidates
+            .entry((package.name.clone(), package.version.clone()))
+            .or_default()
+            .push(package.id.as_str());
+    }
+    let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for node in &metadata.resolve.nodes {
+        edges
+            .entry(node.id.as_str())
+            .or_default()
+            .extend(node.deps.iter().map(|dep| dep.pkg.as_str()));
+    }
     let mut enabled = BTreeSet::new();
     let mut reaches_audit = false;
+    let mut ancestry: Vec<(usize, String)> = Vec::new();
     for line in output.lines() {
-        let (package, features) = line
+        let digits = line
+            .find(|c: char| !c.is_ascii_digit())
+            .expect("tree row depth");
+        let depth: usize = line[..digits].parse().expect("tree row depth");
+        let (display, features) = line[digits..]
             .split_once('|')
             .expect("Cargo tree package/feature row");
-        let mut identity = package.split_whitespace();
+        let mut identity = display.split_whitespace();
         let name = identity.next().expect("Cargo tree package name");
         // Tree rows print `name vX.Y.Z`; metadata ids carry the bare version.
         let version = identity
             .next()
             .expect("Cargo tree package version")
             .strip_prefix('v')
-            .unwrap_or_else(|| panic!("Cargo tree package version: {package}"));
+            .unwrap_or_else(|| panic!("Cargo tree package version: {display}"));
         reaches_audit |= name == "verter_audit";
+        while ancestry.last().is_some_and(|(seen, _)| *seen >= depth) {
+            ancestry.pop();
+        }
+        let mut matching: Vec<&str> = candidates
+            .get(&(name.to_owned(), version.to_owned()))
+            .expect("metadata knows every tree package")
+            .clone();
+        if matching.len() > 1 {
+            if let Some((_, parent)) = ancestry.last() {
+                // The tree only walks activated edges, which the resolve graph
+                // resolved before activation: the parent's edge set disambiguates
+                // same-named packages where the display cannot. A unique display
+                // needs no help — resolve also omits a member's dev self-edge,
+                // which the tree still prints as its own `(*)` row.
+                matching.retain(|id| {
+                    edges
+                        .get(parent.as_str())
+                        .is_some_and(|set| set.contains(id))
+                });
+            }
+        }
+        let [id] = matching[..] else {
+            panic!("one Cargo identity for {name} v{version} under its parent");
+        };
+        ancestry.push((depth, id.to_owned()));
         for feature in features
             .trim_end_matches(" (*)")
             .split(',')
             .filter(|feature| !feature.is_empty())
         {
-            enabled.insert((name.to_owned(), version.to_owned(), feature.to_owned()));
+            enabled.insert((id.to_owned(), feature.to_owned()));
         }
     }
     assert!(reaches_audit, "closure must reach the audit crate");
@@ -171,10 +245,16 @@ fn closure(
 // declares. A third-party crate's internal `dep:` arms are not this
 // repository's declarations to police, and reading them would pull shared
 // library defaults into the forbidden set.
+//
+// Rows come back in two classes. Firm rows — feature-table implications and
+// the features a crossed edge requests — are guaranteed active whenever the
+// seed is, including when the owner enables the seed by default. Activation
+// rows are the `default` pushes for crossed edges, which only Cargo's
+// activation difference can confirm or drop.
 fn declared_closure(
     metadata: &Metadata,
     seeds: &BTreeSet<(String, String)>,
-) -> BTreeSet<PackageFeature> {
+) -> (BTreeSet<PackageFeature>, BTreeSet<PackageFeature>) {
     let packages: BTreeMap<&str, &Package> = metadata
         .packages
         .iter()
@@ -202,12 +282,19 @@ fn declared_closure(
             package.features.contains_key(feature),
             "{name}/{feature} must be declared"
         );
-        pending.push((package.id.clone(), feature.to_owned()));
+        pending.push((package.id.clone(), feature.to_owned(), true));
     }
+    let mut firm = BTreeSet::new();
+    let mut activation = BTreeSet::new();
     let mut visited = BTreeSet::new();
-    while let Some((id, feature)) = pending.pop() {
+    while let Some((id, feature, is_firm)) = pending.pop() {
         if !visited.insert((id.clone(), feature.clone())) {
             continue;
+        }
+        if is_firm {
+            firm.insert((id.clone(), feature.clone()));
+        } else {
+            activation.insert((id.clone(), feature.clone()));
         }
         let package = packages[id.as_str()];
         // Seeds may name a feature the owner does not declare (a `default`
@@ -228,64 +315,73 @@ fn declared_closure(
                     .iter()
                     .find(|dep| dep.name.replace('-', "_") == dependency)
                     .unwrap_or_else(|| panic!("Cargo must resolve {}/{implication}", package.name));
-                pending.push((edge.pkg.clone(), feature.to_owned()));
+                pending.push((edge.pkg.clone(), feature.to_owned(), true));
                 activate_edge(&nodes, &packages, &members, &id, &dependency, &mut pending);
                 continue;
             }
-            pending.push((id.clone(), implication.clone()));
+            pending.push((id.clone(), implication.clone(), true));
         }
     }
-    visited
-        .into_iter()
-        .map(|(id, feature)| {
-            let package = packages[id.as_str()];
-            (package.name.clone(), package.version.clone(), feature)
-        })
-        .collect()
+    (firm, activation)
 }
 
 // Crossing a workspace-declared edge opts into everything the edge can turn
-// on: the features the manifest requests on it, and the dependency's
-// defaults. Whether the edge really has defaults enabled is settled by the
-// activation difference in `forbidden_closure`, which drops seeds Cargo never
-// activates; pushing the default unconditionally keeps edge-declared default
-// lists from needing activation knowledge here.
+// on: the features the manifest requests on it — matched under the table key
+// Cargo resolves the edge by (the rename when the dependency is renamed) and
+// the declaration kind the edge resolved for, normal or build — and the
+// dependency's defaults. A `dep:` arm activates every same-named edge, so a
+// dependency declared as both normal and build contributes both targets.
+// Whether a target really has defaults enabled is settled by the activation
+// difference in `forbidden_closure`; pushing the default unconditionally
+// keeps edge-declared default lists from needing activation knowledge here.
 fn activate_edge(
     nodes: &BTreeMap<&str, &Node>,
     packages: &BTreeMap<&str, &Package>,
     members: &BTreeSet<&str>,
     owner: &str,
     dependency: &str,
-    pending: &mut Vec<(String, String)>,
+    pending: &mut Vec<(String, String, bool)>,
 ) {
     let dependency = dependency.replace('-', "_");
     if !members.contains(owner) {
         return;
     }
-    let edge = nodes[owner]
+    let edges: Vec<&Dependency> = nodes[owner]
         .deps
         .iter()
-        .find(|dep| dep.name.replace('-', "_") == dependency)
-        .unwrap_or_else(|| panic!("Cargo must resolve dep:{dependency}"));
-    pending.push((edge.pkg.clone(), "default".to_owned()));
-    let Some(declared) = packages[owner]
-        .dependencies
-        .iter()
-        .find(|dep| dep.name.replace('-', "_") == dependency && dep.kind.is_none())
-        .map(|dep| dep.features.clone())
-    else {
-        return;
-    };
-    for feature in declared {
-        pending.push((edge.pkg.clone(), feature));
+        .filter(|dep| dep.name.replace('-', "_") == dependency && dep.activates())
+        .collect();
+    assert!(!edges.is_empty(), "Cargo must resolve dep:{dependency}");
+    for edge in edges {
+        for kind in edge
+            .dep_kinds
+            .iter()
+            .map(|dep| dep.kind.as_deref())
+            .collect::<BTreeSet<_>>()
+        {
+            if kind == Some("dev") {
+                continue;
+            }
+            if let Some(declared) = packages[owner].dependencies.iter().find(|dep| {
+                dep.rename.as_deref().unwrap_or(&dep.name).replace('-', "_") == dependency
+                    && dep.kind.as_deref() == kind
+            }) {
+                for feature in &declared.features {
+                    pending.push((edge.pkg.clone(), feature.clone(), true));
+                }
+            }
+        }
+        pending.push((edge.pkg.clone(), "default".to_owned(), false));
     }
 }
 
-// The forbidden set is what a seed activates beyond the same root built
-// without it, restricted to features the workspace's own declarations name.
-// The difference keeps features that are on anyway — shared dependency
-// defaults, the owner's ambient edge requests — out of the set while
-// `dep:`-edge activation and edge-requested instrumentation stay in.
+// The forbidden set is what the seed's declarations can turn on, restricted
+// to features Cargo actually activates with the seed. Firm rows stay
+// forbidden even when the without-seed closure already contains them — the
+// owner that enables the seed (or an ambient edge request) by default is the
+// default-on configuration the policy rejects, not a reason to subtract the
+// feature. The activation difference still arbitrates the `default` pushes,
+// dropping a `default` the edge suppresses instead of fabricating one.
 fn forbidden_closure(
     root: &Path,
     target: &str,
@@ -295,22 +391,40 @@ fn forbidden_closure(
 ) -> BTreeSet<PackageFeature> {
     let mut forbidden = BTreeSet::new();
     for seed @ (package, feature) in seeds {
-        let declared = declared_closure(metadata, &BTreeSet::from([seed.clone()]));
-        let with = closure(root, package, target, Some(feature), false, config);
-        let without = closure(root, package, target, None, false, config);
+        let (declared, activation) = declared_closure(metadata, &BTreeSet::from([seed.clone()]));
+        let with = closure(
+            root,
+            package,
+            target,
+            Some(feature),
+            false,
+            config,
+            metadata,
+        );
+        let without = closure(root, package, target, None, false, config, metadata);
+        forbidden.extend(declared.intersection(&with).cloned());
         let activated: BTreeSet<PackageFeature> = with.difference(&without).cloned().collect();
-        forbidden.extend(declared.intersection(&activated).cloned());
+        forbidden.extend(activation.intersection(&activated).cloned());
     }
     forbidden
 }
 
 fn violations(
+    metadata: &Metadata,
     enabled: &BTreeSet<PackageFeature>,
     forbidden: &BTreeSet<PackageFeature>,
 ) -> Vec<String> {
+    let packages: BTreeMap<&str, &Package> = metadata
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), package))
+        .collect();
     enabled
         .intersection(forbidden)
-        .map(|(name, version, feature)| format!("{name} v{version}/{feature}"))
+        .map(|(id, feature)| {
+            let package = packages[id.as_str()];
+            format!("{} v{}/{feature}", package.name, package.version)
+        })
         .collect()
 }
 
@@ -338,8 +452,8 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
         .parent()
         .unwrap();
     let host = host_target(root);
+    let metadata = metadata(root, &[]);
     for target in [host.as_str(), "wasm32-unknown-unknown"] {
-        let metadata = metadata(root, target, &[]);
         let mut seeds: BTreeSet<(String, String)> = [
             ("verter_audit", "semantic-observe"),
             ("verter_scheduler", "semantic-observe"),
@@ -366,8 +480,8 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
         // the repository's build lanes independently compile those profiles.
         for package in ["verter_napi", "verter_lsp", "verter_wasm", "verter_tsc"] {
             for include_dev in [false, true] {
-                let enabled = closure(root, package, target, None, include_dev, &[]);
-                let violations = violations(&enabled, &forbidden);
+                let enabled = closure(root, package, target, None, include_dev, &[], &metadata);
+                let violations = violations(&metadata, &enabled, &forbidden);
                 assert!(violations.is_empty(), "{package} target={target} dev={include_dev}: optional observation features enabled: {violations:?}");
             }
         }
@@ -391,20 +505,39 @@ fn write_member(root: &Path, name: &str, manifest: &str) {
 
 impl Fixture {
     fn new(production_features: &str, dev_features: Option<&str>) -> Self {
+        Self::with_audit_default(
+            "",
+            &format!(
+                "verter_audit = {{ path = \"../verter_audit\", default-features = false, features = [{production_features}] }}"
+            ),
+            dev_features,
+        )
+    }
+
+    /// Observation owner whose `default` lists `audit_default`; the
+    /// production edge is written verbatim so fixtures choose whether the
+    /// owner's defaults flow into production.
+    fn with_audit_default(
+        audit_default: &str,
+        production_edge: &str,
+        dev_features: Option<&str>,
+    ) -> Self {
         let root = verter_test_support::unique_temp_dir("observe-feature-closure");
         write_member(
             &root,
             "verter_audit",
-            r#"[package]
+            &format!(
+                r#"[package]
 name = "verter_audit"
 version = "0.0.0"
 edition = "2021"
 [features]
-default = []
+default = [{audit_default}]
 semantic-observe = ["attribution"]
 attribution = []
 test-support = []
-"#,
+"#
+            ),
         );
         let mut manifest = format!(
             r#"[package]
@@ -412,7 +545,7 @@ name = "production"
 version = "0.0.0"
 edition = "2021"
 [dependencies]
-verter_audit = {{ path = "../verter_audit", default-features = false, features = [{production_features}] }}"#
+{production_edge}"#
         );
         if let Some(features) = dev_features {
             manifest.push_str(&format!(
@@ -434,15 +567,19 @@ verter_audit = {{ path = "../verter_audit", default-features = false, features =
     }
 
     /// Observation owner whose `semantic-observe` reaches `collector` through
-    /// `implication` (a `dep:` reference or an implicit one) and `audit_edge`.
-    /// The registry serves collector 1.0.0 with `collector_default` as its
-    /// defaults and a bare 2.0.0; `production_edge` is the production
-    /// dependency under test.
+    /// `implication` (a `dep:` reference or an implicit one) and the edges in
+    /// `audit_edges` (full `[dependencies]`/`[build-dependencies]` sections,
+    /// so fixtures choose the declaration kind and any rename). The registry
+    /// serves collector 1.0.0 with `collector_default` as its defaults and a
+    /// bare 2.0.0; `vendor_collector` adds a path-source collector 1.0.0
+    /// outside the declared members for same-name/version different-source
+    /// controls; `production_edges` is the production dependency under test.
     fn with_collector(
         implication: &str,
-        audit_edge: &str,
+        audit_edges: &str,
         collector_default: &[&str],
-        production_edge: &str,
+        production_edges: &str,
+        vendor_collector: bool,
     ) -> Self {
         let root = verter_test_support::unique_temp_dir("observe-feature-closure");
         for (version, default) in [("1.0.0", collector_default), ("2.0.0", &[][..])] {
@@ -474,6 +611,23 @@ instrument = []
             )
             .unwrap();
         }
+        if vendor_collector {
+            let package = root.join("vendor").join("collector");
+            fs::create_dir_all(package.join("src")).unwrap();
+            fs::write(
+                package.join("Cargo.toml"),
+                r#"[package]
+name = "collector"
+version = "1.0.0"
+edition = "2021"
+[features]
+default = []
+instrument = []
+"#,
+            )
+            .unwrap();
+            fs::write(package.join("src/lib.rs"), "").unwrap();
+        }
         write_member(
             &root,
             "verter_audit",
@@ -485,8 +639,7 @@ edition = "2021"
 [features]
 default = []
 semantic-observe = ["{implication}"]
-[dependencies]
-{audit_edge}
+{audit_edges}
 "#
             ),
         );
@@ -498,9 +651,7 @@ semantic-observe = ["{implication}"]
 name = "production"
 version = "0.0.0"
 edition = "2021"
-[dependencies]
-verter_audit = {{ path = "../verter_audit", default-features = false }}
-{production_edge}
+{production_edges}
 "#
             ),
         );
@@ -532,7 +683,7 @@ verter_audit = {{ path = "../verter_audit", default-features = false }}
 
     fn violations(&self, include_dev: bool) -> Vec<String> {
         let target = host_target(Path::new(env!("CARGO_MANIFEST_DIR")));
-        let metadata = metadata(&self.root, &target, &self.config);
+        let metadata = metadata(&self.root, &self.config);
         let forbidden = forbidden_closure(
             &self.root,
             &target,
@@ -541,6 +692,7 @@ verter_audit = {{ path = "../verter_audit", default-features = false }}
             &self.config,
         );
         violations(
+            &metadata,
             &closure(
                 &self.root,
                 "production",
@@ -548,6 +700,7 @@ verter_audit = {{ path = "../verter_audit", default-features = false }}
                 None,
                 include_dev,
                 &self.config,
+                &metadata,
             ),
             &forbidden,
         )
@@ -604,16 +757,18 @@ fn observe_feature_closure_rejects_dev_dependency_unification() {
 fn observe_feature_closure_rejects_dependency_edge_activation() {
     let requested = Fixture::with_collector(
         "dep:collector",
-        "collector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
+        "[dependencies]\ncollector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
         &[],
-        "collector = { version = \"=1.0.0\", default-features = false, features = [\"instrument\"] }",
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=1.0.0\", default-features = false, features = [\"instrument\"] }",
+        false,
     );
     assert_eq!(requested.violations(false), ["collector v1.0.0/instrument"]);
     let defaults = Fixture::with_collector(
         "collector",
-        "collector = { version = \"=1.0.0\", optional = true }",
+        "[dependencies]\ncollector = { version = \"=1.0.0\", optional = true }",
         &["instrument"],
-        "collector = { version = \"=1.0.0\" }",
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=1.0.0\" }",
+        false,
     );
     assert_eq!(
         defaults.violations(false),
@@ -621,23 +776,58 @@ fn observe_feature_closure_rejects_dependency_edge_activation() {
     );
     let untouched = Fixture::with_collector(
         "dep:collector",
-        "collector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
+        "[dependencies]\ncollector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
         &[],
-        "collector = { version = \"=1.0.0\", default-features = false }",
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=1.0.0\", default-features = false }",
+        false,
     );
     assert!(untouched.violations(false).is_empty());
 }
 
-// The observation closure names the collector version it would activate.
-// An unrelated version of the same package carrying the same feature name is
-// outside that closure: instrumentation the opt-in never reaches.
+// The observation opt-in may live on an optional build dependency: `dep:`
+// arms activate build edges too, and Cargo applies the edge's requests on
+// the build side. Production enabling that instrumentation on its own build
+// edge is the same measurement activation and must be rejected.
 #[test]
-fn observe_feature_closure_keys_features_by_package_version() {
+fn observe_feature_closure_rejects_build_dependency_edge_activation() {
+    let fixture = Fixture::with_collector(
+        "dep:collector",
+        "[build-dependencies]\ncollector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
+        &[],
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\n[build-dependencies]\ncollector = { version = \"=1.0.0\", default-features = false, features = [\"instrument\"] }",
+        false,
+    );
+    assert_eq!(fixture.violations(false), ["collector v1.0.0/instrument"]);
+}
+
+// A renamed dependency edge resolves under its manifest key, not the package
+// name behind it: `dep:meter` must find the declaration that renamed
+// `collector` to `meter`, or the edge's requested instrumentation silently
+// drops out of the forbidden set.
+#[test]
+fn observe_feature_closure_rejects_renamed_dependency_edge_activation() {
+    let fixture = Fixture::with_collector(
+        "dep:meter",
+        "[dependencies]\nmeter = { package = \"collector\", version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
+        &[],
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=1.0.0\", default-features = false, features = [\"instrument\"] }",
+        false,
+    );
+    assert_eq!(fixture.violations(false), ["collector v1.0.0/instrument"]);
+}
+
+// The observation closure names the Cargo package identity it would
+// activate. An unrelated version of the same package — or an unrelated
+// source carrying the same name and version — is outside that closure:
+// instrumentation the opt-in never reaches.
+#[test]
+fn observe_feature_closure_keys_features_by_package_identity() {
     let unrelated = Fixture::with_collector(
         "dep:collector",
-        "collector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
+        "[dependencies]\ncollector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
         &[],
-        "collector = { version = \"=2.0.0\", default-features = false, features = [\"instrument\"] }",
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=2.0.0\", default-features = false, features = [\"instrument\"] }",
+        false,
     );
     assert!(
         unrelated.violations(false).is_empty(),
@@ -645,9 +835,49 @@ fn observe_feature_closure_keys_features_by_package_version() {
     );
     let observed = Fixture::with_collector(
         "dep:collector",
-        "collector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
+        "[dependencies]\ncollector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
         &[],
-        "collector = { version = \"=1.0.0\", default-features = false, features = [\"instrument\"] }",
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=1.0.0\", default-features = false, features = [\"instrument\"] }",
+        false,
     );
     assert_eq!(observed.violations(false), ["collector v1.0.0/instrument"]);
+    let split = Fixture::with_collector(
+        "dep:collector",
+        "[dependencies]\ncollector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
+        &[],
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { path = \"../vendor/collector\", default-features = false, features = [\"instrument\"] }",
+        true,
+    );
+    assert!(
+        split.violations(false).is_empty(),
+        "production enables the path-source collector; the observation closure names the registry one"
+    );
+}
+
+// The guard's promise is default-off capture: an owner that turns the seed
+// on through its own defaults must not launder the feature out of the
+// forbidden set via the with/without activation difference.
+#[test]
+fn observe_feature_closure_rejects_owner_default_activation() {
+    let defaulted = Fixture::with_audit_default(
+        "\"semantic-observe\"",
+        "verter_audit = { path = \"../verter_audit\" }",
+        None,
+    );
+    assert_eq!(
+        defaulted.violations(false),
+        [
+            "verter_audit v0.0.0/attribution",
+            "verter_audit v0.0.0/semantic-observe"
+        ]
+    );
+    let control = Fixture::with_audit_default(
+        "\"semantic-observe\"",
+        "verter_audit = { path = \"../verter_audit\", default-features = false }",
+        None,
+    );
+    assert!(
+        control.violations(false).is_empty(),
+        "production opts out of the owner defaults; nothing observation-shaped is active"
+    );
 }
