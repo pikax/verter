@@ -69,13 +69,18 @@ const finite = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0;
 /**
  * The phases in which each tool's ENGINE is working on the demand: from its
  * own start (Verter's host construction; tsc's server spawn) to the last warm
- * request. Statistics, observation, calibration and teardown are the
- * harness's work, never the engine's.
+ * request — for a session, to the last step (`step-N`), whose demands and
+ * edits are the engine's work exactly as a probe's cold and warm requests
+ * are. Statistics, observation, calibration and teardown are the harness's
+ * work, never the engine's.
  */
 export const ENGINE_PHASES = {
   verter: ["engine-start", "setup", "init", "cold", "warm"],
   tsc: ["spawn", "engine-start", "setup", "init", "cold", "warm"],
 };
+
+/** A session's `step-N` marker: the engine working on that step. */
+const sessionStepPhase = (phase) => /^step-\d+$/.test(String(phase));
 
 /**
  * How many warm (in-process) repeats an invocation makes. Warm requests are
@@ -140,7 +145,11 @@ export function killAttributed(inv, limits = {}) {
     return (
       memoryKillEvidence(rec, limits.budgetBytes) || deadlineKillEvidence(rec, limits.timeoutMs)
     );
-  if (arm?.tool !== "verter" || !ENGINE_PHASES.verter.includes(inv.phase)) return false;
+  if (
+    arm?.tool !== "verter" ||
+    (!ENGINE_PHASES.verter.includes(inv.phase) && !sessionStepPhase(inv.phase))
+  )
+    return false;
   return memoryKillEvidence(rec, limits.budgetBytes);
 }
 
@@ -166,8 +175,15 @@ export function invocationEnd(inv, limits = {}) {
     const phase = inv.phase ?? null;
     const detail = phase ? `${rec.killedBy} during ${phase}` : rec.killedBy;
     // A record exists once the demand was measured: whatever was killed
-    // after that (observation, teardown) was not the engine's demand.
-    if (inv.probe?.stage === "measured" || inv.probe?.stage === "complete") {
+    // after that (observation, teardown) was not the engine's demand. A
+    // session record is written once, complete, after every step, its
+    // statistics and its retention: its existence is the session's proof
+    // that the demand was measured and recorded.
+    if (
+      inv.probe?.stage === "measured" ||
+      inv.probe?.stage === "complete" ||
+      inv.session?.stage === "complete"
+    ) {
       return { kind: "observe-killed", detail: `${detail}, after the demand completed` };
     }
     if (!killAttributed(inv, limits)) {

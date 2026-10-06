@@ -237,6 +237,7 @@ async function main() {
     stage: "complete",
     incremental: INCREMENTAL_FACILITY,
     tscExe: job.tscExe,
+    statsExe: job.statsExe,
     serverPid,
     rootFiles,
     phases: { spawnMs, setupMs, setupRoundTripMs, initMs, initRoundTripMs },

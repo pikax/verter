@@ -10,6 +10,9 @@
 // events) is Verter-only: matched when the published names and required
 // flags equal the construction's, never compared with tsc.
 
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   ARMS,
   CLASSES,
@@ -26,6 +29,14 @@ import { canonicalDigest } from "./canonical.mjs";
 import { sha256Text } from "./provenance.mjs";
 import { INCREMENTAL_FACILITY, sessionTsconfigText, tscFiles } from "./sessions.mjs";
 import { supervisorRecordProblems } from "./supervisor.mjs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+/** The harness's own tsc session driver: what a tsc-api session command must run. */
+const TSC_SESSION_DRIVER = join(HERE, "tsc-session-probe.mjs");
+// Commands and record paths reach the records through the platform's `join`,
+// so command provenance is compared separator-insensitively (as validate.mjs
+// compares the CLI arm's command).
+const forwardSlashes = (p) => (typeof p === "string" ? p.replace(/\\/g, "/") : p);
 
 /** The arms a session runs (a session is one live process: no cold-only or whole-program arm). */
 export const SESSION_ARMS = ["verter", "verter-observe", "tsc-api"];
@@ -156,6 +167,10 @@ export function sessionAnswers(inv, session, limits) {
   let end = invocationEnd(inv, limits);
   if (end.kind === "exited" && end.exitCode !== 0)
     end = { kind: "child-failure", detail: `exit ${end.exitCode}` };
+  // A session record exists only complete — written once, after every step,
+  // its statistics and its retention — so a kill after it was written took
+  // nothing from the measurement and the record is read as an exited one.
+  if (end.kind === "observe-killed") end = { kind: "exited", exitCode: 0 };
   const record = inv.session;
   if (end.kind === "exited" && !record)
     end = { kind: "child-failure", detail: inv.sessionReadError ?? "no session record" };
@@ -234,7 +249,11 @@ function sessionArmSummary(arm, invs, session, limits) {
       detail: verdicts.find((v) => v.detail)?.detail ?? "",
     };
   });
-  const completed = measured.filter((i) => invocationEnd(i, limits).kind === "exited" && i.session);
+  // Statistics only over invocations whose record was written (a session
+  // killed after that point kept everything it measured).
+  const completed = measured.filter(
+    (i) => ["exited", "observe-killed"].includes(invocationEnd(i, limits).kind) && i.session,
+  );
   const records = completed.map((i) => i.session);
   const out = {
     invocations: invs.length,
@@ -369,9 +388,14 @@ export function sessionRecordProblems(record, session, { tool }) {
     }
   });
   const reading = tool === "verter" ? record?.afterSteps : record?.serverAfterSteps;
+  const pid = tool === "verter" ? record?.pid : record?.serverPid;
   need(
     typeof reading?.metric === "string" && finite(reading?.peakBytes) && reading.peakBytes > 0,
     "no engine statistics after the steps",
+  );
+  need(
+    Number.isInteger(pid) && reading?.pid === pid,
+    "the engine statistics are not of the session's own process",
   );
   need(
     (record?.statsErrors ?? []).length === 0,
@@ -410,10 +434,13 @@ export function tscIncrementalProblems(record, session, projectDir) {
 
 /**
  * Validate the run's sessions. `selected` are the sessions the run's tier
- * (or --only) selects, `bins` the run's pinned binaries.
+ * (or --only) selects, `bins` the run's pinned binaries, `libText` the
+ * benchmark's library text (its digest is what a session's recorded inputs
+ * must carry). Returns the run's failures and warnings.
  */
 export function validateSessions(run, selected, { schedule, bins, libText = null } = {}) {
   const failures = [];
+  const warnings = [];
   const fail = (m) => failures.push(m);
   const meta = run.meta ?? {};
   const opts = meta.options ?? {};
@@ -425,13 +452,17 @@ export function validateSessions(run, selected, { schedule, bins, libText = null
   for (const [id, cell] of Object.entries(meta.sessions ?? {})) {
     const session = byId.get(id);
     if (!session) continue;
-    const want = sessionInputs(session, "");
+    const want = sessionInputs(session, libText ?? "");
     for (const [file, sha] of Object.entries(want)) {
-      if (file === "lib.bench.d.ts") continue;
+      if (file === "lib.bench.d.ts") {
+        // The library digest is checked only where the validator holds the
+        // benchmark's own library text.
+        if (libText !== null && cell.inputs?.[file] !== sha)
+          fail(`session ${id}: the library is not the benchmark's`);
+        continue;
+      }
       if (cell.inputs?.[file] !== sha) fail(`session ${id}: ${file} is not the catalog's`);
     }
-    if (libText !== null && cell.inputs?.["lib.bench.d.ts"] !== sha256Text(libText))
-      fail(`session ${id}: the library is not the benchmark's`);
   }
   const arms = sessionArmsOf(opts.arms ?? []);
   const plan = schedule(ids, arms, opts.repeat ?? 0, opts.warmup ?? 0).map(
@@ -480,14 +511,34 @@ export function validateSessions(run, selected, { schedule, bins, libText = null
         fail(
           `${id}: ran ${inv.command?.slice(0, 2).join(" ")}, not the pinned probe's session runner`,
         );
+    } else if (tool === "tsc") {
+      // The tsc session arm runs through the harness's own node driver on
+      // the invocation's own job and record: bind the command to that node
+      // (recorded with the run's host) and this script.
+      const out = forwardSlashes(inv.sessionOut);
+      const command = [
+        meta.host?.nodeExe,
+        TSC_SESSION_DRIVER,
+        "--job",
+        String(out).replace(/session\.json$/, "job.json"),
+        "--out",
+        out,
+      ].map(forwardSlashes);
+      const ran = Array.isArray(inv.command) ? inv.command.map(forwardSlashes) : inv.command;
+      if (stable(ran) !== stable(command))
+        fail(
+          `${id}: ran ${Array.isArray(inv.command) ? inv.command.join(" ") : inv.command}, not the harness's node on its own tsc session driver for this invocation`,
+        );
     }
     const end = invocationEnd(inv, limits);
     if (end.kind === "harness-failure") {
       fail(`${id}: failed child: ${end.detail}`);
       continue;
     }
-    if (end.kind !== "exited") continue;
-    if (sup.exitCode !== 0) {
+    // A session killed after its complete record was written is validated
+    // like an exited one: the kill took nothing from the measurement.
+    if (end.kind !== "exited" && end.kind !== "observe-killed") continue;
+    if (end.kind === "exited" && sup.exitCode !== 0) {
       fail(`${id}: failed child: exit ${sup.exitCode}`);
       continue;
     }
@@ -502,6 +553,14 @@ export function validateSessions(run, selected, { schedule, bins, libText = null
       if (inv.session.captureAvailable !== (inv.arm === "verter-observe"))
         fail(`${id}: capture availability ${inv.session.captureAvailable} is wrong for ${inv.arm}`);
     } else {
+      if (inv.session.tscExe !== meta.typescript?.exe)
+        fail(
+          `${id}: the session API ran ${inv.session.tscExe}, not the verified tsc ${meta.typescript?.exe}`,
+        );
+      if (inv.session.statsExe !== bins?.probe?.pinned)
+        fail(
+          `${id}: the server's counters were read by ${inv.session.statsExe}, not the pinned probe`,
+        );
       for (const p of tscIncrementalProblems(inv.session, session, inv.projectDir))
         fail(`${id}: ${p}`);
     }
@@ -516,8 +575,21 @@ export function validateSessions(run, selected, { schedule, bins, libText = null
         fail(
           `${cell.key}|tsc-api step ${d.step} ${d.demand}: wrong answer against the constructed answer: ${p}`,
         );
+    // The observe arm exists to catch a capture layer that changes what the
+    // engine retains: a difference fails the run. Without a completed
+    // measured invocation on either side there is nothing to compare (the
+    // cell reports n/a); that is a warning, never a silent pass.
+    const rs = cell.requiredState;
+    if (rs?.state === "differs")
+      fail(
+        `session ${cell.key}: the observe build's REQUIRED state differs from the production build's (${rs.fields.join(", ")})`,
+      );
+    if (rs?.state === "n/a")
+      warnings.push(
+        `session ${cell.key}: the REQUIRED-state comparison is n/a (an arm has no completed measured invocation)`,
+      );
   }
   if (stable(run.summary?.sessions ?? null) !== stable(recomputed))
     fail("the stored session summary disagrees with its raw records");
-  return failures;
+  return { failures, warnings };
 }

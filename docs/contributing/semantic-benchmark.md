@@ -513,6 +513,20 @@ its answers matched in Verter and reproduced the constructed answer in tsc.
 Answers are observed right after each step, outside every timer, so a
 session's memory figures include observation for both tools.
 
+Each arm's provenance is bound as the probes' is: a Verter session must have
+run the pinned probe's `session` runner, a tsc session the harness's own node
+(recorded with the run's host) running `tsc-session-probe.mjs` on the
+invocation's own job and record paths, with the verified tsc executable and
+the pinned probe that read the server's counters recorded in the record; the
+statistics reading must be of the session's own process (the record's pid),
+and every recorded input digest must be the catalog's — the benchmark
+library's included. A session killed after its complete record was written
+keeps its measurement (the kill took nothing from it); a kill inside a step
+counts as the engine's only on the probes' memory-kill evidence. The observe
+arm's REQUIRED-state identity is enforced: a build that retains differently
+fails validation, and a session where an arm has no completed measured
+invocation reports `n/a` with a warning.
+
 ## Capacity
 
 Every cell has a Capacity row: each arm's outcome at the engine budget (its

@@ -139,6 +139,7 @@ export function hostInfo() {
     logicalCpus: cpus.length,
     totalMemoryBytes: os.totalmem(),
     node: process.version,
+    nodeExe: process.execPath,
   };
 }
 

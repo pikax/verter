@@ -10,9 +10,10 @@
 //   node --test scripts/benchmark/semantic-perf/semantic-perf.test.mjs
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { classifyVerterAnswer, compactProbeRecord, parseCli, verdict } from "./analyze.mjs";
@@ -22,6 +23,7 @@ import { buildProblems, sha256Text, toolchainPin } from "./provenance.mjs";
 import { interpretMeasurement } from "./reference.mjs";
 import { renderMarkdown } from "./report.mjs";
 import {
+  LIB_FILE,
   sameArchitecture,
   schedule,
   scheduleBalanceProblems,
@@ -554,6 +556,10 @@ const PACKAGES = [
 const MEM_MB = 64;
 const PIN = toolchainPin(ROOT);
 const INFRA_MB = 1024;
+const HERE = dirname(fileURLToPath(import.meta.url));
+const LIB_TEXT = readFileSync(LIB_FILE, "utf8");
+const NODE = "node";
+const TSC_SESSION_DRIVER = join(HERE, "tsc-session-probe.mjs");
 
 function supervisorRecord(overrides = {}) {
   return {
@@ -680,9 +686,9 @@ function withWarm(probe, warm) {
   return probe;
 }
 
-function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
+function syntheticRun({ verterText = "1", tscText = "1", arms = ["verter", "tsc-api"] } = {}) {
   const options = {
-    arms: ["verter", "tsc-api"],
+    arms,
     repeat: 2,
     warmup: 1,
     warmRepeats: 1,
@@ -704,7 +710,9 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
     arm: p.arm,
     rep: p.rep,
     warmup: p.warmup,
-    command: [p.arm === "verter" ? "/bin/probe" : "node"],
+    command: [
+      p.arm === "verter" ? "/bin/probe" : p.arm === "verter-observe" ? "/bin/observe" : "node",
+    ],
     supervisorOut: `/nonexistent/${index}.sup.json`,
     supervisorExit: 0,
     supervisor: supervisorRecord(),
@@ -716,7 +724,7 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
       { phase: "done", atMs: 1020 },
     ],
     probe: withWarm(
-      p.arm === "verter" ? verterProbe(verterText, p.arm) : tscProbe(tscText),
+      p.arm === "tsc-api" ? tscProbe(tscText) : verterProbe(verterText, p.arm),
       !p.warmup && p.rep === 0,
     ),
   }));
@@ -742,7 +750,7 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
     meta: {
       options,
       plan: plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`),
-      host: { arch: "x64" },
+      host: { arch: "x64", nodeExe: NODE },
       tuning: {},
       environment: {
         runtime: { names: ["PATH", "SystemRoot"], valuesSha256: sha256Text("runtime environment") },
@@ -1777,6 +1785,7 @@ function tscSessionRecord(session, projectDir, { answers = {} } = {}) {
     stage: "complete",
     incremental: INCREMENTAL_FACILITY,
     tscExe: "/tsc/tsc",
+    statsExe: "/bin/probe",
     serverPid: 2,
     rootFiles: ["lib.bench.d.ts", ...tscFiles(session)].map((f) => `${projectDir}/${f}`),
     phases: { spawnMs: 1, setupMs: 2, setupRoundTripMs: 3, initMs: 1, initRoundTripMs: 2 },
@@ -1834,7 +1843,7 @@ function addSessions(run, sessions) {
         family: session.family,
         note: session.note,
         dir: `/s/${session.id}`,
-        inputs: sessionInputs(session, "lib"),
+        inputs: sessionInputs(session, LIB_TEXT),
       },
     ]),
   );
@@ -1849,6 +1858,7 @@ function addSessions(run, sessions) {
   run.sessionInvocations = plan.map((p, index) => {
     const session = byId.get(p.key);
     const projectDir = `/s/${p.key}/${p.arm}/${p.warmup ? "w" : "r"}${p.rep}/project`;
+    const sessionOut = `/nonexistent/s${index}.session.json`;
     return {
       index,
       sessionId: p.key,
@@ -1857,13 +1867,20 @@ function addSessions(run, sessions) {
       warmup: p.warmup,
       command:
         p.arm === "tsc-api"
-          ? ["node", "tsc-session-probe.mjs"]
+          ? [
+              NODE,
+              TSC_SESSION_DRIVER,
+              "--job",
+              `/nonexistent/s${index}.job.json`,
+              "--out",
+              sessionOut,
+            ]
           : [p.arm === "verter-observe" ? "/bin/observe" : "/bin/probe", "session"],
       projectDir,
       supervisorOut: `/nonexistent/s${index}.sup.json`,
       supervisorExit: 0,
       supervisor: supervisorRecord({ timeoutMs: o.timeoutMs + o.startupAllowanceMs }),
-      sessionOut: `/nonexistent/s${index}.session.json`,
+      sessionOut,
       spawnedAtMs: 1000,
       phase: "done",
       phaseHistory: [{ phase: "done", atMs: 1010 }],
@@ -1900,6 +1917,14 @@ function withObserveBuild(run) {
 /** A synthetic run with the incremental session (verter and tsc-api arms). */
 function sessionRun() {
   const run = syntheticRun();
+  run.meta.options.only = ["synthetic", "incremental-edits"];
+  addSessions(run, sessionsFor("quick", TIERS, run.meta.options.only));
+  return resummarize(run);
+}
+
+/** A synthetic run whose session runs the production and the observe build. */
+function observeSessionRun() {
+  const run = withObserveBuild(syntheticRun({ arms: ["verter", "verter-observe"] }));
   run.meta.options.only = ["synthetic", "incremental-edits"];
   addSessions(run, sessionsFor("quick", TIERS, run.meta.options.only));
   return resummarize(run);
@@ -1996,6 +2021,110 @@ test("session records must follow the script, and the stored session summary mus
   const observe = sessionRun();
   observe.sessionInvocations.find((i) => i.arm === "verter").session.captureAvailable = true;
   failsWith(observe, /capture availability/);
+});
+
+test("a session's engine statistics must be of the process the run measured", () => {
+  const verter = sessionRun();
+  verter.sessionInvocations.find((i) => i.arm === "verter").session.afterSteps.pid = 777;
+  failsWith(verter, /statistics are not of the session's own process/);
+
+  const tsc = sessionRun();
+  tsc.sessionInvocations.find((i) => i.arm === "tsc-api").session.serverAfterSteps.pid = 777;
+  failsWith(tsc, /statistics are not of the session's own process/);
+
+  const noPid = sessionRun();
+  noPid.sessionInvocations.find((i) => i.arm === "verter").session.pid = 12.5;
+  failsWith(noPid, /statistics are not of the session's own process/);
+});
+
+test("the tsc session arm's provenance is bound to the command that ran it", () => {
+  const otherNode = sessionRun();
+  otherNode.sessionInvocations.find((i) => i.arm === "tsc-api").command[0] = "/other/node";
+  failsWith(otherNode, /not the harness's node on its own tsc session driver/);
+
+  const otherDriver = sessionRun();
+  otherDriver.sessionInvocations.find((i) => i.arm === "tsc-api").command[1] =
+    "/elsewhere/driver.mjs";
+  failsWith(otherDriver, /not the harness's node on its own tsc session driver/);
+
+  const otherJob = sessionRun();
+  otherJob.sessionInvocations.find((i) => i.arm === "tsc-api").command[3] = "/other/job.json";
+  failsWith(otherJob, /not the harness's node on its own tsc session driver/);
+
+  const otherTsc = sessionRun();
+  otherTsc.sessionInvocations.find((i) => i.arm === "tsc-api").session.tscExe = "/WHATEVER/tsc";
+  failsWith(otherTsc, /not the verified tsc/);
+
+  const otherStats = sessionRun();
+  otherStats.sessionInvocations.find((i) => i.arm === "tsc-api").session.statsExe =
+    "/bin/other-stats";
+  failsWith(otherStats, /not the pinned probe/);
+});
+
+test("a session's recorded inputs must be the catalog's, the benchmark library's included", () => {
+  const run = sessionRun();
+  const id = Object.keys(run.meta.sessions)[0];
+  run.meta.sessions[id].inputs["lib.bench.d.ts"] = sha256Text("TOTALLY-DIFFERENT-LIB");
+  failsWith(run, /the library is not the benchmark's/);
+});
+
+test("the observe arm must retain the production build's REQUIRED state", () => {
+  const run = observeSessionRun();
+  assert.deepEqual(validate(run).failures, []);
+  assert.equal(run.summary.sessions.cells[0].requiredState.state, "identical");
+
+  const differs = observeSessionRun();
+  for (const inv of differs.sessionInvocations.filter(
+    (i) => i.arm === "verter-observe" && !i.warmup,
+  ))
+    inv.session.retention.retainedBytes = 999999;
+  failsWith(resummarize(differs), /REQUIRED state differs/);
+
+  // An arm with no completed measured invocation leaves nothing to compare:
+  // reported n/a and warned, never a silent pass.
+  const none = observeSessionRun();
+  for (const inv of none.sessionInvocations.filter(
+    (i) => i.arm === "verter-observe" && !i.warmup,
+  )) {
+    inv.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+    inv.session = null;
+    inv.phase = "step-1";
+  }
+  resummarize(none);
+  const checked = validate(none);
+  assert.deepEqual(checked.failures, []);
+  assert.equal(none.summary.sessions.cells[0].requiredState.state, "n/a");
+  assert.ok(checked.warnings.some((w) => /REQUIRED-state comparison is n\/a/.test(w)));
+});
+
+test("a session killed after writing its complete record keeps its measurement; a kill inside a step is the engine's", () => {
+  const killed = sessionRun();
+  const inv = killed.sessionInvocations.find((i) => i.arm === "verter" && !i.warmup);
+  inv.supervisor = supervisorRecord({ killedBy: "memory", exitCode: null });
+  inv.supervisorExit = 137;
+  inv.phase = "stats";
+  resummarize(killed);
+  assert.deepEqual(validate(killed).failures, []);
+  const arm = killed.summary.sessions.cells[0].arms.verter;
+  assert.equal(arm.class, "matched");
+  assert.equal(arm.completedMeasured, 2);
+  assert.equal(arm.metrics.peakBytes.median, 2000);
+  assert.ok(arm.ends.includes("observe-killed"));
+
+  const mid = sessionRun();
+  const midInv = mid.sessionInvocations.find((i) => i.arm === "verter" && !i.warmup);
+  midInv.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    backend: "windows-job-object",
+    killTriggerBytes: MEM_MB * 1024 * 1024,
+  });
+  midInv.supervisorExit = 137;
+  midInv.phase = "step-1";
+  midInv.session = null;
+  resummarize(mid);
+  assert.deepEqual(validate(mid).failures, []);
+  assert.equal(mid.summary.sessions.cells[0].arms.verter.class, "killed");
 });
 
 test("a component's metadata is matched only on equal prop names, required flags and events", () => {

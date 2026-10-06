@@ -36,7 +36,7 @@ import {
   supervisorDeadlineMs,
   warmRepeatsFor,
 } from "./analyze.mjs";
-import { ROOT, sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
+import { LIB_FILE, ROOT, sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
 import {
   buildProblems,
   RECORDED_PACKAGES,
@@ -467,9 +467,16 @@ export function validateRun(
     if (answer.alias && answer.alias !== "__Probe") fail(`${id}: answered ${answer.alias}`);
   }
 
-  // The session workloads: their records, answers and summary.
+  // The session workloads: their records, answers and summary. Their inputs
+  // must be the catalog's, the benchmark's own library included.
   const selectedSessions = sessionsFor(opts.tier ?? "stress", TIERS, opts.only ?? []);
-  for (const f of validateSessions(run, selectedSessions, { schedule, bins })) fail(f);
+  const sessionCheck = validateSessions(run, selectedSessions, {
+    schedule,
+    bins,
+    libText: readFileSync(LIB_FILE, "utf8"),
+  });
+  for (const f of sessionCheck.failures) fail(f);
+  warnings.push(...sessionCheck.warnings);
 
   // Answers, classes and the summary, recomputed from the raw records.
   const recomputed = summarize(run, expected, scenarios, sessions);
