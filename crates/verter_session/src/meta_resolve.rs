@@ -23,7 +23,7 @@
 // of this shell — bare-name references in tests need the imports in
 // scope here.
 #[cfg(test)]
-use crate::types::ProjectionMode;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
@@ -44,7 +44,6 @@ pub(crate) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 // sub-module split — siblings live in `crates/verter_session/src/meta_resolve/`.
 // The shell re-exports the moved `pub(crate)` surface so existing
 // `crate::meta_resolve::*` paths keep working without callsite churn.
-mod dep_signature;
 pub(crate) mod diagnostic_convert;
 pub(crate) mod dispatch_helpers;
 pub(crate) mod exactness;
@@ -66,7 +65,6 @@ mod slot_binding_graph_tests;
 #[cfg(test)]
 #[path = "meta_resolve/typed_ir_consumer_tests.rs"]
 mod typed_ir_consumer_tests;
-pub(crate) use dep_signature::emit_dispatch_dep_signature_facts;
 pub(crate) use dispatch_helpers::{
     arg_preserving_member_use_site_slot, project_expr_class_a_node_via_dispatch_threaded,
     project_expr_class_a_via_dispatch,
@@ -113,7 +111,6 @@ pub use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedJsdocBlock,
     ResolvedJsdocTag, ResolvedMacroMeta, ResolvedNativeProp, ResolvedTypeRegistryMeta,
 };
-pub use crate::project_semantic_dispatch::interior_source::InteriorSourceStep;
 pub(crate) use output::PublishedCompleteness;
 pub use output::{
     ComponentMetaFailure, ComponentMetaOutput, ComponentMetaOutputError,

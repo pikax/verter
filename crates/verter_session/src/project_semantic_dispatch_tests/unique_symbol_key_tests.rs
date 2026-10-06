@@ -3,7 +3,7 @@
 //! property names, and a mapped type binds its key to that type.
 
 use super::checker_probe_lane_tests::{default_probe_host, with_probe_on_host, PROBE_FILE};
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
 /// The key type `keyof` gives a `unique symbol` property key is a node of
 /// the declaring file's (the nominal `typeof` carrier of the symbol's

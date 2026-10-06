@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use verter_session_query::analysis::types::Hash16;
 
-use crate::types::ProjectionMode;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 impl verter_session_query::retention::RetainedFootprint for CachedComponentMetaResult {
     fn retained_footprint_bytes(&self) -> usize {
@@ -81,7 +81,7 @@ pub struct ResolutionTemplate {
     /// publication gate refuses partials), so a cached template is `Complete`
     /// in production; preserving the typed value keeps rehydrate honest
     /// rather than independently resetting the suppression bool to `false`.
-    pub completeness: crate::semantic_query::ResultCompleteness,
+    pub completeness: verter_type_engine::semantic_query::ResultCompleteness,
 }
 
 /// Cached component-meta payload AND its sanitized

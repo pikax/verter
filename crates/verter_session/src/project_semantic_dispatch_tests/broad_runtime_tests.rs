@@ -1,13 +1,15 @@
 use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
-use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
-use crate::semantic_query::{
+use crate::{FileLanguage, UpsertRequest, VerterHost};
+use verter_type_engine::request_context::{
+    current_cold_compute_completeness, ColdComputeCompletenessScope,
+};
+use verter_type_engine::semantic_query::{
     BroadRuntimeClassification, BroadRuntimeKind, DeclIdentity, HashValue, LiteralValue,
     NodeScopeId, PartialReasonSet, PrimitiveKind, QueryError, QueryResult, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue, SurfaceMember,
 };
-use crate::{FileLanguage, UpsertRequest, VerterHost};
 
 fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
     let _ = host
@@ -35,7 +37,7 @@ fn upsert_vue(host: &VerterHost, id: &str, source: &str) {
 
 fn classify(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    subject: crate::semantic_query::SemanticNodeId,
+    subject: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> BroadRuntimeClassification {
     match dispatch.classify_broad_runtime_transient(subject).result {
         QueryResult::Value(SemanticQueryValue::BroadRuntime(value)) => value,
@@ -108,15 +110,12 @@ fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
         "1".to_owned(),
     )));
     let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::BigInt));
-    let subject = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
-            string,
-            number,
-            string,
-            bigint_literal,
-            unknown,
-        ])),
-    ));
+    let subject =
+        graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [string, number, string, bigint_literal, unknown],
+            )),
+        ));
 
     let value = classify(&ProjectSemanticDispatch::new(&host), subject);
 
@@ -145,11 +144,11 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
         readonly: false,
     });
     let callable = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from([]),
         return_type: leaf,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(leaf),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(leaf),
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
@@ -159,8 +158,10 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     let explosive_members: Vec<_> = (0_u64..4_096)
         .map(|index| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            key: crate::semantic_query::AuthoredPropertyKey::string(format!("nested{index}")),
-            value: crate::semantic_query::SemanticNodeId(u64::MAX - index),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(format!(
+                "nested{index}"
+            )),
+            value: verter_type_engine::semantic_query::SemanticNodeId(u64::MAX - index),
             optional: false,
             readonly: false,
             method_kind: None,
@@ -168,40 +169,43 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: Default::default(),
             declaration_origin: None,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
         })
         .collect();
     // Callability is read from signature discovery, which reads the signature
     // node itself, so the construct signature is a real one; the members stay
     // dangling, because classification must never descend into them.
     let constructor = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Construct,
+        kind: verter_type_engine::semantic_query::SignatureKind::Construct,
         params: Arc::from([]),
         return_type: leaf,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(leaf),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(leaf),
         type_parameters: Arc::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
         is_abstract: false,
     });
-    let object = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(explosive_members.into_boxed_slice()),
-        call_signatures: Arc::from([]),
-        construct_signatures: Arc::from([constructor]),
-        index_signatures: Arc::from([]),
-        keyspace: Some(array),
-        has_index_signature: true,
-    }));
+    let object = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(explosive_members.into_boxed_slice()),
+            call_signatures: Arc::from([]),
+            construct_signatures: Arc::from([constructor]),
+            index_signatures: Arc::from([]),
+            keyspace: Some(array),
+            has_index_signature: true,
+        },
+    ));
     assert_eq!(
         classify(&ProjectSemanticDispatch::new(&host), object).kinds(),
         &[BroadRuntimeKind::Function, BroadRuntimeKind::Object],
         "signature discovery classifies the object without reading any member body"
     );
     let subject = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from([
             array, callable, object,
         ])),
     ));
@@ -225,7 +229,9 @@ fn broad_runtime_keeps_null_and_unsupported_undefined_distinct() {
     let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
     let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
     let subject = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([null, undefined])),
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            null, undefined,
+        ])),
     ));
 
     assert_eq!(
@@ -348,7 +354,9 @@ fn all_unknown_intersection_is_explicit_complete_unknown() {
     let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let subject = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([unknown, any])),
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            unknown, any,
+        ])),
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
     let output = dispatch.classify_broad_runtime_transient(subject);
@@ -628,7 +636,7 @@ fn classifier_work_exhaustion_is_partial_unknown_and_never_warms() {
         .collect();
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 arms.into_boxed_slice(),
             )),
         ),

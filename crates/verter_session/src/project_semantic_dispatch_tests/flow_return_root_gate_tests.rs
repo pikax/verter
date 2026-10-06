@@ -25,11 +25,11 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::{
-    FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
@@ -264,8 +264,8 @@ fn r6_key(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(R6_CANONICAL),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -638,7 +638,7 @@ fn flow_return_nested_self_call_never_holds_the_enclosing_slot() {
         };
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnmodeledPosition),
             "the unrecoverable inner self-call is an unmodelled POSITION inside \
              the nested value's return, and degrades the frame that returns it"
         );
@@ -651,7 +651,7 @@ fn flow_return_nested_self_call_never_holds_the_enclosing_slot() {
                 matches!(
                     dispatch.graph().node_data(*return_type).as_deref(),
                     Some(SemanticNodeData::Opaque(
-                        crate::semantic_query::QueryError::UnmodeledPosition
+                        verter_type_engine::semantic_query::QueryError::UnmodeledPosition
                     ))
                 ),
                 "the nested signature's return position carries the typed marker, got {:?}",

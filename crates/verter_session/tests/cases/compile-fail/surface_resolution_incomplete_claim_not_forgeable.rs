@@ -17,7 +17,7 @@
 //! (or forge success evidence) outside the producer boundary; trybuild would
 //! turn red on this fixture.
 
-use verter_session::semantic_query::surface_resolution::{IncompleteSurface, Witnessed};
+use verter_type_engine::semantic_query::surface_resolution::{IncompleteSurface, Witnessed};
 
 fn main() {
     let _forged: IncompleteSurface<Vec<u8>> = IncompleteSurface {

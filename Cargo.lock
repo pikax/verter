@@ -3339,6 +3339,7 @@ dependencies = [
  "verter_session",
  "verter_session_query",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
  "verter_workspace",
  "walkdir",
@@ -3369,6 +3370,7 @@ dependencies = [
  "trybuild",
  "verter_compiler",
  "verter_session",
+ "verter_type_engine",
  "verter_type_expr",
 ]
 
@@ -3505,6 +3507,7 @@ dependencies = [
  "verter_session",
  "verter_session_query",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
 ]
 
@@ -3662,6 +3665,7 @@ dependencies = [
  "verter_session",
  "verter_session_query",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
  "verter_workspace",
 ]
@@ -3959,6 +3963,7 @@ dependencies = [
  "verter_session_query",
  "verter_span",
  "verter_test_support",
+ "verter_type_engine",
  "verter_type_expr",
  "verter_type_expr_oxc",
  "verter_type_runtime",
@@ -4022,6 +4027,7 @@ dependencies = [
  "verter_no_typeexpr",
  "verter_session",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
  "verter_workspace",
 ]
@@ -4106,6 +4112,40 @@ dependencies = [
  "verter_test_support",
  "verter_tsgo_api",
  "windows-sys",
+]
+
+[[package]]
+name = "verter_type_engine"
+version = "0.0.1-beta.6"
+dependencies = [
+ "arc-swap",
+ "boxcar",
+ "dashmap",
+ "hotpath",
+ "imbl",
+ "indexmap",
+ "parking_lot",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "static_assertions",
+ "tracing",
+ "uuid",
+ "verter_analysis_inputs",
+ "verter_audit",
+ "verter_debug_assert",
+ "verter_ecma",
+ "verter_execution",
+ "verter_identity",
+ "verter_language",
+ "verter_no_typeexpr",
+ "verter_session_query",
+ "verter_span",
+ "verter_type_engine",
+ "verter_type_expr",
+ "web-time",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -4216,6 +4256,7 @@ dependencies = [
  "verter_session",
  "verter_session_query",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
  "wasm-bindgen",
  "wasm-bindgen-test",

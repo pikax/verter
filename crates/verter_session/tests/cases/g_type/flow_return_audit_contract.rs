@@ -32,10 +32,10 @@ use std::sync::Arc;
 use verter_audit::payloads::flow_return::{FlowDegradationTag, FlowFailureTag, FlowPartialityTag};
 use verter_audit::{AuditCaptureState, RequestKind, StructuredAuditEvent};
 use verter_session::host_flow_return_audit::FlowReturnError;
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     demand, FlowReturnFailure, FlowReturnResult, ReturnProjectionDemand,
 };
-use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 

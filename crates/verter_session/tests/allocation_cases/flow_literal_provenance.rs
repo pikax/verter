@@ -2,13 +2,16 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
-use verter_session::for_tests::{
-    join_product, FlowProductBudget, FlowProductValue, FlowSemanticAlgebra, FlowTransferOutcome,
-    GraphSemanticAlgebra, LiteralFreshness, LiteralProvenance, LiteralProvenanceResult,
-    ReachingTypeProduct, SemanticGraphStore, WideningMembership,
-};
-use verter_session::semantic_query::{LiteralValue, SemanticNodeData, SemanticNodeId};
 use verter_session_query::flow::policy::FlowGap;
+use verter_type_engine::project_semantic_dispatch::canonical_algebra::{
+    LiteralFreshness, LiteralProvenance, LiteralProvenanceResult,
+};
+use verter_type_engine::project_semantic_dispatch::flow_products::{
+    join_product, FlowProductBudget, FlowProductValue, FlowSemanticAlgebra, FlowTransferOutcome,
+    GraphSemanticAlgebra, ReachingTypeProduct, WideningMembership,
+};
+use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData, SemanticNodeId};
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 use super::{alloc_bytes, alloc_count, reset_alloc_counter};
 

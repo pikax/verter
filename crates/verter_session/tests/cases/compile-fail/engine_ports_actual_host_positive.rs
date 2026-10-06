@@ -1,4 +1,6 @@
-use verter_session::for_tests::{Cancellation, ExecutionSubmission, ExpressionSourceSelection, FactValidation, HostAttachmentPort, HostResolverContext, IndexedInputs, LiveFactValidation, OwnedLowering, RouteLookup};
+use verter_type_engine::resolver_core::request_ports::{Cancellation, ExecutionSubmission, ExpressionSourceSelection, HostAttachmentPort, IndexedInputs, OwnedLowering, RouteLookup};
+use verter_type_engine::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
+use verter_session::for_tests::HostResolverContext;
 
 fn implements_all<P: IndexedInputs + OwnedLowering + ExpressionSourceSelection + RouteLookup + FactValidation + LiveFactValidation + Cancellation + ExecutionSubmission + HostAttachmentPort>() {}
 

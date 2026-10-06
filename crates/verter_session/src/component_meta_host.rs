@@ -26,8 +26,8 @@ use verter_session_query::analysis::type_expand::ExpandedComponentTypes;
 #[cfg(test)]
 use verter_type_expr::{ObjectMember, TypeExpr};
 
-use crate::request_observers::component_meta_trace_custom;
 use crate::VerterHost;
+use verter_type_engine::component_meta_trace_custom;
 
 /// Project one registered carrier into its content-free ordered structure.
 pub fn ordered_sfc_structure_projection(
@@ -98,12 +98,12 @@ impl From<crate::meta::MetaError> for ComponentMetaHostError {
     }
 }
 
-impl From<crate::semantic_query::ExecutionAbort> for ComponentMetaHostError {
-    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+impl From<verter_type_engine::semantic_query::ExecutionAbort> for ComponentMetaHostError {
+    fn from(abort: verter_type_engine::semantic_query::ExecutionAbort) -> Self {
         match abort {
-            crate::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
-            crate::semantic_query::ExecutionAbort::Superseded => Self::Superseded,
-            crate::semantic_query::ExecutionAbort::Shutdown => Self::Shutdown,
+            verter_type_engine::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
+            verter_type_engine::semantic_query::ExecutionAbort::Superseded => Self::Superseded,
+            verter_type_engine::semantic_query::ExecutionAbort::Shutdown => Self::Shutdown,
         }
     }
 }
@@ -763,7 +763,8 @@ fn extract_component_meta_from_resolved_with_evaluated(
     evaluated_types: Option<&ExpandedComponentTypes>,
     include_fallthrough: bool,
 ) -> ComponentMetaAnalysis {
-    let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let dispatch =
+        &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
     // Macro-DTO surface reads through the same request-bound `ctx` as
     // `extract_component_meta_from_resolved`.

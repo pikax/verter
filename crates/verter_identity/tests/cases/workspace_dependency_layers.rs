@@ -55,6 +55,7 @@ const LAYER_2_SYNTAX_FRONTENDS_AND_NEUTRAL_DTOS: &[&str] = &[
 const LAYER_3_SEMANTIC_KERNEL: &[&str] = &[
     "verter_semantic",
     "verter_semantic_source",
+    "verter_type_engine",
     "verter_resolution",
     "verter_diagnostics",
     "verter_actions",

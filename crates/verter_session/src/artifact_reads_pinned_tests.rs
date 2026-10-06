@@ -29,8 +29,8 @@
 //! scenario. The test then asserts the pinned read and Route oracle reject
 //! the stale artifact. A pre-fix `get_any` tree returns the planted stale
 //! hash and the assertions FAIL.
-use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use crate::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::DerivedFactKind;

@@ -28,15 +28,15 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use verter_session_query::declarations::AugmentationScopeKind;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
-use crate::semantic_query::{ProjectionMode, SemanticNodeData};
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -56,7 +56,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
 
 fn node_data(
     host: &VerterHost,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Arc<SemanticNodeData> {
     host.project_type_store()
         .semantic_graph()
@@ -637,16 +637,16 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
 /// isolation; this one drives it through the end-to-end warm-read rail.
 #[test]
 fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
-        ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
-        SemanticQueryOutput,
-    };
     use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
     use verter_session_query::source::env_identity::SourceEnvIdentity;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
 
     let host = make_host();
     upsert_augmentation_fixture(&host);
@@ -690,18 +690,22 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::from("/types.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Foo"),
-            ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                "/types.ts",
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ),
-        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from("/types.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("Foo"),
+                ),
+                Arc::from(
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                        .into_boxed_slice(),
+                ),
+                dispatch.instantiate_context_for(
+                    "/types.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
         match dispatch.execute_type_node(key) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
             other => panic!("the augmented parent demand must produce a value, got {other:?}"),
@@ -891,8 +895,8 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
 /// the SAME family slot and only the fact rail can discriminate.
 #[test]
 fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
     };
@@ -915,13 +919,15 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
                 Arc::from("/types.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Foo"),
             ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            Arc::from(
+                Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+            ),
             dispatch.instantiate_context_for(
                 "/types.ts",
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -1024,25 +1030,29 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 /// failing both the `+ 1` build assertion and the edited-surface assertion.
 #[test]
 fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
     use verter_session_query::inputs::prepared::PreparationFailure;
     use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 
-    use crate::semantic_query::{ProjectionReductionContext, QueryResult, SemanticQueryKey};
+    use verter_type_engine::semantic_query::{
+        ProjectionReductionContext, QueryResult, SemanticQueryKey,
+    };
 
     fn prepare_and_read(
         host: &VerterHost,
     ) -> (
         PreparedTypeDeclResolution,
-        crate::semantic_query::CacheRead<
-            crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId>,
+        verter_type_engine::semantic_query::CacheRead<
+            verter_type_engine::semantic_query::QueryResult<
+                verter_type_engine::semantic_query::SemanticNodeId,
+            >,
         >,
     ) {
         let view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
         let preparation =
-            crate::resolver_core::request_ports::OwnedLowering::prepared_type_for_projection(
+            verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_for_projection(
                 &ctx,
                 &ctx.prepared_decl_bundle("/use.ts")
                     .expect("consumer prepared bundle"),
@@ -1050,18 +1060,22 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
                 "U",
             );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::from("/use.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("U"),
-            ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                "/use.ts",
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ),
-        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from("/use.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("U"),
+                ),
+                Arc::from(
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                        .into_boxed_slice(),
+                ),
+                dispatch.instantiate_context_for(
+                    "/use.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
         (preparation, dispatch.execute_read(key))
     }
 
@@ -1136,8 +1150,8 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
 
 #[test]
 fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
     };
@@ -1174,13 +1188,15 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
                 Arc::from("/use.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("U"),
             ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            Arc::from(
+                Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+            ),
             dispatch.instantiate_context_for(
                 "/use.ts",
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -1302,8 +1318,8 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
 ///     that the `true` above is caused by the torn state, not the key itself.
 #[test]
 fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
 
     let host = make_host();
     // TWO external `declare module "ext-pkg"` peers (no base body) + a consumer
@@ -1333,18 +1349,22 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::from("/use.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("U"),
-            ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                "/use.ts",
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ),
-        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from("/use.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("U"),
+                ),
+                Arc::from(
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                        .into_boxed_slice(),
+                ),
+                dispatch.instantiate_context_for(
+                    "/use.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
         dispatch.execute_read(key).cache_suppress
     };
 
@@ -1420,8 +1440,8 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
 /// `non_cacheable` assertion FAILS.
 #[test]
 fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
 
     // Drive the `/types.ts::Foo` Instantiate under an OUTER fact tracer, returning
     // (build.cache_suppress, build.result_is_partial, outer_tracer.non_cacheable).
@@ -1438,27 +1458,29 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             crate::for_tests::augmentation_force_source_env_unobservable_for_tests(host, true)
         });
         let view = host.resolver_store_view_read().into_owned_view();
-        let (read, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+        let (read, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(host),
             || {
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
                 let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&ctx);
-                let key =
-                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                let key = SemanticQueryKey::Instantiate(
+                    verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(
                             Arc::from("/types.ts"),
                             verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             Arc::from("Foo"),
                         ),
                         Arc::from(
-                            Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                            Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                                .into_boxed_slice(),
                         ),
                         dispatch.instantiate_context_for(
                             "/types.ts",
                             ProjectionReductionContext::published(ProjectionMode::Expanded),
                         ),
-                    ));
+                    ),
+                );
                 dispatch.execute_read(key)
             },
         );
@@ -1539,8 +1561,8 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
 ///     by the broken lease, not the key itself.
 #[test]
 fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
 
     let host = make_host();
     // TWO external `declare module "ext-pkg"` peers augmenting `Cfg`, plus a
@@ -1588,18 +1610,22 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::from("/use.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("U"),
-            ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                "/use.ts",
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ),
-        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from("/use.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("U"),
+                ),
+                Arc::from(
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                        .into_boxed_slice(),
+                ),
+                dispatch.instantiate_context_for(
+                    "/use.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
         dispatch.execute_read(key).cache_suppress
     };
 

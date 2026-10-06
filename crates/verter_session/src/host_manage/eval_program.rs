@@ -13,7 +13,7 @@ use std::sync::Arc;
 use crate::VerterHost;
 
 use super::{is_raw_import_specifier_id, read_analysis_source_result_detail};
-use crate::request_observers::component_meta_trace_custom;
+use verter_type_engine::component_meta_trace_custom;
 
 impl VerterHost {
     pub(crate) fn store_view_allows_current_whole_hash(

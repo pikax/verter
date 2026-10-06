@@ -521,7 +521,7 @@ fn resolution_output_with(
     origin_graph: Option<verter_protocol::types::OriginGraphDto>,
 ) -> host::meta_resolve::ComponentMetaResolutionOutput {
     host::meta_resolve::ComponentMetaResolutionOutput {
-        mode: host::ProjectionMode::Expanded,
+        mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
         resolved_macros: Vec::new(),
         resolved_type_registry_meta,
         origin_graph,
@@ -3075,7 +3075,7 @@ fn component_public_contract_crosses_the_production_ffi_seam_structurally() {
         None,
         Default::default(),
         contract,
-        host::semantic_query::ResultCompleteness::Complete,
+        verter_type_engine::semantic_query::ResultCompleteness::Complete,
     );
     let FfiComponentContractAvailability::Supported { contract } = ffi.component_public_contract
     else {
@@ -3852,8 +3852,8 @@ fn reasonless_partial_publishes_the_inherited_partiality_reason() {
                 diagnostics: Arc::from([]),
             },
         ),
-        host::semantic_query::ResultCompleteness::partial(
-            host::semantic_query::PartialReasonSet::empty(),
+        verter_type_engine::semantic_query::ResultCompleteness::partial(
+            verter_type_engine::semantic_query::PartialReasonSet::empty(),
         ),
     );
 

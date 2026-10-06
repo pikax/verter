@@ -11,18 +11,18 @@
 
 use std::sync::Arc;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
-use crate::fact_signature_helpers::named_fact_tracer;
 use crate::VerterHost;
+use verter_type_engine::named_fact_tracer;
 
 #[cfg(any(test, feature = "test-support"))]
-use crate::engine_test_knobs::TracerScope;
+use verter_type_engine::engine_test_knobs::TracerScope;
 
 use super::{
     component_meta_options_fingerprint, extract_component_meta_from_resolved, ComponentMetaOptions,
 };
-use crate::request_observers::{component_meta_debug, component_meta_debug_enabled};
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
 
 #[cfg(test)]
 thread_local! {
@@ -250,8 +250,10 @@ impl VerterHost {
         self.provenance
             .evaluate_types_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let resolved = self
-            .resolve_component_meta(canonical_or_alias, crate::types::ProjectionMode::Expanded)?;
+        let resolved = self.resolve_component_meta(
+            canonical_or_alias,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )?;
         resolved.evaluated_types
     }
 
@@ -290,7 +292,7 @@ impl VerterHost {
         canonical_or_alias: &str,
     ) -> Result<
         Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-        crate::semantic_query::ExecutionAbort,
+        verter_type_engine::semantic_query::ExecutionAbort,
     > {
         self.provenance
             .get_component_meta_calls
@@ -351,7 +353,8 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(cold) = self.component_meta_via_view_cold(
             canonical.as_str(),
             &view,
@@ -515,7 +518,8 @@ impl VerterHost {
                 overlay,
             );
             let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
-            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             let seed = with_resolution.then(|| {
                 crate::meta_resolve::output::ComponentMetaResolutionSeed::from_template(
                     &cached.resolution_template,
@@ -524,12 +528,12 @@ impl VerterHost {
             // Output-dependency tracing stays SEPARATE from any outer
             // analysis tracer scope (none is active on the warm path).
             let (output, output_read_set) = named_fact_tracer!(
-                &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+                &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
                 TracerScope::ComponentMetaOutput,
                 || {
                     #[cfg(test)]
                     run_warm_output_pre_materialize_hook();
-                    crate::fact_signature_helpers::observe_fact_signature(
+                    verter_type_engine::fact_signature_helpers::observe_fact_signature(
                         &cached_entry.read_set_signature.facts,
                     );
                     crate::meta_resolve::projectors::build_component_meta_output(
@@ -583,7 +587,8 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(ComponentMetaColdResult {
             resolved,
             analysis: meta,
@@ -609,11 +614,11 @@ impl VerterHost {
         // tracer already sealed + published above). Reuse the SAME live
         // session context that extraction used.
         let (output, output_read_set) = named_fact_tracer!(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             TracerScope::ComponentMetaOutput,
             || {
                 if let Some(final_result) = admitted.as_ref() {
-                    crate::fact_signature_helpers::observe_fact_signature(
+                    verter_type_engine::fact_signature_helpers::observe_fact_signature(
                         &final_result.entry.read_set_signature.facts,
                     );
                 }
@@ -690,7 +695,7 @@ impl VerterHost {
         fixed: &crate::resolver_store::BatchFixedView,
     ) -> Result<
         Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-        crate::semantic_query::ExecutionAbort,
+        verter_type_engine::semantic_query::ExecutionAbort,
     > {
         self.get_component_meta_via_view_inner(canonical_or_alias, view, Some(fixed))
     }
@@ -702,7 +707,7 @@ impl VerterHost {
         fixed: Option<&crate::resolver_store::BatchFixedView>,
     ) -> Result<
         Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-        crate::semantic_query::ExecutionAbort,
+        verter_type_engine::semantic_query::ExecutionAbort,
     > {
         self.provenance
             .get_component_meta_calls
@@ -820,7 +825,8 @@ impl VerterHost {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let Some(cold) = self.component_meta_via_view_cold(
             canonical.as_str(),
             view,
@@ -865,13 +871,14 @@ impl VerterHost {
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
         ctx: &dyn crate::resolver_core::HostRequestContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
         seed_fence: &ColdSeedFence,
         validated_at_generation: u64,
-    ) -> Result<Option<ComponentMetaColdResult>, crate::semantic_query::ExecutionAbort> {
+    ) -> Result<Option<ComponentMetaColdResult>, verter_type_engine::semantic_query::ExecutionAbort>
+    {
         #[cfg(test)]
         run_cold_body_pre_resolve_hook();
         // Pin the request executor to the caller's fixed view (FENCED), so
@@ -889,7 +896,7 @@ impl VerterHost {
                 let (mut resolved, admission) = match self
                     .resolve_component_meta_with_view_and_fixed_admission(
                         canonical,
-                        crate::types::ProjectionMode::Expanded,
+                        verter_type_engine::semantic_query::ProjectionMode::Expanded,
                         view,
                         executor_fixed,
                     ) {
@@ -902,7 +909,7 @@ impl VerterHost {
                 );
                 self.merge_extraction_facts_into_admitted_resolved_meta(
                     canonical,
-                    crate::types::ProjectionMode::Expanded,
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                     view.fingerprint(),
                     &mut resolved,
                     extract.fallthrough_fact_versions.as_deref(),
@@ -943,7 +950,8 @@ impl VerterHost {
         );
         // An aborted computation publishes nothing (its partial result was
         // never admitted either).
-        if let Some(abort) = crate::semantic_query::ExecutionAbort::observed_in(completeness.get())
+        if let Some(abort) =
+            verter_type_engine::semantic_query::ExecutionAbort::observed_in(completeness.get())
         {
             return Err(abort);
         }
@@ -1019,7 +1027,8 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx =
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         let entry = crate::component_meta_result_admission::ComponentMetaResultRead::new(
             &dispatch,
             self.project_type_store().component_meta_results(),
@@ -1159,7 +1168,8 @@ impl VerterHost {
                 current_view,
                 overlay,
             );
-            let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
             crate::component_meta_result_admission::ComponentMetaResultRead::new(
                 &dispatch,
                 self.project_type_store().component_meta_results(),
@@ -1293,7 +1303,7 @@ impl VerterHost {
         meta: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
-        final_completeness: crate::semantic_query::ResultCompleteness,
+        final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
         crate::component_meta_cached_result::CachedComponentMetaResult,
     > {
@@ -1316,14 +1326,14 @@ impl VerterHost {
                 "skipping component-meta cache promotion (view-aware path): partial result (merged extract+resolve completeness)",
             );
             return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                crate::cache_runtime::NonAdmissionReason::PartialResult,
+                verter_audit::NonAdmissionReason::PartialResult,
             );
         }
         // Publish fence: a superseded or non-current snapshot never warms
         // the shared cache.
         if !self.validation_token_still_live(seed_fence, canonical, "view-aware path") {
             return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+                verter_audit::NonAdmissionReason::GenerationSuperseded,
             );
         }
         let Some(whole_hash) = view
@@ -1331,7 +1341,7 @@ impl VerterHost {
             .or_else(|| self.shallow_file_state(canonical).map(|s| s.whole_hash))
         else {
             return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                verter_audit::NonAdmissionReason::UnresolvedProvenance,
             );
         };
         let key = self.component_meta_result_key(canonical, &ComponentMetaOptions::default());
@@ -1374,7 +1384,7 @@ impl VerterHost {
         meta: verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
         validated_at_generation: u64,
         seed_fence: &ColdSeedFence,
-        final_completeness: crate::semantic_query::ResultCompleteness,
+        final_completeness: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> crate::component_meta_result_db::ComponentMetaPublishDecision<
         crate::component_meta_cached_result::CachedComponentMetaResult,
     > {
@@ -1397,7 +1407,7 @@ impl VerterHost {
                 "skipping component-meta cache promotion: partial result (merged extract+resolve completeness)",
             );
             return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                crate::cache_runtime::NonAdmissionReason::PartialResult,
+                verter_audit::NonAdmissionReason::PartialResult,
             );
         }
         // Publish fence: recheck the seed view's validation token against
@@ -1411,12 +1421,12 @@ impl VerterHost {
         // (return-only semantics).
         if !self.validation_token_still_live(seed_fence, canonical, "base path") {
             return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+                verter_audit::NonAdmissionReason::GenerationSuperseded,
             );
         }
         let Some(shallow) = self.shallow_file_state(canonical) else {
             return crate::component_meta_result_db::ComponentMetaPublishDecision::return_only(
-                crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+                verter_audit::NonAdmissionReason::UnresolvedProvenance,
             );
         };
         let whole_hash = shallow.whole_hash;
@@ -1457,7 +1467,7 @@ impl VerterHost {
 
     /// Finalise a finished audit record through the
     /// [`crate::host_audit_runtime::AuditRequestRegistration`] planted
-    /// on the active [`crate::request_context::RequestContext`]. The
+    /// on the active [`verter_type_engine::request_context::RequestContext`]. The
     /// registration removes the in-flight slot from the host's
     /// active-request registry and inserts the record into the
     /// records store.
@@ -1477,7 +1487,7 @@ impl VerterHost {
         &self,
         record: crate::component_meta_audit::RequestAuditRecord,
     ) {
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if let Some(registration) = ctx.audit_registration.get() {
                 registration.finalize(record);
                 return;
@@ -1528,12 +1538,12 @@ mod component_meta_entry_tests;
 /// cancelled, in which case the missing value is the abort and nothing is
 /// published.
 pub(super) fn absent_unless_aborted<T>(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-) -> Result<Option<T>, crate::semantic_query::ExecutionAbort> {
+) -> Result<Option<T>, verter_type_engine::semantic_query::ExecutionAbort> {
     if ctx.is_cancelled() {
-        Err(crate::semantic_query::ExecutionAbort::Cancelled)
+        Err(verter_type_engine::semantic_query::ExecutionAbort::Cancelled)
     } else {
         Ok(None)
     }

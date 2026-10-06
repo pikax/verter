@@ -56,11 +56,11 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
     SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::{
     LiteralValue, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
 };
@@ -120,7 +120,7 @@ fn literal_keyed_slots_with_concrete_plan() -> TypeExpr {
 /// Used to verify that per-key substitution replaced the free mapper
 /// binder `K` with the enumerated key literal.
 fn instantiation_ref_args_contain_string_literal(
-    graph: &verter_session::for_tests::SemanticGraphStore,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
     target: &str,
 ) -> bool {
@@ -149,7 +149,7 @@ fn instantiation_ref_args_contain_string_literal(
 /// retains the unbound mapper binder `K` as a TypeParam — this
 /// predicate fires and the substitution-presence predicate does not.
 fn instantiation_ref_args_contain_typeparam_named(
-    graph: &verter_session::for_tests::SemanticGraphStore,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     node: SemanticNodeId,
     target: &str,
 ) -> bool {

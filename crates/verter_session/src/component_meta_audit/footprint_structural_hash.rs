@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use xxhash_rust::xxh3::xxh3_128;
 
-use crate::semantic_query::{
+use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::semantic_query::{
     AuthoredPropertyKey, DeclIdentity, IndexKey, IndexSignature, LiteralValue, NodeScopeId,
     ObjectConstructionEffect, ScopeId, SemanticNodeData, SemanticNodeId, SemanticNodeTag,
     SurfaceMember, ValueRootKey,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
-use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 /// Depth backstop for the structural walk, secondary to the visited-set cycle
 /// guard. The visited set already terminates every cycle reachable through the
@@ -588,9 +588,13 @@ impl StructuralEncoder<'_> {
             } => {
                 self.buf.push(SemanticNodeTag::Signature.stable_id());
                 self.buf.push(match kind {
-                    crate::semantic_query::SignatureKind::Call => 0,
-                    crate::semantic_query::SignatureKind::Construct if *is_abstract => 2,
-                    crate::semantic_query::SignatureKind::Construct => 1,
+                    verter_type_engine::semantic_query::SignatureKind::Call => 0,
+                    verter_type_engine::semantic_query::SignatureKind::Construct
+                        if *is_abstract =>
+                    {
+                        2
+                    }
+                    verter_type_engine::semantic_query::SignatureKind::Construct => 1,
                 });
                 self.buf
                     .extend_from_slice(&(params.len() as u64).to_le_bytes());

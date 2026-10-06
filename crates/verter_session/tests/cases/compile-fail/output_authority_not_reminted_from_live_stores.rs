@@ -9,7 +9,7 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use verter_session::for_tests::EngineStores;
+use verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores;
 
 fn remint(host: &verter_session::VerterHost) {
     let store = host.project_type_store();

@@ -63,6 +63,7 @@ verter_no_storedspan_derive = { path = "crates/verter_no_storedspan_derive" }
 verter_resolution = { path = "crates/verter_resolution" }
 verter_semantic_source = { path = "crates/verter_semantic_source" }
 verter_session_query = { path = "crates/verter_session_query" }
+verter_type_engine = { path = "crates/verter_type_engine" }
 verter_type_expr = { path = "crates/verter_type_expr" }
 verter_type_expr_oxc = { path = "crates/verter_type_expr_oxc" }
 

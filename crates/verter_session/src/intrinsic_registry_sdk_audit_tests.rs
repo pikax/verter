@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::intrinsic_registry::{
+use verter_type_engine::intrinsic_registry::{
     audit_unsupported, extract_intrinsics_from_lib_source, IntrinsicRegistry,
 };
 

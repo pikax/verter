@@ -1,4 +1,4 @@
-use verter_session::for_tests::Cancellation;
+use verter_type_engine::resolver_core::request_ports::Cancellation;
 
 fn cannot_escape<P: Cancellation + ?Sized>(port: &P) {
     let checkpoint = port.cancellation_checkpoint();

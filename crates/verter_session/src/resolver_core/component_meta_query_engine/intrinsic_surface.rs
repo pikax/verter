@@ -33,10 +33,10 @@ use verter_type_expr::locators::{
 use verter_type_expr::TypeExpr;
 
 use super::ComponentMetaQueryEngine;
-use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
-use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext;
+use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
 
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
     SurfaceProvenanceContext, SurfaceView,
 };
@@ -241,7 +241,7 @@ impl ComponentMetaQueryEngine<'_> {
 /// object-shape extraction convention), declared index signatures, and the
 /// synthetic open placeholder for a GENUINELY OPEN surface.
 fn expanded_shape_from_surface_view(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,

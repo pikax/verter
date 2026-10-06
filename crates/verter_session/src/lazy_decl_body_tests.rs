@@ -15,12 +15,12 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::ProjectionMode;
 use crate::VerterHost;
 use crate::{
     meta_provenance::MetaProvenanceSnapshot,
     types::{HostConfig, UpsertRequest},
 };
+use verter_type_engine::semantic_query::ProjectionMode;
 
 fn make_host() -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(

@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::ExecutionAbort;
 use crate::types::HostConfig;
 use crate::types::UpsertRequest;
 use crate::VerterHost;
+use verter_type_engine::semantic_query::ExecutionAbort;
 
 const OWNER: &str = "/src/Aborted.vue";
 const SOURCE: &str = r#"<script setup lang="ts">
@@ -42,9 +42,14 @@ fn host() -> VerterHost {
 
 /// Run `operation` under a request that is already cancelled.
 fn cancelled<T>(operation: impl FnOnce() -> T) -> T {
-    let context = crate::request_context::RequestContext::new(7101, Arc::from(OWNER), false, None);
+    let context = verter_type_engine::request_context::RequestContext::new(
+        7101,
+        Arc::from(OWNER),
+        false,
+        None,
+    );
     context.cancel();
-    let _guard = crate::request_context::RequestContextGuard::install(context);
+    let _guard = verter_type_engine::request_context::RequestContextGuard::install(context);
     operation()
 }
 
@@ -92,7 +97,7 @@ fn a_cancelled_output_request_publishes_nothing_and_a_retry_completes() {
     let (analysis, _resolution, _types, _contract, completeness) = retry.into_parts_with_contract();
     assert_eq!(
         completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
     );
     assert_eq!(analysis.props.len(), 1);
 }

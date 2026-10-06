@@ -369,11 +369,11 @@ fn rest_template_and_mapped_parameters_keep_their_variance() {
 fn variance_marker_nodes(
     dispatch: &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
 ) -> Vec<(
-    crate::semantic_query::SemanticNodeId,
-    crate::semantic_query::DeclIdentity,
-    Option<crate::semantic_query::NodeScopeId>,
+    verter_type_engine::semantic_query::SemanticNodeId,
+    verter_type_engine::semantic_query::DeclIdentity,
+    Option<verter_type_engine::semantic_query::NodeScopeId>,
 )> {
-    use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+    use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
     let graph = dispatch.graph();
     (0..graph.node_count() as u64)
         .map(SemanticNodeId)

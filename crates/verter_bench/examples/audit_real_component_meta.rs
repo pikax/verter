@@ -452,7 +452,7 @@ fn run_one(
     // exact request just observed. Counters are cumulative across
     // requests; consumers can subtract to get per-request deltas.
     let loop5_counters_json =
-        verter_session::loop5_instrumentation::dump_loop5_instrumentation_counters();
+        verter_type_engine::loop5_instrumentation::dump_loop5_instrumentation_counters();
     let flat_slug = target.replace(['/', '\\'], "--");
     let counters_dir = out_dir.join(pass);
     if let Err(err) = fs::create_dir_all(&counters_dir) {
@@ -753,8 +753,8 @@ fn main() -> io::Result<()> {
                 "[WATCHDOG] spawn mode=sample interval_ms={}",
                 watchdog_interval_ms
             );
-            verter_session::loop5_instrumentation::spawn_watchdog_with_mode(
-                verter_session::loop5_instrumentation::WatchdogMode::Sample,
+            verter_type_engine::loop5_instrumentation::spawn_watchdog_with_mode(
+                verter_type_engine::loop5_instrumentation::WatchdogMode::Sample,
                 0,
                 watchdog_interval_ms,
             );
@@ -766,8 +766,8 @@ fn main() -> io::Result<()> {
                         "[WATCHDOG] spawn mode=stall stall_ms={} interval_ms={}",
                         stall_ms, watchdog_interval_ms
                     );
-                    verter_session::loop5_instrumentation::spawn_watchdog_with_mode(
-                        verter_session::loop5_instrumentation::WatchdogMode::Stall,
+                    verter_type_engine::loop5_instrumentation::spawn_watchdog_with_mode(
+                        verter_type_engine::loop5_instrumentation::WatchdogMode::Stall,
                         stall_ms,
                         watchdog_interval_ms,
                     );

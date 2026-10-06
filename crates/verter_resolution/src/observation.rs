@@ -2,7 +2,7 @@
 //! resolver kernel.
 //!
 //! This is a separate sealed trait. It does not extend
-//! `verter_session::resolver_core::ResolverContext` and cannot name
+//! `verter_type_engine::resolver_core::ResolverContext` and cannot name
 //! `VerterHost` or any scheduler type, because `verter_resolution`'s
 //! dependency closure cannot reach those types (they live in a crate that
 //! depends on this one, never the reverse).
@@ -134,7 +134,7 @@ pub trait ResolverObservation: sealed::Sealed {
     /// demand-sliced flow evaluation is built from.
     ///
     /// Backed by a non-blocking peek at
-    /// `verter_session::cache_runtime::flow_slice_node::
+    /// `verter_type_engine::cache_runtime::flow_slice_node::
     /// FunctionFlowGraphStore`'s existing once-per-content-version memo —
     /// NEVER by driving `RetainedSnapshotSkeletonSource`'s cold build
     /// (which reaches `ensure_indexed_ready_serve` and

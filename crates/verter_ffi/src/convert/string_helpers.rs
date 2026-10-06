@@ -566,13 +566,15 @@ pub(super) fn style_lang_to_string(
     format!("{lang:?}")
 }
 
-pub(super) fn projection_mode_to_string(mode: host::ProjectionMode) -> String {
+pub(super) fn projection_mode_to_string(
+    mode: verter_type_engine::semantic_query::ProjectionMode,
+) -> String {
     match mode {
-        host::ProjectionMode::Identity => "identity".to_string(),
-        host::ProjectionMode::Navigate => "navigate".to_string(),
-        host::ProjectionMode::Shallow => "shallow".to_string(),
-        host::ProjectionMode::Expanded => "expanded".to_string(),
-        host::ProjectionMode::Skeleton => "skeleton".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Identity => "identity".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Navigate => "navigate".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Shallow => "shallow".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Expanded => "expanded".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Skeleton => "skeleton".to_string(),
     }
 }
 

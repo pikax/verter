@@ -8,11 +8,11 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::composite::CompositeList;
-use crate::semantic_query::{
+use crate::{HostConfig, VerterHost};
+use verter_type_engine::semantic_query::composite::CompositeList;
+use verter_type_engine::semantic_query::{
     IndexKey, PrimitiveKind, SemanticNodeData, SemanticNodeId, TupleElement,
 };
-use crate::{HostConfig, VerterHost};
 
 /// A nesting past any native-stack or depth bound.
 const DEPTH: usize = 10_000;
@@ -252,6 +252,9 @@ fn alias_chains_end_at_any_length() {
         )
     });
     let (array, end, settled) = ends;
-    assert_eq!(end, crate::semantic_query_memo::AliasChainEnd::Node(array));
+    assert_eq!(
+        end,
+        verter_type_engine::semantic_query_memo::AliasChainEnd::Node(array)
+    );
     assert_eq!(settled, Some(array));
 }

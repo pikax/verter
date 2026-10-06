@@ -648,7 +648,7 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
     // cap. The target is an identity, not a position: whatever else the flow opens,
     // before or after, this scope is the one that overflows.
     let host = host_with_files();
-    crate::engine_test_knobs::arm_fact_tracer_overflow_once(
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
         TracerScope::ScriptFactsImportRoute,
         over_cap,
     );
@@ -662,14 +662,14 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
     // one-shot was consumed would leave the boundary unattributed — the exact hole a
     // positional knob hides behind.
     assert_eq!(
-        crate::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
         Some(TracerScope::ScriptFactsImportRoute),
         "the forced overflow must be claimed BY the import-route scope — the boundary under \
              test. Any other claimant (or none) means the assertions below characterise a \
              different scope",
     );
     assert_eq!(
-        crate::engine_test_knobs::peek_fact_tracer_overflow_once(),
+        verter_type_engine::engine_test_knobs::peek_fact_tracer_overflow_once(),
         None,
         "fixture invariant: the one-shot overflow knob must be CLAIMED inside the entry-point \
              (otherwise nothing overflowed and the assertions below are vacuous)",
@@ -740,17 +740,18 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
     let registration = fixtures::import_gated_capability_free_fixture_registration();
     let host = host_with_files();
 
-    crate::engine_test_knobs::arm_fact_tracer_overflow_once(
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
         TracerScope::ScriptFactsImportRoute,
         over_cap,
     );
 
     // The silent-retarget hazard: an UNRELATED tracer scope opens first. Under an
     // order-keyed one-shot this scope consumes the count and overflows itself.
-    let ((), unrelated_non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
-        |_probe| (),
-    );
+    let ((), unrelated_non_cacheable) =
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
+            |_probe| (),
+        );
     assert!(
         !unrelated_non_cacheable,
         "an UNRELATED tracer scope that merely happens to open first must NOT claim a one-shot \
@@ -759,12 +760,12 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
          green",
     );
     assert_eq!(
-        crate::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
         None,
         "no scope may claim the one-shot before the NAMED target is entered",
     );
     assert_eq!(
-        crate::engine_test_knobs::peek_fact_tracer_overflow_once(),
+        verter_type_engine::engine_test_knobs::peek_fact_tracer_overflow_once(),
         Some((TracerScope::ScriptFactsImportRoute, over_cap)),
         "the one-shot must survive an unrelated upstream scope intact, still armed for its \
          intended claimant",
@@ -778,7 +779,7 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
         "/proj/Consumer.ts",
     );
     assert_eq!(
-        crate::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
         Some(TracerScope::ScriptFactsImportRoute),
         "the overflow must land on the NAMED import-route scope even though a foreign scope ran \
          first",

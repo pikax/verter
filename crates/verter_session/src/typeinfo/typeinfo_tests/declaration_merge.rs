@@ -345,8 +345,8 @@ fn merged_interface_own_member_shadows_heritage() {
 /// surface to a [`TypeExpr`]. The Expanded sibling of
 /// [`shallow_surface_expr`].
 fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> TypeExpr {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionReductionContext, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
     };
 
@@ -360,16 +360,15 @@ fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> T
             canonical_id: Arc::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
         name: Arc::from(name),
     })) {
-        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-            value: node,
-            ..
-        }) => node,
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
+        ) => node,
         other => panic!("{name} must resolve to a declaration carrier: {other:?}"),
     };
 
@@ -378,10 +377,9 @@ fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> T
         path: Arc::from(Vec::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
-        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-            value: node,
-            ..
-        }) => node,
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
+        ) => node,
         other => panic!("empty-path Expanded projection of {name} failed: {other:?}"),
     };
     dispatch
@@ -402,7 +400,7 @@ fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> T
 ///    the inherited `string`.
 #[test]
 fn merged_interface_generic_heritage_own_member_shadows_expanded() {
-    use crate::semantic_query::SemanticNodeData;
+    use verter_type_engine::semantic_query::SemanticNodeData;
 
     let host = make_host_with_footprint();
     upsert_ts(
@@ -478,7 +476,7 @@ fn merged_interface_generic_heritage_own_member_shadows_expanded() {
 /// inherited `shared` steals the own `shared: number`).
 #[test]
 fn merged_interface_mapper_builtin_heritage_own_member_shadows_expanded() {
-    use crate::semantic_query::SemanticNodeData;
+    use verter_type_engine::semantic_query::SemanticNodeData;
 
     let host = make_host_with_footprint();
     upsert_ts(
@@ -579,7 +577,7 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_expanded() {
 /// carrier-stops and `shared` resolves to the own `number`.
 #[test]
 fn merged_interface_mapper_builtin_heritage_own_member_shadows_skeleton() {
-    use crate::semantic_query::SemanticNodeData;
+    use verter_type_engine::semantic_query::SemanticNodeData;
 
     let host = make_host_with_footprint();
     upsert_ts(

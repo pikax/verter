@@ -15,7 +15,7 @@
 //! identical to the base file.
 //!
 //! The resolver-tier seal scope reaches this body via
-//! [`crate::resolver_core::ResolverContext::materialize_overlay_indexed_ready`];
+//! [`verter_type_engine::resolver_core::ResolverContext::materialize_overlay_indexed_ready`];
 //! the impl on [`crate::VerterHost`] delegates here.
 
 use crate::file_artifact_store::FileArtifactKeySource;
@@ -583,7 +583,7 @@ impl VerterHost {
                 // non-admission only, never request partiality. The fenced
                 // consumption ALSO flows by value (the TLS chokepoint flag)
                 // so enclosing traced cold computes refuse admission.
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
                 return Some(crate::host_manage::prepared_decl::IndexedReadyServe {
@@ -598,7 +598,7 @@ impl VerterHost {
             // Complete, NOT partial — mark cache non-admission only, never
             // request partiality (the by-value `store_published == false`
             // and the fan-out both refuse shared-cache admission).
-            crate::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }
@@ -998,7 +998,8 @@ impl VerterHost {
             snapshot,
             route_inventory: Arc::clone(&route_inventory),
             declares_interface_app_config,
-            macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+            macro_hot_mirror:
+                verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
             input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         });

@@ -47,16 +47,15 @@ pub use verter_semantic::analysis::framework_facts::{
     ScriptFactPartialReason, ScriptFactUnavailableReason,
 };
 
-use crate::fact_signature_helpers::{
-    named_cacheability_scope, named_fact_tracer, ReadSetSignatureExt as _,
-};
 use crate::framework::registry::FrameworkRegistration;
-use crate::resolver_core::ResolverContext;
 use crate::VerterHost;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt as _;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::{named_cacheability_scope, named_fact_tracer};
 
 /// Producer-minted exact script facts.
 ///
@@ -434,7 +433,7 @@ static_assertions::assert_not_impl_any!(
 /// it — the production arms of `named_cacheability_scope!` / `named_fact_tracer!`
 /// drop the scope tokens unexpanded.
 #[cfg(any(test, feature = "test-support"))]
-use crate::engine_test_knobs::TracerScope;
+use verter_type_engine::engine_test_knobs::TracerScope;
 
 /// The content-addressed candidate-store key.
 ///
@@ -866,7 +865,9 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
         Option<Vec<ResolvedImportTarget>>,
         bool,
     ) = named_cacheability_scope!(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, engine_ctx),
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(
+            host, engine_ctx
+        ),
         TracerScope::ScriptFactsImportRoute,
         || {
             let mut snapshot = host.get_analysis(canonical)?;
@@ -1015,7 +1016,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             (Vec<ResolvedImportTarget>, bool),
             bool,
         ) = named_cacheability_scope!(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(
                 host, engine_ctx
             ),
             TracerScope::ScriptFactsImportRoute,
@@ -1091,7 +1092,9 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             if let Some(stored) = read_script_fact(
                 &host.framework_script_caches().facts,
                 &fact_key,
-                &crate::resolver_core::fact_validation_port::FactValidationView::new(ctx),
+                &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(
+                    ctx,
+                ),
                 generation,
             ) {
                 // Bubble the facts entry's import-route / package-provenance fact
@@ -1117,7 +1120,9 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             if let Some(stored) = read_script_fact(
                 &host.framework_script_caches().facts,
                 &fact_key,
-                &crate::resolver_core::fact_validation_port::FactValidationView::new(&host_ctx),
+                &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(
+                    &host_ctx,
+                ),
                 generation,
             ) {
                 stored.read_set_signature.bubble_via_tls();
@@ -1146,12 +1151,14 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     // ONE of the two sibling tracers and must be able to say WHICH. Erased in a
     // production build.
     let (payload_opt, finalise) = named_fact_tracer!(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(host, engine_ctx),
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_optional_ctx(
+            host, engine_ctx
+        ),
         TracerScope::ScriptFactsProviderValidate,
         || {
             // Observe the owner's whole hash + every resolved import contributor so
             // a content edit to any of them misses the warm entry.
-            crate::resolver_core::resolver_context::observe_fan_out(
+            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id: canonical.to_string(),
                     hash: whole_hash,
@@ -1160,12 +1167,14 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
             // Root the payload against the owner's import-route surface so a
             // re-route (unchanged file contents) misses the warm entry.
             if let Some(witness) = import_route_witness.as_deref() {
-                crate::resolver_core::resolver_context::observe_fan_out_borrowed(witness);
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(
+                    witness,
+                );
             }
             for target in &resolved_import_targets {
                 if let Some(import_canonical) = &target.resolved_canonical {
                     if let Some(h) = host.get_whole_hash(import_canonical) {
-                        crate::resolver_core::resolver_context::observe_fan_out(
+                        verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                                 canonical_id: import_canonical.clone(),
                                 hash: h,
@@ -1179,7 +1188,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                         // caller's query-scoped load boundary. Without its live
                         // hash the result remains usable for this request, but it
                         // cannot be rooted for shared warm admission.
-                        crate::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                             verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
                         );
                     }
@@ -1208,7 +1217,9 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                 facts,
             ) = &finalise
             {
-                crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
+                verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(
+                    facts.as_ref(),
+                );
             }
             let Some(facts) = payload.as_any_arc().downcast::<T>().ok() else {
                 return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
@@ -1227,7 +1238,9 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                 facts,
             ) = &finalise
             {
-                crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
+                verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(
+                    facts.as_ref(),
+                );
             }
             let Some(facts) = payload.as_any_arc().downcast::<T>().ok() else {
                 return ScriptFactEvidence::Unavailable(UnavailableScriptFacts::new(
@@ -1262,7 +1275,7 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
     | verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(facts) =
         &finalise
     {
-        crate::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
+        verter_type_engine::fact_signature_helpers::bubble_fact_signature_via_tls(facts.as_ref());
     }
     let validate_non_cacheable = matches!(
         &finalise,

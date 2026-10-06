@@ -12,8 +12,8 @@
 //!   `resolve_type_dependency_canonical`, and
 //!   `resolve_type_dependency_canonical_shallow` entry points.
 
-use crate::request_observers::component_meta_trace_custom;
 use crate::VerterHost;
+use verter_type_engine::component_meta_trace_custom;
 
 impl VerterHost {
     /// Expand a relative import specifier into all candidate canonical IDs.

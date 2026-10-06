@@ -18,13 +18,13 @@
 
 use std::sync::Arc;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::types::{HostConfig, UpsertRequest};
+use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
     ApparentDemandScope, FunctionParam, PrimitiveKind, ProjectionMode, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SignatureKind, SignatureReturnCarrier,
 };
-use crate::types::{HostConfig, UpsertRequest};
-use crate::VerterHost;
 
 /// A `Function` ambient corpus whose surface carries a project-A-only
 /// marker member.
@@ -226,7 +226,7 @@ fn apparent_under_demand_scope(
     base: SemanticNodeId,
     demand_canonical: &str,
 ) -> Option<SemanticNodeId> {
-    let _scope = crate::project_semantic_dispatch::LexicalDemandScopeGuard::push(
+    let _scope = verter_type_engine::project_semantic_dispatch::LexicalDemandScopeGuard::push(
         &dispatch.lexical_demand_scope,
         Arc::from(demand_canonical),
     );
@@ -329,7 +329,7 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
         mode: ProjectionMode::Navigate,
     };
     let member_read = {
-        let _scope = crate::project_semantic_dispatch::LexicalDemandScopeGuard::push(
+        let _scope = verter_type_engine::project_semantic_dispatch::LexicalDemandScopeGuard::push(
             &dispatch.lexical_demand_scope,
             Arc::from("/a/main.ts"),
         );
@@ -354,12 +354,12 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     let path_key = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(
-            vec![crate::semantic_query::PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("call"),
+            vec![verter_type_engine::semantic_query::PathSegment::Member(
+                verter_type_engine::semantic_query::PropertyKey::identifier("call"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     };
@@ -440,12 +440,12 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     let path_key = |base: SemanticNodeId, member: &str| SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(
-            vec![crate::semantic_query::PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier(member),
+            vec![verter_type_engine::semantic_query::PathSegment::Member(
+                verter_type_engine::semantic_query::PropertyKey::identifier(member),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     };
@@ -453,10 +453,11 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     // published candidate does.
     let read = |canonical: &str, member: &str| {
         with_fresh_dispatch(&host, |dispatch| {
-            let _scope = crate::project_semantic_dispatch::LexicalDemandScopeGuard::push(
-                &dispatch.lexical_demand_scope,
-                Arc::from(canonical),
-            );
+            let _scope =
+                verter_type_engine::project_semantic_dispatch::LexicalDemandScopeGuard::push(
+                    &dispatch.lexical_demand_scope,
+                    Arc::from(canonical),
+                );
             dispatch.execute_read(path_key(string, member))
         })
     };
@@ -473,7 +474,7 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     let surface_of = |canonical: &str| {
         with_fresh_dispatch(&host, |dispatch| {
             match dispatch.global_wrapper_surface("String", &[], canonical) {
-                crate::project_semantic_dispatch::apparent_type::GlobalWrapper::Surface(
+                verter_type_engine::project_semantic_dispatch::apparent_type::GlobalWrapper::Surface(
                     surface,
                 ) => surface,
                 _ => panic!("{canonical}'s project declares String"),
@@ -547,17 +548,17 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
     let path_key = |base: SemanticNodeId| SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(
-            vec![crate::semantic_query::PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("length"),
+            vec![verter_type_engine::semantic_query::PathSegment::Member(
+                verter_type_engine::semantic_query::PropertyKey::identifier("length"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     };
     let (read, miss) = with_fresh_dispatch(&host, |dispatch| {
-        let _scope = crate::project_semantic_dispatch::LexicalDemandScopeGuard::push(
+        let _scope = verter_type_engine::project_semantic_dispatch::LexicalDemandScopeGuard::push(
             &dispatch.lexical_demand_scope,
             Arc::from("/ws/main.ts"),
         );
@@ -613,7 +614,8 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
         let key = |dispatch: &ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
-        >| crate::semantic_query::FlowReturnKey {
+        >| {
+            verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
                 Arc::from(FLOW),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -623,34 +625,44 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(FLOW),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract:
-                crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+                verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+        }
         };
         let with_dispatch = |f: &dyn Fn(
             &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         ) -> Option<String>| { with_fresh_dispatch(&host, f) };
-        let request = crate::request_context::RequestContext::new(1, Arc::from(FLOW), false, None);
-        let _request = crate::request_context::RequestContextGuard::install(request);
+        let request = verter_type_engine::request_context::RequestContext::new(
+            1,
+            Arc::from(FLOW),
+            false,
+            None,
+        );
+        let _request = verter_type_engine::request_context::RequestContextGuard::install(request);
         let mut served = None;
         // bounded-loop: two demands, the cold one and its warm repeat.
         for _ in 0..2 {
-            served =
-                with_dispatch(
-                    &|dispatch| match crate::semantic_query::SemanticQueryApi::execute(
-                        dispatch,
-                        SemanticQueryKey::FlowReturn(Box::new(key(dispatch))),
-                    ) {
-                        QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-                            value: crate::semantic_query::SemanticQueryValue::FlowReturn(result),
+            served = with_dispatch(&|dispatch| {
+                match verter_type_engine::semantic_query::SemanticQueryApi::execute(
+                    dispatch,
+                    SemanticQueryKey::FlowReturn(Box::new(key(dispatch))),
+                ) {
+                    QueryResult::Value(
+                        verter_type_engine::semantic_query::SemanticQueryOutput {
+                            value:
+                                verter_type_engine::semantic_query::SemanticQueryValue::FlowReturn(
+                                    result,
+                                ),
                             ..
-                        }) => host
-                            .project_node_to_type_expr_for_test(result.return_type())
-                            .map(|expr| format!("{expr:?}")),
-                        _ => None,
-                    },
-                );
+                        },
+                    ) => host
+                        .project_node_to_type_expr_for_test(result.return_type())
+                        .map(|expr| format!("{expr:?}")),
+                    _ => None,
+                }
+            });
         }
         assert_eq!(
             served.as_deref(),
@@ -663,7 +675,7 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
             ),
             "{name} returns the wrapper's declared `length`"
         );
-        let cold = crate::request_context::current_request_context()
+        let cold = verter_type_engine::request_context::current_request_context()
             .expect("the request is installed")
             .flow_return_cold_computes
             .load(std::sync::atomic::Ordering::Relaxed);

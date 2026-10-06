@@ -36,7 +36,7 @@ use super::carrier_head_resolution_tests::{
     bare_ref_carrier, file_scope, host, import_type_carrier, upsert_ts,
 };
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     DeclIdentity, HashValue, MapperKey, MapperKind, NodeScopeId, OptionalityMod, PathSegment,
     PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult, ReadonlyMod,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
@@ -835,31 +835,31 @@ fn object_one_member(
     name: &str,
     value: SemanticNodeId,
 ) -> SemanticNodeId {
-    use crate::semantic_query::{IndexSignature, SurfaceMember};
+    use verter_type_engine::semantic_query::{IndexSignature, SurfaceMember};
     let member = SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        key: crate::semantic_query::AuthoredPropertyKey::string(name),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
         method_kind: None,
         has_implementation_body: false,
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
         declaration_origin: None,
     };
-    dispatch
-        .graph()
-        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+    dispatch.graph().intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
             members: Arc::from(vec![member].into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-        }))
+        },
+    ))
 }
 
 /// An `Intersection` over the given arms.
@@ -868,7 +868,7 @@ fn intersection(
     arms: &[SemanticNodeId],
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             arms.to_vec().into_boxed_slice(),
         )),
     ))
@@ -880,11 +880,13 @@ fn nullary_function(
     return_type: SemanticNodeId,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            return_type,
+        ),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -1014,24 +1016,24 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
     // key domain is its selection argument `'a'` (provably closed), so the
     // source/key-space role must prove finiteness CLOSED and enumerate `{a}`.
     let source_obj = {
-        use crate::semantic_query::{IndexSignature, SurfaceMember};
+        use verter_type_engine::semantic_query::{IndexSignature, SurfaceMember};
         let member = |name: &str, value: SemanticNodeId| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
             value,
             optional: false,
             readonly: false,
             method_kind: None,
             has_implementation_body: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
             declaration_origin: None,
         };
-        dispatch
-            .graph()
-            .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+        dispatch.graph().intern_node(SemanticNodeData::Object(
+            verter_type_engine::test_surface_view! {
                 members: Arc::from(
                     vec![member("a", string_ty), member("b", number_ty)].into_boxed_slice(),
                 ),
@@ -1040,10 +1042,11 @@ fn closed_builtin_source_still_enumerates_under_role_split() {
                 index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
                 keyspace: None,
                 has_index_signature: false,
-            }))
+            },
+        ))
     };
     let lit_a = dispatch.graph().intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("a".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_string()),
     ));
     let pick_source = builtin_instantiation(&dispatch, "Pick", &[source_obj, lit_a]);
     let keyof_pick = keyof(&dispatch, pick_source);

@@ -19,16 +19,16 @@ use std::sync::Arc;
 use verter_type_expr::{PrimitiveName, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr};
 
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::compat_spelling::{
+use crate::VerterHost;
+use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+use verter_type_engine::semantic_query::compat_spelling::{
     semantic_query_error_raw, BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_OBJECT_SURFACE,
     SEMANTIC_SURFACE_MEMBER,
 };
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     HotTypeRef, NodeScopeId, PrimitiveKind, QueryError, ScopeId, SemanticNodeData, SemanticNodeId,
     SyntheticBindingId, TupleElement, ValueRootKey,
 };
-use crate::VerterHost;
-use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 
 fn assert_send_sync<T: Send + Sync>() {}
 
@@ -162,7 +162,7 @@ fn materialize_typeof_round_trips_type_args() {
                 canonical_id: Arc::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -304,11 +304,11 @@ fn materialize_constructor_type_preserves_ctor_ness() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let ret = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let signature = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: ret,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(ret),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -494,10 +494,10 @@ fn typed_query_error_sentinels_round_trip_to_legacy_raw() {
 /// while an unmaterialised-sentinel degradation (`Miss`) flips it.
 #[test]
 fn from_parts_partial_follows_the_typed_materialised_class() {
-    use crate::project_semantic_dispatch::raise::{
+    use verter_type_engine::project_semantic_dispatch::raise::{
         MaterializedOutputTypeExpr, MaterializedTypeExpr, OutputTypeExpr,
     };
-    use crate::semantic_query::{DepSignature, QueryError};
+    use verter_type_engine::semantic_query::{DepSignature, QueryError};
 
     // RaiseMiss: materialised class ⇒ NO degradation leaf ⇒ NOT partial.
     let raise_miss = MaterializedTypeExpr::degraded(QueryError::RaiseMiss);
@@ -536,10 +536,10 @@ fn from_parts_partial_follows_the_typed_materialised_class() {
 /// choke point; an exact payload does not.
 #[test]
 fn from_parts_marks_degraded_payload_partial_and_keeps_exact_clean() {
-    use crate::project_semantic_dispatch::raise::{
+    use verter_type_engine::project_semantic_dispatch::raise::{
         MaterializedOutputTypeExpr, MaterializedTypeExpr, OutputTypeExpr,
     };
-    use crate::semantic_query::{DepSignature, QueryError};
+    use verter_type_engine::semantic_query::{DepSignature, QueryError};
 
     let degraded = MaterializedTypeExpr::degraded(QueryError::Miss);
     let carrier = MaterializedOutputTypeExpr::from_parts(

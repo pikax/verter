@@ -4,7 +4,7 @@
 //! the sole graph-native published-member reducer, and the identity-preserving
 //! package-backed-root gate used by the projector.
 
-use super::super::dep_signature::emit_dispatch_dep_signature_facts;
+use verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts;
 
 crate::output_sinks::define_output_capability! {
     /// Capability held only by this graph-native output sink.
@@ -13,12 +13,17 @@ crate::output_sinks::define_output_capability! {
 }
 
 fn materializer_context(
-    mode: crate::semantic_query::ProjectionMode,
-) -> crate::semantic_query::ProjectionReductionContext {
-    if matches!(mode, crate::semantic_query::ProjectionMode::Navigate) {
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(mode)
+    mode: verter_type_engine::semantic_query::ProjectionMode,
+) -> verter_type_engine::semantic_query::ProjectionReductionContext {
+    if matches!(
+        mode,
+        verter_type_engine::semantic_query::ProjectionMode::Navigate
+    ) {
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            mode,
+        )
     } else {
-        crate::semantic_query::ProjectionReductionContext::published(mode)
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(mode)
     }
 }
 
@@ -28,13 +33,13 @@ fn materializer_context(
 /// sentinels before classifying the root. Mapped carriers publish unless their
 /// value is the typed semantic-miss carrier.
 fn node_root_is_published_operator(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
-    use crate::project_semantic_dispatch::raise::node_root_is_published_operator_with_dispatch;
+    use verter_type_engine::project_semantic_dispatch::raise::node_root_is_published_operator_with_dispatch;
 
     node_root_is_published_operator_with_dispatch(dispatch, node)
 }
@@ -45,17 +50,19 @@ fn node_root_is_published_operator(
 /// therefore uses `Published(Navigate)`. Other `Navigate` roots remain
 /// structural transit; all other modes publish directly.
 pub(crate) fn node_materialize_reduction_context(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
-    node: crate::semantic_query::SemanticNodeId,
-    mode: crate::semantic_query::ProjectionMode,
-) -> crate::semantic_query::ProjectionReductionContext {
-    if matches!(mode, crate::semantic_query::ProjectionMode::Navigate)
-        && node_root_is_published_operator(dispatch, node)
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+    mode: verter_type_engine::semantic_query::ProjectionMode,
+) -> verter_type_engine::semantic_query::ProjectionReductionContext {
+    if matches!(
+        mode,
+        verter_type_engine::semantic_query::ProjectionMode::Navigate
+    ) && node_root_is_published_operator(dispatch, node)
     {
-        crate::semantic_query::ProjectionReductionContext::published(mode)
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(mode)
     } else {
         materializer_context(mode)
     }
@@ -64,14 +71,14 @@ pub(crate) fn node_materialize_reduction_context(
 /// Reduce a settled member node through the single semantic dispatch and emit
 /// the complete dependency signature to both active fact channels.
 pub(crate) fn reduce_member_value_graph_native_with_context(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
     _scope_canonical_id: &str,
-    member_value: crate::semantic_query::SemanticNodeId,
-    context: crate::semantic_query::ProjectionReductionContext,
-) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
+    member_value: verter_type_engine::semantic_query::SemanticNodeId,
+    context: verter_type_engine::semantic_query::ProjectionReductionContext,
+) -> verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     use crate::output_sinks::OutputProjector;
 
     let cap = MetaResolveFieldTypesOutputCap::new(dispatch);
@@ -84,10 +91,15 @@ pub(crate) fn reduce_member_value_graph_native_with_context(
 /// cache fence. A missing hash makes the verdict non-cacheable; the keyed owner
 /// is already rooted separately and is not duplicated here.
 fn push_decl_scope_fence(
-    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical: &str,
     scope_canonical_id: &str,
-    fence: &mut Vec<(std::sync::Arc<str>, crate::semantic_query::DepVersion)>,
+    fence: &mut Vec<(
+        std::sync::Arc<str>,
+        verter_type_engine::semantic_query::DepVersion,
+    )>,
     refused: &mut bool,
 ) {
     if *refused || canonical == scope_canonical_id || canonical.is_empty() {
@@ -96,7 +108,7 @@ fn push_decl_scope_fence(
     match ctx.authoritative_current_content_hash(canonical) {
         Some(whole_hash) => fence.push((
             std::sync::Arc::<str>::from(canonical),
-            crate::semantic_query::DepVersion::WholeHash(whole_hash),
+            verter_type_engine::semantic_query::DepVersion::WholeHash(whole_hash),
         )),
         None => *refused = true,
     }
@@ -111,12 +123,15 @@ fn push_decl_scope_fence(
 pub(crate) fn package_backed_object_like_root_identity_with_fence(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     scope_canonical_id: &str,
-    root_identity: &crate::semantic_query::DeclIdentity,
-) -> (bool, Option<crate::semantic_query::DepSignature>) {
+    root_identity: &verter_type_engine::semantic_query::DeclIdentity,
+) -> (
+    bool,
+    Option<verter_type_engine::semantic_query::DepSignature>,
+) {
     let dispatch = query_engine.dispatch;
     use std::sync::Arc;
 
-    let empty_fence: crate::semantic_query::DepSignature = Arc::from(Vec::new());
+    let empty_fence: verter_type_engine::semantic_query::DepSignature = Arc::from(Vec::new());
     let declaration_scope = root_identity.canonical_id.as_ref();
     if !query_engine
         .ctx
@@ -125,7 +140,7 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
         return (false, Some(empty_fence));
     }
 
-    let mut fence: Vec<(Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+    let mut fence: Vec<(Arc<str>, verter_type_engine::semantic_query::DepVersion)> = Vec::new();
     let mut refused = false;
     push_decl_scope_fence(
         query_engine.ctx,
@@ -181,8 +196,8 @@ pub(crate) fn package_backed_object_like_root_identity_with_fence(
             dispatch
                 .raise_authored_locator_to_hot(
                     &locator,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        crate::semantic_query::ProjectionMode::Navigate,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
                 )
                 .at_optional_boundary()

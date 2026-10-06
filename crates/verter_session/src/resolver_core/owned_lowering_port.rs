@@ -2,7 +2,6 @@
 //! answer crosses the request boundary as owned IR or a typed refusal.
 
 use super::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
-use super::request_ports::OwnedLowering;
 use std::sync::Arc;
 use verter_session_query::flow::binding::FlowBindingMapError;
 use verter_session_query::flow::bundle::{
@@ -10,6 +9,7 @@ use verter_session_query::flow::bundle::{
 };
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 use verter_session_query::{QueryHostAdmission, QueryHostError, QueryHostServe};
+use verter_type_engine::resolver_core::request_ports::OwnedLowering;
 use verter_type_expr::locators::AuthoredBodyLocator;
 
 fn lower_authored(
@@ -139,8 +139,8 @@ trait SourceInputProvider {
 }
 impl<L: RequestBoundLifecycle> SourceInputProvider for RequestBoundAdapter<L>
 where
-    Self: super::resolver_context::sealed::Sealed
-        + super::resolver_context::sealed::RequestBoundSealed,
+    Self: verter_type_engine::resolver_core::resolver_context::sealed::Sealed
+        + verter_type_engine::resolver_core::resolver_context::sealed::RequestBoundSealed,
 {
     #[inline]
     fn raw_prepared_type_decl(
@@ -353,7 +353,7 @@ fn observed_fact_hash(
     )
 }
 fn missing_source() {
-    crate::fact_tracing::note_non_cacheable_read_fan_out(
+    verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
         verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
     );
 }
@@ -362,7 +362,7 @@ fn missing_source() {
 /// this crate).
 macro_rules! expression_source_selection_from_source_inputs {
     ([$($generics:tt)*] $ty:ty $(where [$($bounds:tt)*])?) => {
-        impl<$($generics)*> super::request_ports::ExpressionSourceSelection for $ty $(where $($bounds)*)? {
+        impl<$($generics)*> verter_type_engine::resolver_core::request_ports::ExpressionSourceSelection for $ty $(where $($bounds)*)? {
             type ExpressionDemand = crate::host_source_demand::HostExpressionDemand;
 
             fn indexed_flow_source(
@@ -373,7 +373,7 @@ macro_rules! expression_source_selection_from_source_inputs {
                 Option<Self::ExpressionDemand>,
             )> {
                 let serve =
-                    super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
+                    verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
                 let demand = SourceInputProvider::source(self, &serve.indexed.shallow_state).map(|source| {
                     crate::host_source_demand::HostExpressionDemand::new(
                         source.decl_bodies().indexed_expression_demand(),
@@ -390,7 +390,7 @@ macro_rules! expression_source_selection_from_source_inputs {
                 Self::ExpressionDemand,
             )> {
                 let serve =
-                    super::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
+                    verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
                 let source = SourceInputProvider::source(self, &serve.indexed.shallow_state)?;
                 Some((
                     serve,
@@ -403,8 +403,8 @@ macro_rules! expression_source_selection_from_source_inputs {
     };
 }
 expression_source_selection_from_source_inputs!([L: RequestBoundLifecycle] RequestBoundAdapter<L> where [
-    Self: super::resolver_context::sealed::Sealed
-        + super::resolver_context::sealed::RequestBoundSealed,
+    Self: verter_type_engine::resolver_core::resolver_context::sealed::Sealed
+        + verter_type_engine::resolver_core::resolver_context::sealed::RequestBoundSealed,
 ]);
 #[cfg(any(test, feature = "test-support"))]
 expression_source_selection_from_source_inputs!([] crate::VerterHost);
@@ -520,10 +520,15 @@ impl<T: SourceInputProvider> HostSourcePort for T {
 /// A session request context: the engine's request contract plus the
 /// session-only extensions a framework-surface resolver demands.
 pub(crate) trait HostRequestContext:
-    super::ResolverContext<super::HostCapabilities> + HostSourcePort
+    verter_type_engine::resolver_core::ResolverContext<super::HostCapabilities> + HostSourcePort
 {
 }
-impl<T: super::ResolverContext<super::HostCapabilities> + HostSourcePort> HostRequestContext for T {}
+impl<
+        T: verter_type_engine::resolver_core::ResolverContext<super::HostCapabilities>
+            + HostSourcePort,
+    > HostRequestContext for T
+{
+}
 
 /// Implements the engine's owned-lowering port for one concrete source-input
 /// provider (each provider is named; the port is foreign to this crate).
@@ -542,12 +547,12 @@ macro_rules! owned_lowering_from_source_inputs {
             fn terminal_macro_inventory(
                 &self,
                 canonical: &str,
-            ) -> super::request_ports::TerminalMacroInventory {
-                let indexed = super::request_ports::IndexedInputs::indexed_for_current_content(self, canonical);
+            ) -> verter_type_engine::resolver_core::request_ports::TerminalMacroInventory {
+                let indexed = verter_type_engine::resolver_core::request_ports::IndexedInputs::indexed_for_current_content(self, canonical);
                 let base_source = (indexed.is_none() && SourceInputProvider::source_session_view(self).is_none())
                     .then(|| SourceInputProvider::source_host(self).scheduler_source(canonical))
                     .flatten();
-                super::request_ports::TerminalMacroInventory {
+                verter_type_engine::resolver_core::request_ports::TerminalMacroInventory {
                     origin_whole_hash: indexed
                         .as_ref()
                         .map(|i| i.whole_hash)
@@ -596,11 +601,11 @@ macro_rules! owned_lowering_from_source_inputs {
             ) {
                 let host = SourceInputProvider::source_host(self);
                 host.ingest_program_ambient_roots();
-                let env = super::request_ports::IndexedInputs::host_view_env_hashes(self);
+                let env = verter_type_engine::resolver_core::request_ports::IndexedInputs::host_view_env_hashes(self);
                 let (population, discriminator) =
                     crate::session_view::augmentation_population_for_view(SourceInputProvider::source_session_view(self));
                 let key = crate::file_artifact_store::AugmentationTargetKey {
-                    project_identity: super::request_ports::IndexedInputs::host_view_project_identity(self),
+                    project_identity: verter_type_engine::resolver_core::request_ports::IndexedInputs::host_view_project_identity(self),
                     resolve_env_hash: env.resolve_env_hash,
                     lib_env_hash: env.lib_env_hash,
                     population,
@@ -612,7 +617,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 .ensure_populated(
                     &key,
                     |canonical, spec| {
-                        super::request_ports::RouteLookup::resolve_type_dependency_canonical(self, canonical, spec)
+                        verter_type_engine::resolver_core::request_ports::RouteLookup::resolve_type_dependency_canonical(self, canonical, spec)
                             .map(Arc::from)
                     },
                     discriminator,
@@ -623,7 +628,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 &self,
                 name: &str,
                 space: verter_session_query::facts::SymbolSpace,
-            ) -> super::request_ports::ContributorAnswer {
+            ) -> verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                 SourceInputProvider::source_host(self).ingest_program_ambient_roots();
                 OwnedLowering::contributor_answer(self,
                     &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
@@ -638,7 +643,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 name: &str,
                 allow_automatic_libs: bool,
                 space: Option<verter_session_query::facts::SymbolSpace>,
-            ) -> super::request_ports::ContributorAnswer {
+            ) -> verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                 let host = SourceInputProvider::source_host(self);
                 let (_, discriminator) =
                     crate::session_view::augmentation_population_for_view(SourceInputProvider::source_session_view(self));
@@ -655,7 +660,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     }
                     None => population.lookup(target, name, discriminator, allow_automatic_libs),
                 };
-                super::request_ports::ContributorAnswer {
+                verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                     population_fingerprint,
                     contributors,
                 }
@@ -664,12 +669,12 @@ macro_rules! owned_lowering_from_source_inputs {
                 &self,
                 captured: &verter_session_query::source::artifact_key::FileArtifactKey,
                 observed_hash: verter_session_query::analysis::types::Hash16,
-            ) -> Option<super::request_ports::AugmenterArtifactAnswer> {
+            ) -> Option<verter_type_engine::resolver_core::request_ports::AugmenterArtifactAnswer> {
                 let (artifact, refreshed_key) = SourceInputProvider::source_host(self)
                     .project_type_store()
                     .indexed()
                     .augmenter_artifacts_self_healing(captured, observed_hash)?;
-                Some(super::request_ports::AugmenterArtifactAnswer {
+                Some(verter_type_engine::resolver_core::request_ports::AugmenterArtifactAnswer {
                     augmentations: Arc::clone(&artifact.augmentations),
                     refreshed_key,
                 })
@@ -727,8 +732,8 @@ macro_rules! owned_lowering_from_source_inputs {
                 observed: verter_session_query::analysis::types::Hash16,
                 key: verter_session_query::facts::registry::FactKey,
             ) -> Option<bool> {
-                let normalized = super::request_ports::IndexedInputs::normalized_analysis_canonical(self, canonical);
-                let identity = super::request_ports::IndexedInputs::artifact_key_for_current_content(self, canonical)?;
+                let normalized = verter_type_engine::resolver_core::request_ports::IndexedInputs::normalized_analysis_canonical(self, canonical);
+                let identity = verter_type_engine::resolver_core::request_ports::IndexedInputs::artifact_key_for_current_content(self, canonical)?;
                 if identity.content_hash != observed {
                     return None;
                 }
@@ -750,8 +755,8 @@ macro_rules! owned_lowering_from_source_inputs {
                 key: verter_session_query::facts::registry::FactKey,
                 lane: verter_session_query::facts::registry::FactLane,
             ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
-                let normalized = super::request_ports::IndexedInputs::normalized_analysis_canonical(self, canonical);
-                let identity = super::request_ports::IndexedInputs::artifact_key_for_current_content(self, canonical)?;
+                let normalized = verter_type_engine::resolver_core::request_ports::IndexedInputs::normalized_analysis_canonical(self, canonical);
+                let identity = verter_type_engine::resolver_core::request_ports::IndexedInputs::artifact_key_for_current_content(self, canonical)?;
                 if identity.content_hash != observed_hash {
                     return None;
                 }
@@ -956,8 +961,8 @@ macro_rules! owned_lowering_from_source_inputs {
     };
 }
 owned_lowering_from_source_inputs!([L: RequestBoundLifecycle] RequestBoundAdapter<L> where [
-    Self: super::resolver_context::sealed::Sealed
-        + super::resolver_context::sealed::RequestBoundSealed,
+    Self: verter_type_engine::resolver_core::resolver_context::sealed::Sealed
+        + verter_type_engine::resolver_core::resolver_context::sealed::RequestBoundSealed,
 ]);
 #[cfg(any(test, feature = "test-support"))]
 owned_lowering_from_source_inputs!([] crate::VerterHost);

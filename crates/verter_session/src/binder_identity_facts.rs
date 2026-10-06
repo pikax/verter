@@ -52,14 +52,14 @@
 
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "test-support"))]
-use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::project_type_store::IndexedReady;
-use crate::semantic_query::{BinderScopeId, DeclarationSlotSeed, SemanticSymbolSpace};
 use dashmap::DashMap;
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::declarations::{AugmentationScopeKind, ValueDeclKind};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+#[cfg(any(test, feature = "test-support"))]
+use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt as _;
+use verter_type_engine::semantic_query::{BinderScopeId, DeclarationSlotSeed, SemanticSymbolSpace};
 
 // ===========================================================================
 // Artifact payload (scope tree + declaration-slot seeds + provenance)
@@ -78,7 +78,7 @@ pub struct BinderScopeRecord {
     /// The scope kind this id names (its content-derived header). Lives
     /// on the RECORD, not on the id, so the query-identity id stays a
     /// lean 16-byte discriminator.
-    pub kind: crate::semantic_query::BinderScopeKind,
+    pub kind: verter_type_engine::semantic_query::BinderScopeKind,
     /// The enclosing scope's id. `None` only on a file top-level scope.
     pub parent: Option<BinderScopeId>,
 }
@@ -247,8 +247,8 @@ impl BinderIdentityFacts {
 /// corpus completeness fact in this block, so it must never warm a
 /// cache as a falsely-authoritative miss.
 #[must_use]
-pub fn negative_lookup_admission() -> crate::semantic_query::admit::Admission {
-    crate::semantic_query::admit::Admission::ReturnOnly
+pub fn negative_lookup_admission() -> verter_type_engine::semantic_query::admit::Admission {
+    verter_type_engine::semantic_query::admit::Admission::ReturnOnly
 }
 
 // ===========================================================================
@@ -466,7 +466,7 @@ pub(crate) fn project_binder_identity_facts_inputs(
         };
         scopes.push(BinderScopeRecord {
             id,
-            kind: crate::semantic_query::BinderScopeKind::Namespace {
+            kind: verter_type_engine::semantic_query::BinderScopeKind::Namespace {
                 qualified_name: Arc::clone(qualified_name),
             },
             parent: Some(parent),
@@ -494,11 +494,11 @@ pub(crate) fn project_binder_identity_facts_inputs(
             let (scope_id, scope_record_kind) = match scope_kind {
                 AugmentationScopeKind::Global => (
                     BinderScopeId::augmentation_global_scope(owner),
-                    crate::semantic_query::BinderScopeKind::AugmentationGlobal,
+                    verter_type_engine::semantic_query::BinderScopeKind::AugmentationGlobal,
                 ),
                 AugmentationScopeKind::Module(specifier) => (
                     BinderScopeId::augmentation_module_scope(owner, Arc::from(specifier.as_str())),
-                    crate::semantic_query::BinderScopeKind::AugmentationModule {
+                    verter_type_engine::semantic_query::BinderScopeKind::AugmentationModule {
                         specifier: Arc::from(specifier.as_str()),
                     },
                 ),
@@ -609,7 +609,7 @@ pub(crate) fn project_binder_identity_facts_inputs(
     for owner in file_scope_owners {
         scopes.push(BinderScopeRecord {
             id: BinderScopeId::file_scope(owner),
-            kind: crate::semantic_query::BinderScopeKind::File,
+            kind: verter_type_engine::semantic_query::BinderScopeKind::File,
             parent: None,
         });
     }
@@ -677,8 +677,8 @@ fn aug_scope_sort_key(scope_kind: &AugmentationScopeKind) -> (u8, String) {
 }
 
 /// Deterministic sort key for a binder scope kind.
-fn scope_kind_sort_key(kind: &crate::semantic_query::BinderScopeKind) -> (u8, String) {
-    use crate::semantic_query::BinderScopeKind;
+fn scope_kind_sort_key(kind: &verter_type_engine::semantic_query::BinderScopeKind) -> (u8, String) {
+    use verter_type_engine::semantic_query::BinderScopeKind;
     match kind {
         BinderScopeKind::File => (0, String::new()),
         BinderScopeKind::Namespace { qualified_name } => (1, qualified_name.to_string()),
@@ -710,11 +710,13 @@ fn scope_kind_sort_key(kind: &crate::semantic_query::BinderScopeKind) -> (u8, St
 /// `AppConfigNoOverrideProofDb` producer precedent).
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn produce_binder_identity_facts(
-    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     store: &BinderIdentityFactsStore,
     canonical: &str,
 ) -> Option<Arc<BinderIdentityFactsEntry>> {
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let dispatch = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let serve = ctx.ensure_indexed_ready_serve(canonical)?;
     let indexed = serve.indexed;
     let parse_stable_hash = crate::parse_stable_hash::compute_parse_stable_hash_inputs(&indexed);
@@ -733,7 +735,7 @@ pub(crate) fn produce_binder_identity_facts(
             // admits its own value with THESE binder facts observed, so
             // it is invalidated when a pinned fact moves (the sibling
             // `AppConfigNoOverrideProofDb::peek` pattern).
-            crate::fact_signature_helpers::bubble_fact_signature(
+            verter_type_engine::fact_signature_helpers::bubble_fact_signature(
                 ctx,
                 &entry.read_set_signature.facts,
             );
@@ -758,7 +760,7 @@ pub(crate) fn produce_binder_identity_facts(
         // fact is forced, so production lowers zero declaration bodies.
         let mut all_pinned = true;
         let mut pin = |fact_key: FactKey| {
-            match crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            match verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                 ctx,
                 canonical_for_body.as_ref(),
                 indexed_for_body.whole_hash,
@@ -904,16 +906,16 @@ pub(crate) fn produce_binder_identity_facts(
 use verter_session_query::facts::{FactKey, FactLane};
 #[cfg(any(test, feature = "test-support"))]
 fn fact_space(
-    space: crate::semantic_query::SemanticSymbolSpace,
+    space: verter_type_engine::semantic_query::SemanticSymbolSpace,
 ) -> verter_session_query::facts::SymbolSpace {
     match space {
-        crate::semantic_query::SemanticSymbolSpace::Type => {
+        verter_type_engine::semantic_query::SemanticSymbolSpace::Type => {
             verter_session_query::facts::SymbolSpace::Type
         }
-        crate::semantic_query::SemanticSymbolSpace::Value => {
+        verter_type_engine::semantic_query::SemanticSymbolSpace::Value => {
             verter_session_query::facts::SymbolSpace::Value
         }
-        crate::semantic_query::SemanticSymbolSpace::Namespace => {
+        verter_type_engine::semantic_query::SemanticSymbolSpace::Namespace => {
             verter_session_query::facts::SymbolSpace::Namespace
         }
     }
@@ -921,12 +923,12 @@ fn fact_space(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::semantic_query::{
-        DeclarationSlotSeed, ResolvedDeclSlotIdentity, SemanticSymbolSpace,
-    };
     use crate::types::{HostConfig, UpsertRequest};
     use crate::{FileLanguage, VerterHost};
     use std::sync::Arc;
+    use verter_type_engine::semantic_query::{
+        DeclarationSlotSeed, ResolvedDeclSlotIdentity, SemanticSymbolSpace,
+    };
 
     fn host() -> Arc<VerterHost> {
         Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -955,8 +957,9 @@ pub(crate) mod tests {
         let host = host();
         upsert_ts(&host, "/w/a.ts", "export interface Foo { x: string }");
         let _ = host.analyze_with_audit("/w/a.ts");
-        let dispatch =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        let dispatch = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+            host.as_ref(),
+        );
 
         let seed = DeclarationSlotSeed::new(
             Arc::from("/w/a.ts"),
@@ -1025,8 +1028,10 @@ pub(crate) mod tests {
 
         // An outer traced computation that WARM-HITS the store must
         // carry the binder facts in its own finalized read-set.
-        let (hit, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        let (hit, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             || {
                 super::produce_binder_identity_facts(
                     host.as_ref(),
@@ -1073,7 +1078,10 @@ pub(crate) mod tests {
         );
         let _ = host.analyze_with_audit("/w/b.ts");
         assert!(
-            !crate::fact_signature_helpers::validate_fact_signature(host.as_ref(), &outer_facts),
+            !verter_type_engine::fact_signature_helpers::validate_fact_signature(
+                host.as_ref(),
+                &outer_facts
+            ),
             "the bubbled outer read-set must invalidate when a pinned binder fact moves"
         );
     }

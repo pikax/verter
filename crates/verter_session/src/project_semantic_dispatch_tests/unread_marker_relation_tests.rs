@@ -11,8 +11,10 @@ use std::sync::Arc;
 use super::checker_probe_lane_tests::with_probe;
 use super::dispatch_txn::RelationStep;
 use super::relation::ComparabilityVerdict;
-use crate::semantic_query::{PartialReasonSet, PrimitiveKind, QueryError, SemanticNodeData};
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
+use verter_type_engine::semantic_query::{
+    PartialReasonSet, PrimitiveKind, QueryError, SemanticNodeData,
+};
 
 /// Every marker kind the relation may meet as an operand.
 fn marker_kinds() -> Vec<QueryError> {
@@ -46,7 +48,7 @@ fn an_unread_marker_is_never_a_relation_fact() {
     with_probe("", "1", |dispatch, _| {
         let graph = dispatch.graph();
         let object = graph.intern_node(SemanticNodeData::Object(
-            crate::semantic_query::SurfaceView::from_members(Vec::new(), None),
+            verter_type_engine::semantic_query::SurfaceView::from_members(Vec::new(), None),
         ));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
@@ -127,7 +129,7 @@ function locals() { class LB { x = 1 } class LS extends LB { y = 2 } return [new
             matches!(
                 measured,
                 Err(reasons) if reasons.contains(
-                    crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL
+                    verter_type_engine::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL
                 )
             ),
             "`{probe}` is no relation fact: {measured:?}"

@@ -344,7 +344,7 @@ fn live_graph() -> ProductionGraph {
 /// checked for ABSENCE (its live check proves it is still missing); a root
 /// that exists must not be listed, so its live closure check can never be
 /// skipped by staying on this list.
-const ABSENT_ROOTS: &[&str] = &["verter_type_engine"];
+const ABSENT_ROOTS: &[&str] = &[];
 
 fn assert_live_rule(root: &str) {
     let graph = live_graph();

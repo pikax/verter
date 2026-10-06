@@ -2,7 +2,7 @@
 //! output authority.
 //!
 //! The engine mints one [`OutputAuthority`] per engine, at
-//! [`EngineStores::create`](crate::project_semantic_dispatch::engine_resources::EngineStores::create).
+//! [`EngineStores::create`](verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores::create).
 //! The host's composition code stores it privately, wrapped in an
 //! [`OutputLease`], and attaches a shared lease to every request beside the
 //! engine (the request's host attachment). A lease is inert: it opens ONLY
@@ -30,12 +30,12 @@
 
 use std::sync::Arc;
 
-use crate::project_semantic_dispatch::engine_resources::OutputAuthority;
-use crate::project_semantic_dispatch::output_materialization::{
+use verter_type_engine::project_semantic_dispatch::engine_resources::OutputAuthority;
+use verter_type_engine::project_semantic_dispatch::output_materialization::{
     MaterializedOutputTypeExpr, OutputTypeExpr,
 };
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticNodeId};
 
 /// The host's private hold on its engine's [`OutputAuthority`].
 ///
@@ -119,7 +119,7 @@ macro_rules! define_output_capability {
             'ctx,
             C: $crate::session_attachment::SessionCapabilities,
         > {
-            dispatch: &'disp $crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C>,
+            dispatch: &'disp ::verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C>,
             lease: &'disp $crate::output_sinks::OutputLease,
         }
 
@@ -127,7 +127,7 @@ macro_rules! define_output_capability {
             /// Mint the capability over the request's dispatch. Visible ONLY
             /// within this output-sink module (`$mint_vis`).
             $mint_vis fn new(
-                dispatch: &'disp $crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C>,
+                dispatch: &'disp ::verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C>,
             ) -> Self {
                 Self {
                     dispatch,
@@ -138,7 +138,7 @@ macro_rules! define_output_capability {
             /// The dispatch this capability projects through.
             pub(crate) fn dispatch_for_projector(
                 &self,
-            ) -> &$crate::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C> {
+            ) -> &::verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'ctx, C> {
                 self.dispatch
             }
 
@@ -227,7 +227,7 @@ pub(crate) trait DispatchOutputTestExt {
     /// `<materialize miss>` compatibility projection.
     fn materialize_type_expr(
         &self,
-        handle: crate::semantic_query::HotTypeRef,
+        handle: verter_type_engine::semantic_query::HotTypeRef,
     ) -> verter_type_expr::TypeExpr;
 
     /// Plain shell-raise returning the unwrapped `TypeExpr`.
@@ -250,7 +250,7 @@ impl<C: crate::session_attachment::SessionCapabilities> DispatchOutputTestExt
 {
     fn materialize_type_expr(
         &self,
-        handle: crate::semantic_query::HotTypeRef,
+        handle: verter_type_engine::semantic_query::HotTypeRef,
     ) -> verter_type_expr::TypeExpr {
         let cap = TestOutputCap::new(self);
         cap.materialize_output_type_expr(handle.node())
@@ -294,9 +294,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::{OutputProjector, TestOutputCap};
-    use crate::project_semantic_dispatch::engine_resources::EngineStores;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+    use verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
     /// Authority minted for a different engine — even a freshly created one
     /// with the same configuration — must not materialize through a dispatch
@@ -322,7 +322,7 @@ mod tests {
             host.project_type_store()
                 .semantic_graph()
                 .intern_node(SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::String,
+                    verter_type_engine::semantic_query::PrimitiveKind::String,
                 ));
         let dispatch = ProjectSemanticDispatch::new(&host);
         let cap = TestOutputCap::new(&dispatch);
@@ -343,10 +343,12 @@ mod carrier_identity_tests {
     use std::sync::Arc;
 
     use super::{OutputProjector, TestOutputCap};
-    use crate::project_semantic_dispatch::engine_resources::{EngineStores, OutputAuthority};
-    use crate::project_semantic_dispatch::output_materialization::wrap_output_type_expr;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+    use verter_type_engine::project_semantic_dispatch::engine_resources::{
+        EngineStores, OutputAuthority,
+    };
+    use verter_type_engine::project_semantic_dispatch::output_materialization::wrap_output_type_expr;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData};
 
     fn foreign_authority() -> OutputAuthority {
         EngineStores::create(

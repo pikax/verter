@@ -24,10 +24,12 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::{CaptureToken, DispatchEntry};
-use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SemanticQueryKey};
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::capture_token::{CaptureToken, DispatchEntry};
+use verter_type_engine::semantic_query::{
+    ProjectionMode, ProjectionReductionContext, SemanticQueryKey,
+};
 use verter_type_expr::TypeExpr;
 
 #[allow(deprecated)]
@@ -113,7 +115,7 @@ fn key_published_expanded(key: &SemanticQueryKey) -> bool {
         _ => None,
     };
     ctx.is_some_and(|c| {
-        c.demand == crate::semantic_query::ReductionDemand::Published
+        c.demand == verter_type_engine::semantic_query::ReductionDemand::Published
             && c.mode == ProjectionMode::Expanded
     })
 }

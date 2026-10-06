@@ -5,6 +5,6 @@
 //! with the no-PRC-conversion fixture this pins the sealed-context split:
 //! the locator path cannot reach the reducing lowerer.
 
-use verter_session::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 
 fn main() {}

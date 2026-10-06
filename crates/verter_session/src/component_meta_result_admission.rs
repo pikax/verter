@@ -19,8 +19,8 @@ use crate::component_meta_result_db::{
     ComponentMetaResultDb, ComponentMetaResultEntry, ComponentMetaResultKey,
 };
 use crate::meta_provenance::MetaProvenance;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverCapabilities;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverCapabilities;
 
 /// Warm reads of the final component-meta result store, validated against one
 /// request.
@@ -56,7 +56,7 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
             // counter in sync with the `.get()` accessor so
             // joiner-accounting assertions continue to attribute a miss
             // to the cold winner.
-            if let Some(ctx) = crate::request_context::current_request_context() {
+            if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
                 ctx.cache_counters
                     .component_meta
                     .misses
@@ -98,7 +98,7 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
             bump_miss(self.observations);
             return None;
         }
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             ctx.cache_counters
                 .component_meta
                 .hits
@@ -117,7 +117,7 @@ pub(crate) fn record_component_meta_result_miss(observations: &MetaProvenance) {
     observations
         .component_meta_result_cache_misses
         .fetch_add(1, Ordering::Relaxed);
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
         ctx.cache_counters
             .component_meta
             .misses
@@ -190,7 +190,7 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
                     }
                 }
                 ComponentMetaPublishDecision::ReturnOnly(reason) => {
-                    crate::cache_runtime::admission::propagate_non_admission(reason);
+                    verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);
                     tracing::debug!(
                         target: "verter::audit::record",
                         file = %canonical,
@@ -202,8 +202,8 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
                 ComponentMetaPublishDecision::NoValue => {}
             },
             FactReadSetFinalise::NonCacheable(_) => {
-                let reason = crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
+                let reason = verter_audit::NonAdmissionReason::UnresolvedProvenance;
+                verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);
                 tracing::debug!(
                     target: "verter::audit::record",
                     file = %canonical,
@@ -212,8 +212,8 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
                 );
             }
             FactReadSetFinalise::Overflow => {
-                let reason = crate::cache_runtime::NonAdmissionReason::SignatureOverflow;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
+                let reason = verter_audit::NonAdmissionReason::SignatureOverflow;
+                verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);
                 tracing::debug!(
                     target: "verter::audit::record",
                     file = %canonical,
@@ -222,8 +222,8 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultPublish
                 );
             }
             FactReadSetFinalise::MutationUnstable => {
-                let reason = crate::cache_runtime::NonAdmissionReason::MutationUnstable;
-                crate::cache_runtime::admission::propagate_non_admission(reason);
+                let reason = verter_audit::NonAdmissionReason::MutationUnstable;
+                verter_type_engine::cache_runtime::admission::propagate_non_admission(reason);
                 tracing::debug!(
                     target: "verter::audit::record",
                     file = %canonical,

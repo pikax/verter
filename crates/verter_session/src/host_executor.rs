@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 use verter_language::FileLanguage;
 use verter_scheduler::execution::executor::{
@@ -494,12 +494,14 @@ impl HostStageExecutor {
         // accounting.
         if timing_on {
             let total_ns = parse_start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-            if let Some(acc) = crate::request_context::current_accumulator() {
-                acc.push_file_parse_timing(crate::request_footprint::FileParseTiming {
-                    canonical_id: Arc::from(canonical_id),
-                    parse_ns: total_ns,
-                    lower_ns: 0,
-                });
+            if let Some(acc) = verter_type_engine::request_context::current_accumulator() {
+                acc.push_file_parse_timing(
+                    verter_type_engine::request_footprint::FileParseTiming {
+                        canonical_id: Arc::from(canonical_id),
+                        parse_ns: total_ns,
+                        lower_ns: 0,
+                    },
+                );
             }
         }
 
@@ -514,7 +516,7 @@ impl HostStageExecutor {
         // scheduler. Returns immediately when no token is bound (the
         // production hot path).
         #[cfg(any(test, feature = "test-support"))]
-        crate::capture_token::with_active_capture(|t| {
+        verter_type_engine::capture_token::with_active_capture(|t| {
             t.record_parse(canonical_id);
         });
 

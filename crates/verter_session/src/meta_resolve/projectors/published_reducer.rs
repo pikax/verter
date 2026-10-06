@@ -7,8 +7,8 @@
 
 use verter_session_query::type_solver::builtin::BuiltinUtility;
 
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
-use crate::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 /// The shallow reduction-gate facts of a graph `node`, read in NODE DOMAIN —
 /// the shape decisions used by the per-member publication path:
@@ -55,7 +55,7 @@ fn peel_alias_root(
 /// triad. Parity-checked field-for-field against the `TypeExpr` predicates on
 /// `raise(node)`.
 pub(crate) fn classify_node_reduction_gates(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,

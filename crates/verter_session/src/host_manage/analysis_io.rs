@@ -14,11 +14,11 @@ use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
 
 use crate::file_artifact_store::FileArtifactKeySource;
-#[cfg(any(test, feature = "test-support"))]
-use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 use crate::hash::compile_profile_hash;
 use crate::id::canonicalize_id;
@@ -34,7 +34,7 @@ use crate::VerterHost;
 use verter_language::FileLanguage;
 
 use super::{exact_resolution_uses_type_preferred_target, HostExportGraphResolver};
-use crate::request_observers::{component_meta_debug, component_meta_debug_enabled};
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
 
 /// Test-visible record of which resolver context the template-class lane bound
 /// for one invocation of [`VerterHost::build_template_class_semantic_facts`].
@@ -50,7 +50,7 @@ pub(crate) struct TemplateClassLaneBinding {
     /// `true` when the lane took the indexed-present / base-publishable
     /// branch, `false` when it took the cold-seed session branch.
     pub(crate) indexed_present: bool,
-    /// [`crate::resolver_core::ResolverContext::is_request_bound`] of the
+    /// [`verter_type_engine::resolver_core::ResolverContext::is_request_bound`] of the
     /// context handed to the resolver-tier builder.
     pub(crate) request_bound: bool,
 }
@@ -288,7 +288,7 @@ impl VerterHost {
     ///
     /// * the configured [`verter_semantic::analysis::AnalysisScope`] carries a
     ///   template flag — the standing, host-wide answer;
-    /// * a [`crate::request_context::RootTemplateDemandScope`] is active on this
+    /// * a [`verter_type_engine::request_context::RootTemplateDemandScope`] is active on this
     ///   thread — the REQUEST-SCOPED answer used by the public-API carrier
     ///   render, whose parent-facing props type is projected from the
     ///   inheritance resolver's root reachability.
@@ -299,7 +299,7 @@ impl VerterHost {
     /// fact the carrier actually reads.
     pub(crate) fn template_analysis_required(&self) -> bool {
         self.config.effective_scope().needs_template_analysis()
-            || crate::request_context::root_template_analysis_demanded()
+            || verter_type_engine::request_context::root_template_analysis_demanded()
     }
 
     pub(crate) fn compute_template_analysis_if_missing(
@@ -504,7 +504,7 @@ impl VerterHost {
         if !current.view().validates_fact_signature(&signature.facts) {
             return None;
         }
-        crate::fact_signature_helpers::observe_fact_signature(&signature.facts);
+        verter_type_engine::fact_signature_helpers::observe_fact_signature(&signature.facts);
         Some(template)
     }
 
@@ -904,7 +904,7 @@ impl VerterHost {
 
         let resolved = self.resolve_component_meta_with_view(
             canonical_or_alias,
-            crate::types::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
             view,
         )?;
         resolved.evaluated_types
@@ -1514,7 +1514,7 @@ impl VerterHost {
     }
 
     /// Establish ONE tear-free
-    /// [`crate::resolver_core::MaterializeScopeObservation`] for a
+    /// [`verter_type_engine::resolver_core::MaterializeScopeObservation`] for a
     /// materialize-memo scope canonical (base-host path).
     ///
     /// Pins the scope to a single `Arc<IndexedReady>` whose `whole_hash`
@@ -1548,7 +1548,7 @@ impl VerterHost {
     pub(crate) fn observe_materialize_scope(
         &self,
         canonical: &str,
-    ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
+    ) -> Option<verter_type_engine::resolver_core::MaterializeScopeObservation> {
         self.with_base_resolver_context(|ctx| {
             self.observe_materialize_scope_with_context(ctx, canonical)
         })
@@ -1563,27 +1563,31 @@ impl VerterHost {
     /// form and is compiled out of a shipped build.
     pub(crate) fn observe_materialize_scope_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
-    ) -> Option<crate::resolver_core::MaterializeScopeObservation> {
+    ) -> Option<verter_type_engine::resolver_core::MaterializeScopeObservation> {
         let indexed = self
             .current_content_pinned_indexed(canonical)
             .or_else(|| self.artifact_current_indexed(canonical))?;
         let observed_whole_hash = indexed.whole_hash;
         let syntactic_export_set =
-            crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                 ctx,
                 canonical,
                 observed_whole_hash,
                 verter_session_query::facts::FactKey::SyntacticExportSet,
                 verter_session_query::facts::FactLane::Semantic,
             );
-        Some(crate::resolver_core::MaterializeScopeObservation {
-            canonical_id: Arc::from(canonical),
-            observed_whole_hash: indexed.whole_hash,
-            observed_shallow_hash: indexed.shallow_state.whole_hash,
-            syntactic_export_set,
-        })
+        Some(
+            verter_type_engine::resolver_core::MaterializeScopeObservation {
+                canonical_id: Arc::from(canonical),
+                observed_whole_hash: indexed.whole_hash,
+                observed_shallow_hash: indexed.shallow_state.whole_hash,
+                syntactic_export_set,
+            },
+        )
     }
 
     /// Return the scheduler's authoritative [`oxc_span::SourceType`] for a loaded

@@ -347,14 +347,14 @@ pub enum ComponentMetaResolutionPurpose {
 /// the ACTIVE context, so an overlay session reads its overlay content (an
 /// overlay-added prop surfaces here; it never leaks into a base-view read,
 /// which keys a distinct `whole_hash`). The DTO core validates its own cached
-/// entry against `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and bubbles the entry's fact signature into
+/// entry against `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and bubbles the entry's fact signature into
 /// any active outer fact tracer (so an outer component-meta cold trace inherits
 /// the DTO's cross-file carrier facts on a warm DTO hit), keeping the outer
 /// component-meta cache entry correctly keyed — all inside the single
 /// resolution engine.
 pub(crate) fn component_meta_resolved_macros(
     ctx: &dyn crate::resolver_core::HostRequestContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -474,7 +474,7 @@ pub(crate) fn component_meta_resolved_macros(
                 outcome,
                 crate::typeinfo::framework_surface::ResolvedOutcome::Partial { .. }
             ) {
-                crate::request_context::mark_request_result_partial();
+                verter_type_engine::request_context::mark_request_result_partial();
             }
             let Some(dtos) = outcome.value() else {
                 continue;

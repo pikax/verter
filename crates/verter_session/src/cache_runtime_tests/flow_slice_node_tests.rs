@@ -4,11 +4,6 @@
 //! non-admission, warm-hit identity, content-version keying, and the
 //! empty-fact-rail pin (no slice identity in `ReadSetSignature.facts`).
 
-use crate::cache_runtime::flow_slice_node::*;
-use crate::project_semantic_dispatch::flow_slice_driver::FlowBodySkeletonSource;
-use crate::project_semantic_dispatch::flow_slice_driver::FlowSliceDriver;
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::SemanticQueryApi as _;
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::sync::atomic::AtomicBool;
@@ -35,6 +30,11 @@ use verter_session_query::flow::skeleton::FunctionBodySkeleton;
 use verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton;
 use verter_session_query::function_program::FunctionDeclarationRef;
 use verter_session_query::function_program::FunctionProgramKey;
+use verter_type_engine::cache_runtime::flow_slice_node::*;
+use verter_type_engine::project_semantic_dispatch::flow_slice_driver::FlowBodySkeletonSource;
+use verter_type_engine::project_semantic_dispatch::flow_slice_driver::FlowSliceDriver;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::SemanticQueryApi as _;
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::TopLevelOwnerId;
 
@@ -1177,8 +1177,8 @@ fn mytype_member_slice_via_production_store_materializes_no_sibling_and_no_mytyp
     // the slice path must observe no fact naming `Mytype` (no
     // class-surface, `TypeOf`, constructor, import, or route fact for
     // the sibling's type).
-    let (ir, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    let (ir, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || {
             let outcome = FlowSliceDriver::new(stores, ctx)
                 .lookup_hash(key.clone())
@@ -1439,8 +1439,8 @@ pub(crate) fn flow_graph_build_is_shallow_interned_no_lowering_lazy_regions() {
         const e = { a, b, d };
         return { big: e, tiny: 1 };
     }"#;
-    let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    let ((), finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || {
             let skeleton = skeleton_of(source);
             let graph = verter_session_query::flow::flow_graph::build_function_flow_graph_for_test(
@@ -1543,8 +1543,9 @@ fn flow_return_of(
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
-    let key = crate::semantic_query::FlowReturnKey {
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(canonical),
             TopLevelOwnerId::ordinary_file(),
@@ -1554,18 +1555,20 @@ fn flow_return_of(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract:
-            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+            verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
     };
-    match dispatch.execute(crate::semantic_query::SemanticQueryKey::FlowReturn(
-        Box::new(key),
-    )) {
-        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-            value: crate::semantic_query::SemanticQueryValue::FlowReturn(result),
-            ..
-        }) => host
+    match dispatch
+        .execute(verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)))
+    {
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput {
+                value: verter_type_engine::semantic_query::SemanticQueryValue::FlowReturn(result),
+                ..
+            },
+        ) => host
             .project_node_to_type_expr_for_test(result.return_type())
             .expect("a flow return value projects"),
         other => panic!("[{stage}] {name} must produce a flow return value, got {other:?}"),

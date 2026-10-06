@@ -22,16 +22,16 @@ use super::*;
 /// keeps its precise `typeof` spelling at every depth.
 fn nameable_render_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
-) -> crate::semantic_query::SemanticNodeId {
+) -> verter_type_engine::semantic_query::SemanticNodeId {
     dispatch.widen_owner_local_nominal_typeofs(node, owner_canonical)
 }
 
 pub(super) fn render_tsc_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
@@ -90,7 +90,7 @@ pub(super) fn render_tsc_node(
 pub(super) fn render_tsc_testing_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<(TscSpliceText, Option<TscDeclarationFailureReason>), ProjectionFailure> {
     counters.tsc_materializations += 1;
@@ -863,7 +863,7 @@ fn inferred_class_members(
                 &verter_type_expr::facts::FunctionReturnSource::Flow(*identity),
                 owner_canonical,
             ) {
-                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
+                verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
                     // A DEGRADED SUCCESS never splices display text: this
                     // projection is fail-closed (every degraded shape
                     // refuses), and a modeled-`any` substitution is a
@@ -874,7 +874,7 @@ fn inferred_class_members(
                         ));
                     }
                     let Some((safe, typeof_paths)) =
-                        crate::project_semantic_dispatch::raise::node_declaration_facts_with_dispatch(
+                        verter_type_engine::project_semantic_dispatch::raise::node_declaration_facts_with_dispatch(
                             dispatch,
                             result.return_type(),
                         )
@@ -907,16 +907,16 @@ fn inferred_class_members(
                     }
                     (rendered.text, typeof_paths)
                 }
-                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
-                    crate::semantic_query::FlowReturnFailure::Budget(reason),
+                verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
+                    verter_type_engine::semantic_query::FlowReturnFailure::Budget(reason),
                 ) => {
                     return Err(ClassInferenceFailure::InferenceUnavailable(reason));
                 }
                 // A call in the body did not resolve: the member is typed
                 // UNSUPPORTED and suppresses admission — never widened
                 // back to `any`.
-                crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
-                    crate::semantic_query::FlowReturnFailure::CallResolution(_),
+                verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
+                    verter_type_engine::semantic_query::FlowReturnFailure::CallResolution(_),
                 ) => {
                     return Err(ClassInferenceFailure::Unsupported(
                         UnsupportedReason::SemanticConstruct,
@@ -1180,10 +1180,11 @@ fn binding_usage_precedence(usage: TscBindingUsage) -> u8 {
 /// predicate).
 pub(super) fn emit_type_is_cross_sfc_carrier(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    payload: crate::semantic_query::SemanticNodeId,
+    payload: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> bool {
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), payload)
+    let Some(data) =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), payload)
     else {
         return false;
     };
@@ -1213,11 +1214,12 @@ pub(super) fn cross_file_namespace_import_type(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     attempt: &mut verter_compiler::compile_transaction::CompileAttempt<'_>,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
     inventory: &TscScopeInventory<'_>,
 ) -> Option<String> {
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let data =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
     let SemanticNodeData::DeclRef { identity } = data.as_ref() else {
         return None;
     };
@@ -1277,12 +1279,12 @@ pub(super) fn tsc_emit_rows(
         // surface is published from this lane, hence no completeness claim to
         // gate). A complete no-name signature contributes no row.
         let names = match callable.event_names(context) {
-            crate::semantic_query::surface_resolution::SurfaceResolution::Resolved(names)
-            | crate::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(names) => {
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(names)
+            | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(names) => {
                 names.into_inner()
             }
-            crate::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
-            crate::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => continue,
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
                 incomplete,
             ) => match incomplete.into_authored_fallback() {
                 Some(names) => names,
@@ -1362,10 +1364,10 @@ fn push_tsc_emit(
 fn render_emit_payload_parameters(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
-    use crate::semantic_query::SemanticNodeData;
+    use verter_type_engine::semantic_query::SemanticNodeData;
 
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
     let Some(node) = dispatch
@@ -1378,7 +1380,9 @@ fn render_emit_payload_parameters(
             resolution_failure(MacroProjectionLane::Tsc)
         });
     };
-    match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).as_deref() {
+    match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        .as_deref()
+    {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
             render_tuple_parameters(dispatch, owner_canonical, elements, counters)
         }
@@ -1386,7 +1390,7 @@ fn render_emit_payload_parameters(
         // a construct signature is not a callback shape and degrades to the
         // honest open rest below.
         Some(SemanticNodeData::Signature {
-            kind: crate::semantic_query::SignatureKind::Call,
+            kind: verter_type_engine::semantic_query::SignatureKind::Call,
             params,
             ..
         }) => render_function_parameters(dispatch, owner_canonical, params, counters),
@@ -1397,7 +1401,7 @@ fn render_emit_payload_parameters(
 fn render_tuple_parameters(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    elements: &[crate::semantic_query::TupleElement],
+    elements: &[verter_type_engine::semantic_query::TupleElement],
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     let mut rendered = Vec::with_capacity(elements.len());
@@ -1423,7 +1427,7 @@ fn render_tuple_parameters(
 fn render_function_parameters(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
-    params: &[crate::semantic_query::FunctionParam],
+    params: &[verter_type_engine::semantic_query::FunctionParam],
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     let mut rendered = Vec::with_capacity(params.len());

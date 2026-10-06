@@ -10,8 +10,6 @@ use verter_session_query::type_solver::{
 use verter_type_expr::TopLevelOwnerId;
 
 use super::ShallowFileState;
-use crate::fact_tracing::PreparedDeclOutcomeFold;
-use crate::identity_interner::IdentityInterner;
 use verter_semantic_source::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
 use verter_session_query::inputs::prepared::{
     ImportBinding, PreparationFailure, PreparedDeclOutcome, PreparedOwnerScope,
@@ -20,6 +18,8 @@ use verter_session_query::inputs::prepared::{
 use verter_session_query::inputs::shallow::ClassifiedTypeDeps;
 use verter_session_query::inputs::shallow::ExportTarget;
 use verter_session_query::source::demand::DemandOutcome;
+use verter_type_engine::fact_tracing::PreparedDeclOutcomeFold;
+use verter_type_engine::identity_interner::IdentityInterner;
 
 #[path = "prepared_decl_type_prep.rs"]
 mod type_prep;
@@ -935,7 +935,7 @@ impl PreparedTypeDeclCache {
                 // (retry on the next live-lease demand) AND mark the
                 // generalized non-cacheability rail so an enclosing traced
                 // compute refuses admission.
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)
@@ -1192,7 +1192,7 @@ impl PreparedValueDeclCache {
                 // (retry on the next live-lease demand) AND mark the
                 // generalized non-cacheability rail so an enclosing traced
                 // compute refuses admission.
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)

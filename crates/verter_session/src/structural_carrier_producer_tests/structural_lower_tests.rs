@@ -17,17 +17,17 @@ use verter_type_expr::{
     UnknownProvenance, UnknownValue, ValueRef,
 };
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::scope_shadowing::ScopeShadowing;
-use crate::semantic_query::{
+use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+use verter_type_engine::semantic_query::{
     DeclIdentity, IndexKey, MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind,
     ProjectionReductionContext, ReadonlyMod, SemanticNodeData, SemanticNodeId, SyntheticBindingId,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
-use crate::structural_carrier_producer::{
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::structural_carrier_producer::{
     lower_type_expr_structural_for_tests, BinderScope, StructuralLowerContext, StructuralLowerError,
 };
-use crate::VerterHost;
 
 /// A real declaration-bound file scope for emission fixtures — deliberately
 /// NOT `Global`/empty, so a fixture discriminates against a lowerer that
@@ -247,7 +247,7 @@ fn lowers_synthetic_slot_binding_with_content_free_id() {
         host.project_type_store()
             .semantic_graph()
             .intern_node(SemanticNodeData::Primitive(
-                crate::semantic_query::PrimitiveKind::String,
+                verter_type_engine::semantic_query::PrimitiveKind::String,
             ));
     let key = SyntheticCarrierKey {
         scope_canonical_id: Arc::from("/Comp.vue"),
@@ -457,7 +457,7 @@ fn lowers_constructor_type_wrapping_a_function_signature() {
         matches!(
             &*node(&graph, root),
             SemanticNodeData::Signature {
-                kind: crate::semantic_query::SignatureKind::Construct,
+                kind: verter_type_engine::semantic_query::SignatureKind::Construct,
                 ..
             }
         ),
@@ -532,7 +532,7 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
         !matches!(
             &*node(&graph, root),
             SemanticNodeData::Signature {
-                kind: crate::semantic_query::SignatureKind::Construct,
+                kind: verter_type_engine::semantic_query::SignatureKind::Construct,
                 ..
             }
         ),
@@ -1198,8 +1198,8 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     let binders: [BinderScope; 0] = [];
     // The consuming declaration's own-body role.
     let ctx = StructuralLowerContext::new_for_tests(&binders).with_merge_role(
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Shallow,
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Shallow,
         )
         .stamp_role(MemberMergeRole::OwnBody),
     );
@@ -1426,7 +1426,7 @@ fn conditional_with_infer(name: &str, check: PrimitiveName) -> TypeExpr {
 fn conditional_infer_binder(
     graph: &SemanticGraphStore,
     conditional: SemanticNodeId,
-) -> crate::semantic_query::InferBinderId {
+) -> verter_type_engine::semantic_query::InferBinderId {
     let extends = match graph.node_data(conditional).as_deref() {
         Some(SemanticNodeData::Conditional { extends, .. }) => *extends,
         other => panic!("expected conditional root, got {other:?}"),
@@ -1960,26 +1960,27 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
             ),
             other => panic!("outer conditional expected, got {other:?}"),
         };
-    use crate::semantic_query::SemanticQueryApi as _;
+    use verter_type_engine::semantic_query::SemanticQueryApi as _;
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let result =
-        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::Conditional {
+    let result = match dispatch.execute_type_node(
+        verter_type_engine::semantic_query::SemanticQueryKey::Conditional {
             check,
             extends,
             true_branch,
             false_branch,
             distributive,
             pending: None,
-        }) {
-            crate::semantic_query::QueryResult::Value(
-                crate::semantic_query::SemanticQueryOutput { value: id, .. },
-            ) => id,
-            other => panic!("expected Value, got {other:?}"),
-        };
+        },
+    ) {
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value: id, .. },
+        ) => id,
+        other => panic!("expected Value, got {other:?}"),
+    };
     assert!(
         matches!(
             &*node(&graph, result),
-            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s)) if s == "no"
+            SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(s)) if s == "no"
         ),
         "`string extends infer U ? (number extends U ? U : \"no\") : never` must \
          resolve \"no\" on the macro producer path, got {:?}",
@@ -2010,7 +2011,7 @@ fn structural_equivalence_for_constructor_signature() {
         matches!(
             &*node(&graph, root),
             SemanticNodeData::Signature {
-                kind: crate::semantic_query::SignatureKind::Construct,
+                kind: verter_type_engine::semantic_query::SignatureKind::Construct,
                 ..
             }
         ),

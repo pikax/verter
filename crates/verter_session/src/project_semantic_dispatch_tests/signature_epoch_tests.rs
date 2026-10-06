@@ -12,22 +12,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 
 use super::call_resolve_tests::{occurrence, signature};
-use crate::project_semantic_dispatch::signature_discovery::{
+use crate::types::UpsertRequest;
+use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
+use crate::{HostConfig, VerterHost};
+use verter_type_engine::project_semantic_dispatch::signature_discovery::{
     SharedSignatureNodes, SignaturesOfTypeBuildPoint, SIGNATURES_OF_TYPE_BUILD_HOOK,
 };
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
     FunctionParam, NodeScopeId, PrimitiveKind, QueryResult, SemanticContextId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue, SignatureKind,
     SignatureReturnCarrier, CONTEXT_FREE_EVALUATION,
 };
-use crate::signature_kernel::{
+use verter_type_engine::signature_kernel::{
     BorrowedSet, CallSubstitution, GraphEpoch, ReadSignatureResultKey, ResultDemand,
     SemanticReadView, SignatureCandidate, SignatureSetValue,
 };
-use crate::types::UpsertRequest;
-use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
-use crate::{HostConfig, VerterHost};
 
 const CANONICAL: &str = "/ws/signature-epoch.ts";
 
@@ -60,15 +60,16 @@ fn callable(
     d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     calls: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
-    d.graph()
-        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+    d.graph().intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(calls.into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-        }))
+        },
+    ))
 }
 
 /// Two signature-bearing subjects: an overloaded callable (a set of two
@@ -712,7 +713,7 @@ fn observe(host: &VerterHost) -> Vec<String> {
             };
             let carrier = host.get_flow_return_type_with_audit(
                 &identity,
-                crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             );
             let Ok(result) = carrier.as_result() else {
                 return format!("{symbol}: refused");
@@ -725,8 +726,8 @@ fn observe(host: &VerterHost) -> Vec<String> {
             let node = d
                 .normalize_node_keeping_declaration_refs_for_tests(
                     result.return_type(),
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Expanded,
                     ),
                 )
                 .into_complete_node();

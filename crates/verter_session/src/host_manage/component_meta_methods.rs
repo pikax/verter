@@ -10,20 +10,19 @@
 //! shell (registry / cycle / origin-graph predicates, the resolver adapter)
 //! are reached via `super::*`.
 
-use crate::request_observers::{
-    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-};
 use crate::resolver_core::{
     run_component_meta_request, ComponentMetaRequestResult, RequestSource, SingleflightRole,
 };
-use crate::types::ProjectionMode;
 use crate::VerterHost;
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::component_meta_trace_custom;
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
+use verter_type_engine::semantic_query::ProjectionMode;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 // File moved from `meta_resolve/host_methods.rs` to
 // `host_manage/component_meta_methods.rs`. The original `super::X` paths
@@ -103,7 +102,7 @@ impl VerterHost {
         self.resolve_component_meta_with_view_and_fixed(canonical_or_alias, mode, view, None)
     }
 
-    /// Install a per-request [`crate::request_context::RequestContext`]
+    /// Install a per-request [`verter_type_engine::request_context::RequestContext`]
     /// carrying `config.projection_op_budget` IFF none is active — the ONE
     /// shared install-if-none path that arms the projection-budget fuse AND
     /// the per-cold-compute completeness rail across EVERY component-meta
@@ -119,12 +118,12 @@ impl VerterHost {
         request_id: u64,
         canonical_id: &str,
         timing_capture: bool,
-    ) -> Option<crate::request_context::RequestContextGuard> {
-        if crate::request_context::current_request_context().is_some() {
+    ) -> Option<verter_type_engine::request_context::RequestContextGuard> {
+        if verter_type_engine::request_context::current_request_context().is_some() {
             return None;
         }
-        Some(crate::request_context::RequestContextGuard::install(
-            crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
+        Some(verter_type_engine::request_context::RequestContextGuard::install(
+            verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
                 request_id,
                 std::sync::Arc::<str>::from(canonical_id),
                 verter_audit::RequestKind::ComponentMeta,
@@ -196,7 +195,7 @@ impl VerterHost {
             // up the outer id while the record is stored under the
             // inner id, and every `AuditedRequest::resolve` would
             // fail with `AuditRecordMissing`.
-            let request_id = crate::request_context::current_request_context()
+            let request_id = verter_type_engine::request_context::current_request_context()
                 .map(|ctx| ctx.request_id)
                 .unwrap_or_else(next_component_meta_audit_request_id);
             let (host_cache_before_bytes, workspace_before_bytes) =
@@ -403,7 +402,7 @@ impl VerterHost {
             // the deterministic footprint miner before the builder
             // finalises. The file ledger is read off the state BEFORE
             // the miner consumes it.
-            if let Some(ctx) = crate::request_context::current_request_context() {
+            if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
                 if ctx.footprint_capture {
                     if let Some(acc) = ctx.audit_accumulator.as_ref() {
                         let state = acc.drain();
@@ -473,7 +472,8 @@ impl VerterHost {
         whole_hash: Hash16,
     ) -> Option<ResolvedComponentMetaState> {
         crate::resolver_core::with_bare_host_ctx_for_test(self, |ctx| {
-            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
             self.compute_component_meta_state_inner(
                 canonical,
                 mode,
@@ -543,10 +543,11 @@ impl VerterHost {
             store_view,
             std::sync::Arc::clone(overlay),
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = &session_ctx;
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
             mode,
@@ -582,10 +583,11 @@ impl VerterHost {
             store_view,
             std::sync::Arc::clone(overlay),
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = &session_ctx;
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
             mode,
@@ -645,10 +647,11 @@ impl VerterHost {
             cold_seed,
             std::sync::Arc::clone(overlay),
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = &host_ctx;
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
             mode,
@@ -704,10 +707,11 @@ impl VerterHost {
             cold_seed,
             std::sync::Arc::clone(overlay),
         );
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = &host_ctx;
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         self.compute_component_meta_state_inner(
             canonical,
             mode,
@@ -848,10 +852,10 @@ impl VerterHost {
         &self,
         canonical: &str,
         whole_hash: Hash16,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         >,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -878,10 +882,10 @@ impl VerterHost {
         captured: Option<&CapturedComponentMetaInputs>,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         >,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -981,11 +985,11 @@ impl VerterHost {
             verter_session_query::analysis::component_meta::MacroExpansionDiagnostics,
         > = Vec::new();
         let mut synthesis_suppression: Option<
-            crate::semantic_query::surface_resolution::NonEmptyReasons,
+            verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons,
         > = None;
         let fold_synthesis_claim =
             |suppression: &mut Option<
-                crate::semantic_query::surface_resolution::NonEmptyReasons,
+                verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons,
             >,
              result: slot_binding_graph::SynthesisResult| {
                 match result.completeness() {
@@ -1127,14 +1131,14 @@ impl VerterHost {
                 parts.evaluated_types = Some(evaluated_types);
             }
             {
-                crate::request_observers::component_meta_trace_custom!(
+                verter_type_engine::component_meta_trace_custom!(
                     "semantic_graph_stats",
                     format!("owner={} dispatch_authority=true", canonical),
                 );
             }
             if query_engine.has_fuse_tripped() {
                 for trip in query_engine.fuse_trips() {
-                    crate::request_observers::component_meta_trace_custom!(
+                    verter_type_engine::component_meta_trace_custom!(
                         "fuse_tripped",
                         format!(
                             "owner={} fuse={} budget={} actual={}",
@@ -1149,7 +1153,7 @@ impl VerterHost {
                 ..Default::default()
             }
         } else {
-            crate::request_observers::component_meta_trace_custom!(
+            verter_type_engine::component_meta_trace_custom!(
                 "semantic_graph_stats",
                 format!(
                     "owner={} registry_materialization=skipped macro_shapes=skipped",
@@ -1178,9 +1182,9 @@ impl VerterHost {
         }
         let append_elapsed = append_start.elapsed();
         let registry_after = parts.resolved_type_registry.len();
-        if crate::request_observers::component_meta_debug_enabled() {
+        if verter_type_engine::request_observers::component_meta_debug_enabled() {
             let dep_cache_size = self.project_type_store.indexed().len();
-            crate::request_observers::component_meta_debug(format!(
+            verter_type_engine::request_observers::component_meta_debug(format!(
                 "PROFILE owner={} registry_before={} registry_after={} registry_added={} dep_cache_entries={} append_ms={:.1}",
                 canonical,
                 registry_before,
@@ -1234,20 +1238,23 @@ impl VerterHost {
         // here, carrying the downstream `PROPAGATED` class).
         // `synthesis_should_suppress` is the bool projection of this — keep
         // the two in lock-step.
-        let request_result_partial = crate::request_context::current_request_result_is_partial();
+        let request_result_partial =
+            verter_type_engine::request_context::current_request_result_is_partial();
         let completeness = match (synthesis_suppression, request_result_partial) {
-            (Some(reasons), true) => crate::semantic_query::ResultCompleteness::partial(
-                reasons
-                    .get()
-                    .union(crate::semantic_query::PartialReasonSet::PROPAGATED),
-            ),
-            (Some(reasons), false) => {
-                crate::semantic_query::ResultCompleteness::partial(reasons.get())
+            (Some(reasons), true) => {
+                verter_type_engine::semantic_query::ResultCompleteness::partial(
+                    reasons
+                        .get()
+                        .union(verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED),
+                )
             }
-            (None, true) => crate::semantic_query::ResultCompleteness::partial(
-                crate::semantic_query::PartialReasonSet::PROPAGATED,
+            (Some(reasons), false) => {
+                verter_type_engine::semantic_query::ResultCompleteness::partial(reasons.get())
+            }
+            (None, true) => verter_type_engine::semantic_query::ResultCompleteness::partial(
+                verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
             ),
-            (None, false) => crate::semantic_query::ResultCompleteness::Complete,
+            (None, false) => verter_type_engine::semantic_query::ResultCompleteness::Complete,
         };
         let synthesis_should_suppress = completeness.is_partial();
 
@@ -1306,9 +1313,9 @@ impl VerterHost {
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) {
         let dispatch = query_engine.dispatch;
-        let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new(
-            &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_CALLS,
-            &crate::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_NS,
+        let _loop8_timer = verter_type_engine::loop5_instrumentation::TimerGuard::new(
+            &verter_type_engine::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_CALLS,
+            &verter_type_engine::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_NS,
         );
         // Top-level whole-surface registry
         // projection. Subsequent commits narrow this to the actual
@@ -1319,7 +1326,7 @@ impl VerterHost {
         // admits every key + descend.
         let registry_projection =
             crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
-                crate::component_meta_caches::PublishedSurfaceKind::Registry,
+                verter_type_engine::component_meta_caches::PublishedSurfaceKind::Registry,
             );
         let registry_cursor = registry_projection.cursor();
         fn track_component_meta_dependency(
@@ -1338,7 +1345,7 @@ impl VerterHost {
         // unloaded producing canonical) conservatively stays symbolic — the
         // consumer re-resolves the named root on demand.
         fn imported_registry_alias_should_stay_symbolic(
-            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
                 '_,
                 crate::resolver_core::HostCapabilities,
             >,
@@ -1349,8 +1356,8 @@ impl VerterHost {
             match dispatch
                 .raise_authored_locator_to_hot(
                     &locator,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        crate::semantic_query::ProjectionMode::Navigate,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
                 )
                 .at_optional_boundary()
@@ -1390,13 +1397,15 @@ impl VerterHost {
         /// reference member value enqueues `Whole`), matching the registry
         /// seed-scan contract.
         fn collect_imported_component_meta_registry_seed_refs_node(
-            ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
-            dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+                crate::resolver_core::HostCapabilities,
+            >,
+            dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
                 '_,
                 crate::resolver_core::HostCapabilities,
             >,
-            graph: &crate::semantic_query_memo::SemanticGraphStore,
-            node: crate::semantic_query::SemanticNodeId,
+            graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+            node: verter_type_engine::semantic_query::SemanticNodeId,
             published_names: &rustc_hash::FxHashSet<String>,
             queued_names: &mut RegistryQueuedNames,
             output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
@@ -1404,14 +1413,14 @@ impl VerterHost {
             cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
         ) {
             fn collect_one_filtered_node(
-                ctx: &dyn crate::resolver_core::ResolverContext<
+                ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
                     crate::resolver_core::HostCapabilities,
                 >,
-                dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+                dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
                     '_,
                     crate::resolver_core::HostCapabilities,
                 >,
-                node: crate::semantic_query::SemanticNodeId,
+                node: verter_type_engine::semantic_query::SemanticNodeId,
                 published_names: &rustc_hash::FxHashSet<String>,
                 queued_names: &mut RegistryQueuedNames,
                 output: &mut std::collections::VecDeque<PendingComponentMetaRegistryRef>,
@@ -1450,8 +1459,10 @@ impl VerterHost {
                     );
                 }
             }
-            match crate::project_semantic_dispatch::node_data_for(graph, node).as_deref() {
-                Some(crate::semantic_query::SemanticNodeData::Object(surface)) => {
+            match verter_type_engine::project_semantic_dispatch::node_data_for(graph, node)
+                .as_deref()
+            {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Object(surface)) => {
                     for member in surface.positive_members().iter() {
                         collect_one_filtered_node(
                             ctx,dispatch,
@@ -1517,7 +1528,7 @@ impl VerterHost {
                 }
             }
         }
-        let debug_enabled = crate::request_observers::component_meta_debug_enabled();
+        let debug_enabled = verter_type_engine::request_observers::component_meta_debug_enabled();
         let import_refresh_started = debug_enabled.then(Instant::now);
         // §3.4 structural role classification for the seed refresh below: a
         // registry entry whose NAME a type-role-bearing macro consumes
@@ -1599,7 +1610,7 @@ impl VerterHost {
             if let Some(started) = _entry_started {
                 let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 if elapsed_ms >= 5.0 {
-                    crate::request_observers::component_meta_debug(format!(
+                    verter_type_engine::request_observers::component_meta_debug(format!(
                         "REGISTRY_IMPORT_UPDATE owner={} name={} source={} resolved={} elapsed_ms={:.1}",
                         owner_canonical,
                         entry.name,
@@ -1699,7 +1710,7 @@ impl VerterHost {
                     &define_props_roots,
                 ) {
                     #[cfg(any(test, feature = "test-support"))]
-                    crate::capture_token::with_active_capture(|t| {
+                    verter_type_engine::capture_token::with_active_capture(|t| {
                         t.record_counter(
                             crate::meta_resolve::SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER,
                             1,
@@ -1738,11 +1749,11 @@ impl VerterHost {
         // discovery walks run node-domain off the raised carriers.
         let seed_dispatch = query_engine.dispatch;
         let seed_transit_ctx =
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
+            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                verter_type_engine::semantic_query::ProjectionMode::Navigate,
             );
         let raise_seed_source =
-            |dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+            |dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
                 '_,
                 crate::resolver_core::HostCapabilities,
             >,
@@ -1750,7 +1761,7 @@ impl VerterHost {
              source: &verter_type_expr::facts::SemanticTypeSource| {
                 dispatch.raise_semantic_type_source_to_hot(
                     source,
-                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: producer_scope.canonical_id.as_ref(),
                         scope_owner: producer_scope.owner,
                         context: seed_transit_ctx,
@@ -1962,7 +1973,8 @@ impl VerterHost {
                 break;
             }
             let _pending_started =
-                crate::request_observers::component_meta_debug_enabled().then(Instant::now);
+                verter_type_engine::request_observers::component_meta_debug_enabled()
+                    .then(Instant::now);
             let PendingComponentMetaRegistryRef {
                 name: type_name,
                 producer_scope: pending_producer_scope,
@@ -2006,8 +2018,8 @@ impl VerterHost {
             {
                 continue;
             }
-            if crate::request_observers::component_meta_debug_enabled() {
-                crate::request_observers::component_meta_debug(format!(
+            if verter_type_engine::request_observers::component_meta_debug_enabled() {
+                verter_type_engine::request_observers::component_meta_debug(format!(
                     "REGISTRY_PENDING owner={} name={} source_hint={:?} exported={:?} route={:?}",
                     owner_canonical,
                     type_name,
@@ -2022,8 +2034,10 @@ impl VerterHost {
                 pending_exported_name.unwrap_or(type_name.as_str()),
                 Some(pending_producer_scope.canonical_id.as_ref()),
             );
-            if crate::request_observers::component_meta_debug_enabled() && !_can_resolve {
-                crate::request_observers::component_meta_debug(format!(
+            if verter_type_engine::request_observers::component_meta_debug_enabled()
+                && !_can_resolve
+            {
+                verter_type_engine::request_observers::component_meta_debug(format!(
                     "REGISTRY_SKIP_UNRESOLVABLE owner={} name={} source_hint={:?} exported={:?}",
                     owner_canonical,
                     type_name,
@@ -2038,8 +2052,8 @@ impl VerterHost {
             if pending_producer_scope.canonical_id.as_ref() != owner_canonical {
                 let source_hint = pending_producer_scope.canonical_id.as_ref();
                 if !query_engine.allow_imported_root() {
-                    if crate::request_observers::component_meta_debug_enabled() {
-                        crate::request_observers::component_meta_debug(format!(
+                    if verter_type_engine::request_observers::component_meta_debug_enabled() {
+                        verter_type_engine::request_observers::component_meta_debug(format!(
                             "REGISTRY_SKIP_BUDGET owner={} name={}",
                             owner_canonical, type_name,
                         ));
@@ -2048,16 +2062,17 @@ impl VerterHost {
                 }
                 track_component_meta_dependency(tracked_dependencies, owner_canonical, source_hint);
                 let _imported_pending_started =
-                    crate::request_observers::component_meta_debug_enabled().then(Instant::now);
+                    verter_type_engine::request_observers::component_meta_debug_enabled()
+                        .then(Instant::now);
                 let _resolved_import = query_engine.resolve_imported_registry_symbol(
                     source_hint,
                     pending_producer_scope.owner,
                     requested_exported_name,
                 );
-                if crate::request_observers::component_meta_debug_enabled()
+                if verter_type_engine::request_observers::component_meta_debug_enabled()
                     && _resolved_import.is_none()
                 {
-                    crate::request_observers::component_meta_debug(format!(
+                    verter_type_engine::request_observers::component_meta_debug(format!(
                         "REGISTRY_IMPORT_MISS owner={} name={} source={} exported={}",
                         owner_canonical, type_name, source_hint, requested_exported_name,
                     ));
@@ -2079,7 +2094,8 @@ impl VerterHost {
                         );
                     }
                     let declaration_started =
-                        crate::request_observers::component_meta_debug_enabled().then(Instant::now);
+                        verter_type_engine::request_observers::component_meta_debug_enabled()
+                            .then(Instant::now);
                     let mut declaration =
                         if matches!(pending_route, crate::resolver_core::RouteDemand::Whole) {
                             query_engine.resolve_type_declaration(
@@ -2113,8 +2129,8 @@ impl VerterHost {
                         crate::resolver_core::RouteDemand::MemberPath(path) => path.is_empty(),
                         _ => false,
                     };
-                    if crate::request_observers::component_meta_debug_enabled() {
-                        crate::request_observers::component_meta_debug(format!(
+                    if verter_type_engine::request_observers::component_meta_debug_enabled() {
+                        verter_type_engine::request_observers::component_meta_debug(format!(
                             "REGISTRY_IMPORTED_GATE owner={} name={} stay_symbolic={} route_whole={} body_class={:?}",
                             owner_canonical, type_name,
                             imported_registry_alias_should_stay_symbolic(dispatch,
@@ -2177,7 +2193,8 @@ impl VerterHost {
                         continue;
                     }
                     let surface_started =
-                        crate::request_observers::component_meta_debug_enabled().then(Instant::now);
+                        verter_type_engine::request_observers::component_meta_debug_enabled()
+                            .then(Instant::now);
                     // Route-scoped registry publication: a non-whole route
                     // publishes the SELECTED one-level topology as a
                     // `Projected(Surface)` fact (member payloads stay lazy
@@ -2222,7 +2239,7 @@ impl VerterHost {
                     if let Some(started) = _pending_started {
                         let total_elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                         if total_elapsed_ms >= 5.0 {
-                            crate::request_observers::component_meta_debug(format!(
+                            verter_type_engine::request_observers::component_meta_debug(format!(
                                 "REGISTRY_PENDING_IMPORTED owner={} name={} source={} resolved={} resolve_ms={:.1} declaration_ms={:.1} surface_ms={:.1} total_ms={:.1}",
                                 owner_canonical,
                                 type_name,
@@ -2271,7 +2288,7 @@ impl VerterHost {
                     .raise_authored_locator_to_hot(locator, seed_transit_ctx)
                     .at_optional_boundary()
                     .and_then(|hot| {
-                        crate::project_semantic_dispatch::reference_carriers::reference_carrier_head(dispatch,
+                        verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(dispatch,
                             hot.node(),
                         )
                     })
@@ -2321,8 +2338,8 @@ impl VerterHost {
             let Some(published_locator) = published_locator else {
                 continue;
             };
-            if crate::request_observers::component_meta_debug_enabled() {
-                crate::request_observers::component_meta_debug(format!(
+            if verter_type_engine::request_observers::component_meta_debug_enabled() {
+                verter_type_engine::request_observers::component_meta_debug(format!(
                     "REGISTRY_PENDING_LOCAL_SURFACE owner={} name={} route={:?} locator={:?}",
                     owner_canonical, type_name, pending_route, published_locator
                 ));
@@ -2387,7 +2404,7 @@ impl VerterHost {
             if let Some(started) = _pending_started {
                 let total_elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
                 if total_elapsed_ms >= 5.0 {
-                    crate::request_observers::component_meta_debug(format!(
+                    verter_type_engine::request_observers::component_meta_debug(format!(
                         "REGISTRY_PENDING_LOCAL owner={} name={} declaration_owner={:?} route={:?} total_ms={:.1}",
                         owner_canonical,
                         type_name,
@@ -2398,10 +2415,10 @@ impl VerterHost {
                 }
             }
         }
-        if crate::request_observers::component_meta_debug_enabled()
+        if verter_type_engine::request_observers::component_meta_debug_enabled()
             && (_loop_materializations > 0 || _loop_iterations > 0)
         {
-            crate::request_observers::component_meta_debug(format!(
+            verter_type_engine::request_observers::component_meta_debug(format!(
                 "REGISTRY_LOOP owner={} iterations={} materializations={} published={} loop_ms={:.1}",
                 owner_canonical,
                 _loop_iterations,
@@ -2412,7 +2429,7 @@ impl VerterHost {
         }
         let loop_elapsed_ms = _loop_start.elapsed().as_secs_f64() * 1000.0;
         if debug_enabled {
-            crate::request_observers::component_meta_debug(format!(
+            verter_type_engine::request_observers::component_meta_debug(format!(
                 "PROFILE_PHASES owner={} import_refresh_ms={:.1} public_field_collect_ms={:.1} seed_scan_ms={:.1} loop_ms={:.1}",
                 owner_canonical,
                 import_refresh_elapsed_ms,
@@ -2860,7 +2877,7 @@ impl VerterHost {
             .filter(|fact| fact.canonical_id() != Some(canonical))
             .cloned()
             .collect::<Vec<_>>();
-        crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
+        verter_type_engine::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
 
         let Some(admission) = admission else {
             return;
@@ -3005,7 +3022,7 @@ impl VerterHost {
                 .filter(|fact| fact.canonical_id() != Some(canonical))
                 .cloned()
                 .collect();
-        crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
+        verter_type_engine::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
         // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
         // fact from the STORED signature, mirroring the validated cache
         // above and the `ComponentMetaResultDb` publish path (see
@@ -3137,7 +3154,7 @@ impl VerterHost {
         // Fan-out to outer active tracers so the encoded-payload
         // mirror participates in transitive fact bubbling. Empty
         // signatures are a no-op per `observe_fact_signature`.
-        crate::fact_signature_helpers::observe_fact_signature(&fact_versions);
+        verter_type_engine::fact_signature_helpers::observe_fact_signature(&fact_versions);
         let cached = crate::types::CachedMetaPayload {
             fact_versions,
             payload,

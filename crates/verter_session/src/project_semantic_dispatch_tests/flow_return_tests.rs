@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::{
-    FlowReturnKey, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnKey, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 
 const FLOW_EXEC_FIXTURE: &str = r#"
@@ -355,8 +355,8 @@ fn flow_result_for_file(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     };
     flow_result(dispatch, host, key)
@@ -378,8 +378,8 @@ fn flow_key(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(CANONICAL),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -440,7 +440,7 @@ fn assert_whole_return_is_unmodeled_marker(
             );
             assert_eq!(
                 result.degradation(),
-                Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+                Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnmodeledPosition),
                 "{what}: the positional degradation reason"
             );
         }
@@ -853,9 +853,9 @@ fn flow_return_key_carries_no_value_environment() {
         // the key.
         let mut typed = key.clone();
         typed.context.type_substitution =
-            crate::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                crate::semantic_query::SemanticNodeId(7),
-                crate::semantic_query::SemanticNodeId(8),
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
+                verter_type_engine::semantic_query::SemanticNodeId(7),
+                verter_type_engine::semantic_query::SemanticNodeId(8),
             )]);
         assert_ne!(typed, key, "a type substitution fork is a distinct key");
     });
@@ -877,7 +877,7 @@ pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let with_env = |mutate: fn(&mut crate::semantic_query::FlowReturnContext)| {
+        let with_env = |mutate: fn(&mut verter_type_engine::semantic_query::FlowReturnContext)| {
             let mut key = base.clone();
             mutate(&mut key.context);
             key
@@ -915,8 +915,9 @@ pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
         );
         assert_ne!(ordinal_fork, base, "the overload ordinal is key identity");
         let mut args_fork = base.clone();
-        args_fork.normalized_type_args =
-            Arc::from(vec![crate::semantic_query::SemanticNodeId(9)].into_boxed_slice());
+        args_fork.normalized_type_args = Arc::from(
+            vec![verter_type_engine::semantic_query::SemanticNodeId(9)].into_boxed_slice(),
+        );
         assert_ne!(args_fork, base, "the normalized type args are key identity");
 
         // Warm isolation: compute the base, then prove a shifted-env key
@@ -1180,8 +1181,8 @@ fn function_return_helper_degraded_and_absent_arms() {
         // only when the cold build never ran).
         match dispatch.execute_function_return_source(&invoked_source, CANONICAL) {
             super::flow_return::FunctionReturnNode::NoValue(
-                crate::semantic_query::FlowReturnFailure::Unsupported(
-                    crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+                verter_type_engine::semantic_query::FlowReturnFailure::Unsupported(
+                    verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
                 ),
             ) => {}
             other => {
@@ -1215,11 +1216,11 @@ fn function_return_helper_degraded_and_absent_arms() {
 /// the no-surface class.
 #[test]
 fn inline_no_value_close_folds_the_no_surface_rails() {
-    use crate::semantic_query::PartialReasonSet;
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let key = flow_key(
             dispatch,
             "subObservesBrokenInit",
@@ -1228,7 +1229,7 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
         );
         let read = dispatch
             .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
-        let observed = crate::request_context::current_cold_compute_completeness();
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
         scope.discard();
         assert!(
             matches!(read.value, QueryResult::Value(_)),
@@ -1303,7 +1304,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
                 scope: "/ws/root.ts".to_string(),
                 expression: "RootAssign".to_string(),
                 extra_imports: Vec::new(),
-                mode: crate::semantic_query::ProjectionMode::Expanded,
+                mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 cacheable: false,
             },
         )
@@ -1331,8 +1332,8 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for("/ws/mixed_c.ts"),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let roots = dispatch
@@ -1633,7 +1634,7 @@ fn flow_return_direct_call_chain_charges_connected_work() {
             "/ws/chain.ts",
         ) {
             super::flow_return::FunctionReturnNode::NoValue(
-                crate::semantic_query::FlowReturnFailure::Budget(_),
+                verter_type_engine::semantic_query::FlowReturnFailure::Budget(_),
             ) => {}
             other => panic!("the over-limit chain degrades with Budget, got {other:?}"),
         }
@@ -1713,7 +1714,7 @@ fn a_composite_member_call_never_unions_the_callee_whole_return() {
 /// assertions.
 #[test]
 fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
-    use crate::semantic_query::PartialReasonSet;
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_host();
     let mut source = String::new();
@@ -1745,19 +1746,19 @@ fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
             function_part: FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         };
-        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let node = dispatch.execute_function_return_source(
             &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
             "/ws/budget-class.ts",
         );
-        let observed = crate::request_context::current_cold_compute_completeness();
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
         scope.discard();
 
         assert!(
             matches!(
                 node,
                 super::flow_return::FunctionReturnNode::NoValue(
-                    crate::semantic_query::FlowReturnFailure::Budget(_)
+                    verter_type_engine::semantic_query::FlowReturnFailure::Budget(_)
                 )
             ),
             "the over-limit chain still degrades with Budget, got {node:?}"
@@ -2098,7 +2099,7 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
 fn flow_result_value(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     key: FlowReturnKey,
-) -> crate::semantic_query::FlowReturnResult {
+) -> verter_type_engine::semantic_query::FlowReturnResult {
     let QueryResult::Value(SemanticQueryOutput {
         value: SemanticQueryValue::FlowReturn(result),
         ..
@@ -2138,13 +2139,15 @@ pub(crate) fn flow_return_key_covers_input_context_and_projection_demand() {
 
         // Demand axis: same function/env/input, narrower projection path.
         let mut narrower = base.clone();
-        narrower.demand = crate::semantic_query::ReturnProjectionDemand {
+        narrower.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
             point: {
-                let mut point = crate::semantic_query::demand::Demand::identity();
+                let mut point = verter_type_engine::semantic_query::demand::Demand::identity();
                 point.projection.path =
-                    crate::semantic_query::demand::ProjectionPath::from_segments([
-                        crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(Arc::from("b")),
+                    verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                        verter_type_engine::semantic_query::PathSegment::Member(
+                            verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                                "b",
+                            )),
                         ),
                     ]);
                 point
@@ -2161,14 +2164,13 @@ pub(crate) fn flow_return_key_covers_input_context_and_projection_demand() {
         );
 
         // Input axis: same function/env/demand, a contextual input binding.
-        let contextual =
-            dispatch
-                .graph()
-                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::Number,
-                ));
+        let contextual = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
         let mut with_input = base.clone();
-        with_input.input = crate::semantic_query::FlowInputContext {
+        with_input.input = verter_type_engine::semantic_query::FlowInputContext {
             contextual_parameters: Arc::from(vec![contextual].into_boxed_slice()),
         };
         assert_ne!(
@@ -2207,13 +2209,15 @@ fn flow_return_narrower_demand_point_fails_closed_unmodeled() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        key.demand = crate::semantic_query::ReturnProjectionDemand {
+        key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
             point: {
-                let mut point = crate::semantic_query::demand::Demand::identity();
+                let mut point = verter_type_engine::semantic_query::demand::Demand::identity();
                 point.projection.path =
-                    crate::semantic_query::demand::ProjectionPath::from_segments([
-                        crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(Arc::from("b")),
+                    verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                        verter_type_engine::semantic_query::PathSegment::Member(
+                            verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                                "b",
+                            )),
                         ),
                     ]);
                 point
@@ -2254,7 +2258,7 @@ fn flow_return_degraded_success_returns_value_and_admits_nothing() {
         let result = flow_result_value(dispatch, degraded_key.clone());
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::NonCallableBinding),
             "a usable degraded value carries its typed reason on the SUCCESS carrier"
         );
         let projected = host
@@ -2418,7 +2422,7 @@ fn flow_return_unapplied_write_effect_degrades_and_admits_nothing() {
         let result = flow_result_value(dispatch, key.clone());
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
             "a slice with an unapplied write effect into a value-selected \
              parameter slot must degrade (fail closed), never publish a \
              wrong type as complete"
@@ -2622,7 +2626,9 @@ fn flow_return_failed_binding_initializer_degrades_only_when_observed() {
         );
         assert_eq!(
             observed.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer)
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FailedBindingInitializer
+            )
         );
 
         let ignored_key = flow_key(
@@ -2869,7 +2875,7 @@ fn flow_return_publishes_compute_recorded_whole_return_point() {
         let step = dispatch.execute_flow_return(root);
         assert!(matches!(
             step,
-            crate::semantic_query::FlowReturnStep::Complete(_)
+            verter_type_engine::semantic_query::FlowReturnStep::Complete(_)
         ));
         let member = flow_key(
             dispatch,
@@ -2905,11 +2911,11 @@ fn member_flow_key(
     member: &str,
 ) -> FlowReturnKey {
     let mut key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
-    key.demand = crate::semantic_query::ReturnProjectionDemand {
-        point: crate::semantic_query::demand::Demand::navigate(
-            crate::semantic_query::demand::ProjectionPath::from_segments([
-                crate::semantic_query::PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier(member),
+    key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
+        point: verter_type_engine::semantic_query::demand::Demand::navigate(
+            verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                verter_type_engine::semantic_query::PathSegment::Member(
+                    verter_type_engine::semantic_query::PropertyKey::identifier(member),
                 ),
             ]),
         ),
@@ -2919,7 +2925,10 @@ fn member_flow_key(
 
 /// Whether any dispatched key under the capture names `needle` (the
 /// sibling-materialisation detector for the member-demand tests).
-fn capture_touches(snapshot: &crate::capture_token::CaptureSnapshot, needle: &str) -> bool {
+fn capture_touches(
+    snapshot: &verter_type_engine::capture_token::CaptureSnapshot,
+    needle: &str,
+) -> bool {
     snapshot
         .dispatch_log
         .iter()
@@ -2937,7 +2946,8 @@ fn flow_return_member_demand_projects_widened_member_and_skips_sibling_binding()
     // Member demand: sibling stays cold.
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let guard = crate::capture_token::CaptureToken::start_for_query("flow_member_demand");
+        let guard =
+            verter_type_engine::capture_token::CaptureToken::start_for_query("flow_member_demand");
         let (expr, _) = flow_result(
             dispatch,
             &host,
@@ -2959,7 +2969,8 @@ fn flow_return_member_demand_projects_widened_member_and_skips_sibling_binding()
     // materialises the sibling — the detector is discriminating.
     let control = make_host();
     with_dispatch(&control, |dispatch| {
-        let guard = crate::capture_token::CaptureToken::start_for_query("flow_member_control");
+        let guard =
+            verter_type_engine::capture_token::CaptureToken::start_for_query("flow_member_control");
         let (expr, _) = flow_result(
             dispatch,
             &control,
@@ -3100,7 +3111,7 @@ fn budget_tripping_content_trips_when_lowered() {
     assert_eq!(
         super::checker_probe_lane_tests::flow_return_outcome_in(Default::default(), &source, "pf"),
         Err(crate::host_flow_return_audit::FlowReturnError::Failure(
-            crate::semantic_query::FlowReturnFailure::Budget(
+            verter_type_engine::semantic_query::FlowReturnFailure::Budget(
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
             )
         ))
@@ -3170,15 +3181,15 @@ fn flow_return_member_demand_never_lowers_elided_sibling_content() {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for("/ws/member-sibling-content.ts"),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
-        key.demand = crate::semantic_query::ReturnProjectionDemand {
-            point: crate::semantic_query::demand::Demand::navigate(
-                crate::semantic_query::demand::ProjectionPath::from_segments([
-                    crate::semantic_query::PathSegment::Member(
-                        crate::semantic_query::PropertyKey::identifier("b"),
+        key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
+            point: verter_type_engine::semantic_query::demand::Demand::navigate(
+                verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                    verter_type_engine::semantic_query::PathSegment::Member(
+                        verter_type_engine::semantic_query::PropertyKey::identifier("b"),
                     ),
                 ]),
             ),
@@ -3330,7 +3341,7 @@ fn assert_degraded_return_only(
     host: &Arc<VerterHost>,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
-    reason: crate::semantic_query::FlowReturnDegradation,
+    reason: verter_type_engine::semantic_query::FlowReturnDegradation,
 ) {
     let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
     let result = flow_result_value(dispatch, key.clone());
@@ -3403,7 +3414,7 @@ fn flow_return_conditionally_defined_var_degrades_at_observation() {
             &host,
             dispatch,
             "subBranchVarOneArm",
-            crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+            verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
         );
     });
 }
@@ -3590,8 +3601,8 @@ fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() 
                 ),
                 normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
                 context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
-                demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-                input: crate::semantic_query::FlowInputContext::empty(),
+                demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+                input: verter_type_engine::semantic_query::FlowInputContext::empty(),
                 result_contract: super::flow_solve::flow_return_result_contract_id(),
             };
             let result = flow_result_value(dispatch, key.clone());
@@ -3638,14 +3649,14 @@ fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() 
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let result = flow_result_value(dispatch, collision.clone());
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnmodeledPosition),
             "a real owner-scope collision fails closed"
         );
         // POSITIONAL: the signature keeps its shape and every slot that
@@ -3788,7 +3799,9 @@ fn flow_return_return_free_loop_declaring_a_var_degrades() {
         );
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition
+            ),
             "a `var` a loop body first defines is conditionally defined past the loop"
         );
         assert_eq!(
@@ -3892,8 +3905,8 @@ fn scc_key(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(SCC_CANONICAL),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -3906,7 +3919,7 @@ fn scc_key(
 /// finalizer alone.
 fn staged_flow_proof(
     key: &FlowReturnKey,
-    value: crate::semantic_query::FlowReturnResult,
+    value: verter_type_engine::semantic_query::FlowReturnResult,
 ) -> super::flow_solve::CompleteFlowResult {
     use super::dispatch_txn::flow_obligation_state::{
         FlowConvergenceEvidence, FlowEvaluationProvenance,
@@ -4004,10 +4017,11 @@ fn an_incomplete_or_transiently_refused_flow_result_is_not_kept() {
                     value: value.clone(),
                     reuse,
                     replay: super::dispatch_txn::FlowMemberReuse {
-                        reads: crate::resolver_core::resolver_context::RecordedFactReads {
-                            facts: Arc::from(Vec::new()),
-                            non_cacheable: false,
-                        },
+                        reads:
+                            verter_type_engine::resolver_core::resolver_context::RecordedFactReads {
+                                facts: Arc::from(Vec::new()),
+                                non_cacheable: false,
+                            },
                         observed_self_roots: Vec::new(),
                         canonical_evidence_deposited: false,
                     },
@@ -4033,7 +4047,7 @@ fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseCl
             canonical_id: "/ws/replayed.ts".to_string(),
             hash: [5; 16],
         };
-        let root: crate::semantic_query_memo::ObservedGraphSelfRoot =
+        let root: verter_type_engine::semantic_query_memo::ObservedGraphSelfRoot =
             (Arc::from("/ws/replayed.ts"), [6; 16]);
         dispatch.dispatch_txn.borrow_mut().flow.results.complete(
             key.clone(),
@@ -4041,7 +4055,7 @@ fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseCl
                 value: value.clone(),
                 reuse,
                 replay: super::dispatch_txn::FlowMemberReuse {
-                    reads: crate::resolver_core::resolver_context::RecordedFactReads {
+                    reads: verter_type_engine::resolver_core::resolver_context::RecordedFactReads {
                         facts: Arc::from(vec![fact.clone()]),
                         non_cacheable: false,
                     },
@@ -4058,7 +4072,7 @@ fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseCl
         );
         let observed = frame.finish();
         match step {
-            crate::semantic_query::FlowReturnStep::Complete(result) => assert_eq!(
+            verter_type_engine::semantic_query::FlowReturnStep::Complete(result) => assert_eq!(
                 result.return_type(),
                 value.return_type(),
                 "the demand is answered with the member's proven value"
@@ -4124,7 +4138,7 @@ fn scc_expect_value(
     host: &Arc<VerterHost>,
     name: &str,
 ) -> (
-    crate::semantic_query::FlowReturnResult,
+    verter_type_engine::semantic_query::FlowReturnResult,
     usize,
     Vec<SemanticQueryKey>,
 ) {
@@ -4470,7 +4484,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 .iter()
                 .cloned()
                 .map(|(_, key, _, result, materialized, flight)| {
-                    crate::semantic_query_memo::PendingFlowReturnMember {
+                    verter_type_engine::semantic_query_memo::PendingFlowReturnMember {
                         result: staged_flow_proof(&key, result),
                         key,
                         materialized,
@@ -4480,7 +4494,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 .collect();
             let published_any = graph.publish_scc_members_fenced(
                 Some(dispatch.ctx),
-                &crate::semantic_query_memo::SccRootWitness::flow_return(
+                &verter_type_engine::semantic_query_memo::SccRootWitness::flow_return(
                     root_key.clone(),
                     carrier.admission_seq,
                 ),
@@ -4537,7 +4551,7 @@ fn flow_expr_for_script(
     script: &str,
 ) -> (
     verter_type_expr::TypeExpr,
-    Option<crate::semantic_query::FlowReturnDegradation>,
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
 ) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let canonical = "/ws/flow-control-probe.ts";
@@ -4561,8 +4575,8 @@ fn flow_expr_for_script(
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let result = flow_result_value(dispatch, key);
@@ -4645,7 +4659,7 @@ fn flow_return_switch_fallthrough_only_var_is_flagged_conditional() {
     );
     assert_eq!(
         degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition)
+        Some(verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition)
     );
 }
 
@@ -4870,11 +4884,11 @@ fn flow_return_negated_conjunction_recovers_the_positive_predicate() {
 enum FlowSourceProbe {
     Value {
         expr: verter_type_expr::TypeExpr,
-        degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+        degradation: Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
         candidates: usize,
     },
     NoValue {
-        error: crate::semantic_query::FlowReturnFailure,
+        error: verter_type_engine::semantic_query::FlowReturnFailure,
         candidates: usize,
     },
 }
@@ -4979,12 +4993,15 @@ fn expect_clean_flow_value(script: &str) -> verter_type_expr::TypeExpr {
 }
 
 #[track_caller]
-fn expect_refused_flow_as(script: &str, expected: crate::semantic_query::FlowReturnUnsupported) {
+fn expect_refused_flow_as(
+    script: &str,
+    expected: verter_type_engine::semantic_query::FlowReturnUnsupported,
+) {
     match flow_source_probe(script) {
         FlowSourceProbe::NoValue { error, candidates } => {
             assert_eq!(
                 error,
-                crate::semantic_query::FlowReturnFailure::Unsupported(expected)
+                verter_type_engine::semantic_query::FlowReturnFailure::Unsupported(expected)
             );
             assert_eq!(candidates, 0, "a refusal must not admit a candidate");
         }
@@ -5482,9 +5499,11 @@ pub(crate) fn a_labeled_try_or_throw_suffix_never_admits_a_fabricated_undefined_
             } => {
                 assert_eq!(
                     degradation,
-                    Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                        verter_session_query::flow::policy::FlowGap::AbruptCompletion
-                    )),
+                    Some(
+                        verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                            verter_session_query::flow::policy::FlowGap::AbruptCompletion
+                        )
+                    ),
                     "an undecided destination fails closed: {suffix}"
                 );
                 assert_eq!(candidates, 0, "a gapped result never warms: {suffix}");
@@ -5588,19 +5607,19 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
 
     expect_refused_flow_as(
         "function makeProps(x: string | number) { do { (() => { if (typeof x !== \"string\") throw 0 })() } while (false); return { v: x } }",
-        crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
 
     expect_refused_flow_as(
         "function makeProps(x: string | number) { (() => { if (typeof x !== \"string\") throw 0 })(); return { v: x } }",
-        crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
 
     // Negative control: a directly invoked write remains effectful and
     // fails closed.
     expect_refused_flow_as(
         "function makeProps() { let x: \"a\" | \"b\" = \"a\"; do { (() => { x = \"b\" })() } while (false); return x }",
-        crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
     // A reachable write inside the loop body joins the entering value at
     // the loop's exit (TypeScript 7.0.2 `tsc`: `"a" | "b"`).
@@ -5616,7 +5635,7 @@ fn flow_return_loop_transfer_classification_tracks_invocation_paths_and_reachabi
 fn flow_return_sequence_wrapped_iife_effect_fails_closed() {
     expect_refused_flow_as(
         "function makeProps() { let x: \"a\" | \"b\" = \"a\"; ((() => { x = \"b\" })(), (() => { x = \"b\" })()); return x }",
-        crate::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
+        verter_type_engine::semantic_query::FlowReturnUnsupported::InvokedClosureEffect,
     );
 }
 
@@ -5740,7 +5759,7 @@ fn flow_return_nested_label_inherits_the_enclosing_suffix_return() {
 /// rails instead would let a no-surface producer publish around.
 #[test]
 fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let canonical = "/ws/spread-member.ts";
@@ -5759,37 +5778,36 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
         let ctx = RequestContext::new(1, Arc::from(canonical), false, None);
         let _guard = RequestContextGuard::install(ctx);
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
-        let typeof_node =
-            dispatch
-                .graph()
-                .intern_node(crate::semantic_query::SemanticNodeData::new_typeof(
-                    crate::semantic_query::ValueRootKey {
-                        scope: crate::semantic_query::ScopeId {
-                            canonical_id: Arc::from(canonical),
-                            owner,
-                            local_scope: None,
-                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                                owner,
-                            ),
-                        },
-                        name: Arc::from("makeProps"),
+        let typeof_node = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::new_typeof(
+                verter_type_engine::semantic_query::ValueRootKey {
+                    scope: verter_type_engine::semantic_query::ScopeId {
+                        canonical_id: Arc::from(canonical),
+                        owner,
+                        local_scope: None,
+                        binder_scope_id:
+                            verter_type_engine::semantic_query::BinderScopeId::file_scope(owner),
                     },
-                    Arc::from([]),
-                    Arc::from([]),
-                ));
+                    name: Arc::from("makeProps"),
+                },
+                Arc::from([]),
+                Arc::from([]),
+            ),
+        );
 
-        let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-        let observation = crate::project_semantic_dispatch::BuildLocalTaintGuard::push(
+        let completeness_scope =
+            verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+        let observation = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
             &dispatch.build_local_taint,
         );
         let projected = dispatch.flow_return_member_projection(
             typeof_node,
-            &crate::semantic_query::PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("label"),
+            &verter_type_engine::semantic_query::PathSegment::Member(
+                verter_type_engine::semantic_query::PropertyKey::identifier("label"),
             ),
         );
         let observed = observation.finish();
-        let completeness = crate::request_context::current_cold_compute_completeness();
+        let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
         completeness_scope.discard();
 
         assert!(
@@ -5806,7 +5824,7 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
              {completeness:?}"
         );
         assert!(
-            !crate::request_context::current_request_result_is_partial(),
+            !verter_type_engine::request_context::current_request_result_is_partial(),
             "the declined probe never marks the request partial sticky"
         );
 
@@ -5825,11 +5843,11 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
             0,
         );
         key.context = dispatch.flow_return_context_for(canonical);
-        key.demand = crate::semantic_query::ReturnProjectionDemand {
-            point: crate::semantic_query::demand::Demand::navigate(
-                crate::semantic_query::demand::ProjectionPath::from_segments([
-                    crate::semantic_query::PathSegment::Member(
-                        crate::semantic_query::PropertyKey::identifier("label"),
+        key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
+            point: verter_type_engine::semantic_query::demand::Demand::navigate(
+                verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                    verter_type_engine::semantic_query::PathSegment::Member(
+                        verter_type_engine::semantic_query::PropertyKey::identifier("label"),
                     ),
                 ]),
             ),
@@ -5838,7 +5856,9 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
         assert!(
             matches!(
                 read.value,
-                crate::semantic_query::QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                verter_type_engine::semantic_query::QueryResult::Error(
+                    verter_type_engine::semantic_query::QueryError::Miss
+                )
             ),
             "the member demand itself fails closed with the typed miss, got {:?}",
             read.value
@@ -5848,8 +5868,9 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
             "a direct member-demand consumer keeps the no-surface rails"
         );
         assert!(
-            read.partial_reasons
-                .contains(crate::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE),
+            read.partial_reasons.contains(
+                verter_type_engine::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE
+            ),
             "the decline rides the no-surface class, got {:?}",
             read.partial_reasons
         );
@@ -5865,7 +5886,7 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
 /// The per-request cold-compute counter, read from the installed
 /// `RequestContext`.
 fn flow_cold_computes() -> u32 {
-    crate::request_context::current_request_context()
+    verter_type_engine::request_context::current_request_context()
         .expect("the test installs a RequestContext")
         .flow_return_cold_computes
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -5953,7 +5974,7 @@ fn flow_root_publish_requires_complete_flow_proof() {
 #[test]
 fn production_missing_obligation_returns_only_and_recomputes() {
     use super::flow_return::flow_admission_fault_injection as inject;
-    use crate::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
@@ -6001,8 +6022,8 @@ fn production_missing_obligation_returns_only_and_recomputes() {
 /// both_orders`' degraded leg).
 #[test]
 fn degraded_flow_finalizer_never_warms_root_or_scc() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::semantic_query::PartialReasonSet;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     // Root leg.
     let host = make_host();
@@ -6033,7 +6054,7 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
 
         // The universal rail: consuming the degraded value through the
         // sealed consumer entry folds its class through the read funnel.
-        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let node = dispatch.execute_function_return_source(
             &verter_type_expr::facts::FunctionReturnSource::Flow(
                 verter_type_expr::facts::FlowFunctionReturnIdentity {
@@ -6049,7 +6070,7 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
             ),
             CANONICAL,
         );
-        let observed = crate::request_context::current_cold_compute_completeness();
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
         scope.discard();
         assert!(
             matches!(node, super::flow_return::FunctionReturnNode::Flow(_)),
@@ -6138,12 +6159,11 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
         assert_eq!(flow_slice.graphs().build_count(), 1);
 
         // An ordinary non-flow query.
-        let member =
-            dispatch
-                .graph()
-                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::Number,
-                ));
+        let member = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
         let _ = dispatch.execute(SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
             nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
@@ -6151,29 +6171,29 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
 
         // The pending typed-gap roots: a typed refusal, never a graph or
         // a plan.
-        let analysis_context = crate::semantic_query::ProgramAnalysisContext {
+        let analysis_context = verter_type_engine::semantic_query::ProgramAnalysisContext {
             parse_env_hash: [0; 16],
             resolve_env_hash: [0; 16],
             type_env_hash: [0; 16],
             lib_env_hash: [0; 16],
             project_identity: 0,
-            substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
+            substitution: verter_type_engine::semantic_query::SubstitutionCanonicalHash::empty(),
         };
         let pending_roots = [
             SemanticQueryKey::FlowNarrowingAt {
-                point: crate::semantic_query::ProgramPointId {
+                point: verter_type_engine::semantic_query::ProgramPointId {
                     canonical_id: Arc::from(CANONICAL),
                     offset: 0,
                 },
-                flow: crate::semantic_query::FlowNarrowingKey::empty(),
+                flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
                 context: analysis_context,
             },
             SemanticQueryKey::ContextualTypeAt {
-                point: crate::semantic_query::ProgramPointId {
+                point: verter_type_engine::semantic_query::ProgramPointId {
                     canonical_id: Arc::from(CANONICAL),
                     offset: 0,
                 },
-                contextual: crate::semantic_query::ContextualTypingKey::empty(),
+                contextual: verter_type_engine::semantic_query::ContextualTypingKey::empty(),
                 context: analysis_context,
             },
         ];
@@ -6182,7 +6202,7 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
             assert!(
                 matches!(
                     result,
-                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                    QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
                 ),
                 "a pending typed-gap root is a typed miss, got {result:?}"
             );
@@ -6208,39 +6228,39 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
 /// partial + ReturnOnly.
 #[test]
 fn pending_flow_roots_surface_their_operation_specific_gap() {
-    use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
-    use crate::semantic_query::PartialReasonSet;
     use verter_session_query::flow::policy::FlowGap;
+    use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let analysis_context = crate::semantic_query::ProgramAnalysisContext {
+        let analysis_context = verter_type_engine::semantic_query::ProgramAnalysisContext {
             parse_env_hash: [0; 16],
             resolve_env_hash: [0; 16],
             type_env_hash: [0; 16],
             lib_env_hash: [0; 16],
             project_identity: 0,
-            substitution: crate::semantic_query::SubstitutionCanonicalHash::empty(),
+            substitution: verter_type_engine::semantic_query::SubstitutionCanonicalHash::empty(),
         };
         let pending_roots = [
             (
                 SemanticQueryKey::FlowNarrowingAt {
-                    point: crate::semantic_query::ProgramPointId {
+                    point: verter_type_engine::semantic_query::ProgramPointId {
                         canonical_id: Arc::from(CANONICAL),
                         offset: 0,
                     },
-                    flow: crate::semantic_query::FlowNarrowingKey::empty(),
+                    flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
                     context: analysis_context,
                 },
                 FlowGap::GuardNarrowing,
             ),
             (
                 SemanticQueryKey::ContextualTypeAt {
-                    point: crate::semantic_query::ProgramPointId {
+                    point: verter_type_engine::semantic_query::ProgramPointId {
                         canonical_id: Arc::from(CANONICAL),
                         offset: 0,
                     },
-                    contextual: crate::semantic_query::ContextualTypingKey::empty(),
+                    contextual: verter_type_engine::semantic_query::ContextualTypingKey::empty(),
                     context: analysis_context,
                 },
                 FlowGap::UnmodeledExpression,
@@ -6284,7 +6304,7 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
 #[test]
 fn flow_root_proof_gate_veto_marks_the_read_partial() {
     use super::flow_return::flow_admission_fault_injection as inject;
-    use crate::semantic_query::PartialReasonSet;
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
@@ -6344,7 +6364,7 @@ fn flow_root_proof_gate_veto_marks_the_read_partial() {
 #[test]
 fn obligation_budget_refusal_takes_the_faulting_request_class() {
     use super::flow_return::flow_admission_fault_injection as inject;
-    use crate::semantic_query::PartialReasonSet;
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
@@ -6536,14 +6556,17 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
             .shallow_file_state(SUB_CANONICAL)
             .map(|state| state.whole_hash)
             .unwrap_or_default();
-        let scope = crate::semantic_query::NodeScopeId::File {
+        let scope = verter_type_engine::semantic_query::NodeScopeId::File {
             canonical_id: Arc::from(SUB_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
         };
         let binder = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("T")),
+            decl: verter_type_engine::semantic_query::DeclIdentity::from_scope(
+                &scope,
+                Arc::from("T"),
+            ),
             param_index: 0,
             constraint: None,
             default: None,
@@ -6559,14 +6582,16 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(SUB_CANONICAL),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let root_key = key_of("rootFn");
         let mut member_key = key_of("memberFn");
         member_key.context.type_substitution =
-            crate::semantic_query::CanonicalTypeSubstitution::new(vec![(binder, number)]);
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
+                binder, number,
+            )]);
 
         // Open both frames and prepare BOTH demands for real.
         let root_idx = dispatch
@@ -6627,7 +6652,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
 
         // The member pops PROVISIONAL: the caller-return clone substitutes
         // at the pop; the deposited outcome stays raw.
-        let raw_member = crate::semantic_query::FlowReturnResult::new(
+        let raw_member = verter_type_engine::semantic_query::FlowReturnResult::new(
             graph,
             binder,
             verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
@@ -6640,7 +6665,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
             Some(discharge_of(&member_key)),
         );
         assert!(
-            matches!(step, crate::semantic_query::FlowReturnStep::Complete(ref result) if result.return_type() == number),
+            matches!(step, verter_type_engine::semantic_query::FlowReturnStep::Complete(ref result) if result.return_type() == number),
             "the caller-return clone substitutes at the pop"
         );
 
@@ -6648,7 +6673,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         let _ = dispatch.flow_frame_close_with_evidence_for_tests(
             root_idx,
             super::dispatch_txn::FlowReturnPendingOutcome::EvaluatedValue(
-                crate::semantic_query::FlowReturnResult::new(
+                verter_type_engine::semantic_query::FlowReturnResult::new(
                     graph,
                     number,
                     verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
@@ -6843,8 +6868,8 @@ export function makeProps(x: string | number) {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(PRED_CANONICAL),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         assert_eq!(
@@ -6910,8 +6935,8 @@ export function makeChecked(x: string | number) {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(CHECK_CANONICAL),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         assert_eq!(
@@ -6953,8 +6978,8 @@ fn whole_return_key(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -6993,9 +7018,11 @@ fn assert_control_callee_gaps_unwarmed(
     }
     assert_eq!(
         result.degradation(),
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            verter_session_query::flow::policy::FlowGap::GuardNarrowing
-        )),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            )
+        ),
         "{name}: the control test degrades to the typed guard-narrowing gap"
     );
     assert_eq!(
@@ -7085,9 +7112,11 @@ fn assert_class_evaluation_write_gaps_unwarmed(
     }
     assert_eq!(
         result.degradation(),
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            verter_session_query::flow::policy::FlowGap::GuardNarrowing
-        )),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            )
+        ),
         "{name}: the unmodelled write degrades to the typed guard-narrowing gap"
     );
     assert_eq!(
@@ -7498,9 +7527,11 @@ function f(x: A | B, A: typeof B) {
         }
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                verter_session_query::flow::policy::FlowGap::GuardNarrowing
-            )),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
             "the shadowed constructor test degrades to the typed guard-narrowing gap"
         );
         assert_eq!(
@@ -7679,9 +7710,11 @@ function typeofFunction(x: object) {
             );
             assert_eq!(
                 result.degradation(),
-                Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
-                )),
+                Some(
+                    verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                    )
+                ),
                 "`{function}` keeps the typed guard gap when `{global}` is unavailable"
             );
             assert_eq!(
@@ -7721,15 +7754,15 @@ fn lower_lib_global_mints_only_a_global_the_environment_provides() {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 &Arc::from(name),
                 Arc::from(args.into_boxed_slice()),
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
             )
         };
-        let unknown =
-            dispatch
-                .graph()
-                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::Unknown,
-                ));
+        let unknown = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Unknown,
+            ),
+        );
 
         assert!(
             lower("Function", Vec::new()).is_some(),
@@ -8074,9 +8107,11 @@ function f(x: Base) { if (x instanceof KSub) return x; return 0; }
         );
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                verter_session_query::flow::policy::FlowGap::GuardNarrowing
-            )),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
             "an unreadable heritage hop leaves the typed guard-narrowing gap"
         );
         assert_eq!(
@@ -8119,7 +8154,7 @@ interface PlainSurface { extra: number }
                         name: Arc::from(name),
                         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
                     },
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
                 )
                 .unwrap_or_else(|| panic!("`{name}` must lower in owner scope"))
         };
@@ -8128,16 +8163,20 @@ interface PlainSurface { extra: number }
         let callable = named("Callable");
         let callable_surface = named("CallableSurface");
         let plain_surface = named("PlainSurface");
-        let object = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Object,
-        ));
-        let number = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
+        let object = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Object,
+            ),
+        );
+        let number = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
         let assignable = |source, target| {
             matches!(
                 dispatch.execute_relate_pair_as_result_for_tests(source, target),
-                crate::semantic_query::RelationResult::Assignable { .. }
+                verter_type_engine::semantic_query::RelationResult::Assignable { .. }
             )
         };
 
@@ -8240,9 +8279,11 @@ function f(x: Derived | string) { if (x instanceof K) return x; return 0; }
             );
             assert_eq!(
                 result.degradation(),
-                Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
-                )),
+                Some(
+                    verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                        verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                    )
+                ),
                 "{what} leaves the typed guard-narrowing gap"
             );
             assert_eq!(
@@ -8287,9 +8328,11 @@ fn assert_instanceof_class_arms_gap_unwarmed(
     }
     assert_eq!(
         result.degradation(),
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            verter_session_query::flow::policy::FlowGap::GuardNarrowing
-        )),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            )
+        ),
         "{name}: the constructor test degrades to the typed guard-narrowing gap"
     );
     assert_eq!(
@@ -8397,9 +8440,11 @@ function inherited(x: C | B) {
         }
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                verter_session_query::flow::policy::FlowGap::GuardNarrowing
-            )),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
             "inherited: the constructor test degrades to the typed guard-narrowing gap"
         );
         assert_eq!(
@@ -8488,9 +8533,11 @@ function f(x: string | number) {
         }
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                verter_session_query::flow::policy::FlowGap::GuardNarrowing
-            )),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
             "f: the wrapped discarded assertion degrades to the typed guard-narrowing gap"
         );
         assert_eq!(
@@ -8553,9 +8600,11 @@ function f(x: string | number) {
         }
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                verter_session_query::flow::policy::FlowGap::GuardNarrowing
-            )),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
             "f: the heritage discarded assertion degrades to the typed guard-narrowing gap"
         );
         assert_eq!(
@@ -8632,9 +8681,11 @@ fn assert_object_read_gaps_unwarmed(
     }
     assert_eq!(
         result.degradation(),
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            verter_session_query::flow::policy::FlowGap::GuardNarrowing
-        )),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            )
+        ),
         "{name}: the unprovable call degrades to the typed guard-narrowing gap"
     );
     assert_eq!(
@@ -9152,9 +9203,11 @@ function f(x: "a" | "b" | "c") {
         }
         assert_eq!(
             result.degradation(),
-            Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-                verter_session_query::flow::policy::FlowGap::GuardNarrowing
-            )),
+            Some(
+                verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                    verter_session_query::flow::policy::FlowGap::GuardNarrowing
+                )
+            ),
             "the uncarried dispatch relation degrades to the typed guard-narrowing gap"
         );
         assert_eq!(
@@ -9522,7 +9575,7 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
         let member = super::relation::DrainedFlowReturnMember {
             key: member_key,
             outcome: FlowReturnPendingOutcome::EvaluatedValue(
-                crate::semantic_query::FlowReturnResult::new(
+                verter_type_engine::semantic_query::FlowReturnResult::new(
                     graph,
                     number,
                     verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
@@ -9537,7 +9590,7 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
             inline_flight: None,
             holds: Vec::new(),
             self_roots: Vec::new(),
-            materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+            materialized: verter_type_engine::semantic_query::demand::MaterializedSet::empty(),
             fresh_seed: false,
             flow_demand: Some(carrier),
             discharge: None,
@@ -9651,7 +9704,9 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
 /// other assertion still passes.
 #[test]
 fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
-    use crate::semantic_query::{CallKind, FunctionParam, PartialReasonSet, SignatureKind};
+    use verter_type_engine::semantic_query::{
+        CallKind, FunctionParam, PartialReasonSet, SignatureKind,
+    };
 
     #[derive(Clone, Copy)]
     enum RootDomain {
@@ -9780,7 +9835,7 @@ fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
 /// assertions still pass.
 #[test]
 fn unserved_demand_site_takes_the_transient_class() {
-    use crate::semantic_query::PartialReasonSet;
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
@@ -9861,7 +9916,7 @@ fn unproven_member_slot_consumed(host: &VerterHost) -> bool {
 fn assert_flow_unverified_rails(
     result_is_partial: bool,
     cache_suppress: bool,
-    reasons: crate::semantic_query::PartialReasonSet,
+    reasons: verter_type_engine::semantic_query::PartialReasonSet,
     what: &str,
 ) {
     assert!(
@@ -9870,7 +9925,8 @@ fn assert_flow_unverified_rails(
          suppressed: {cache_suppress})"
     );
     assert!(
-        reasons.contains(crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+        reasons
+            .contains(verter_type_engine::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED),
         "{what}: the refusal rides the flow-unverified class, got {reasons:?}"
     );
 }
@@ -9955,7 +10011,7 @@ fn unproven_flow_member_makes_relation_root_decided_return_only() {
 /// batches of either domain. The unarmed control admits once.
 #[test]
 fn unproven_flow_member_makes_call_root_complete_return_only() {
-    use crate::semantic_query::{CallKind, FunctionParam, SignatureKind};
+    use verter_type_engine::semantic_query::{CallKind, FunctionParam, SignatureKind};
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
@@ -10238,7 +10294,7 @@ fn provenance_distinguishes_first_demands_of_two_runtimes() {
         // runtime B's evaluation evidence is foreign, never a proof.
         let graph = dispatch.graph();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-        let result = crate::semantic_query::FlowReturnResult::new(
+        let result = verter_type_engine::semantic_query::FlowReturnResult::new(
             graph,
             number,
             verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
@@ -10583,7 +10639,7 @@ fn flow_expr_cold_warm(
     script: &str,
 ) -> (
     verter_type_expr::TypeExpr,
-    Option<crate::semantic_query::FlowReturnDegradation>,
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
 ) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let canonical = "/ws/flow-control-probe.ts";
@@ -10607,8 +10663,8 @@ fn flow_expr_cold_warm(
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         }
     };
@@ -10905,8 +10961,8 @@ fn conv_flow_key(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(CONV_OWNER),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -10915,7 +10971,7 @@ fn conv_flow_key(
 /// the published `Expanded` mode — the same shared `ProjectPath` route
 /// every consumer takes to read a member of a resolved return surface.
 fn conv_member_demand(base: SemanticNodeId) -> SemanticQueryKey {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey,
     };
     SemanticQueryKey::ProjectPath {
@@ -10958,7 +11014,7 @@ fn conv_sole_property(expr: &verter_type_expr::TypeExpr) -> (String, verter_type
     )
 }
 
-fn conv_stats(host: &VerterHost) -> crate::semantic_query::SemanticGraphStats {
+fn conv_stats(host: &VerterHost) -> verter_type_engine::semantic_query::SemanticGraphStats {
     host.project_type_store().semantic_graph().stats_snapshot()
 }
 
@@ -11114,7 +11170,7 @@ fn conv_fresh(dead_source: &str, false_branch: &str) -> ConvObservation {
 #[test]
 fn flow_return_retains_a_selective_operand_as_a_carrier_and_forces_it_only_on_consumer_demand() {
     use super::semantic_operand_tests::interned_nodes;
-    use crate::project_semantic_dispatch::raise::enable_dispatch_trace_for_test;
+    use verter_type_engine::project_semantic_dispatch::raise::enable_dispatch_trace_for_test;
     use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
     let host = make_host();
@@ -11314,16 +11370,20 @@ fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both(
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     with_dispatch(&host, |dispatch| {
         let graph = dispatch.graph();
-        let string = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
-        ));
-        let number = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
+        let string = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::String,
+            ),
+        );
+        let number = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
         let string_or_number =
             dispatch.intern_normalized_union_or_intersection(&[string, number], true);
-        let member = |value: SemanticNodeId| crate::semantic_query::SurfaceMember {
-            key: crate::semantic_query::AuthoredPropertyKey::string("c"),
+        let member = |value: SemanticNodeId| verter_type_engine::semantic_query::SurfaceMember {
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("c"),
             value,
             optional: false,
             readonly: false,
@@ -11332,17 +11392,18 @@ fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both(
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: Default::default(),
             declaration_origin: None,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         };
         let object = |value: SemanticNodeId| {
-            graph.intern_node(crate::semantic_query::SemanticNodeData::Object(
-                crate::semantic_query::surface_view! {
+            graph.intern_node(verter_type_engine::semantic_query::SemanticNodeData::Object(
+                verter_type_engine::surface_view! {
                     members: Arc::from(vec![member(value)].into_boxed_slice()),
                     call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    index_signatures: Arc::from(Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()),
+                    index_signatures: Arc::from(Vec::<verter_type_engine::semantic_query::IndexSignature>::new().into_boxed_slice()),
                     keyspace: None,
                     has_index_signature: false,
                 },
@@ -11351,7 +11412,7 @@ fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both(
         let narrow = object(string);
         let wide = object(string_or_number);
         let union = dispatch.intern_normalized_union_or_intersection(&[narrow, wide], true);
-        let Some(crate::semantic_query::SemanticNodeData::Union(members)) =
+        let Some(verter_type_engine::semantic_query::SemanticNodeData::Union(members)) =
             graph.node_data(union).as_deref().cloned()
         else {
             panic!("the canonical union of the two object arms must stay a union");
@@ -11466,9 +11527,11 @@ fn flow_return_reunion_undecided_reverse_relation_keeps_every_arm_and_never_warm
     let (expr, degradation) = flow_expr_for_script(script);
     assert_eq!(
         degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            verter_session_query::flow::policy::FlowGap::NominalRelation
-        )),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::NominalRelation
+            )
+        ),
         "an undecided arm pair records the typed relation gap"
     );
     let verter_type_expr::TypeExpr::Union(arms) = &expr else {
@@ -11534,8 +11597,8 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         }
     };
@@ -11602,8 +11665,8 @@ fn flow_return_slot_candidates(script: &str, function: &str) -> usize {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let _ = flow_result_value(dispatch, key.clone());
@@ -11648,38 +11711,46 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     with_dispatch(&host, |dispatch| {
         let graph = dispatch.graph();
-        let literal = graph.intern_node(crate::semantic_query::SemanticNodeData::Literal(
-            verter_type_expr::LiteralValue::String("x".to_owned()),
-        ));
-        let empty = graph.intern_node(crate::semantic_query::SemanticNodeData::Object(
-            crate::semantic_query::SurfaceView::new(
-                Arc::from(Vec::new().into_boxed_slice()),
-                Arc::from(Vec::new().into_boxed_slice()),
-                Arc::from(Vec::new().into_boxed_slice()),
-                Arc::from(Vec::new().into_boxed_slice()),
-                None,
-                false,
+        let literal = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Literal(
+                verter_type_expr::LiteralValue::String("x".to_owned()),
             ),
-        ));
+        );
+        let empty = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Object(
+                verter_type_engine::semantic_query::SurfaceView::new(
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    Arc::from(Vec::new().into_boxed_slice()),
+                    None,
+                    false,
+                ),
+            ),
+        );
         let intersection =
             dispatch.intern_normalized_union_or_intersection(&[empty, literal], false);
         assert_eq!(
             intersection, literal,
             "`{{}} & \"x\"` is `\"x\"` in the canonical layer"
         );
-        let string = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
-        ));
+        let string = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::String,
+            ),
+        );
         let derived = dispatch.intern_normalized_union_or_intersection(&[string, empty], false);
         assert_eq!(
             derived, string,
             "a constructed `string & {{}}` (an instantiated `T & {{}}`) is `string`"
         );
-        let written = graph.intern_node(crate::semantic_query::SemanticNodeData::Intersection(
-            crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
-                vec![string, empty].into_boxed_slice(),
-            )),
-        ));
+        let written = graph.intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Intersection(
+                verter_type_engine::semantic_query::composite::CompositeList::authored_shell(
+                    Arc::from(vec![string, empty].into_boxed_slice()),
+                ),
+            ),
+        );
         assert_eq!(
             super::canonical_algebra::reduced_authored_intersection(
                 graph,
@@ -11702,7 +11773,7 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
 /// that every concurrent read of every family shares.
 #[test]
 fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
-    use crate::capture_token::ENTRIES_MUTEX_ACQUISITIONS;
+    use verter_type_engine::capture_token::ENTRIES_MUTEX_ACQUISITIONS;
 
     const FUNCTIONS: [&str; 4] = [
         "subCallReturn",
@@ -11724,7 +11795,7 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
     let query = |name: &str| {
         host.get_flow_return_type_with_audit(
             &identity(name),
-            crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         )
     };
     for name in FUNCTIONS {
@@ -11741,7 +11812,10 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
                     scope.spawn(move || {
                         start.wait();
                         let name = FUNCTIONS[caller % FUNCTIONS.len()];
-                        let guard = crate::capture_token::CaptureToken::start_for_query("warm");
+                        let guard =
+                            verter_type_engine::capture_token::CaptureToken::start_for_query(
+                                "warm",
+                            );
                         let answered = query(name).as_result().is_ok();
                         let snapshot = guard.end();
                         assert!(answered, "{name} answers warm");
@@ -11761,7 +11835,7 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
 
 /// The functions of `source` whose `FlowReturn` read closes WITHOUT its
 /// proof — the finalizer's verdict partial, so the read is `ReturnOnly`
-/// with [`crate::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`]
+/// with [`verter_type_engine::semantic_query::PartialReasonSet::FLOW_RETURN_UNVERIFIED`]
 /// — each with its partial reasons. A correct flow answer closes with its
 /// proof: the completeness design keeps every correct answer clean and
 /// admits no unproven one as exact, so a publication boundary that
@@ -11792,8 +11866,8 @@ fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<String> {
                 ),
                 normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
                 context: dispatch.flow_return_context_for(FILE),
-                demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-                input: crate::semantic_query::FlowInputContext::empty(),
+                demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+                input: verter_type_engine::semantic_query::FlowInputContext::empty(),
                 result_contract: super::flow_solve::flow_return_result_contract_id(),
             };
             let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));

@@ -39,13 +39,13 @@ use std::sync::Arc;
 
 use verter_audit::RequestKind;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::{
-    PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey,
-};
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::{FileLanguage, UpsertRequest, VerterHost};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::{
+    PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryKey,
+};
 
 /// Build a host that has audit recording fully enabled. The
 /// regression test for raw-dispatch nesting only matters when
@@ -83,8 +83,10 @@ fn upsert_ts(host: &VerterHost, id: &str, source: &str) {
 /// an empty `type_args` slice short-circuits to `Opaque(Miss)` for
 /// `DefineProps`, which is exactly the path we want to exercise to
 /// prove the dispatch arm produced no record.
-fn synthetic_macro_owner(canonical: &str) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+fn synthetic_macro_owner(
+    canonical: &str,
+) -> verter_type_engine::semantic_query::ResolvedDeclSlotIdentity {
+    verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical),
         verter_type_expr::TopLevelOwnerId::instance(0),
         Arc::from("<sfc-script-setup>"),
@@ -150,7 +152,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         let footprint_capture = host.config.footprint_capture && host.config.audit_enabled;
         let accumulator = if footprint_capture {
             Some(Arc::new(
-                crate::request_footprint::RequestFootprintAccumulator::new(),
+                verter_type_engine::request_footprint::RequestFootprintAccumulator::new(),
             ))
         } else {
             None
@@ -185,7 +187,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
             macro_index: 0,
             macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
             type_args: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::MacroPayloadContext::new(
+            context: verter_type_engine::semantic_query::MacroPayloadContext::new(
                 Default::default(),
                 ProjectionMode::Expanded,
             ),
@@ -210,17 +212,17 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         // typical component-meta entry-point would touch.
         let graph = host.project_type_store().semantic_graph();
         let primitive_base = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
+            verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         let path_key = SemanticQueryKey::ProjectPath {
             base: primitive_base,
             path: Arc::from(
                 vec![PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier("nonexistent"),
+                    verter_type_engine::semantic_query::PropertyKey::identifier("nonexistent"),
                 )]
                 .into_boxed_slice(),
             ),
-            context: crate::semantic_query::ProjectionReductionContext::published(
+            context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Identity,
             ),
         };

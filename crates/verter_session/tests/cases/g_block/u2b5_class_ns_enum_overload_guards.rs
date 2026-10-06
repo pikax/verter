@@ -17,14 +17,14 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::{
     AmbientNamespaceContext, ClassSurfaceContext, ClassSurfaceSide, EnumContext,
     OverloadSetContext, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError,
     QueryResult, ResolvedDeclSlotIdentity, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticSymbolSpace, SignatureKind, ValueRootKey,
 };
-use verter_session::{HostConfig, UpsertRequest, VerterHost};
-use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -666,7 +666,7 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     // one the dual-space algorithm's Instance side published.
     let inner_instantiate = verter_session::for_tests::instantiate_key_for_tests(
         &host,
-        decl_slot.with_symbol_space(verter_session::semantic_query::SemanticSymbolSpace::Type),
+        decl_slot.with_symbol_space(verter_type_engine::semantic_query::SemanticSymbolSpace::Type),
         Arc::from(Vec::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
     );
@@ -686,7 +686,7 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     // while excluding the instance member `x`.
     let static_data = graph.node_data(r#static);
     match static_data.as_deref() {
-        Some(verter_session::semantic_query::SemanticNodeData::Object(view)) => {
+        Some(verter_type_engine::semantic_query::SemanticNodeData::Object(view)) => {
             assert!(
                 !view.construct_signatures.is_empty(),
                 "static surface must carry the class construct signature"
@@ -715,9 +715,9 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
     let typeof_env = host.host_view_env_hashes_for(canonical);
     let typeof_project_identity = host.host_view_project_identity_for(canonical).fold_u32();
     let typeof_key = SemanticQueryKey::TypeOf {
-        value_root: verter_session::semantic_query::ValueRootSlotIdentity::new(
+        value_root: verter_type_engine::semantic_query::ValueRootSlotIdentity::new(
             ValueRootKey {
-                scope: verter_session::semantic_query::ScopeId::file(
+                scope: verter_type_engine::semantic_query::ScopeId::file(
                     Arc::from(canonical),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
@@ -728,9 +728,9 @@ fn class_dual_space_routes_instance_and_static_through_distinct_shared_paths() {
             typeof_env.lib_env_hash,
         ),
         path: Arc::from([]),
-        context: verter_session::semantic_query::TypeOfContext::new(
-            verter_session::semantic_query::ProjectionReductionContext::published(
-                verter_session::semantic_query::ProjectionMode::Shallow,
+        context: verter_type_engine::semantic_query::TypeOfContext::new(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Shallow,
             ),
             typeof_env.resolve_env_hash,
         ),

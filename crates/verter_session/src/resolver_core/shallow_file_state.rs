@@ -733,7 +733,9 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredTypeDecl>> {
-        crate::fact_tracing::consume_source_read(self.decl_bodies.type_decl_in(owner, name))
+        verter_type_engine::fact_tracing::consume_source_read(
+            self.decl_bodies.type_decl_in(owner, name),
+        )
     }
 
     pub(crate) fn type_decl_outcome_in(
@@ -754,7 +756,7 @@ impl ShallowFileState {
         {
             return Some(Arc::clone(body));
         }
-        crate::fact_tracing::consume_source_read(self.decl_bodies.value_decl(name))
+        verter_type_engine::fact_tracing::consume_source_read(self.decl_bodies.value_decl(name))
     }
 
     pub(crate) fn value_decl_in(
@@ -762,7 +764,7 @@ impl ShallowFileState {
         owner: TopLevelOwnerId,
         name: &str,
     ) -> Option<Arc<LoweredValueDecl>> {
-        crate::fact_tracing::consume_source_read(self.value_decl_read_in(owner, name))
+        verter_type_engine::fact_tracing::consume_source_read(self.value_decl_read_in(owner, name))
     }
 
     /// [`Self::value_decl_in`] with its source evidence still attached, for a
@@ -873,16 +875,16 @@ impl ShallowFileState {
     ) -> Option<Arc<LoweredValueDecl>> {
         // The user declaration is consulted first; a broken-lease miss there
         // stays in the evidence even when the rune ambient answers.
-        crate::fact_tracing::consume_source_read(self.value_decl_read_in(owner, name).or_else(
-            || {
+        verter_type_engine::fact_tracing::consume_source_read(
+            self.value_decl_read_in(owner, name).or_else(|| {
                 SourceRead::clean(
                     (owner == TopLevelOwnerId::ordinary_file()
                         && self.decl_bodies.rune_ambient_visible())
                     .then(|| verter_semantic_source::rune_ambient::rune_ambient_value_decl(name))
                     .flatten(),
                 )
-            },
-        ))
+            }),
+        )
     }
 
     /// TYPE-space counterpart of [`Self::effective_value_decl`]: a user
@@ -899,7 +901,7 @@ impl ShallowFileState {
     ) -> Option<Arc<LoweredTypeDecl>> {
         // The user declaration is consulted first; a broken-lease miss there
         // stays in the evidence even when the rune ambient answers.
-        crate::fact_tracing::consume_source_read(
+        verter_type_engine::fact_tracing::consume_source_read(
             self.decl_bodies.type_decl_in(owner, name).or_else(|| {
                 SourceRead::clean(
                     (owner == TopLevelOwnerId::ordinary_file()
@@ -945,7 +947,7 @@ impl ShallowFileState {
                 // shared-cache admission (this accessor collapses the
                 // `DemandOutcome` directly, bypassing `into_source_read`), and fail
                 // closed — never cache the transient empty classification.
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 None
@@ -990,7 +992,7 @@ impl ShallowFileState {
         self.decl_bodies
             .header_index()
             .augmentation_type_header_in(scope, owner, name)?;
-        crate::fact_tracing::consume_source_read(
+        verter_type_engine::fact_tracing::consume_source_read(
             self.decl_bodies
                 .augmentation_type_decl_in(scope, owner, name),
         )
@@ -1043,7 +1045,7 @@ impl ShallowFileState {
         self.decl_bodies
             .header_index()
             .augmentation_value_header(scope, name)?;
-        crate::fact_tracing::consume_source_read(
+        verter_type_engine::fact_tracing::consume_source_read(
             self.decl_bodies.augmentation_value_decl(scope, name),
         )
     }
@@ -1416,7 +1418,7 @@ impl SfsRouteFactProvider<'_> {
             // non-cacheability rail on `LeaseMiss` (a genuine `Ready(None)` /
             // body-less re-borrow stays an unmarked, cacheable undecided miss).
             verter_session_query::source::demand::DemandOutcome::LeaseMiss => {
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 None
@@ -1934,9 +1936,9 @@ export interface Props { value: NS.Value.Inner; named: F.Bar }
         assert_eq!(namespace.imported_name, "Value");
         assert_eq!(
             namespace.route,
-            RouteDemand::MemberPath(Arc::from([crate::semantic_query::PropertyKey::identifier(
-                "Inner"
-            ),])),
+            RouteDemand::MemberPath(Arc::from([
+                verter_type_engine::semantic_query::PropertyKey::identifier("Inner"),
+            ])),
         );
         assert_ne!(namespace.imported_name, "*.Value.Inner");
 
@@ -1948,9 +1950,9 @@ export interface Props { value: NS.Value.Inner; named: F.Bar }
         assert_eq!(named.imported_name, "Foo");
         assert_eq!(
             named.route,
-            RouteDemand::MemberPath(Arc::from([crate::semantic_query::PropertyKey::identifier(
-                "Bar"
-            ),])),
+            RouteDemand::MemberPath(Arc::from([
+                verter_type_engine::semantic_query::PropertyKey::identifier("Bar"),
+            ])),
         );
     }
 
@@ -2254,7 +2256,7 @@ export interface Props { child: Inner; data: Local }
             "Props",
             Some(&dep_edges),
             &import_canonicalization,
-            &crate::identity_interner::IdentityInterner::with_process_local_account(),
+            &verter_type_engine::identity_interner::IdentityInterner::with_process_local_account(),
         )
         .expect("Props preparation should not fail")
         .expect("Props should prepare");
@@ -2304,10 +2306,9 @@ type AppConfig = { theme: string }
         // Member dependency edges should exist for 'ui', 'indicator', but not
         // 'color' (primitive).
         let member_edge = |member: &str| {
-            sym.route_facts
-                .member_dependency_edges
-                .iter()
-                .find(|edge| edge.member == crate::semantic_query::PropertyKey::identifier(member))
+            sym.route_facts.member_dependency_edges.iter().find(|edge| {
+                edge.member == verter_type_engine::semantic_query::PropertyKey::identifier(member)
+            })
         };
         assert!(
             member_edge("ui").is_some(),

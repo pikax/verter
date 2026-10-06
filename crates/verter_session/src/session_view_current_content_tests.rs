@@ -42,8 +42,8 @@
 //! base-scan `content_hash_for` returns the planted stale hash and
 //! every assertion FAILS; against the post-fix tree they PASS.
 
-use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use rustc_hash::FxHashMap;
 
@@ -644,7 +644,7 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
 /// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`]
 /// (the normalised analysis canonical keys the `FileArtifactStore`
 /// artifact), but the subsequent
-/// [`crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content`]
+/// [`verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content`]
 /// call recovered the parse facts through a `FileArtifactStore` lookup
 /// keyed by the RAW canonical. The only overlay artifact is keyed by the
 /// NORMALISED canonical (`/pkg/index.d.ts` for `/pkg/index.js`), so the

@@ -4,8 +4,8 @@
 //! demand starts from zero.
 
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::PartialReasonSet;
 use crate::{HostConfig, VerterHost};
+use verter_type_engine::semantic_query::PartialReasonSet;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())

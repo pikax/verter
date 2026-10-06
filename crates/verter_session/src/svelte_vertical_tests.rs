@@ -1129,8 +1129,8 @@ let { title }: Props = $props();
     overflow_host
         .get_component_meta("/Overflow.svelte")
         .expect("prime admitted analysis");
-    crate::engine_test_knobs::arm_fact_tracer_overflow_once(
-        crate::engine_test_knobs::TracerScope::ComponentMetaOutput,
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
+        verter_type_engine::engine_test_knobs::TracerScope::ComponentMetaOutput,
         verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
     let overflow = overflow_host
@@ -1138,8 +1138,8 @@ let { title }: Props = $props();
         .expect("overflow projection request")
         .expect("overflow still returns the projection");
     assert_eq!(
-        crate::engine_test_knobs::fact_tracer_overflow_claimed_by(),
-        Some(crate::engine_test_knobs::TracerScope::ComponentMetaOutput),
+        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
+        Some(verter_type_engine::engine_test_knobs::TracerScope::ComponentMetaOutput),
         "the forced overflow must land on the separately-finalized output scope",
     );
     assert!(overflow.publication_witness.is_none());

@@ -47,10 +47,10 @@ fn workspace_root() -> PathBuf {
 /// Files that must carry module-scoped `#![deny(missing_docs)]`.
 const DOC_DENY_FILES: &[&str] = &[
     "crates/verter_execution/src/request_context.rs",
-    "crates/verter_session/src/request_context.rs",
+    "crates/verter_type_engine/src/request_context.rs",
     "crates/verter_session/src/audited_request.rs",
     "crates/verter_session/src/component_meta_audit/mod.rs",
-    "crates/verter_session/src/request_footprint.rs",
+    "crates/verter_type_engine/src/request_footprint.rs",
     "crates/verter_session/src/component_meta_audit/assertions.rs",
     "crates/verter_session/src/component_meta_audit/audit_records_store.rs",
     "crates/verter_session/src/component_meta_audit/footprint_miner.rs",
@@ -337,12 +337,12 @@ fn build_audit_source_blob(root: &Path) -> String {
     );
     blob.push('\n');
     blob.push_str(
-        &fs::read_to_string(root.join("crates/verter_session/src/request_context.rs"))
+        &fs::read_to_string(root.join("crates/verter_type_engine/src/request_context.rs"))
             .expect("read request_context.rs"),
     );
     blob.push('\n');
     blob.push_str(
-        &fs::read_to_string(root.join("crates/verter_session/src/request_footprint.rs"))
+        &fs::read_to_string(root.join("crates/verter_type_engine/src/request_footprint.rs"))
             .expect("read request_footprint.rs"),
     );
     blob.push('\n');

@@ -11,11 +11,11 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 
 const SEAL_CANONICAL: &str = "/ws/flow-frame-seal.ts";
@@ -123,8 +123,8 @@ fn key_for(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(SEAL_CANONICAL),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -184,7 +184,7 @@ fn assert_marker(
         matches!(
             dispatch.graph().node_data(node).as_deref(),
             Some(SemanticNodeData::Opaque(
-                crate::semantic_query::QueryError::UnmodeledPosition
+                verter_type_engine::semantic_query::QueryError::UnmodeledPosition
             ))
         ),
         "{what}: the POSITIONAL marker carrier (never `Miss`, never a fabricated \
@@ -561,13 +561,13 @@ fn product_key(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(PRODUCT_CANONICAL),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
 
-use crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::{
+use verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_fault_injection::{
     ObservedProduct, ProductObservation,
 };
 
@@ -598,7 +598,7 @@ fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalPro
             "fixture product types must project; a missing type is not equivalent evidence",
         ))
     };
-    let set = |ids: &[crate::semantic_query::SemanticNodeId]| {
+    let set = |ids: &[verter_type_engine::semantic_query::SemanticNodeId]| {
         let mut values: Vec<_> = ids.iter().copied().map(node).collect();
         values.sort();
         values
@@ -676,7 +676,7 @@ struct ProductRun {
 /// build's artifacts are visible — under ONE request context, so the
 /// cold-compute counter measures the whole run.
 fn run_product(host: &Arc<VerterHost>, name: &str, demands: u32) -> ProductRun {
-    use crate::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
     let ctx = RequestContext::new(1, Arc::from(PRODUCT_CANONICAL), false, None);
     let _guard = RequestContextGuard::install(ctx);
     let mut served = None;
@@ -693,7 +693,7 @@ fn run_product(host: &Arc<VerterHost>, name: &str, demands: u32) -> ProductRun {
             }
         });
     }
-    let cold_computes = crate::request_context::current_request_context()
+    let cold_computes = verter_type_engine::request_context::current_request_context()
         .expect("the run installs a RequestContext")
         .flow_return_cold_computes
         .load(std::sync::atomic::Ordering::Relaxed);

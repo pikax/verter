@@ -20,7 +20,7 @@ use std::sync::Arc;
 /// Canonical file/path identity as observed by a kernel attempt.
 ///
 /// Dependency-neutral interned string, matching the shape of
-/// `verter_session::capture_token::CanonicalId` (`Arc<str>`) without
+/// `verter_type_engine::capture_token::CanonicalId` (`Arc<str>`) without
 /// depending on that crate — `verter_semantic` sits below `verter_session`
 /// in the dependency graph and must not name it.
 pub type CanonicalId = Arc<str>;

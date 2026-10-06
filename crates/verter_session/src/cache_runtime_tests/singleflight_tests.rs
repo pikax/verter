@@ -1,10 +1,10 @@
 //! Return-only reason propagation observed through a live session host's
 //! fact tracer.
 
-use crate::cache_runtime::singleflight::*;
-use crate::cache_runtime::NonAdmissionReason;
 use dashmap::DashMap;
 use std::sync::Arc;
+use verter_audit::NonAdmissionReason;
+use verter_type_engine::cache_runtime::singleflight::*;
 
 /// Typed `ReturnOnly` reasons control whether the returned value taints an
 /// enclosing cold compute. Family-local non-retention must leave the outer

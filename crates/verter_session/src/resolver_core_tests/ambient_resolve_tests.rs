@@ -1,8 +1,8 @@
-use crate::resolver_core::ambient_resolve::*;
 use crate::HostConfig;
 use crate::VerterHost;
 use std::sync::Arc;
 use verter_session_query::resolution::ProjectId;
+use verter_type_engine::resolver_core::ambient_resolve::*;
 use verter_workspace::AmbientLibSpec;
 use verter_workspace::MemoryOptions;
 use verter_workspace::MemoryWorkspace;

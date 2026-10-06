@@ -17,16 +17,16 @@
 //!
 //! ### Authoritative host-owned caches (durable, dep-validated, reused across queries)
 //!
-//! - [`MaterializeMemoDb`](crate::component_meta_caches::MaterializeMemoDb)
+//! - [`MaterializeMemoDb`](verter_type_engine::component_meta_caches::MaterializeMemoDb)
 //!   — interned semantic instantiations keyed by
 //!   `(target_decl, mode, args)`. Final-result reuse across requests.
-//! - [`ComponentMetaResultDb`](crate::component_meta_caches::ComponentMetaResultDb)
+//! - [`ComponentMetaResultDb`](verter_type_engine::component_meta_caches::ComponentMetaResultDb)
 //!   — final `ComponentMetaAnalysis` payloads keyed by `(canonical, profile)`.
 //!   `get_component_meta` consults this first; the engine only runs on cold misses.
-//! - [`SemanticGraphStore`](crate::semantic_query_memo::SemanticGraphStore)
+//! - [`SemanticGraphStore`](verter_type_engine::semantic_query_memo::SemanticGraphStore)
 //!   — interned semantic-node arena.
 //!   Engine subqueries dispatch via
-//!   [`ProjectSemanticDispatch`](crate::project_semantic_dispatch::ProjectSemanticDispatch)
+//!   [`ProjectSemanticDispatch`](verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch)
 //!   which deduplicates against this store.
 //! - `ClassifyMaterializationCycleGate`
 //!   (`project_semantic_dispatch::cycle_gate`) — the sealed
@@ -81,14 +81,14 @@ use rustc_hash::FxHashMap;
 use verter_session_query::declarations::DeclarationId;
 
 use super::declaration_metadata::DeclarationMetadataResolver;
-use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
-use crate::resolver_core::scope_shadowing::ScopeShadowing;
-use crate::resolver_core::ResolverContext;
-use crate::resolver_core::{FuseBudgets, FuseState};
-use crate::semantic_query::SemanticNodeId;
 use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
 use verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata;
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+use verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload;
+use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::resolver_core::{FuseBudgets, FuseState};
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 // The output-sink capabilities for this subtree are defined PER-SINK in the
 // exact output-SINK modules that project — NOT subtree-wide:
@@ -157,15 +157,6 @@ pub(crate) use surface::MetaQuerySurfaceOutputCap;
 // `helpers` child module. All entries are `pub(super)` and used from
 // the engine impl in sibling modules plus the inline test module.
 
-// The spelling consts are OWNED by `semantic_query::compat_spelling` (the
-// single spelling family home); re-exported here for path stability (the
-// consumers are the sentinel/test modules).
-#[allow(unused_imports)]
-pub(crate) use crate::semantic_query::compat_spelling::{
-    BUDGET_EXCEEDED_SENTINEL_PREFIX, SEMANTIC_MISS, SEMANTIC_OBJECT_SURFACE,
-    SEMANTIC_SURFACE_MEMBER,
-};
-
 /// Build an R28 signature for a cache whose validity depends on the
 /// IDENTITY of a top-level type at `(canonical, type_name)`. Observes
 /// `Export(name)`, `LocalDecl(name)`, and `MemberShape(exporter=name)`
@@ -187,7 +178,7 @@ pub(crate) fn engine_fact_signature_for_exported_type(
     type_name: &str,
     observed_hash: verter_session_query::facts::store_view::ResolverHash16,
 ) -> verter_session_query::facts::fact_cache::SignatureAdmission {
-    crate::fact_signature_helpers::fact_signature_for_exported_type(
+    verter_type_engine::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
         canonical_id,
         type_name,
@@ -261,8 +252,11 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     canonical_a: &str,
     canonical_b: &str,
-) -> crate::semantic_query::DepSignature {
-    let mut entries: Vec<(std::sync::Arc<str>, crate::semantic_query::DepVersion)> = Vec::new();
+) -> verter_type_engine::semantic_query::DepSignature {
+    let mut entries: Vec<(
+        std::sync::Arc<str>,
+        verter_type_engine::semantic_query::DepVersion,
+    )> = Vec::new();
     let push = |entries: &mut Vec<_>, c: &str| {
         let whole_hash = ctx
             .shallow_file_state(c)
@@ -270,7 +264,7 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
             .unwrap_or_default();
         entries.push((
             std::sync::Arc::<str>::from(c),
-            crate::semantic_query::DepVersion::WholeHash(whole_hash),
+            verter_type_engine::semantic_query::DepVersion::WholeHash(whole_hash),
         ));
     };
     push(&mut entries, canonical_a);
@@ -299,7 +293,7 @@ pub(crate) enum FastShallowFieldExprExactness {
 /// exactness discriminant.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FastShallowFieldExpr {
-    pub hot: crate::semantic_query::HotTypeRef,
+    pub hot: verter_type_engine::semantic_query::HotTypeRef,
     pub semantic_source: verter_type_expr::facts::SemanticTypeSource,
     pub exactness: FastShallowFieldExprExactness,
 }
@@ -343,12 +337,12 @@ pub(crate) struct FastShallowFieldExpr {
 /// tracked debt noted above.
 pub struct ComponentMetaQueryEngine<'a> {
     pub(crate) ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    pub(crate) dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    pub(crate) dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         'a,
         crate::resolver_core::HostCapabilities,
     >,
     // The caches below are read-through views over the host-owned
-    // typed DBs on `ProjectTypeStore` (see `crate::component_meta_caches`).
+    // typed DBs on `ProjectTypeStore` (see `verter_type_engine::component_meta_caches`).
     // Each engine field is a per-request **non-authoritative read-through
     // view** that mirrors the ctx DB result for repeated lookups within
     // one request. `RefCell` provides interior mutability so `&self`
@@ -728,7 +722,7 @@ pub(crate) fn await_imported_registry_winner_park_for_tests(canonical_id: &str) 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub(crate) fn new(
         ctx: &'a dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-        dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             'a,
             crate::resolver_core::HostCapabilities,
         >,
@@ -738,7 +732,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // `0` — every production engine binds to a request-bound
         // ctx (`HostResolverContext` / `SessionResolverContext`).
         if !ctx.is_request_bound() {
-            crate::request_context::bump_bare_engine_construction();
+            verter_type_engine::request_context::bump_bare_engine_construction();
         }
         Self {
             ctx,

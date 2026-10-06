@@ -8114,7 +8114,7 @@ fn audit_no_hot_loop_instrumentation_self_test_rejects_emit_names() {
 ///
 /// Lower crates must reach the audit substrate exclusively through
 /// [`verter_audit::current_observer`]. They must NOT reach into
-/// `verter_session::request_context::current_request_context` (which
+/// `verter_type_engine::request_context::current_request_context` (which
 /// is a session-internal, typed accessor onto the concrete
 /// `Arc<RequestContext>`). Architectural intent: the substrate's
 /// thin `AuditObserver` trait is the cross-crate API; only the

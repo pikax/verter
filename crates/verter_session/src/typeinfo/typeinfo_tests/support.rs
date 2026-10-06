@@ -11,9 +11,9 @@ use verter_type_expr::{FunctionExpr, IndexSignature, LiteralValue, ObjectMember,
 pub(super) use verter_type_expr::{PrimitiveName, TypeExpr};
 
 pub(super) use super::super::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport};
-pub(super) use crate::semantic_query::ProjectionMode;
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+pub(super) use verter_type_engine::semantic_query::ProjectionMode;
 
 pub(super) const COMPONENT_TYPES: &str = include_str!("fixtures/component_types.ts");
 pub(super) const SCOPE_TYPES: &str = include_str!("fixtures/scope.ts");
@@ -157,8 +157,8 @@ pub(crate) fn resolve_expr(
 /// `Instantiate` (not an empty-path `ProjectPath`), so it does NOT exercise the
 /// synthesiser; this helper does.
 pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> TypeExpr {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionReductionContext, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
     };
 
@@ -179,16 +179,15 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
             canonical_id: Arc::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
         name: Arc::from(name),
     })) {
-        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-            value: node,
-            ..
-        }) => node,
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
+        ) => node,
         other => panic!("{name} must resolve to a declaration carrier: {other:?}"),
     };
 
@@ -197,10 +196,9 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
         path: Arc::from(Vec::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     }) {
-        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-            value: node,
-            ..
-        }) => node,
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
+        ) => node,
         other => panic!("empty-path Shallow projection of {name} failed: {other:?}"),
     };
     dispatch
@@ -554,10 +552,12 @@ pub(crate) fn template_literal_reduce_read(
     quasis: &[&str],
     arg_unions: &[Vec<String>],
 ) -> (
-    crate::semantic_query::CacheRead<
-        crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId>,
+    verter_type_engine::semantic_query::CacheRead<
+        verter_type_engine::semantic_query::QueryResult<
+            verter_type_engine::semantic_query::SemanticNodeId,
+        >,
     >,
-    Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
 ) {
     template_literal_reduce_read_with_work_limit(host, quasis, arg_unions, None)
 }
@@ -570,13 +570,17 @@ pub(crate) fn template_literal_reduce_read_with_work_limit(
     arg_unions: &[Vec<String>],
     work_limit: Option<usize>,
 ) -> (
-    crate::semantic_query::CacheRead<
-        crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId>,
+    verter_type_engine::semantic_query::CacheRead<
+        verter_type_engine::semantic_query::QueryResult<
+            verter_type_engine::semantic_query::SemanticNodeId,
+        >,
     >,
-    Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
 ) {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{LiteralValue, SemanticNodeData, SemanticNodeId, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        LiteralValue, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    };
 
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let args: Vec<SemanticNodeId> = arg_unions
@@ -594,9 +598,9 @@ pub(crate) fn template_literal_reduce_read_with_work_limit(
                 members[0]
             } else {
                 graph.intern_node(SemanticNodeData::Union(
-                    crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
-                        members.into_boxed_slice(),
-                    )),
+                    verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                        Arc::from(members.into_boxed_slice()),
+                    ),
                 ))
             }
         })

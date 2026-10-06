@@ -2,9 +2,10 @@ use super::*;
 use crate::meta::MetaProject;
 use crate::output_sinks::DispatchOutputTestExt;
 use crate::resolver_core::ComponentMetaRequestHost;
-use crate::types::{HostConfig, ProjectionMode};
+use crate::types::HostConfig;
 use crate::VerterHost;
 use std::sync::Arc;
+use verter_type_engine::semantic_query::ProjectionMode;
 use verter_type_expr::TypeExpr;
 
 // ===========================================================================
@@ -251,7 +252,8 @@ defineProps<Props>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolver_host = super::HostComponentMetaResolver {
         host,
         ctx: host,
@@ -331,7 +333,8 @@ defineProps<{ modelValue?: ModelValue<R> }>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolver_host = super::HostComponentMetaResolver {
         host,
         ctx: host,
@@ -350,7 +353,8 @@ defineProps<{ modelValue?: ModelValue<R> }>()
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
 
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let mut query_engine =
         crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_0);
 
@@ -2774,7 +2778,7 @@ export interface Props { a: string }
 
     let resolved = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         let fixture_dispatch_1 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         resolve_jsdoc_tag_type(
             project.host(),
@@ -4358,16 +4362,18 @@ defineProps<Slots>()
     // named import misses, and stopping at the barrel loses the terminal
     // source/name. Pin both halves alongside the final-meta assertion.
 
-    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-        host,
-        &fixture_dispatch_2,
-        "/App.vue",
-        verter_type_expr::TopLevelOwnerId::instance(0),
-        None,
-        "ThemeNs.sharedTheme",
-    )
-    .expect("the exact-owner namespace member must resolve through the barrel");
+    let fixture_dispatch_2 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let resolved =
+        verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            host,
+            &fixture_dispatch_2,
+            "/App.vue",
+            verter_type_expr::TopLevelOwnerId::instance(0),
+            None,
+            "ThemeNs.sharedTheme",
+        )
+        .expect("the exact-owner namespace member must resolve through the barrel");
     assert_eq!(resolved.canonical_id.as_ref(), "/inner.ts");
     assert_eq!(
         resolved.owner,
@@ -5259,7 +5265,8 @@ defineProps<Props>()
     let host = project.host();
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let mut query_engine =
         crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_3);
 
@@ -5324,7 +5331,8 @@ fn component_meta_query_engine_routes_imported_registry_symbols_to_the_defining_
     let host = project.host();
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_4 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let mut query_engine =
         crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_4);
 
@@ -5392,7 +5400,8 @@ defineSlots<Slots<T>>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolver_host = super::HostComponentMetaResolver {
         host,
         ctx: host,
@@ -5411,7 +5420,8 @@ defineSlots<Slots<T>>()
         crate::resolver_core::ComponentMetaResolutionPurpose::Full,
     );
 
-    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_5 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let mut query_engine =
         crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_5);
     let solves_before = 0u32;
@@ -5522,7 +5532,7 @@ defineSlots<Slots<T>>()
         .expect("full expanded state should resolve");
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_6 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         host.compute_component_meta_state_for_fallthrough(
             "/src/App.vue",
@@ -5606,7 +5616,7 @@ defineExpose({ exposed })
         .expect("full expanded state should resolve");
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_7 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         host.compute_component_meta_state_for_fallthrough(
             "/src/App.vue",
@@ -5754,7 +5764,7 @@ defineEmits<Emits>()
         .expect("full expanded state should resolve");
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_8 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         host.compute_component_meta_state_for_fallthrough(
             "/src/App.vue",
@@ -5859,7 +5869,7 @@ defineEmits<Emits>()
 
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_9 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         host.compute_component_meta_state_for_fallthrough(
             "/src/Child.vue",
@@ -5884,7 +5894,8 @@ defineEmits<Emits>()
         "fallthrough-expanded state should not materialize imported declaration ownership for type-based defineEmits when the evaluated shape already supplies the declared events",
     );
 
-    let fixture_dispatch_10 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_10 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
         host,
         &fixture_dispatch_10,
@@ -5966,7 +5977,7 @@ defineEmits<Emits>()
 
     let fallthrough = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_11 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         host.compute_component_meta_state_for_fallthrough(
             "/src/Child.vue",
@@ -6001,7 +6012,8 @@ defineEmits<Emits>()
         "fallthrough-expanded state should keep the transitive imported defineEmits root off resolved_macros when the owner-local wrapper is sufficient",
     );
 
-    let fixture_dispatch_12 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_12 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
         host,
         &fixture_dispatch_12,
@@ -6093,7 +6105,7 @@ defineProps<Props>()
     // normalized typeinfo DTO.
     let inputs = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_13 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         crate::resolver_core::component_meta_resolved_macros(
             ctx,
@@ -6169,7 +6181,7 @@ defineSlots<Slots>()
         .expect("component-meta state");
     let inputs = crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_14 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         crate::resolver_core::component_meta_resolved_macros(
             ctx,
@@ -6213,7 +6225,8 @@ defineProps<{ x: string }>()
     let host = project.host();
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_15 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_15 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let mut query_engine =
         crate::resolver_core::ComponentMetaQueryEngine::new(host, &fixture_dispatch_15);
 
@@ -6499,12 +6512,12 @@ defineProps<TreeNode>()
 ///       threading repair (per the plan's STOP CONDITION #1).
 #[test]
 fn spike_dispatch_handles_props_t_substitution_via_macro_shell() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use std::sync::Arc as StdArc;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
     };
-    use std::sync::Arc as StdArc;
     use verter_type_expr::TypeExpr;
 
     let project = make_project();
@@ -6561,9 +6574,9 @@ defineProps<Props<T>>()
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: StdArc::from(vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("items"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("items"),
         )]),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -6628,9 +6641,9 @@ defineProps<Props<T>>()
 /// `Wrapper` Ref shell as a lazy carrier.
 #[test]
 fn instantiate_memo_splits_per_body_mode() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::ProjectionMode;
     use std::sync::Arc as StdArc;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::ProjectionMode;
     use verter_type_expr::TypeExpr;
 
     let project = make_project();
@@ -6756,9 +6769,9 @@ defineProps<Wrapper<Inner>>()
 /// terminal member's value (the `'button' | 'submit' | 'reset'` union).
 #[test]
 fn dispatch_only_pick_indexed_access_reduces_to_member_union() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::ProjectionMode;
     use std::sync::Arc as StdArc;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::ProjectionMode;
     use verter_type_expr::{empty_type_args, LiteralValue, TypeExpr};
 
     let project = make_project();
@@ -6821,7 +6834,9 @@ defineProps<{ type?: ButtonHTMLAttributes['type'] }>()
 
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
         lowered,
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     );
 
     let raised = &materialized;
@@ -6883,12 +6898,12 @@ defineProps<{ type?: ButtonHTMLAttributes['type'] }>()
 /// `(props: { planId: string; plan: TPlan }) => any`.
 #[test]
 fn dispatch_only_imported_mapped_slots_resolved_shape_via_dispatch_only() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use std::sync::Arc as StdArc;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         PathSegment, ProjectionMode, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
     };
-    use std::sync::Arc as StdArc;
     use verter_type_expr::{empty_type_args, TypeExpr};
 
     let project = make_project();
@@ -6974,12 +6989,12 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
     // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
     // can navigate the Mapped+Conditional pair to extract the badge slot.
     let badge_path: StdArc<[PathSegment]> = StdArc::from(vec![PathSegment::Member(
-        crate::semantic_query::PropertyKey::identifier("badge"),
+        verter_type_engine::semantic_query::PropertyKey::identifier("badge"),
     )]);
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: badge_path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -7097,9 +7112,9 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 /// can iterate the slot names without re-walking source IR.
 #[test]
 fn dispatch_only_imported_mapped_slots_final_shape_via_dispatch_only() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::ProjectionMode;
     use std::sync::Arc as StdArc;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::ProjectionMode;
     use verter_type_expr::TypeExpr;
 
     let project = make_project();
@@ -7182,7 +7197,9 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
         lowered,
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     );
     let raised = &materialized;
 
@@ -7387,7 +7404,8 @@ defineEmits<Emits>()
     let snapshot = host
         .get_raw_analysis_snapshot("/src/App.vue")
         .expect("raw snapshot should exist");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolver_host = super::HostComponentMetaResolver {
         host,
         ctx: host,
@@ -7952,8 +7970,8 @@ fn dispatch_aliased_conditional_emits_branch_merge() {
         resolve_emit_payload_to_conditional_root, resolve_payload_surface_with_scope,
         PayloadSurfaceScope,
     };
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
     let project = make_project();
     project
@@ -7998,7 +8016,7 @@ defineEmits<ConditionalEmits>()
     // exactly the shape that defeated the direct-only branch-merge.
     assert!(
         !matches!(
-            crate::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::node_data_for(
                 host.project_type_store().semantic_graph(),
                 payload_node
             )
@@ -8015,7 +8033,7 @@ defineEmits<ConditionalEmits>()
         resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
             .expect("the named emit alias carrier must reach its conditional root");
     assert!(matches!(
-        crate::project_semantic_dispatch::node_data_for(
+        verter_type_engine::project_semantic_dispatch::node_data_for(
             host.project_type_store().semantic_graph(),
             conditional_root
         )
@@ -8037,7 +8055,7 @@ defineEmits<ConditionalEmits>()
          payload surface by following the DeclRef carrier to the Conditional root",
     );
     let members =
-        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+        verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
             host, &dispatch, surface,
         )
         .resolved_for_tests()
@@ -8066,7 +8084,7 @@ defineEmits<ConditionalEmits>()
 #[test]
 fn emit_branch_merge_merges_colliding_js_property_spellings() {
     use crate::meta_resolve::projectors::macro_payload_substrate::merge_emit_branch_members;
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SemanticNodeId,
         SurfaceMember,
     };
@@ -8074,10 +8092,10 @@ fn emit_branch_merge_merges_colliding_js_property_spellings() {
     let host = VerterHost::new_standalone(crate::HostConfig::default());
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let number = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let member = |key: AuthoredPropertyKey, value: SemanticNodeId, visibility| SurfaceMember {
         key,
@@ -8094,7 +8112,7 @@ fn emit_branch_merge_merges_colliding_js_property_spellings() {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
     };
     let numeric_1 = AuthoredPropertyKey::Number(
-        crate::semantic_query::CanonicalIndexInt::from_canonical_i64(1).unwrap(),
+        verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(1).unwrap(),
     );
     let true_members = vec![member(
         numeric_1,
@@ -8147,15 +8165,15 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
     use crate::meta_resolve::projectors::{
         resolve_payload_surface_with_scope, PayloadSurfaceScope,
     };
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::ProjectionMode;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     let drive = |canonical: &str,
                  source: &str|
      -> (
         Option<Vec<String>>,
         bool,
-        crate::semantic_query::PartialReasonSet,
+        verter_type_engine::semantic_query::PartialReasonSet,
     ) {
         let project = make_project();
         project.upsert_base(canonical, source).unwrap();
@@ -8176,7 +8194,7 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
             )
             .expect("ConditionalEmits must lower to a Navigate carrier node");
 
-        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let mut diag_sink = Vec::new();
         let surface = resolve_payload_surface_with_scope(
             &dispatch,
@@ -8190,7 +8208,7 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
         // reasons into the active scope at the discharge, not as a producer
         // side effect.
         let names = surface.recorded().map(|surface| {
-            crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+            verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
                 host, &dispatch, surface,
             )
             .resolved_for_tests()
@@ -8199,7 +8217,7 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
             .filter_map(|m| m.string_name().map(|n| n.to_string()))
             .collect::<Vec<_>>()
         });
-        let completeness = crate::request_context::current_cold_compute_completeness();
+        let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
         drop(scope);
         let reasons = completeness.reasons();
         (names, completeness.is_partial(), reasons)
@@ -8224,7 +8242,7 @@ defineEmits<ConditionalEmits>()
          (published events: {names:?})"
     );
     assert!(
-        reasons.contains(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY),
+        reasons.contains(verter_type_engine::semantic_query::PartialReasonSet::MISSING_DEPENDENCY),
         "the drop-site record carries the NAMED missing-dependency class — the \
          anonymous boolean bridge alone is not the typed outcome; got {reasons:?}"
     );
@@ -8256,57 +8274,61 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     use crate::meta_resolve::projectors::{
         resolve_payload_surface_with_scope, PayloadSurfaceScope,
     };
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
     use std::sync::Arc;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
     let host = VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let number = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
-    let event = |name: &str, value: SemanticNodeId| crate::semantic_query::SurfaceMember {
-        key: crate::semantic_query::AuthoredPropertyKey::string(name),
-        value,
-        optional: false,
-        readonly: false,
-        method_kind: None,
-        has_implementation_body: false,
-        visibility: verter_type_expr::MemberVisibility::Public,
-        spans: Default::default(),
-        declaration_origin: None,
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-    };
+    let event =
+        |name: &str, value: SemanticNodeId| verter_type_engine::semantic_query::SurfaceMember {
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
+            value,
+            optional: false,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            spans: Default::default(),
+            declaration_origin: None,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+        };
     let closed_branch = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(vec![event("saved", string)].into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<verter_type_engine::semantic_query::IndexSignature>::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
         },
     ));
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
     let open_branch = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-        crate::semantic_query::ObjectSpreadProgram {
+        verter_type_engine::semantic_query::ObjectSpreadProgram {
             effects: Arc::from(
                 vec![
-                    crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                        crate::semantic_query::AuthoredPropertyEffect {
-                            key: crate::semantic_query::AuthoredPropertyKey::string("loaded"),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(
+                                "loaded",
+                            ),
                             value: number,
                             optional: false,
                             readonly: false,
@@ -8314,12 +8336,14 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
                             spans: Default::default(),
                             declaration_origin: None,
                             declared_in_macro_type_arg:
-                                crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         },
                     ),
-                    crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(
+                        type_param,
+                    ),
                 ]
                 .into_boxed_slice(),
             ),
@@ -8358,7 +8382,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     // from the open program branch), and the open signal is retained in
     // the diagnostic envelope.
     let members =
-        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+        verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
             &host, &dispatch, surface,
         )
         .resolved_for_tests()
@@ -8413,8 +8437,8 @@ fn dispatch_long_alias_chain_to_conditional_emits_branch_merge() {
         resolve_emit_payload_to_conditional_root, resolve_payload_surface_with_scope,
         PayloadSurfaceScope,
     };
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeData};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
     let project = make_project();
     project
@@ -8470,7 +8494,7 @@ defineEmits<EmitChain0>()
     // the Conditional root).
     assert!(
         !matches!(
-            crate::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::node_data_for(
                 host.project_type_store().semantic_graph(),
                 payload_node
             )
@@ -8486,7 +8510,7 @@ defineEmits<EmitChain0>()
         resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
             .expect("the >8-hop named emit alias carrier must reach its conditional root");
     assert!(matches!(
-        crate::project_semantic_dispatch::node_data_for(
+        verter_type_engine::project_semantic_dispatch::node_data_for(
             host.project_type_store().semantic_graph(),
             conditional_root
         )
@@ -8509,7 +8533,7 @@ defineEmits<EmitChain0>()
          retired depth-8 cap returned None before hop 12 and lost the merge",
     );
     let members =
-        crate::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
+        verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
             host, &dispatch, surface,
         )
         .resolved_for_tests()
@@ -8553,8 +8577,8 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
     use crate::meta_resolve::projectors::{
         resolve_emit_payload_to_conditional_root, EMIT_CARRIER_WALK_FUSE,
     };
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
 
     // Seed the cyclic aliases through the SHALLOW indexing path
     // (`ensure_indexed_ready`) rather than full SFC evaluation. The
@@ -8596,7 +8620,7 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
     // Precondition: the cyclic head is a carrier, not a Conditional.
     assert!(
         !matches!(
-            crate::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::node_data_for(
                 host.project_type_store().semantic_graph(),
                 payload_node
             )
@@ -8674,16 +8698,17 @@ export type C = { back: A }
             "Pick",
             vec![TypeExpr::named("A"), TypeExpr::string_literal("next")],
         );
-        let node = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
-            .lower_type_expr_in_scope_with_mode(
-                "/cycle.ts",
-                &pick_over_cycle,
-                crate::semantic_query::ProjectionMode::Navigate,
-            )
-            .expect("Pick<A,'next'> must lower");
+        let node =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
+                .lower_type_expr_in_scope_with_mode(
+                    "/cycle.ts",
+                    &pick_over_cycle,
+                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
+                )
+                .expect("Pick<A,'next'> must lower");
 
         let fixture_dispatch_16 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
         let detected = crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
             &fixture_dispatch_16,
             "/cycle.ts",
@@ -8795,11 +8820,14 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
     // The overlay session's own whole-hash hint (resolved through the session
     // ctx) keys the overlay DTO slot; the core re-derives + validates it.
     let overlay_hash =
-        crate::resolver_core::request_ports::IndexedInputs::get_whole_hash(&session_ctx, SFC)
-            .unwrap_or([0u8; 16]);
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::get_whole_hash(
+            &session_ctx,
+            SFC,
+        )
+        .unwrap_or([0u8; 16]);
 
     let fixture_dispatch_17 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &fixture_dispatch_17,
@@ -8932,11 +8960,14 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     );
 
     let overlay_hash =
-        crate::resolver_core::request_ports::IndexedInputs::get_whole_hash(&session_ctx, SFC)
-            .unwrap_or([0u8; 16]);
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::get_whole_hash(
+            &session_ctx,
+            SFC,
+        )
+        .unwrap_or([0u8; 16]);
 
     let fixture_dispatch_18 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &fixture_dispatch_18,
@@ -9087,11 +9118,14 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
     // overlaid), so the overlay read keys on the same SFC hash — the binding
     // must still reflect the OVERLAY carrier through the ctx-bound resolution.
     let overlay_hash =
-        crate::resolver_core::request_ports::IndexedInputs::get_whole_hash(&session_ctx, SFC)
-            .unwrap_or([0u8; 16]);
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::get_whole_hash(
+            &session_ctx,
+            SFC,
+        )
+        .unwrap_or([0u8; 16]);
 
     let fixture_dispatch_19 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&session_ctx);
     let overlay_dtos = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         &session_ctx,
         &fixture_dispatch_19,
@@ -9275,10 +9309,10 @@ fn project_model_drops_non_model_cursor() {
     // weaker than the per-member admission invariant). A non-`Model` cursor MUST
     // early-return `None`; the production caller (project_evaluated_types) passes
     // a `Model` cursor, which is NOT gated by this check.
-    use crate::component_meta_caches::PublishedSurfaceKind;
     use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::{build_owner_decl_identity, project_model};
     use crate::resolver_core::ComponentMetaQueryEngine;
+    use verter_type_engine::component_meta_caches::PublishedSurfaceKind;
 
     let project = make_project();
     project
@@ -9317,7 +9351,7 @@ const model = defineModel<string>()
     // the wrong published-surface kind.
     {
         let fixture_dispatch_20 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
         let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_20);
         let wrong_projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
         let mut diag_sink = Vec::new();
@@ -9342,7 +9376,7 @@ const model = defineModel<string>()
     // resolve + publish the model payload (a present model surface).
     {
         let fixture_dispatch_20 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
         let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_20);
         let model_projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Model);
         let mut diag_sink = Vec::new();

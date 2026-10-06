@@ -22,7 +22,7 @@ use verter_semantic_source::parsed_eval_program::WalkedRead;
 #[inline]
 pub(crate) fn consume_walked_read<T>(read: WalkedRead<T>) -> T {
     if read.refusal.is_some() {
-        crate::request_context::mark_request_result_partial();
+        verter_type_engine::request_context::mark_request_result_partial();
     }
     read.value
 }
@@ -40,7 +40,7 @@ pub(crate) fn flow_bound_graph_for_tests(
         .value
         .expect("fixture binding authority")
         .expect("fixture retained structure");
-    crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
+    verter_type_engine::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
         .mint_bound_flow_graph(key, prepared)
 }
 
@@ -164,8 +164,9 @@ mod tests {
             &source,
         );
         let memo = state.decl_bodies();
-        let _request =
-            crate::request_context::install_test_request_for("/ws/refused_index_walk.ts");
+        let _request = verter_type_engine::request_context::install_test_request_for(
+            "/ws/refused_index_walk.ts",
+        );
         let _forcing = force_reservations(&[Reservation::Lease], needed);
 
         fail_reservations_needing(Reservation::Lease, needed, 1);
@@ -178,7 +179,7 @@ mod tests {
             "the refused read is the empty index"
         );
         assert!(
-            !crate::request_context::current_request_result_is_partial(),
+            !verter_type_engine::request_context::current_request_result_is_partial(),
             "the source side marks nothing; its consumer applies the refusal"
         );
 
@@ -188,7 +189,7 @@ mod tests {
         fail_reservations_needing(Reservation::Lease, needed, 0);
         assert_eq!(served.len(), 0, "the refused index was not memoized");
         assert!(
-            crate::request_context::current_request_result_is_partial(),
+            verter_type_engine::request_context::current_request_result_is_partial(),
             "serving a refused read marks the request result partial"
         );
 

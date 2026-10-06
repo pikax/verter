@@ -13,12 +13,12 @@ use verter_type_expr::locators::{
 };
 use verter_type_expr::TopLevelOwnerId;
 
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::operand::{
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::operand::{
     OperandBinderIdentity, SemanticOperandForceRequest, SemanticOperandMintError,
     SemanticOperandParts,
 };
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId,
 };

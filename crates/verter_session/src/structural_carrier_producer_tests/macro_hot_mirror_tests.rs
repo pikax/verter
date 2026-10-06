@@ -10,20 +10,21 @@ use std::sync::Arc;
 
 use verter_type_expr::TypeExpr;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::types::HostConfig;
+use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
     HotTypeRef, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
-use crate::types::HostConfig;
-use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
 
 fn macro_type_arg_hot_ref(
     host: &VerterHost,
     canonical: &str,
     macro_index: usize,
 ) -> Option<HotTypeRef> {
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     fixture_dispatch_0
         .macro_type_arg_hot_ref(canonical, macro_index)
         .map(|product| product.hot)
@@ -844,9 +845,12 @@ fn broken_lease_type_decl_accessor_carries_its_refusal_to_the_consumer() {
         verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         || {
             let read = memo.type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "B");
-            let unconsumed = crate::fact_tracing::tracing::current_tracer()
+            let unconsumed = verter_type_engine::fact_tracing::tracing::current_tracer()
                 .is_some_and(|tracer| tracer.non_cacheable_read_observed());
-            (crate::fact_tracing::consume_source_read(read), unconsumed)
+            (
+                verter_type_engine::fact_tracing::consume_source_read(read),
+                unconsumed,
+            )
         },
     );
     assert!(
@@ -916,12 +920,13 @@ fn concurrent_first_macro_arg_demands_singleflight_one_cold_build() {
         .engine
         .macro_hot_post_warm_miss_barrier
         .lock() = Some(std::sync::Arc::new(std::sync::Barrier::new(N)));
-    let handles: Vec<Option<crate::semantic_query::HotTypeRef>> = std::thread::scope(|scope| {
-        let joins: Vec<_> = (0..N)
-            .map(|_| scope.spawn(|| macro_type_arg_hot_ref(&host, "/C.vue", macro_index)))
-            .collect();
-        joins.into_iter().map(|j| j.join().unwrap()).collect()
-    });
+    let handles: Vec<Option<verter_type_engine::semantic_query::HotTypeRef>> =
+        std::thread::scope(|scope| {
+            let joins: Vec<_> = (0..N)
+                .map(|_| scope.spawn(|| macro_type_arg_hot_ref(&host, "/C.vue", macro_index)))
+                .collect();
+            joins.into_iter().map(|j| j.join().unwrap()).collect()
+        });
     *host
         .test_force
         .engine

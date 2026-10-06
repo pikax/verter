@@ -15,7 +15,7 @@
 //! the struct definition in `lib.rs`; the construction-time substrate
 //! types ([`HostResolverState`], [`WorkspaceSourceLoader`],
 //! [`next_host_instance_id`]) live here.
-use crate::project_semantic_dispatch::relation_knobs::RelationHostKnobs;
+use verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs;
 
 use std::sync::Arc;
 
@@ -329,7 +329,7 @@ impl VerterHost {
         // across hosts; the scheduler crate uses a `OnceLock` and
         // silently observes that the hook is already registered on
         // subsequent host constructions.
-        crate::request_context::install_clear_tls_hook();
+        verter_type_engine::request_context::install_clear_tls_hook();
 
         // Thread the host's configured `resolve_extensions` into the
         // workspace at construction so reverse-dep stem stripping
@@ -668,7 +668,7 @@ impl VerterHost {
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             flow_fault_injection:
-                Arc::new(crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default()),
+                Arc::new(verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default()),
             #[cfg(any(test, feature = "test-support"))]
             test_force,
             #[cfg(any(test, feature = "test-support"))]
@@ -829,7 +829,7 @@ impl VerterHost {
     #[must_use]
     pub fn dispatch_trace_for(
         &self,
-        key: &crate::semantic_query::SemanticQueryKey,
+        key: &verter_type_engine::semantic_query::SemanticQueryKey,
     ) -> crate::host_test_audit::DispatchTrace {
         crate::host_test_audit::DispatchTrace::from_key(
             self.project_type_store.semantic_graph(),
@@ -857,18 +857,20 @@ impl VerterHost {
     #[must_use]
     pub fn semantic_dispatch(
         &self,
-    ) -> crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    ) -> verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     > {
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
     }
 
     /// Run one base-lane operation through a sealed request-bound context.
     pub(crate) fn with_base_resolver_context<R>(
         &self,
         operation: impl FnOnce(
-            &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+            &dyn verter_type_engine::resolver_core::ResolverContext<
+                crate::resolver_core::HostCapabilities,
+            >,
         ) -> R,
     ) -> R {
         let base = self.resolver_store_view_read().into_cold_seed_view();
@@ -1560,9 +1562,9 @@ mod resource_policy_lazy_tests {
     use std::sync::Arc;
 
     use crate::host_compile::{CompileBatchInput, CompileBatchOptions};
-    use crate::semantic_query::ProjectionMode;
     use crate::types::{HostConfig, UpsertRequest};
     use crate::{FileLanguage, VerterHost};
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     /// `batch_typecheck()` must NOT spawn the host CPU pool's worker
     /// threads at construction; the first `compile_many` batch (which fans
@@ -1713,19 +1715,21 @@ mod resource_policy_lazy_tests {
     }
 }
 
-impl crate::fact_signature_helpers::UnboundBasisOwner for crate::VerterHost {
+impl verter_type_engine::fact_signature_helpers::UnboundBasisOwner for crate::VerterHost {
     fn signature_overflow_at_install(&self) -> &std::sync::atomic::AtomicU64 {
         &self.signature_overflow_at_install
     }
     #[cfg(any(test, feature = "test-support"))]
-    fn engine_test_knobs(&self) -> &crate::engine_test_knobs::TestKnobs {
+    fn engine_test_knobs(&self) -> &verter_type_engine::engine_test_knobs::TestKnobs {
         &self.test_force.engine
     }
 }
 
 impl crate::VerterHost {
-    pub(crate) fn engine_observers(&self) -> crate::project_semantic_dispatch::EngineObservers {
-        crate::project_semantic_dispatch::EngineObservers::new(
+    pub(crate) fn engine_observers(
+        &self,
+    ) -> verter_type_engine::project_semantic_dispatch::EngineObservers {
+        verter_type_engine::project_semantic_dispatch::EngineObservers::new(
             #[cfg(any(test, feature = "test-support"))]
             Arc::clone(&self.signature_overflow_at_install),
             Arc::clone(&self.provenance.engine),
@@ -1740,7 +1744,6 @@ impl crate::VerterHost {
 
 #[cfg(any(test, feature = "test-support"))]
 mod fact_validation_authority {
-    use crate::resolver_core::fact_validation_port::FactValidation;
     use std::collections::BTreeSet;
     use verter_session_query::facts::fact_cache::{
         DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
@@ -1749,7 +1752,10 @@ mod fact_validation_authority {
     use verter_session_query::facts::store_view::{
         ResolverHash16, StoreView, StoreViewCompatToken,
     };
-    impl crate::resolver_core::fact_validation_port::LiveFactValidation for crate::VerterHost {
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
+    impl verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation
+        for crate::VerterHost
+    {
         type Clocks = crate::resolver_store::WorkspaceSlotClocks;
         fn aggregate_clock_reader(
             &self,
@@ -1778,14 +1784,16 @@ mod fact_validation_authority {
             )],
             facts: &[FactVersionRef],
         ) -> Result<
-            crate::fact_signature_helpers::StructuralCarrierReadSet,
-            crate::cache_runtime::NonAdmissionReason,
+            verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
+            verter_audit::NonAdmissionReason,
         > {
             let view = match self.resolver_store_view_read() {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
             };
-            crate::semantic_query_memo::semantic_graph_read_set_signature(&view, roots, facts)
+            verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
+                &view, roots, facts,
+            )
         }
         fn record_signature_overflow(&self) {
             self.signature_overflow_at_install

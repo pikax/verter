@@ -1,9 +1,9 @@
 //! Flow-demand carrier and obligation-ledger transitions driven through a
 //! session-built flow-graph fixture.
 
-use crate::project_semantic_dispatch::dispatch_txn::*;
-use crate::semantic_query::FlowReturnFailure;
 use std::sync::Arc;
+use verter_type_engine::project_semantic_dispatch::dispatch_txn::*;
+use verter_type_engine::semantic_query::FlowReturnFailure;
 
 /// The flow-demand carriers: the in-flight flow frame and the deferred
 /// SCC member each carry the demand's `FlowDemandCarrier` (handle + plan +
@@ -13,27 +13,28 @@ use std::sync::Arc;
 /// round-trips a carrier when set.
 #[test]
 fn flow_demand_carriers_default_none_and_round_trip() {
-    use crate::for_tests::{
-        flow_graph_fixture_for_tests, flow_return_result_contract_id, FlowDemandRequest,
-        FlowResourcePolicy,
+    use crate::for_tests::flow_graph_fixture_for_tests;
+    use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
+    use verter_type_engine::project_semantic_dispatch::flow_solve::{
+        flow_return_result_contract_id, FlowDemandRequest, FlowResourcePolicy,
     };
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
         FlowReturnKey, ReturnProjectionDemand, SemanticQueryKey,
     };
-    use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 
     let fixture = flow_graph_fixture_for_tests("function carry_me(x) { return x; }\n", 31);
     let query = SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
         function: FlowFunctionSlotIdentity {
-            declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(
-                Arc::from("/flow_solve_fixture.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("carry_me"),
-                0,
-                [0; 16],
-                [0; 16],
-            ),
+            declaration_slot:
+                verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::value_slot(
+                    Arc::from("/flow_solve_fixture.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("carry_me"),
+                    0,
+                    [0; 16],
+                    [0; 16],
+                ),
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
@@ -44,7 +45,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
             type_env_hash: [0; 16],
             lib_env_hash: [0; 16],
             project_identity: [0; 16],
-            result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
+            result_evaluation: verter_type_engine::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: CanonicalTypeSubstitution::empty(),
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
@@ -57,7 +58,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
         input: FlowInputContext::empty(),
         result_contract: flow_return_result_contract_id(),
     }));
-    let provenance = crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(7, 3, 5, 0);
+    let provenance = verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(7, 3, 5, 0);
     let plan = fixture
         .build_plan(FlowDemandRequest {
             ancestry: Default::default(),
@@ -69,7 +70,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
         .expect("the carrier fixture plans");
     let mut runtime = ObligationRuntime::default();
     let carrier =
-        crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowDemandCarrier {
+        verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowDemandCarrier {
             handle: runtime.install_flow_demand(&plan),
             plan: Arc::new(plan),
             provenance,
@@ -100,7 +101,7 @@ fn flow_demand_carriers_default_none_and_round_trip() {
         inline_flight: None,
         holds: Vec::new(),
         self_roots: Vec::new(),
-        materialized: crate::semantic_query::demand::MaterializedSet::default(),
+        materialized: verter_type_engine::semantic_query::demand::MaterializedSet::default(),
         fresh_seed: false,
         flow_demand: None,
         discharge: None,
@@ -130,30 +131,31 @@ fn flow_demand_carriers_default_none_and_round_trip() {
 /// test-only installer — and both runtime gates must refuse it fail-closed.
 #[test]
 fn zero_obligation_demand_never_converges_or_seals() {
-    use crate::for_tests::{
-        flow_graph_fixture_for_tests, flow_return_result_contract_id, FlowDemandRequest,
-        FlowResourcePolicy,
-    };
-    use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::{
+    use crate::for_tests::flow_graph_fixture_for_tests;
+    use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::{
         FlowSealError, FlowTransitionError,
     };
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::flow_solve::{
+        flow_return_result_contract_id, FlowDemandRequest, FlowResourcePolicy,
+    };
+    use verter_type_engine::semantic_query::{
         CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
         FlowReturnKey, ReturnProjectionDemand, SemanticQueryKey,
     };
-    use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 
     let fixture = flow_graph_fixture_for_tests("function seal_me(x) { return x; }\n", 33);
     let query = SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
         function: FlowFunctionSlotIdentity {
-            declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(
-                Arc::from("/flow_solve_fixture.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("seal_me"),
-                0,
-                [0; 16],
-                [0; 16],
-            ),
+            declaration_slot:
+                verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::value_slot(
+                    Arc::from("/flow_solve_fixture.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("seal_me"),
+                    0,
+                    [0; 16],
+                    [0; 16],
+                ),
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
@@ -164,7 +166,7 @@ fn zero_obligation_demand_never_converges_or_seals() {
             type_env_hash: [0; 16],
             lib_env_hash: [0; 16],
             project_identity: [0; 16],
-            result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
+            result_evaluation: verter_type_engine::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: CanonicalTypeSubstitution::empty(),
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
@@ -177,7 +179,7 @@ fn zero_obligation_demand_never_converges_or_seals() {
         input: FlowInputContext::empty(),
         result_contract: flow_return_result_contract_id(),
     }));
-    let provenance = crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(11, 3, 5, 0);
+    let provenance = verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(11, 3, 5, 0);
     let plan = fixture
         .build_plan(FlowDemandRequest {
             ancestry: Default::default(),
@@ -208,11 +210,13 @@ fn zero_obligation_demand_never_converges_or_seals() {
     );
 
     // The seal refuses the same universe: no evidence-free completion mints.
-    let graph = crate::semantic_query_memo::SemanticGraphStore::new();
-    let number = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
-    ));
-    let value = crate::semantic_query::FlowReturnResult::new(
+    let graph = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
+    let number = graph.intern_node(
+        verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+            verter_type_engine::semantic_query::PrimitiveKind::Number,
+        ),
+    );
+    let value = verter_type_engine::semantic_query::FlowReturnResult::new(
         &graph,
         number,
         verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),

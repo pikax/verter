@@ -6,14 +6,14 @@
 //! the TLS observer install, producer body run under the matching
 //! guard, per-request counters snapshotted at finalize) around one
 //! `SemanticQueryKey::FlowReturn` demand routed through the shared
-//! [`crate::project_semantic_dispatch::ProjectSemanticDispatch`] —
+//! [`verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch`] —
 //! never a second resolver.
 //!
 //! Outcome mapping (the locked design's split result/carrier contract,
 //! C1): a COMPLETE evaluation — including a DEGRADED SUCCESS carrying
 //! `FlowReturnResult::degradation` — rides the [`AuditedResult`] `Ok`
 //! arm; a genuine NO-VALUE outcome (the typed
-//! [`crate::semantic_query::FlowReturnFailure`] class) rides the `Err`
+//! [`verter_type_engine::semantic_query::FlowReturnFailure`] class) rides the `Err`
 //! arm as [`FlowReturnError::Failure`]. Both arms carry the audit
 //! record.
 //!
@@ -21,7 +21,7 @@
 //! `FlowReturnStarted` structured event and its record reports
 //! `from_cache = true` with `cold_computes == 0`; the cold-path
 //! emission helpers construct no event payload without an installed
-//! accumulator (see [`crate::flow_return_audit`]).
+//! accumulator (see [`verter_type_engine::flow_return_audit`]).
 //!
 //! Partiality projection: `observed_partiality` reduces the outcome's
 //! OWN typed reason — the [`FlowReturnResult::degradation`] the
@@ -43,15 +43,15 @@ use verter_audit::{
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
-use crate::instant::Instant;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::{
+use crate::VerterHost;
+use verter_session_query::flow::policy::FlowGap;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::{
     FlowReturnDegradation, FlowReturnFailure, FlowReturnResult, FlowReturnUnsupported,
     ResolveCallFailure, ReturnProjectionDemand,
 };
-use crate::VerterHost;
-use verter_session_query::flow::policy::FlowGap;
 
 /// Typed `Err` arm of the flow-return [`AuditedResult`] carrier —
 /// genuine NO-VALUE outcomes only. A degraded-but-usable result is NOT
@@ -137,23 +137,23 @@ impl VerterHost {
             // from a degraded member return carries a typed degradation.
             let (step, partial) = dispatch.execute_flow_return_observing_degraded_read(key);
             #[cfg(feature = "test-support")]
-            crate::cancel_trace::mark("evaluated");
+            verter_type_engine::cancel_trace::mark("evaluated");
             match step {
-                crate::semantic_query::FlowReturnStep::Complete(result) => {
+                verter_type_engine::semantic_query::FlowReturnStep::Complete(result) => {
                     Ok(Arc::new(if partial {
                         result.with_partial_interior()
                     } else {
                         result
                     }))
                 }
-                crate::semantic_query::FlowReturnStep::NoValue(failure) => {
+                verter_type_engine::semantic_query::FlowReturnStep::NoValue(failure) => {
                     Err(FlowReturnError::Failure(failure))
                 }
                 // A hold cannot surface at a fresh top-level
                 // transaction (no in-flight frame exists to
                 // re-enter); treat a torn surfacing as
                 // undecided, never a fabricated value.
-                crate::semantic_query::FlowReturnStep::Hold(_) => {
+                verter_type_engine::semantic_query::FlowReturnStep::Hold(_) => {
                     Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
                 }
             }
@@ -178,7 +178,7 @@ impl VerterHost {
         // Stamp a fresh request id and bookkeeping for the harness'
         // multi-request guard. Mirrors the other audited entry-points.
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         // Construct a per-request context. The footprint-attachment
         // pipeline plants the per-request accumulator (and workspace
@@ -239,7 +239,7 @@ impl VerterHost {
                         &current_view,
                         overlay,
                     );
-                    let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext<
+                    let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
                         crate::resolver_core::HostCapabilities,
                     > = &host_ctx;
                     match registration.as_ref() {
@@ -266,7 +266,7 @@ impl VerterHost {
             }
         };
         #[cfg(feature = "test-support")]
-        crate::cancel_trace::mark("released");
+        verter_type_engine::cancel_trace::mark("released");
         // A cancelled request's incomplete answer IS the cancellation: the
         // evaluation stops at its next check with a budget trip, or a nested
         // read stops and degrades the value it feeds. Neither says anything

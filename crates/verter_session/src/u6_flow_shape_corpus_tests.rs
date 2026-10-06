@@ -54,15 +54,15 @@
 use std::sync::Arc;
 
 use crate::host_flow_return_audit::FlowReturnError;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnFailure, FlowReturnUnsupported, PrimitiveKind, QueryError,
-    SemanticNodeData, SemanticQueryKey,
-};
 use crate::types::{CompileProfile, HostConfig, UpsertRequest, VirtualNodeKind, VirtualQuery};
 use crate::CompileTarget;
 use crate::{FileLanguage, VerterHost};
 use verter_session_query::flow::policy::FlowGap;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    FlowReturnDegradation, FlowReturnFailure, FlowReturnUnsupported, PrimitiveKind, QueryError,
+    SemanticNodeData, SemanticQueryKey,
+};
 
 // The strengthening layer: recursive expectations, the public cold/warm
 // boundary companion, negative controls, and the crossed capture-write
@@ -780,7 +780,7 @@ pub(crate) fn degr_of(reason: Option<FlowReturnDegradation>) -> Degr {
 /// PROGRAM is a construction plan and reports none.
 fn member_shapes(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Vec<(String, NodeShape)> {
     match dispatch.graph().node_data(node).as_deref() {
         Some(SemanticNodeData::Object(surface)) => surface
@@ -869,13 +869,13 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
         _ => None,
     };
     match dispatch.execute_function_return_source(&source, &canonical) {
-        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Declared(hot) => {
+        verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Declared(hot) => {
             MeasuredFlow::Declared {
                 node: node_shape(dispatch.graph().node_data(hot.node()).as_deref()),
                 members: member_shapes(&dispatch, hot.node()),
             }
         }
-        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
+        verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
             let identity = flow_identity.expect("the Flow arm carries the identity");
             let candidates =
                 dispatch
@@ -890,13 +890,13 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
                 candidates,
             }
         }
-        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::DeclaredMiss => {
+        verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::DeclaredMiss => {
             MeasuredFlow::DeclaredMiss
         }
-        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(_) => {
+        verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(_) => {
             MeasuredFlow::NoValue
         }
-        crate::project_semantic_dispatch::flow_return::FunctionReturnNode::Absent => {
+        verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Absent => {
             MeasuredFlow::Absent
         }
     }
@@ -2498,7 +2498,9 @@ mod corpus_suite {
         }
 
         fn candidate_count(host: &Arc<VerterHost>, canonical: &str, function: &str) -> usize {
-            use crate::semantic_query::{FlowInputContext, FlowReturnKey, ReturnProjectionDemand};
+            use verter_type_engine::semantic_query::{
+                FlowInputContext, FlowReturnKey, ReturnProjectionDemand,
+            };
 
             let store_view = host.resolver_store_view_read().into_owned_view();
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -2518,7 +2520,7 @@ mod corpus_suite {
                 demand: ReturnProjectionDemand::whole_return(),
                 input: FlowInputContext::empty(),
                 result_contract:
-                    crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+                    verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
             };
             dispatch
                 .graph()
@@ -2609,7 +2611,7 @@ mod corpus_suite {
 
             let first = host.get_flow_return_type_with_audit(
                 &ident,
-                crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             );
             let first_audit = first.audit();
             let first_payload = first_audit
@@ -2672,7 +2674,7 @@ mod corpus_suite {
 
             let second = host.get_flow_return_type_with_audit(
                 &ident,
-                crate::semantic_query::ReturnProjectionDemand::whole_return(),
+                verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             );
             let second_audit = second.audit();
             let second_payload = second_audit

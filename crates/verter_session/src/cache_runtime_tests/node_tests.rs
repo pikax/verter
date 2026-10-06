@@ -2,16 +2,6 @@
 //! compute context reads its compat token through the resolver context, and
 //! publish revalidates self roots against the host's live view.
 
-use crate::cache_runtime::admission::CacheAdmission;
-use crate::cache_runtime::admission::CacheEntry;
-use crate::cache_runtime::admission::Candidate;
-use crate::cache_runtime::admission::DeferredVictims;
-use crate::cache_runtime::admission::FactCandidateDiscriminant;
-use crate::cache_runtime::admission::PublishCoreOutcome;
-use crate::cache_runtime::candidate_store::ReverseIndexedCandidateStore;
-use crate::cache_runtime::node::*;
-use crate::cache_runtime::singleflight::InflightTable;
-use crate::resolver_core::ResolverContext;
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::sync::atomic::AtomicU64;
@@ -20,6 +10,16 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::cache_runtime::admission::CacheAdmission;
+use verter_type_engine::cache_runtime::admission::CacheEntry;
+use verter_type_engine::cache_runtime::admission::Candidate;
+use verter_type_engine::cache_runtime::admission::DeferredVictims;
+use verter_type_engine::cache_runtime::admission::FactCandidateDiscriminant;
+use verter_type_engine::cache_runtime::admission::PublishCoreOutcome;
+use verter_type_engine::cache_runtime::candidate_store::ReverseIndexedCandidateStore;
+use verter_type_engine::cache_runtime::node::*;
+use verter_type_engine::cache_runtime::singleflight::InflightTable;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// A minimal `ArtifactNode` impl over a bare value type. The point of
 /// this test is structural: `ArtifactNode` exposes ONLY `Key` and
@@ -127,13 +127,17 @@ impl QueryNode for StaleGenerationQueryNode {
         // The store validates by generation; the stale candidate never
         // matches the live generation, so the lookup is always a miss.
         let generation = cx.generation();
-        crate::project_semantic_dispatch::memo::read_candidate(&self.store, key, |candidate| {
-            if candidate.validated_at_generation == generation {
-                Some(candidate.value.clone())
-            } else {
-                None
-            }
-        })
+        verter_type_engine::project_semantic_dispatch::memo::read_candidate(
+            &self.store,
+            key,
+            |candidate| {
+                if candidate.validated_at_generation == generation {
+                    Some(candidate.value.clone())
+                } else {
+                    None
+                }
+            },
+        )
     }
 
     fn compute(&self, key: &Self::Key, cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
@@ -300,7 +304,8 @@ fn compute_ctx_from_resolver_carries_compat_token_and_generation() {
     // generation matches the project-type-store generation.
     assert_eq!(
         cx.compat_token,
-        crate::resolver_core::fact_validation_port::FactValidationView::new(ctx).compat_token()
+        verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)
+            .compat_token()
     );
     assert_eq!(cx.generation(), ctx.current_project_generation());
 }

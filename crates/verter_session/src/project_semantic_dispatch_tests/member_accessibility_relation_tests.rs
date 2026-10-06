@@ -117,8 +117,9 @@ fn comparability(a: &str, b: &str) -> &'static str {
         FIXTURE,
         &format!("[{a}, {b}]"),
         |dispatch, node| {
-            let Some(crate::semantic_query::SemanticNodeData::Tuple { elements, .. }) =
-                dispatch.graph().node_data(node).as_deref().cloned()
+            let Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                elements, ..
+            }) = dispatch.graph().node_data(node).as_deref().cloned()
             else {
                 panic!("`[{a}, {b}]` settles to a tuple");
             };

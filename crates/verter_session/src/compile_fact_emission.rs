@@ -294,10 +294,12 @@ fn observe_file_whole_hash(host: &VerterHost, canonical_id: &str) {
     let Some(whole_hash) = host.current_or_read_whole_hash(canonical_id) else {
         return;
     };
-    crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::FileWholeHash {
-        canonical_id: canonical_id.to_string(),
-        hash: whole_hash,
-    });
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+        FactVersionRef::FileWholeHash {
+            canonical_id: canonical_id.to_string(),
+            hash: whole_hash,
+        },
+    );
 }
 
 /// Emit a `ParseFactRef` observation against the producer's current
@@ -326,12 +328,14 @@ fn observe_parse_fact_present(host: &VerterHost, canonical_id: &str, key: FactKe
     let Some(expected_hash) = lookup_parse_fact_hash(host, canonical_id, &key, lane) else {
         return;
     };
-    crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::Parse(ParseFactRef {
-        canonical_id: canonical_id.to_string(),
-        key,
-        lane,
-        expected_hash,
-    }));
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out(FactVersionRef::Parse(
+        ParseFactRef {
+            canonical_id: canonical_id.to_string(),
+            key,
+            lane,
+            expected_hash,
+        },
+    ));
 }
 
 /// Enumerate every `MemberPresence(exporter, *, space)` fact in the
@@ -518,14 +522,14 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
                 resolved_relative_canonical: None,
                 wildcard_pattern: None,
             };
-            crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::RouteSurface(
-                RouteSurfaceFactRef {
+            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                FactVersionRef::RouteSurface(RouteSurfaceFactRef {
                     canonical_id: import.source.clone(),
                     key: fact_key,
                     lane: FactLane::Semantic,
                     expected_hash: *fingerprint,
-                },
-            ));
+                }),
+            );
 
             // Per-augmenter `FileWholeHash`: the header-level fingerprint
             // above is invariant under a member-VALUE-type edit, so the

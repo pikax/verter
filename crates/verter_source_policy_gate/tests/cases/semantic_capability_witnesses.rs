@@ -37,8 +37,8 @@ mod hot_structural_rail_not_impl_asserts {
 /// satisfy the hot-carrier marker, and a shared reference is never a
 /// witness — type identity is the strictly stronger statement.
 mod semantic_api_wire_input_witness {
-    use verter_session::semantic_query::SemanticNodeId;
     use verter_session::typeinfo::types::TypeArgList;
+    use verter_type_engine::semantic_query::SemanticNodeId;
 
     fn identity(args: &'static [SemanticNodeId]) -> &'static [SemanticNodeId] {
         args

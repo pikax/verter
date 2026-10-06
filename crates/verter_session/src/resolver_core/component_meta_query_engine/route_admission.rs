@@ -44,8 +44,8 @@
 //! widening the type's NAME does not widen the MINT or the materialise (which
 //! stays cap-gated at the surface sink).
 
-use crate::project_semantic_dispatch::raise::{NodeShapeEq, RaisedNodeShapeFacts};
-use crate::semantic_query::SemanticNodeId;
+use verter_type_engine::project_semantic_dispatch::raise::{NodeShapeEq, RaisedNodeShapeFacts};
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 /// A node-domain route-projection result: the admitted [`SemanticNodeId`] a
 /// route/surface adapter produced AFTER its node-domain acceptance gate, held in

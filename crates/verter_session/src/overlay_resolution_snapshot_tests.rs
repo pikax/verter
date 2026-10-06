@@ -3,8 +3,8 @@
 //! witness and its validator refer to the same effective resolution
 //! snapshot.
 
-use crate::resolver_core::request_ports::RouteLookup;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::RouteLookup;
 
 use rustc_hash::FxHashMap;
 

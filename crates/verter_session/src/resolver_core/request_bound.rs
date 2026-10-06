@@ -1,7 +1,7 @@
 //! The session's request-bound resolver contexts: the direct-host test seam and the
 //! request-bound adapter that serves the engine's resolver ports from a lifecycle.
-use crate::fact_tracing::note_non_cacheable_read_fan_out;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
+use verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out;
 
 use std::sync::Arc;
 
@@ -9,18 +9,20 @@ use verter_session_query::declarations::DeclarationId;
 use verter_session_query::resolution::{AmbientSymbolHit, ProjectStableKey};
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
-use super::request_ports::{Cancellation, ExecutionSubmission, IndexedInputs, RouteLookup};
-use super::resolver_context::*;
 use verter_session_query::inputs::indexed::IndexedInputRecord;
 use verter_session_query::inputs::indexed::IndexedInputServe;
 use verter_session_query::inputs::prepared::PreparedInputRecord;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
+use verter_type_engine::resolver_core::request_ports::{
+    Cancellation, ExecutionSubmission, IndexedInputs, RouteLookup,
+};
+use verter_type_engine::resolver_core::resolver_context::*;
 
-use crate::fact_tracing::tracing as tracer_stack;
 use crate::project_type_store::IndexedReady;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::ShallowFileState;
 use verter_session_query::declarations::metadata::ValueDeclIdentity;
+use verter_type_engine::fact_tracing::tracing as tracer_stack;
 
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
@@ -41,8 +43,10 @@ impl ResolverCapabilities for HostCapabilities {
 /// Translate the host's configuration into the engine's immutable execution
 /// policy. The engine takes the selected values; it never reads the host
 /// configuration itself.
-fn engine_policy_for(config: &crate::HostConfig) -> crate::project_semantic_dispatch::EnginePolicy {
-    crate::project_semantic_dispatch::EnginePolicy::new(
+fn engine_policy_for(
+    config: &crate::HostConfig,
+) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
+    verter_type_engine::project_semantic_dispatch::EnginePolicy::new(
         config.depth_budget,
         config.recursion_budget_overrides.synthesis_steps,
         config.recursion_budget_overrides.walker_pathological_cap,
@@ -95,9 +99,14 @@ impl ResolverContext<HostCapabilities> for crate::VerterHost {}
 
 #[cfg(any(test, feature = "test-support"))]
 impl IndexedInputs for crate::VerterHost {
-    fn operand_env_epoch(&self) -> super::request_ports::OperandEnvEpoch {
+    fn operand_env_epoch(
+        &self,
+    ) -> verter_type_engine::resolver_core::request_ports::OperandEnvEpoch {
         let w = self.workspace();
-        super::request_ports::OperandEnvEpoch::new(w.published_root(), w.content_generation())
+        verter_type_engine::resolver_core::request_ports::OperandEnvEpoch::new(
+            w.published_root(),
+            w.content_generation(),
+        )
     }
     fn project_stable_key_for_canonical(
         &self,
@@ -147,7 +156,7 @@ impl IndexedInputs for crate::VerterHost {
         crate::VerterHost::declaration_sequence_rank(self, canonical)
     }
 
-    fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy {
+    fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
         engine_policy_for(&self.config)
     }
 
@@ -497,7 +506,9 @@ impl Cancellation for crate::VerterHost {}
 #[cfg(any(test, feature = "test-support"))]
 impl ExecutionSubmission for crate::VerterHost {
     type MacroMirrors = super::request_inputs::MacroMirrorSelector;
-    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding<Self::MacroMirrors> {
+    fn attach_engine(
+        &self,
+    ) -> verter_type_engine::project_semantic_dispatch::EngineBinding<Self::MacroMirrors> {
         self.project_type_store().bind_engine(
             self.engine_observers(),
             self.source_input_leases.macro_selector(
@@ -509,7 +520,7 @@ impl ExecutionSubmission for crate::VerterHost {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl super::request_ports::HostAttachmentPort for crate::VerterHost {
+impl verter_type_engine::resolver_core::request_ports::HostAttachmentPort for crate::VerterHost {
     type HostAttachment = crate::session_attachment::SessionAttachment;
     fn host_attachment(&self) -> &Self::HostAttachment {
         self.session_attachment()
@@ -718,9 +729,14 @@ impl<L: RequestBoundLifecycle> IndexedInputs for RequestBoundAdapter<L>
 where
     Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
-    fn operand_env_epoch(&self) -> super::request_ports::OperandEnvEpoch {
+    fn operand_env_epoch(
+        &self,
+    ) -> verter_type_engine::resolver_core::request_ports::OperandEnvEpoch {
         let w = self.0.host().workspace();
-        super::request_ports::OperandEnvEpoch::new(w.published_root(), w.content_generation())
+        verter_type_engine::resolver_core::request_ports::OperandEnvEpoch::new(
+            w.published_root(),
+            w.content_generation(),
+        )
     }
     fn project_stable_key_for_canonical(
         &self,
@@ -768,7 +784,7 @@ where
         self.0.host().declaration_sequence_rank(canonical)
     }
 
-    fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy {
+    fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
         engine_policy_for(&self.0.host().config)
     }
 
@@ -1070,7 +1086,9 @@ where
     Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
     type MacroMirrors = super::request_inputs::MacroMirrorSelector;
-    fn attach_engine(&self) -> crate::project_semantic_dispatch::EngineBinding<Self::MacroMirrors> {
+    fn attach_engine(
+        &self,
+    ) -> verter_type_engine::project_semantic_dispatch::EngineBinding<Self::MacroMirrors> {
         self.0.host().project_type_store().bind_engine(
             self.0.host().engine_observers(),
             self.0
@@ -1085,7 +1103,8 @@ where
     }
 }
 
-impl<L: RequestBoundLifecycle> super::request_ports::HostAttachmentPort for RequestBoundAdapter<L>
+impl<L: RequestBoundLifecycle> verter_type_engine::resolver_core::request_ports::HostAttachmentPort
+    for RequestBoundAdapter<L>
 where
     Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
@@ -1204,7 +1223,7 @@ impl crate::VerterHost {
 
 #[cfg(test)]
 mod request_bound_adapter_structure_tests {
-    use super::ResolverContext;
+    use verter_type_engine::resolver_core::ResolverContext;
 
     fn assert_resolver_context<T: ResolverContext<super::HostCapabilities>>() {}
 
@@ -1215,15 +1234,16 @@ mod request_bound_adapter_structure_tests {
     }
 }
 
-use super::fact_validation_port::FactValidation;
 use std::collections::BTreeSet;
 use verter_session_query::facts::fact_cache::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
     RouteSurfaceFactRef,
 };
 use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
+use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
 
-impl<L: RequestBoundLifecycle> crate::resolver_core::fact_validation_port::LiveFactValidation
+impl<L: RequestBoundLifecycle>
+    verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation
     for RequestBoundAdapter<L>
 {
     type Clocks = crate::resolver_store::WorkspaceSlotClocks;
@@ -1258,10 +1278,10 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         )],
         facts: &[FactVersionRef],
     ) -> Result<
-        crate::fact_signature_helpers::StructuralCarrierReadSet,
-        crate::cache_runtime::NonAdmissionReason,
+        verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
+        verter_audit::NonAdmissionReason,
     > {
-        crate::semantic_query_memo::semantic_graph_read_set_signature(
+        verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
             self.0.request_view(),
             roots,
             facts,

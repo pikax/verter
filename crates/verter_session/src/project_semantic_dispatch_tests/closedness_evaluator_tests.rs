@@ -30,7 +30,7 @@ use super::raise::{
     userland_instantiation_body_is_closed_object, ClosednessVerdict, KeyDomainBinding,
 };
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{DeclIdentity, HashValue};
+use verter_type_engine::semantic_query::{DeclIdentity, HashValue};
 
 fn decl(canonical: &str, name: &str) -> DeclIdentity {
     DeclIdentity {

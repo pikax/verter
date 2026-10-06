@@ -1,5 +1,5 @@
 use super::*;
-use crate::resolver_core::request_ports::IndexedInputs;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use std::sync::Arc;
 use verter_type_expr::TypeExpr;
@@ -748,11 +748,12 @@ defineProps<Props>()
             "ImportedProps",
         ),
     ] {
-        let prepared = crate::resolver_core::request_ports::OwnedLowering::prepared_type_decl(
-            &host, canonical, owner, name,
-        )
-        .expect("exact-owner preparation should succeed")
-        .unwrap_or_else(|| panic!("{canonical}#{name} should prepare"));
+        let prepared =
+            verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_decl(
+                &host, canonical, owner, name,
+            )
+            .expect("exact-owner preparation should succeed")
+            .unwrap_or_else(|| panic!("{canonical}#{name} should prepare"));
         assert_eq!(prepared.root_identity.owner, owner);
         assert_eq!(
             prepared.vue_ignored_heritage.as_ref(),
@@ -1525,7 +1526,7 @@ fn a_request_builds_an_owners_import_route_witness_once() {
         importer,
         "import { Theme } from './theme'\nimport { Size } from './size'\nexport type Re = [Theme, Size]\n",
     );
-    let _request = crate::request_context::install_test_request_for(importer);
+    let _request = verter_type_engine::request_context::install_test_request_for(importer);
     let before = witness_builds_for_tests();
     let first = host
         .owner_import_route_witness_for_tests(importer)
@@ -1596,7 +1597,7 @@ fn a_request_normalizes_an_analysis_canonical_once() {
         importer,
         "import { X } from './missing'\nexport type Re = X\n",
     );
-    let _request = crate::request_context::install_test_request_for(importer);
+    let _request = verter_type_engine::request_context::install_test_request_for(importer);
     let resolutions = |host: &crate::VerterHost| {
         let provenance = host.ws().vfs_provenance_snapshot();
         provenance.import_resolution_cache_hit_count + provenance.import_resolution_cache_miss_count
@@ -3315,14 +3316,14 @@ import Child from './Child.vue'
     let resolved = host
         .compute_component_meta_state(
             "/src/App.vue",
-            crate::types::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
             host.get_whole_hash("/src/App.vue")
                 .expect("whole hash should exist for App.vue"),
         )
         .expect("resolved meta should exist");
     let resolution = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         let fixture_dispatch_0 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         host.compute_fallthrough_surface_from_resolved_state(
             "/src/App.vue",
@@ -3425,12 +3426,15 @@ import { shared } from './shared'
     host.provenance().reset();
 
     let resolved = host
-        .resolve_component_meta("/src/Button.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Button.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("resolved meta should be computed from the captured view");
 
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         let fixture_dispatch_1 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         extract_component_meta_from_resolved(
             &host,
@@ -3474,21 +3478,23 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
     let canonical = "/src/App.vue";
 
     // A request budget with ample headroom — it is NEVER exhausted.
-    let rctx = crate::request_context::RequestContext::with_kind_timing_and_projection_budget(
-        1,
-        Arc::from(canonical),
-        verter_audit::RequestKind::ComponentMeta,
-        false,
-        false,
-        None,
-        100_000,
-    );
-    let _guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
-    let _scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let rctx =
+        verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from(canonical),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            100_000,
+        );
+    let _guard =
+        verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+    let _scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
 
     // Fold a NON-budget partial (fuse / semantic-miss class) WITHOUT touching
     // the projection budget.
-    crate::request_context::mark_request_result_partial();
+    verter_type_engine::request_context::mark_request_result_partial();
 
     // The discriminating precondition split: the partial is typed completeness,
     // NOT budget exhaustion. The deleted ad-hoc gate would NOT fire here.
@@ -3497,7 +3503,7 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
         "the projection budget must NOT be exhausted — this isolates the non-budget partial"
     );
     assert!(
-        crate::request_context::current_cold_compute_completeness().is_partial(),
+        verter_type_engine::request_context::current_cold_compute_completeness().is_partial(),
         "the cold-compute scope must carry a Partial after a non-budget fold"
     );
 
@@ -3536,8 +3542,8 @@ fn non_budget_partial_gates_fallthrough_admission_with_budget_unexhausted() {
             },
         fact_versions: Vec::new(),
     };
-    crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         |probe| {
             let admission =
                 crate::resolver_core::FallthroughStableAdmission::from_test_scope(probe);
@@ -5257,8 +5263,11 @@ fn resolve_expanded_state(
     host: &VerterHost,
     canonical_or_alias: &str,
 ) -> crate::meta_resolve::ResolvedComponentMetaState {
-    host.resolve_component_meta(canonical_or_alias, crate::types::ProjectionMode::Expanded)
-        .expect("expanded resolved state should exist")
+    host.resolve_component_meta(
+        canonical_or_alias,
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
+    )
+    .expect("expanded resolved state should exist")
 }
 
 fn resolved_macro_by_type<'a>(
@@ -5612,7 +5621,10 @@ defineProps<Props>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("should return resolved state");
     let props = hm_prop_names(&host, "/src/Comp.vue", &state);
     assert!(
@@ -5651,7 +5663,10 @@ defineProps<A & B>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("should return resolved state");
     let names = hm_prop_names(&host, "/src/Comp.vue", &state);
     assert!(
@@ -5686,7 +5701,10 @@ defineEmits<Events>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("should return resolved state");
     let emit_dtos = dtos_for_kind(
         &host,
@@ -5727,7 +5745,10 @@ defineSlots<Slots>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("should return resolved state");
     let slot_dtos = dtos_for_kind(
         &host,
@@ -5776,7 +5797,10 @@ defineSlots<Slots>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("should return resolved state");
     let slot_names = hm_slot_names(&host, "/src/Comp.vue", &state);
     assert!(
@@ -5812,7 +5836,10 @@ defineProps<Props>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("should return resolved state");
     let prop_names = hm_prop_names(&host, "/src/Comp.vue", &state);
     assert!(
@@ -5852,7 +5879,10 @@ defineSlots<Slots>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("should return resolved state");
     let slot_dtos = dtos_for_kind(
         &host,
@@ -7428,12 +7458,14 @@ const second: B<'shared-x' | 'shared-y'> = null as never
     let graph = host.project_type_store().semantic_graph();
     let mut vue_instantiations = std::collections::HashSet::new();
     for id in 0u64..(graph.node_count() as u64) {
-        let node = crate::semantic_query::SemanticNodeId(id);
+        let node = verter_type_engine::semantic_query::SemanticNodeId(id);
         let Some(data) = graph.node_data(node) else {
             continue;
         };
-        if let crate::semantic_query::SemanticNodeData::InstantiationRef { base, args } =
-            data.as_ref()
+        if let verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
+            base,
+            args,
+        } = data.as_ref()
         {
             // Scope the sweep by the DECLARING FILE, never by the decl name —
             // an alias leaking into identity would change the name, and a
@@ -7882,8 +7914,9 @@ fn return_wrapper_role_for(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
         crate::resolver_core::HostResolverContext::from_cold_seed(host, fixed.cold_seed(), overlay);
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
-    crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    verter_type_engine::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(
         &dispatch,
         canonical,
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -12399,7 +12432,7 @@ fn overlay_reader_retargets_wildcard_after_base_file_set_change() {
         .with_session_overlay(&host, &view);
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::SessionResolverContext::new(&host, &view, &base, overlay);
-    let warm = crate::resolver_core::request_ports::IndexedInputs::indexed_for_current_content(
+    let warm = verter_type_engine::resolver_core::request_ports::IndexedInputs::indexed_for_current_content(
         &ctx, barrel,
     )
     .expect("session context returns overlay indexed");
@@ -12809,13 +12842,14 @@ fn resolve_eval_dependency_canonical_memoizes_positive_result_within_request_con
     );
     let host = VerterHost::new(HostConfig::default(), ws.clone());
 
-    let rctx = crate::request_context::RequestContext::new(
+    let rctx = verter_type_engine::request_context::RequestContext::new(
         4201,
         Arc::from("/workspace/src/App.vue"),
         false,
         None,
     );
-    let _guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+    let _guard =
+        verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&rctx));
 
     let first = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
     assert_eq!(
@@ -12859,7 +12893,7 @@ fn resolve_eval_dependency_canonical_resolves_without_request_context() {
     );
     let host = VerterHost::new(HostConfig::default(), ws.clone());
     assert!(
-        crate::request_context::current_request_context().is_none(),
+        verter_type_engine::request_context::current_request_context().is_none(),
         "precondition: no request context is installed on this thread",
     );
 
@@ -12886,13 +12920,14 @@ fn resolve_eval_dependency_canonical_does_not_memoize_negative_results() {
     let ws = Arc::new(CountingWorkspace::new());
     let host = VerterHost::new(HostConfig::default(), ws.clone());
 
-    let rctx = crate::request_context::RequestContext::new(
+    let rctx = verter_type_engine::request_context::RequestContext::new(
         4202,
         Arc::from("/workspace/src/App.vue"),
         false,
         None,
     );
-    let _guard = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx));
+    let _guard =
+        verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&rctx));
 
     let first = host.resolve_eval_dependency_canonical("/workspace/src/missing/nope");
     assert!(
@@ -12926,13 +12961,14 @@ fn resolve_eval_dependency_canonical_memo_is_isolated_per_request_context() {
     let host = VerterHost::new(HostConfig::default(), ws.clone());
 
     {
-        let rctx1 = crate::request_context::RequestContext::new(
+        let rctx1 = verter_type_engine::request_context::RequestContext::new(
             4203,
             Arc::from("/workspace/src/App.vue"),
             false,
             None,
         );
-        let _guard1 = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx1));
+        let _guard1 =
+            verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&rctx1));
         let resolved = host.resolve_eval_dependency_canonical("/workspace/src/runtime/types/html");
         assert_eq!(
             resolved.as_deref(),
@@ -12946,13 +12982,14 @@ fn resolve_eval_dependency_canonical_memo_is_isolated_per_request_context() {
         // `_guard1` drops here — the first request is over.
     }
 
-    let rctx2 = crate::request_context::RequestContext::new(
+    let rctx2 = verter_type_engine::request_context::RequestContext::new(
         4204,
         Arc::from("/workspace/src/Other.vue"),
         false,
         None,
     );
-    let _guard2 = crate::request_context::RequestContextGuard::install(Arc::clone(&rctx2));
+    let _guard2 =
+        verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&rctx2));
     assert!(
         rctx2.dep_canonical_memo.lock().is_empty(),
         "a fresh request context starts with an empty memo — no cross-request sharing",
@@ -13708,7 +13745,7 @@ export const defaults: Props = { label: 'ok' }
     assert!(
         prepared_type
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("label")),
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("label")),
         "on-demand prepared type materialization should retain the shallow member index",
     );
 
@@ -16887,7 +16924,10 @@ export interface UnusedProps {
 
     ws.reset_reads();
     let resolved = host
-        .resolve_component_meta("/src/Consumer.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Consumer.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("expanded component meta should resolve");
 
     let prop_names: std::collections::BTreeSet<String> =
@@ -17573,14 +17613,14 @@ fn bundle_fact_validation_round_trip() {
     assert!(
         updated
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("title")),
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("title")),
         "updated prepared decl should contain the new property 'title', got: {:?}",
         updated.member_index.keys().collect::<Vec<_>>()
     );
     assert!(
         !updated
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("label")),
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("label")),
         "updated prepared decl should NOT contain the old property 'label', got: {:?}",
         updated.member_index.keys().collect::<Vec<_>>()
     );
@@ -17839,7 +17879,10 @@ defineProps<ImportedProps>()
     );
 
     let state = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("should return resolved state");
     let props = hm_prop_names(&host, "/src/Comp.vue", &state);
     assert!(
@@ -18266,8 +18309,8 @@ export type Props = { render: typeof Button }
 mod imported_root_trace_dedup_tests {
     use super::*;
     use crate::component_meta_audit::structured_event::StructuredAuditEvent;
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::request_footprint::RequestFootprintAccumulator;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_footprint::RequestFootprintAccumulator;
     use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
     fn host_with_props_ts() -> Arc<VerterHost> {
@@ -18369,10 +18412,10 @@ mod imported_root_trace_dedup_tests {
 #[cfg(test)]
 mod trace_laziness_tests {
     use super::*;
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::request_footprint::RequestFootprintAccumulator;
-    use crate::request_observers::component_meta_trace_custom;
     use std::cell::Cell;
+    use verter_type_engine::component_meta_trace_custom;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 
     // Counter is per-test (declared inside the test function), not
     // module-static — cargo runs sibling tests in parallel and any
@@ -19319,7 +19362,7 @@ defineProps<{{ label?: string; rev{revision}?: number }}>()
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn host_evict_releases_the_closed_documents_nodes_and_the_disk_reload_reinterns() {
-    use crate::semantic_query::SemanticNodeId;
+    use verter_type_engine::semantic_query::SemanticNodeId;
 
     const CONSUMER_V1: &str = r#"<script setup lang="ts">
 import type { IconProps } from './types/icon'
@@ -19562,7 +19605,9 @@ defineProps<IconProps>()
     // substrate); every other live node at a later cycle's start was
     // minted by an earlier cycle and survived that cycle's close.
     let persistent: std::collections::HashSet<u64> = (0..graph.node_slot_count() as u64)
-        .filter(|ordinal| graph.node_is_live(crate::semantic_query::SemanticNodeId(*ordinal)))
+        .filter(|ordinal| {
+            graph.node_is_live(verter_type_engine::semantic_query::SemanticNodeId(*ordinal))
+        })
         .collect();
     for cycle in 0..20usize {
         let slots_at_cycle_start = graph.node_slot_count();
@@ -19607,7 +19652,7 @@ defineProps<IconProps>()
                 // that survived a close: `(id, scope, payload)`.
                 let survivors: Vec<String> = (0..slots_at_cycle_start as u64)
                     .filter(|ordinal| !persistent.contains(ordinal))
-                    .map(crate::semantic_query::SemanticNodeId)
+                    .map(verter_type_engine::semantic_query::SemanticNodeId)
                     .filter(|id| graph.node_is_live(*id))
                     .map(|id| {
                         format!(
@@ -19619,7 +19664,7 @@ defineProps<IconProps>()
                     .collect();
                 let minted_now: Vec<String> = (slots_at_cycle_start as u64
                     ..graph.node_slot_count() as u64)
-                    .map(crate::semantic_query::SemanticNodeId)
+                    .map(verter_type_engine::semantic_query::SemanticNodeId)
                     .filter(|id| graph.node_is_live(*id))
                     .map(|id| {
                         format!(
@@ -19760,7 +19805,7 @@ function fireChurn() {{
                     first.3, resolved.3
                 );
                 let survivors: Vec<String> = (first.4 as u64..slots_at_cycle_start as u64)
-                    .map(crate::semantic_query::SemanticNodeId)
+                    .map(verter_type_engine::semantic_query::SemanticNodeId)
                     .filter(|id| graph.node_is_live(*id))
                     .map(|id| {
                         format!(
@@ -19827,8 +19872,8 @@ defineProps<IconProps>()
 fn live_node_ids_scoped_to(
     host: &VerterHost,
     canonical: &str,
-) -> Vec<crate::semantic_query::SemanticNodeId> {
-    use crate::semantic_query::SemanticNodeId;
+) -> Vec<verter_type_engine::semantic_query::SemanticNodeId> {
+    use verter_type_engine::semantic_query::SemanticNodeId;
     let graph = host.project_type_store().semantic_graph();
     (0..graph.node_slot_count() as u64)
         .map(SemanticNodeId)
@@ -20076,8 +20121,10 @@ fn overlay_views_of_an_open_owner_keep_two_component_meta_views() {
             .derived_raw_cache()
             .get(OWNER)
             .expect("the owner keeps its derived state while open");
-        let mut per_mode: rustc_hash::FxHashMap<crate::types::ProjectionMode, usize> =
-            rustc_hash::FxHashMap::default();
+        let mut per_mode: rustc_hash::FxHashMap<
+            verter_type_engine::semantic_query::ProjectionMode,
+            usize,
+        > = rustc_hash::FxHashMap::default();
         for (mode, _view_fingerprint) in entry.cached_resolved_meta.keys() {
             *per_mode.entry(*mode).or_default() += 1;
         }

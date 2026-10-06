@@ -12,11 +12,11 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{PrimitiveName, TopLevelOwnerId, TypeExpr};
 
@@ -159,8 +159,8 @@ fn eval(host: &Arc<VerterHost>, canonical: &str, name: &str) -> Outcome {
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     };
     match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))) {

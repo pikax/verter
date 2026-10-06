@@ -5,17 +5,17 @@ use std::sync::Arc;
 
 use super::call_resolve_tests::{occurrence, signature};
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::types::UpsertRequest;
+use crate::{HostConfig, VerterHost};
+use verter_type_engine::semantic_query::{
     CanonicalTypeSubstitution, FunctionParam, IncompleteReason, PrimitiveKind, QueryError,
     QueryOutcome, Ready, SemanticContext, SemanticContextId, SemanticNodeData, SemanticNodeId,
     SignatureKind, SignatureReturnCarrier, TupleElement, TypeParamDecl, CONTEXT_FREE_EVALUATION,
 };
-use crate::signature_kernel::{
+use verter_type_engine::signature_kernel::{
     BorrowedSet, CallSubstitution, ResultDemand, SemanticReadView, SignatureResultRecipe,
     SignatureSetRef, SignatureStore,
 };
-use crate::types::UpsertRequest;
-use crate::{HostConfig, VerterHost};
 
 const CANONICAL: &str = "/ws/signature-discovery.ts";
 
@@ -49,15 +49,16 @@ fn callable(
     calls: Vec<SemanticNodeId>,
     constructs: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
-    d.graph()
-        .intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+    d.graph().intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(calls.into_boxed_slice()),
             construct_signatures: Arc::from(constructs.into_boxed_slice()),
             index_signatures: Arc::from(Vec::new().into_boxed_slice()),
             keyspace: None,
             has_index_signature: false,
-        }))
+        },
+    ))
 }
 
 fn discover(
@@ -94,7 +95,7 @@ fn count(set: SignatureSetRef, store: &SignatureStore) -> usize {
 fn candidates(
     set: SignatureSetRef,
     store: &SignatureStore,
-) -> Vec<crate::signature_kernel::SignatureCandidate> {
+) -> Vec<verter_type_engine::signature_kernel::SignatureCandidate> {
     match SemanticReadView::pin(store)
         .read_set(set)
         .expect("live set")
@@ -107,7 +108,7 @@ fn candidates(
 
 fn recipe_of(
     store: &SignatureStore,
-    candidate: crate::signature_kernel::SignatureCandidate,
+    candidate: verter_type_engine::signature_kernel::SignatureCandidate,
 ) -> SignatureResultRecipe {
     let view = SemanticReadView::pin(store);
     let descriptor = view.descriptor(candidate.signature).unwrap();
@@ -117,8 +118,8 @@ fn recipe_of(
 
 fn identity_substitution(
     store: &SignatureStore,
-    candidate: crate::signature_kernel::SignatureCandidate,
-) -> crate::signature_kernel::CallSubstitutionId {
+    candidate: verter_type_engine::signature_kernel::SignatureCandidate,
+) -> verter_type_engine::signature_kernel::CallSubstitutionId {
     let view = SemanticReadView::pin(store);
     let space = view
         .descriptor(candidate.signature)
@@ -131,8 +132,8 @@ fn identity_substitution(
 
 fn read_return(
     d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    candidate: crate::signature_kernel::SignatureCandidate,
-    call: crate::signature_kernel::CallSubstitutionId,
+    candidate: verter_type_engine::signature_kernel::SignatureCandidate,
+    call: verter_type_engine::signature_kernel::CallSubstitutionId,
 ) -> Result<SemanticNodeId, IncompleteReason> {
     let store = d.graph().signature_store();
     match d.read_signature_result(
@@ -205,7 +206,7 @@ fn empty_is_a_complete_negative_distinct_from_incomplete() {
         SignatureSetRef::Empty
     );
     let unconstrained = d.graph().intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Free"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Free"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -300,7 +301,7 @@ fn alias_and_constraint_settle_to_the_signature_shape() {
     let object = callable(&d, vec![f], vec![]);
     let alias = d.graph().intern_node(SemanticNodeData::Alias(object));
     let constrained = d.graph().intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Fn"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Fn"),
         param_index: 0,
         constraint: Some(alias),
         default: None,
@@ -454,7 +455,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let number = prim(&d, PrimitiveKind::Number);
     let t = d.graph().intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Ret"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Ret"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -660,7 +661,7 @@ fn intersection_dedups_by_signature_equivalence_in_authored_order() {
         callable(&d, vec![other], vec![]),
     ];
     let intersection = d.graph().intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             members.to_vec().into_boxed_slice(),
         )),
     ));
@@ -753,7 +754,8 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
     let mix_a = mixin("MixA", instance_a);
     let m1 = mixin("M1", instance_a);
     let m2 = mixin("M2", instance_b);
-    let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
+    let context =
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit();
     let store = d.graph().signature_store();
     for (label, members, instances, rest_only) in [
         (
@@ -771,7 +773,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
         ("M1 & M2", [m1, m2], [instance_a, instance_b], true),
     ] {
         let intersection = d.graph().intern_node(SemanticNodeData::Intersection(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 members.to_vec().into_boxed_slice(),
             )),
         ));
@@ -844,7 +846,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
     }
 
     let binder = d.graph().intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("G"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("G"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -875,7 +877,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
         )],
     );
     let intersection = d.graph().intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![generic, ctor_b].into_boxed_slice(),
         )),
     ));
@@ -900,7 +902,7 @@ fn signature_set_of(
     subject: SemanticNodeId,
     context: SemanticContextId,
 ) -> SignatureSetRef {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
     };
     match d.execute(SemanticQueryKey::SignaturesOfType {
@@ -976,7 +978,7 @@ fn signatures_of_type_do_not_warm_hit_across_semantic_contexts() {
 /// keys and two cold builds; an identical demand is warm.
 #[test]
 fn read_signature_result_distinct_demands_do_not_alias() {
-    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+    use verter_type_engine::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let string = prim(&d, PrimitiveKind::String);
@@ -992,7 +994,7 @@ fn read_signature_result_distinct_demands_do_not_alias() {
     let store = d.graph().signature_store();
     let candidate = candidates(ready(discover(&d, sig, SignatureKind::Call)), store).remove(0);
     let call = identity_substitution(store, candidate);
-    let key = |projection| crate::signature_kernel::ReadSignatureResultKey {
+    let key = |projection| verter_type_engine::signature_kernel::ReadSignatureResultKey {
         descriptor: candidate.signature,
         call_substitution: call,
         projection,
@@ -1000,8 +1002,8 @@ fn read_signature_result_distinct_demands_do_not_alias() {
         semantic_context: SemanticContextId::production(),
     };
     assert_ne!(key(ResultDemand::Return), key(ResultDemand::Both));
-    let identified = crate::signature_kernel::ReadSignatureResultKey {
-        evaluation: crate::semantic_query::ResultEvaluationContextId::from_raw(1),
+    let identified = verter_type_engine::signature_kernel::ReadSignatureResultKey {
+        evaluation: verter_type_engine::semantic_query::ResultEvaluationContextId::from_raw(1),
         ..key(ResultDemand::Return)
     };
     assert_ne!(key(ResultDemand::Return), identified);
@@ -1026,7 +1028,7 @@ fn generic_identity(
     constraint: Option<SemanticNodeId>,
 ) -> SemanticNodeId {
     let t = d.graph().intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic(name),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic(name),
         param_index: 0,
         constraint,
         default: None,
@@ -1332,7 +1334,7 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
             .unwrap()
             .signature_semantic_flags
     };
-    use crate::signature_kernel::SignatureSemanticFlags as Flags;
+    use verter_type_engine::signature_kernel::SignatureSemanticFlags as Flags;
     assert_eq!(flagged("/ws/a.js", any), Flags::UNTYPED_JS);
     assert_eq!(flagged("/ws/b.ts", any), Flags::NONE);
     assert_eq!(flagged("/ws/c.js", string), Flags::NONE);
@@ -1384,7 +1386,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         candidates(from_second.set, store)[0].signature,
         "premise: both subjects publish the one content-interned descriptor"
     );
-    let authored = |value: &crate::signature_kernel::SignatureSetValue| {
+    let authored = |value: &verter_type_engine::signature_kernel::SignatureSetValue| {
         value
             .nodes
             .iter()
@@ -1456,7 +1458,8 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
         d.utility_inference_signature(overloaded, SignatureKind::Call),
         Some(last)
     );
-    let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
+    let context =
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit();
     assert_eq!(
         d.resolve_signature_utility(SignatureUtility::ReturnType, overloaded, context),
         Some(string)
@@ -1469,7 +1472,7 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
 
     let tail = sig("uc", boolean, boolean);
     let intersection = d.graph().intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![overloaded, callable(&d, vec![tail], vec![])].into_boxed_slice(),
         )),
     ));
@@ -1480,7 +1483,7 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
 
     let union = d.intern_normalized_union_or_intersection(&[sig("ud", string, number), tail], true);
     let constrained = d.graph().intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Fn"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Fn"),
         param_index: 0,
         constraint: Some(overloaded),
         default: None,

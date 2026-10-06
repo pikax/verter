@@ -44,8 +44,8 @@ use verter_session_query::analysis::type_expand::{
 use verter_session_query::analysis::types::AnalyzedMacroKind;
 use verter_session_query::type_solver::result::{ExecutionStatus, SolverExactness};
 
-use crate::resolver_core::ResolverContext;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Top-level driver: publish the `define_props` / `define_emits` /
 /// `define_slots` shapes for every type-based macro in `snapshot`.
@@ -151,7 +151,7 @@ pub(crate) fn project_define_macro_shapes(
 /// resolved-but-empty from unresolved/missing.
 fn define_props_shape(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -247,7 +247,7 @@ fn define_props_shape(
 /// its payload source and publication evidence.
 fn define_emits_shape(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -323,7 +323,7 @@ fn define_emits_shape(
 /// bindings are published separately by `resolve_slot_bindings_graph_native`.
 fn define_slots_shape(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -385,7 +385,7 @@ fn define_slots_shape(
 /// shared `SemanticGraphStore`, so this shares the DTO path's reduction work.
 fn macro_surface_resolves(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -507,7 +507,7 @@ fn fail_shape_result_on_failed_member(
     }
     *exactness = SolverExactness::Incomplete;
     *execution_status = merge_execution_status(*execution_status, ExecutionStatus::HardStop);
-    crate::request_context::mark_request_result_partial();
+    verter_type_engine::request_context::mark_request_result_partial();
 }
 
 /// Severity-ordered merge of two expansion execution statuses (the worse status

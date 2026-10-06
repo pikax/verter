@@ -10,13 +10,13 @@ use super::dispatch_txn::{
     SessionId,
 };
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::{HostConfig, VerterHost};
+use verter_type_engine::semantic_query::{
     BudgetExceededKind, CallArgKey, CallKind, ConstParamPolicy, ContextualInferenceMode,
     FlowNarrowingKey, FlowReturnFailure, FlowReturnResult, FlowReturnStep,
     InferenceCandidatePriority, InferencePassKind, NoInferMask, PrimitiveKind, ProgramPointId,
     RecursionOrBudgetCap, ResolveCallKey, SemanticNodeData, VariancePhase,
 };
-use crate::{HostConfig, VerterHost};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 use verter_type_expr::{
@@ -40,7 +40,7 @@ fn flow_identity(name: &str) -> FlowFunctionReturnIdentity {
 
 fn call_key(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    callee: crate::semantic_query::SemanticNodeId,
+    callee: verter_type_engine::semantic_query::SemanticNodeId,
     offset: u32,
 ) -> ResolveCallKey {
     ResolveCallKey {

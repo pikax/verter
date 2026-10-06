@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use super::raise::{dispatch_cold_for, dispatch_warm_for};
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::VerterHost;
+use verter_type_engine::semantic_query::{
     LiteralValue, PrimitiveKind, QueryError, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     TruthinessDomain, TruthinessInhabitance,
 };
-use crate::VerterHost;
 
 fn domain_of(host: &VerterHost, subject: SemanticNodeId) -> TruthinessDomain {
     ProjectSemanticDispatch::new(host)
@@ -176,7 +176,7 @@ fn truthiness_rules_match_the_pinned_checker() {
     // `${"a" | ""}` admits both buckets (measured q11: the falsy edge
     // keeps the arm as `""`).
     let ab = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from([
             lit_a, lit_empty,
         ])),
     ));
@@ -197,7 +197,7 @@ fn truthiness_rules_match_the_pinned_checker() {
     // A type parameter classifies through its constraint (measured q2/q3:
     // `T extends "a"` leaves the falsy edge, `T extends string` keeps
     // it); unconstrained is `unknown`'s domain (measured q1).
-    let decl = crate::semantic_query::DeclIdentity {
+    let decl = verter_type_engine::semantic_query::DeclIdentity {
         canonical_id: Arc::from("/wb/t.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: Default::default(),

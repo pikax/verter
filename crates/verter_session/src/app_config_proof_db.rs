@@ -118,7 +118,7 @@ pub struct AppConfigNoOverrideProofEntry {
     /// R3/R26/R28 path-precise dep signature. Captured by the
     /// production producer's `install_fact_tracer` scope; bubbles
     /// into outer fact tracers via
-    /// [`crate::fact_signature_helpers::bubble_fact_signature`] on
+    /// [`verter_type_engine::fact_signature_helpers::bubble_fact_signature`] on
     /// warm hit. Validated against the live store view on every
     /// warm-hit read.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
@@ -147,7 +147,7 @@ impl AppConfigNoOverrideProofDb {
     /// caller declines and the slow path runs.
     ///
     /// Validation is path-precise only. Each warm-hit read calls
-    /// [`crate::fact_signature_helpers::validate_fact_signature`]
+    /// [`verter_type_engine::fact_signature_helpers::validate_fact_signature`]
     /// against the live store view through `ctx`. A single
     /// mismatched fact returns `None` and the caller cold-recomputes.
     /// On a successful warm hit, the path-precise observation set
@@ -243,9 +243,11 @@ impl Default for AppConfigNoOverrideProofDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for AppConfigNoOverrideProofDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation
+    for AppConfigNoOverrideProofDb
+{
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         // `AppConfigNoOverrideProofDb` participates in
         // [FileContent, AppConfigInterfaceMerge]. The proof's dep
         // signature includes the merge-generation; either a content
@@ -253,15 +255,17 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for AppConfigNoOverr
         // `interface AppConfig` shape change must invalidate it.
         &[FileContent, AppConfigInterfaceMerge]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, AppConfigInterfaceMerge | ProjectGeneration) {
             self.invalidate_all();
         }
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for AppConfigNoOverrideProofDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical
+    for AppConfigNoOverrideProofDb
+{
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         let before = self.live_count();
         self.invalidate_canonical(canonical_id);
@@ -315,9 +319,9 @@ impl crate::invalidation_domain::InvalidationByCanonical for AppConfigNoOverride
 /// producer is absent from every ordinary production build.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn app_config_no_override_proof_get_or_compute<
-    C: crate::resolver_core::ResolverCapabilities,
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
 >(
-    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     proofs: &crate::app_config_proof_db::AppConfigNoOverrideProofDb,
     provenance: &crate::meta_provenance::MetaProvenance,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
@@ -378,8 +382,8 @@ pub(crate) fn app_config_no_override_proof_get_or_compute<
             .map(|ir| !ir.declares_interface_app_config)
             .unwrap_or(true)
     };
-    let (no_override, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+    let (no_override, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
         cold_body,
     );
     provenance

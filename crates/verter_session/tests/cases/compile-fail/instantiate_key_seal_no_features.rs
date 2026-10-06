@@ -22,10 +22,7 @@
 //! corresponding line would COMPILE and trybuild would fail this fixture.
 
 use std::sync::Arc;
-use verter_session::semantic_query::{
-    InstantiateContext, InstantiateKey, ProjectionMode, ProjectionReductionContext,
-    ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
-};
+use verter_type_engine::semantic_query::{InstantiateContext, InstantiateKey, ProjectionMode, ProjectionReductionContext, ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey};
 
 fn main() {
     let prc = ProjectionReductionContext::published(ProjectionMode::Expanded);
@@ -43,7 +40,7 @@ fn main() {
 
     // 2. The source-kind axis is a `pub(crate)` enum — its variants are not
     //    nameable outside the crate.
-    let _forged_source = verter_session::semantic_query::InstantiateBodySource::NonFile;
+    let _forged_source = verter_type_engine::semantic_query::InstantiateBodySource::NonFile;
 
     // 3. `InstantiateContext` has private fields — not struct-literal-able.
     let _forged_context = InstantiateContext {

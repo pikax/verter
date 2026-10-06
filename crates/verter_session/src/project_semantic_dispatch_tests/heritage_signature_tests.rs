@@ -13,7 +13,7 @@
 //! s: null = v;` read off the TS2322 message for a type probe.
 
 use super::checker_probe_lane_tests::{mismatches, tuple_labels};
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
 const HERITAGE: &str = "\
 interface A { (): string }
@@ -209,8 +209,10 @@ fn a_mixin_constructor_base_keeps_its_own_construct_signature() {
 /// last — instead of turning into an intersection type.
 #[test]
 fn a_substituted_heritage_body_stays_a_declaration() {
-    use crate::semantic_query::composite::{CompositeList, CompositeOriginCategory};
-    use crate::semantic_query::{PrimitiveKind, SignatureKind, SignatureReturnCarrier};
+    use verter_type_engine::semantic_query::composite::{CompositeList, CompositeOriginCategory};
+    use verter_type_engine::semantic_query::{
+        PrimitiveKind, SignatureKind, SignatureReturnCarrier,
+    };
 
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = super::ProjectSemanticDispatch::new(&host);
@@ -218,7 +220,7 @@ fn a_substituted_heritage_body_stays_a_declaration() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let binder = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("C"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("C"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -239,14 +241,16 @@ fn a_substituted_heritage_body_stays_a_declaration() {
         })
     };
     let callable = |signature| {
-        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-            members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: std::sync::Arc::from(vec![signature].into_boxed_slice()),
-            construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        }))
+        graph.intern_node(SemanticNodeData::Object(
+            verter_type_engine::test_surface_view! {
+                members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: std::sync::Arc::from(vec![signature].into_boxed_slice()),
+                construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ))
     };
     let base_signature = returning(string);
     let base = callable(base_signature);
@@ -283,7 +287,7 @@ fn a_substituted_heritage_body_stays_a_declaration() {
 /// preserving rebuild.
 #[test]
 fn a_rebuilt_heritage_body_keeps_its_category() {
-    use crate::semantic_query::composite::{
+    use verter_type_engine::semantic_query::composite::{
         CompositeList, CompositeOriginCategory, IntersectionKind,
     };
     let arms: std::sync::Arc<[SemanticNodeId]> =

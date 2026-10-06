@@ -15,12 +15,12 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::{
-    FlowReturnResult, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnResult, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::TopLevelOwnerId;
 
@@ -57,8 +57,8 @@ pub(super) fn flow_key(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     part: FunctionPartIdentity,
-) -> crate::semantic_query::FlowReturnKey {
-    crate::semantic_query::FlowReturnKey {
+) -> verter_type_engine::semantic_query::FlowReturnKey {
+    verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(FILE),
             TopLevelOwnerId::ordinary_file(),
@@ -68,8 +68,8 @@ pub(super) fn flow_key(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(FILE),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -111,8 +111,8 @@ fn with_probe<R>(
         let normalized = dispatch
             .normalize_node_keeping_declaration_refs_for_tests(
                 result.return_type(),
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Expanded,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 ),
             )
             .into_complete_node()
@@ -177,7 +177,10 @@ fn assert_tuple_probe(source: &str, name: &str, expected: &[(&str, bool, &str)])
 fn constructor_and_instance(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     constructor: SemanticNodeId,
-) -> (crate::semantic_query::SurfaceView, SemanticNodeId) {
+) -> (
+    verter_type_engine::semantic_query::SurfaceView,
+    SemanticNodeId,
+) {
     let graph = dispatch.graph();
     let Some(SemanticNodeData::Object(view)) = graph.node_data(constructor).as_deref().cloned()
     else {
@@ -202,7 +205,7 @@ fn constructor_and_instance(
 fn instance_surface(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     instance: SemanticNodeId,
-) -> crate::semantic_query::SurfaceView {
+) -> verter_type_engine::semantic_query::SurfaceView {
     let graph = dispatch.graph();
     let Some(SemanticNodeData::ClassExpressionInstance { surface, .. }) =
         graph.node_data(instance).as_deref().cloned()
@@ -465,7 +468,7 @@ fn class_expression_literal_computed_keys_name_their_members() {
 #[test]
 fn class_expression_late_bound_keys_index_their_side() {
     with_dispatch(SHAPES, |dispatch| {
-        let index = |view: &crate::semantic_query::SurfaceView| {
+        let index = |view: &verter_type_engine::semantic_query::SurfaceView| {
             view.index_signatures
                 .iter()
                 .map(|signature| (signature.key_type, signature.value_type))
@@ -1069,7 +1072,7 @@ fn bare_factory_return_reads_each_parameter_at_its_constraint() {
         };
         assert!(matches!(
             kind,
-            crate::semantic_query::SignatureKind::Construct
+            verter_type_engine::semantic_query::SignatureKind::Construct
         ));
         let [rest] = &params[..] else {
             panic!("mixinConstraint: one rest parameter");
@@ -1095,7 +1098,7 @@ fn bare_factory_return_reads_each_parameter_at_its_constraint() {
 /// class)`.
 #[test]
 fn printed_name_qualifies_exactly_the_instantiated_clauses() {
-    let identity = crate::semantic_query::ClassExpressionIdentity {
+    let identity = verter_type_engine::semantic_query::ClassExpressionIdentity {
         canonical_id: Arc::from(FILE),
         owner: TopLevelOwnerId::ordinary_file(),
         offset: 0,
@@ -1195,7 +1198,7 @@ fn nested_class_expression_raise(depth: usize) -> (usize, usize) {
                 scope: "/ws/nested-class.ts".to_string(),
                 expression: "ReturnType<typeof pf>".to_string(),
                 extra_imports: Vec::new(),
-                mode: crate::semantic_query::ProjectionMode::Expanded,
+                mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 cacheable: false,
             },
         )

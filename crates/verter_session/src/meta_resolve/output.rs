@@ -22,7 +22,7 @@
 //! - **Positional topology.** Materialized lanes are positional vectors
 //!   order-aligned with the analysis — never name-keyed maps (names repeat
 //!   across duplicate events, slots, fallthrough branches, registry rows).
-use crate::project_semantic_dispatch::interior_source::InteriorSourceStep;
+use verter_type_engine::project_semantic_dispatch::interior_source::InteriorSourceStep;
 
 use verter_session_query::analysis::component_meta::{ComponentMetaAnalysis, ResolvedTypeAnalysis};
 use verter_type_expr::facts::{SemanticSourceFailure, SourcePosition};
@@ -50,7 +50,7 @@ use crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap;
 /// three named constructors below, so the claim a call site is making is
 /// spelled out at that call site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PublishedCompleteness(crate::semantic_query::ResultCompleteness);
+pub(crate) struct PublishedCompleteness(verter_type_engine::semantic_query::ResultCompleteness);
 
 impl PublishedCompleteness {
     /// A result with no partiality anywhere: hand-built parts, i.e. the
@@ -58,15 +58,16 @@ impl PublishedCompleteness {
     /// resolve or extract phase to merge. No production entry uses it — a
     /// production envelope's completeness is always MEASURED.
     #[cfg(test)]
-    pub(crate) const COMPLETE: Self = Self(crate::semantic_query::ResultCompleteness::Complete);
+    pub(crate) const COMPLETE: Self =
+        Self(verter_type_engine::semantic_query::ResultCompleteness::Complete);
 
     /// The COLD constructor: the resolve-phase term merged with the WHOLE
     /// extract scope, i.e. exactly the signal
     /// `component_meta_publish_decision*` gates admission on. Every cold
     /// output-bearing entry MUST build its envelope completeness here.
     pub(crate) fn merged(
-        resolve: crate::semantic_query::ResultCompleteness,
-        extract: crate::semantic_query::ResultCompleteness,
+        resolve: verter_type_engine::semantic_query::ResultCompleteness,
+        extract: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> Self {
         Self(resolve.merge(extract))
     }
@@ -78,13 +79,13 @@ impl PublishedCompleteness {
     /// arms re-publish it rather than recomputing a merge they have no extract
     /// phase for.
     pub(crate) fn from_admitted_cache_entry(
-        cached: crate::semantic_query::ResultCompleteness,
+        cached: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> Self {
         Self(cached)
     }
 
     /// The carried value, for the envelope field and the wire projection.
-    pub(crate) fn get(self) -> crate::semantic_query::ResultCompleteness {
+    pub(crate) fn get(self) -> verter_type_engine::semantic_query::ResultCompleteness {
         self.0
     }
 }
@@ -117,7 +118,7 @@ pub struct ComponentMetaOutput {
     /// result-cache publication gate (the no-poison invariant), and this
     /// field never changes that decision — it only stops the payload from
     /// LOOKING complete.
-    completeness: crate::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 }
 
 impl ComponentMetaOutput {
@@ -130,7 +131,7 @@ impl ComponentMetaOutput {
         resolution: Option<ComponentMetaResolutionOutput>,
         types: MaterializedComponentMetaTypes,
         contract: crate::framework::ComponentContractAvailability,
-        completeness: crate::semantic_query::ResultCompleteness,
+        completeness: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> Self {
         Self {
             analysis,
@@ -162,7 +163,7 @@ impl ComponentMetaOutput {
         Option<ComponentMetaResolutionOutput>,
         MaterializedComponentMetaTypes,
         crate::framework::ComponentContractAvailability,
-        crate::semantic_query::ResultCompleteness,
+        verter_type_engine::semantic_query::ResultCompleteness,
     ) {
         (
             self.analysis,
@@ -377,7 +378,7 @@ pub struct MaterializedEventOccurrence {
 #[derive(Debug, Clone)]
 pub struct ComponentMetaResolutionOutput {
     /// The projection mode the resolution ran under.
-    pub mode: crate::types::ProjectionMode,
+    pub mode: verter_type_engine::semantic_query::ProjectionMode,
     /// Resolved per-macro metadata (declaration identity, native-props
     /// visibility surface, JSDoc).
     pub resolved_macros: Vec<crate::meta_resolve::ResolvedMacroMeta>,
@@ -574,7 +575,7 @@ pub enum ComponentMetaFailure {
     /// A present source the terminal sink could not materialize.
     Output(ComponentMetaOutputError),
     /// The computation was aborted.
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
 impl From<ComponentMetaOutputError> for ComponentMetaFailure {
@@ -583,8 +584,8 @@ impl From<ComponentMetaOutputError> for ComponentMetaFailure {
     }
 }
 
-impl From<crate::semantic_query::ExecutionAbort> for ComponentMetaFailure {
-    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+impl From<verter_type_engine::semantic_query::ExecutionAbort> for ComponentMetaFailure {
+    fn from(abort: verter_type_engine::semantic_query::ExecutionAbort) -> Self {
         Self::Aborted(abort)
     }
 }

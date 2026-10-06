@@ -8,14 +8,15 @@
 use std::sync::Arc;
 
 use crate::resolver_core::{
-    FallthroughNodeKey, FallthroughOverrideIdentity, ResolverContext, ResolverCounters,
-    ResolverDiagnostic, ValidatedFactCache,
+    FallthroughNodeKey, FallthroughOverrideIdentity, ResolverCounters, ResolverDiagnostic,
+    ValidatedFactCache,
 };
 use verter_session_query::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedSurfaceCompleteness, FallthroughSurface,
 };
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::resolver_core::ResolverContext;
 
 #[derive(Debug, Clone)]
 pub enum FallthroughNodeValue {
@@ -185,7 +186,8 @@ impl FallthroughNodeResult {
 
 /// The most keys the fallthrough node cache keeps: the bound the semantic
 /// memo keeps on its families.
-pub(crate) const FALLTHROUGH_NODE_CAP: usize = crate::bounded_query_retention::DEFAULT_BUDGET_CAP;
+pub(crate) const FALLTHROUGH_NODE_CAP: usize =
+    verter_type_engine::bounded_query_retention::DEFAULT_BUDGET_CAP;
 
 /// What the node cache keeps, and why. The cache itself answers reads; this
 /// is its single write-side consistency domain: every admission and removal
@@ -442,8 +444,8 @@ impl FallthroughResolverState {
     ) -> R {
         let supersession_before = ctx.current_external_supersession_fingerprint();
         let ((value, candidate), non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(
-                &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+                &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
                 |_probe| compute(),
             );
 
@@ -461,8 +463,8 @@ impl FallthroughResolverState {
         if !key.is_cacheable() {
             return;
         }
-        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-            crate::request_context::current_cold_compute_completeness().is_partial(),
+        if verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
+            verter_type_engine::request_context::current_cold_compute_completeness().is_partial(),
         ) {
             return;
         }
@@ -712,7 +714,7 @@ mod tests {
 
         state.clear_cache();
         let served = state.compute_and_maybe_admit(&host, || {
-            crate::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
             (

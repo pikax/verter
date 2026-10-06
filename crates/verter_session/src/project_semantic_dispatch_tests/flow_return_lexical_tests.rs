@@ -19,11 +19,11 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::{
-    FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
@@ -1869,8 +1869,8 @@ fn r5_key_part(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(R5_CANONICAL),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -1880,7 +1880,7 @@ fn r5_key_part(
 /// 1 = warm-admitted).
 struct R5Outcome {
     ty: TypeExpr,
-    degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+    degradation: Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
     candidates: usize,
 }
 
@@ -1999,7 +1999,7 @@ pub(crate) fn assert_flow_fails_closed(
 fn assert_degraded(
     host: &Arc<VerterHost>,
     name: &str,
-    expected: crate::semantic_query::FlowReturnDegradation,
+    expected: verter_type_engine::semantic_query::FlowReturnDegradation,
 ) {
     let outcome = r5_eval(host, name).unwrap_or_else(|| panic!("{name} must produce a value"));
     assert_eq!(
@@ -2175,13 +2175,13 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
     assert_degraded(
         &host,
         "r5LabeledLoopVar",
-        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
     );
     // A conditional `var` has no single reaching definition: degraded.
     assert_degraded(
         &host,
         "r5LabeledIfVar",
-        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
     );
     // A `switch` declaring a `var` in one clause: the binding has no
     // reaching definition on the paths that skip the clause — the
@@ -2189,7 +2189,7 @@ fn flow_return_labeled_statement_body_reaches_every_inner_rail() {
     assert_degraded(
         &host,
         "r5LabeledSwitchVar",
-        crate::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
+        verter_type_engine::semantic_query::FlowReturnDegradation::ConditionalVarDefinition,
     );
     // A `try` whose block binds the `var`, with NO catch: the abrupt
     // paths leave the frame, so past the statement the normal-completion
@@ -2242,7 +2242,7 @@ fn flow_return_call_on_binding_folds_the_read_membership_flags() {
     assert_degraded(
         &host,
         "r5CallOnFailedInit",
-        crate::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
+        verter_type_engine::semantic_query::FlowReturnDegradation::FailedBindingInitializer,
     );
 }
 
@@ -2547,7 +2547,7 @@ fn flow_return_degraded_component_member_is_order_independent_and_never_warms() 
             .unwrap_or_else(|| panic!("{first} must produce a value when demanded first"));
         assert_eq!(
             outcome.degradation,
-            Some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnappliedWriteEffect),
             "{first}: the component's observed degradation must survive the discharge"
         );
         assert_eq!(outcome.ty, number(), "{first} return type");
@@ -3066,17 +3066,17 @@ fn project_member_path(
     base: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
-    let path: Arc<[crate::semantic_query::PathSegment]> = Arc::from(
-        vec![crate::semantic_query::PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier(key),
+    let path: Arc<[verter_type_engine::semantic_query::PathSegment]> = Arc::from(
+        vec![verter_type_engine::semantic_query::PathSegment::Member(
+            verter_type_engine::semantic_query::PropertyKey::identifier(key),
         )]
         .into_boxed_slice(),
     );
     match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(out) => out.value,
@@ -3143,7 +3143,7 @@ fn conditional_check(
 struct SigParts {
     params: Vec<SemanticNodeId>,
     return_type: SemanticNodeId,
-    type_parameters: Vec<crate::semantic_query::TypeParamDecl>,
+    type_parameters: Vec<verter_type_engine::semantic_query::TypeParamDecl>,
 }
 
 #[track_caller]
@@ -3797,7 +3797,7 @@ fn flow_return_parameter_list_is_its_own_shadowing_inventory() {
     assert_eq!(
         r5_eval(&host, "paramTypeofNoTwin").map(|outcome| outcome.degradation),
         Some(Some(
-            crate::semantic_query::FlowReturnDegradation::UnresolvedValue
+            verter_type_engine::semantic_query::FlowReturnDegradation::UnresolvedValue
         )),
         "an unresolvable owner-scope probe is a miss carrier, not a complete result"
     );
@@ -5695,7 +5695,7 @@ fn method_overload_group_carrier_hides_the_implementation_signature() {
                 let selected = dispatch
                     .utility_inference_signature(
                         projected,
-                        crate::semantic_query::SignatureKind::Call,
+                        verter_type_engine::semantic_query::SignatureKind::Call,
                     )
                     .unwrap_or_else(|| panic!("{name}: the group must select a signature"));
                 let parts = signature_parts(dispatch, selected);
@@ -5952,9 +5952,11 @@ fn flow_return_sequence_call_context_value_surfaces() {
     );
     assert_eq!(
         discarded.degradation,
-        Some(crate::semantic_query::FlowReturnDegradation::FlowGap(
-            verter_session_query::flow::policy::FlowGap::GuardNarrowing
-        )),
+        Some(
+            verter_type_engine::semantic_query::FlowReturnDegradation::FlowGap(
+                verter_session_query::flow::policy::FlowGap::GuardNarrowing
+            )
+        ),
         "tnAmbSeqDiscard: the discarded unprovable call degrades to the typed gap"
     );
     assert_eq!(discarded.candidates, 0, "tnAmbSeqDiscard never warms");
@@ -5971,7 +5973,7 @@ fn flow_return_sequence_call_context_value_surfaces() {
 /// are known to inherit.
 #[test]
 fn visible_overload_ordinals_covers_every_group_shape() {
-    use crate::semantic_query::visible_overload_ordinals;
+    use verter_type_engine::semantic_query::visible_overload_ordinals;
 
     // Degenerate.
     assert_eq!(visible_overload_ordinals([]), Vec::<usize>::new());
@@ -6297,8 +6299,8 @@ fn r1_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(R1_CANONICAL),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let QueryResult::Value(SemanticQueryOutput {
@@ -6632,8 +6634,8 @@ fn r2_eval(host: &Arc<VerterHost>, name: &str) -> Option<R5Outcome> {
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(R2_CANONICAL),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         let QueryResult::Value(SemanticQueryOutput {

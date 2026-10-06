@@ -291,7 +291,7 @@ fn raise_member_value(
     host: &VerterHost,
     member: &TypeInfoSurfaceMember,
 ) -> verter_type_expr::TypeExpr {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
@@ -351,7 +351,8 @@ fn defineslots_return_span_slices_raw_to_vnode_array() {
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots<...>() must resolve a macro surface");
 
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_0,

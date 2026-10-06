@@ -1101,7 +1101,7 @@ export function v1(x: boolean) { return ov(x); }
 /// from a signature combining every overload.
 #[test]
 fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
     };
     let rows = [

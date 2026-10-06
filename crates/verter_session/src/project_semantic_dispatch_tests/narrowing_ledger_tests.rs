@@ -1,7 +1,7 @@
-use crate::project_semantic_dispatch::flow_return::*;
-use crate::semantic_query::SemanticNodeId;
 use std::sync::Arc;
 use verter_session_query::flow::binding::FlowBindingRef as FlowProductSubject;
+use verter_type_engine::project_semantic_dispatch::flow_return::*;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 fn param(ordinal: u32) -> FlowProductSubject {
     let allocator = oxc_allocator::Allocator::default();

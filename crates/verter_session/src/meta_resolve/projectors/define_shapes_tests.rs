@@ -5,10 +5,10 @@
 
 use super::*;
 use crate::meta::MetaProject;
-use crate::project_semantic_dispatch::semantic_source::demand_semantic_source_type_expr_with_ctx;
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::semantic_source::demand_semantic_source_type_expr_with_ctx;
 use verter_type_expr::facts::{
     ClosedTypeFact, LeafTypeFact, ProjectedTypeFact, SemanticTypeSource,
 };
@@ -47,7 +47,8 @@ fn save_payload_source(project: &MetaProject) -> verter_type_expr::facts::Source
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
 
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let shape = define_emits_shape(&ctx, &fixture_dispatch_0, "/App.vue", 0)
         .expect("the emits macro surface resolves");
     shape
@@ -284,7 +285,10 @@ defineEmits<{ save: [id: number] }>()
             payload: verter_type_expr::locators::MacroPayloadPosition::TypeArgument,
         }),
         path: std::sync::Arc::from(
-            vec![crate::semantic_query::PropertyKey::identifier("save")].into_boxed_slice(),
+            vec![verter_type_engine::semantic_query::PropertyKey::identifier(
+                "save",
+            )]
+            .into_boxed_slice(),
         ),
     });
     assert_eq!(
@@ -322,7 +326,8 @@ defineEmits<{ save: [id: number] }>()
     // Sanity: the UNTAMPERED analysis materializes cleanly — the typed
     // failure asserted below is not unconditional.
 
-    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let fixture_dispatch_1 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     crate::meta_resolve::projectors::build_component_meta_output(
         host,
         &fixture_dispatch_1,
@@ -350,7 +355,7 @@ defineEmits<{ save: [id: number] }>()
             payload: verter_type_expr::locators::MacroPayloadPosition::TypeArgument,
         }),
         path: std::sync::Arc::from(
-            vec![crate::semantic_query::PropertyKey::identifier(
+            vec![verter_type_engine::semantic_query::PropertyKey::identifier(
                 "not_a_member",
             )]
             .into_boxed_slice(),
@@ -447,7 +452,8 @@ defineEmits<{ save: [id: number] }>()
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
 
-    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_2 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let shape = define_emits_shape(&ctx, &fixture_dispatch_2, "/App.vue", 0)
         .expect("the authored emits macro surface resolves");
     let save = shape
@@ -501,7 +507,8 @@ defineEmits<ImportedEmits>()
     let overlay = std::sync::Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::new(host, &view, overlay);
 
-    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let shape = define_emits_shape(&ctx, &fixture_dispatch_3, "/App.vue", 0)
         .expect("the imported emits macro surface resolves");
     let save = shape

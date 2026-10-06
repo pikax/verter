@@ -366,7 +366,7 @@ const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 
 /// Re-exported under the resolver-store-local name `OverlayIdentity`.
 /// `StoreViewOverlayIdentity` is named distinctly to avoid colliding with
-/// `crate::cache_runtime::world_snapshot::OverlayIdentity`, an unrelated
+/// `verter_type_engine::cache_runtime::world_snapshot::OverlayIdentity`, an unrelated
 /// type).
 pub(crate) use verter_session_query::resolution::StoreViewOverlayIdentity as OverlayIdentity;
 pub(crate) use verter_session_query::resolution::StoreViewProjectIdentity;
@@ -1119,7 +1119,7 @@ pub(crate) struct StoreViewSnapshot {
 
 /// The LIVE source-env identity for `key`'s canonical — the SINGLE
 /// construction point shared by the fact producer
-/// ([`crate::fact_signature_helpers::observe_file_source_env_from_artifact_key`])
+/// ([`verter_type_engine::fact_signature_helpers::observe_file_source_env_from_artifact_key`])
 /// and the validate-side root-relative read
 /// ([`crate::store_view_roots::StoreViewRoots::resolve_canonical`]),
 /// so record and validate compare the same dimensions by
@@ -1567,7 +1567,7 @@ impl HostStoreView {
             .fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             ctx.cache_counters
                 .bypass_diagnostics
                 .host_store_view_from_host_builds
@@ -4609,29 +4609,30 @@ impl VerterHost {
         // taking this snapshot). These counters move into the
         // component-meta payload — they are kind-specific and do
         // not belong on the generic `RequestStoreAudit`.
-        let component_meta_counters = match crate::request_context::current_request_context() {
-            Some(ctx) => ComponentMetaStoreCounters {
-                materialize_structure_calls: ctx
-                    .materialize_structure_calls
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                materialize_structure_cache_hits: ctx
-                    .materialize_structure_cache_hits
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                node_arena_lock_acquisitions: ctx
-                    .node_arena_lock_acquisitions
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                family_map_lock_acquisitions: ctx
-                    .family_map_lock_acquisitions
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                dep_signature_merges: ctx
-                    .dep_signature_merges
-                    .load(std::sync::atomic::Ordering::Relaxed),
-                dep_signature_intern_hits: ctx
-                    .dep_signature_intern_hits
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            },
-            None => ComponentMetaStoreCounters::default(),
-        };
+        let component_meta_counters =
+            match verter_type_engine::request_context::current_request_context() {
+                Some(ctx) => ComponentMetaStoreCounters {
+                    materialize_structure_calls: ctx
+                        .materialize_structure_calls
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    materialize_structure_cache_hits: ctx
+                        .materialize_structure_cache_hits
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    node_arena_lock_acquisitions: ctx
+                        .node_arena_lock_acquisitions
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    family_map_lock_acquisitions: ctx
+                        .family_map_lock_acquisitions
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    dep_signature_merges: ctx
+                        .dep_signature_merges
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    dep_signature_intern_hits: ctx
+                        .dep_signature_intern_hits
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                },
+                None => ComponentMetaStoreCounters::default(),
+            };
 
         let store_audit = crate::component_meta_audit::RequestStoreAudit {
             store_view_hits: u32::from(store_view.is_some()),

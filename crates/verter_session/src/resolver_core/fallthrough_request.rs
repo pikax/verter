@@ -1,14 +1,15 @@
 use rustc_hash::FxHashSet;
 
-use crate::fact_signature_helpers::CacheabilityProbe;
-use crate::request_context::ColdComputeCompletenessScope;
 use crate::resolver_core::{
     fallthrough_cache_key, run_stable_request, FallthroughNodeKey, FallthroughPropOverrideSet,
-    RequestRunResult, RequestSource, ResolverContext, SingleflightGroup, StableExecutionValue,
+    RequestRunResult, RequestSource, SingleflightGroup, StableExecutionValue,
     StableRequestExecutor,
 };
-use crate::semantic_query::ResultCompleteness;
 use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::fact_signature_helpers::CacheabilityProbe;
+use verter_type_engine::request_context::ColdComputeCompletenessScope;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::ResultCompleteness;
 
 /// Owner-minted evidence that a stable fallthrough result was computed inside
 /// the request driver's cacheability scope. Only the request driver can
@@ -91,7 +92,7 @@ pub(crate) trait FallthroughRequestHost {
     /// request-bound resolver context (via `from_cold_seed`) so that, on a
     /// non-current seed, the fallthrough resolver's per-element /
     /// per-child / per-root node-cache validation (which reads through
-    /// `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)`) MISSES rather than consuming a stale warm hit.
+    /// `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)`) MISSES rather than consuming a stale warm hit.
     /// The fenced cold builder still computes from the seed (the outer
     /// `is_stable` / publish fence rejects promotion of a non-current
     /// result); only its nested probes fail closed.
@@ -409,7 +410,7 @@ where
         // the off-lane / fallback paths carry it out. The held scope is still
         // active here (it lives until executor drop), so this reads THIS
         // attempt's partiality.
-        crate::request_context::current_cold_compute_completeness()
+        verter_type_engine::request_context::current_cold_compute_completeness()
     }
 
     fn fold_follower_completeness(&self, joined: ResultCompleteness) {
@@ -418,7 +419,7 @@ where
         // scope + request suppress flag BEFORE returning — so the follower's
         // own owner / payload / node admission downstream refuses to warm a
         // surface built on a leader's partial child (the no-poison fence).
-        crate::request_context::fold_result_completeness(joined);
+        verter_type_engine::request_context::fold_result_completeness(joined);
     }
 }
 
@@ -465,8 +466,8 @@ where
     H: FallthroughRequestHost,
 {
     host.with_cacheability_context(fixed_store_view, |ctx| {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 run_fallthrough_request_in_scope(
                     host,
@@ -670,7 +671,7 @@ mod tests {
             _base_is_current: bool,
         ) -> Option<Self::Resolution> {
             if self.mark_hazard.get() {
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                 );
             }
@@ -932,7 +933,7 @@ mod tests {
         let overrides = FallthroughPropOverrideSet {
             entries: vec![crate::resolver_core::FallthroughPropOverride {
                 name: "p".to_string(),
-                node: crate::semantic_query::SemanticNodeId(1),
+                node: verter_type_engine::semantic_query::SemanticNodeId(1),
             }],
         };
 
@@ -1096,7 +1097,7 @@ mod tests {
                     // The leader's cold compute trips the projection budget —
                     // fold a PARTIAL into the executor's per-attempt held
                     // cold-compute scope (entered by `compute`).
-                    crate::request_context::mark_request_result_partial();
+                    verter_type_engine::request_context::mark_request_result_partial();
                 }
                 Some(42)
             }
@@ -1110,7 +1111,9 @@ mod tests {
                 _admission: &FallthroughStableAdmission<'_, W>,
             ) {
                 // Production no-poison gate mirror: refuse a partial.
-                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                if verter_type_engine::request_context::current_cold_compute_completeness()
+                    .is_partial()
+                {
                     return;
                 }
                 self.promotions
@@ -1176,7 +1179,8 @@ mod tests {
                 let mut visiting = FxHashSet::default();
                 // The follower's OWN cold-compute scope: the fold MUST land
                 // here so the follower's downstream admission refuses.
-                let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+                let scope =
+                    verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
                 let result = run_fallthrough_request(
                     &host,
                     &singleflight,
@@ -1187,7 +1191,8 @@ mod tests {
                     3,
                 );
                 let scope_partial_after_join =
-                    crate::request_context::current_cold_compute_completeness().is_partial();
+                    verter_type_engine::request_context::current_cold_compute_completeness()
+                        .is_partial();
                 drop(scope);
                 (result, scope_partial_after_join)
             })
@@ -1344,7 +1349,7 @@ mod tests {
                     // Attempt 1: fold a PARTIAL into the per-attempt held
                     // scope, then advance the fingerprint so `is_stable`
                     // diverges → unstable → discarded.
-                    crate::request_context::mark_request_result_partial();
+                    verter_type_engine::request_context::mark_request_result_partial();
                     self.live_fp.fetch_add(1, AtomicOrdering::Relaxed);
                     Some(1)
                 } else {
@@ -1363,7 +1368,9 @@ mod tests {
                 _admission: &FallthroughStableAdmission<'_, W>,
             ) {
                 // Production no-poison gate mirror: refuse a partial.
-                if crate::request_context::current_cold_compute_completeness().is_partial() {
+                if verter_type_engine::request_context::current_cold_compute_completeness()
+                    .is_partial()
+                {
                     return;
                 }
                 self.promotions.borrow_mut().push(canonical_id.to_string());
@@ -1385,7 +1392,7 @@ mod tests {
         // ENCLOSING cold-compute scope (the extract helper / parent
         // fallthrough compute analogue). A DISCARDED attempt's partiality
         // must never taint it.
-        let enclosing = crate::request_context::ColdComputeCompletenessScope::enter();
+        let enclosing = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let result = run_fallthrough_request(
             &host,
             &singleflight,
@@ -1397,7 +1404,7 @@ mod tests {
         );
         // Read the enclosing scope's completeness BEFORE dropping it.
         let enclosing_partial_after =
-            crate::request_context::current_cold_compute_completeness().is_partial();
+            verter_type_engine::request_context::current_cold_compute_completeness().is_partial();
         drop(enclosing);
 
         assert_eq!(

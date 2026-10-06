@@ -5,7 +5,7 @@
 //! gate descent on the published path the consumer actually walks.
 //!
 //! The substrate is built on the EXISTING `PathSegment` type from
-//! [`crate::semantic_query`] (which already carries
+//! [`verter_type_engine::semantic_query`] (which already carries
 //! `Member(Arc<str>)` and `Index(IndexKey)`); this module adds the
 //! caller-side spec (`SurfaceProjection`, `ProjectionNode`,
 //! `KeyFilter`, `PublishedSurfaceKind`) and the threading
@@ -46,10 +46,10 @@
 
 #![allow(dead_code)] // Substrate; full surface adopted across Commits A–F.
 
-use crate::component_meta_caches::{KeyFilter, PublishedSurfaceKind};
-use crate::semantic_query::PathSegment;
-use crate::types::ProjectionMode;
 use rustc_hash::FxHashMap;
+use verter_type_engine::component_meta_caches::{KeyFilter, PublishedSurfaceKind};
+use verter_type_engine::semantic_query::PathSegment;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// One node in a [`SurfaceProjection`] — encodes per-child
 /// constraints plus the (terminal-only) mode to dispatch at.
@@ -292,7 +292,7 @@ impl<'a> ProjectionCursor<'a> {
 
     /// Whether the cursor admits the given key at THIS hop. Used by
     /// the registry walker's Object arm to gate per-member descent.
-    pub(crate) fn admits_key(&self, key: &crate::semantic_query::PropertyKey) -> bool {
+    pub(crate) fn admits_key(&self, key: &verter_type_engine::semantic_query::PropertyKey) -> bool {
         self.node.key_filter.admits(key)
     }
 
@@ -334,7 +334,7 @@ impl<'a> ProjectionCursor<'a> {
     /// NOT breadth-enumerated.
     pub(crate) fn descend_published_member(
         &self,
-        key: &crate::semantic_query::PropertyKey,
+        key: &verter_type_engine::semantic_query::PropertyKey,
     ) -> Option<ProjectionCursor<'a>> {
         // (1) Explicit child wins — the consumer walked a deep path
         // into this member; carry that demand verbatim.
@@ -431,11 +431,12 @@ mod tests {
     fn cursor_admits_all_when_whole_surface() {
         let proj = SurfaceProjection::whole_surface(PublishedSurfaceKind::Props);
         let cursor = proj.cursor();
-        assert!(cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("anything")));
+        assert!(cursor
+            .admits_key(&verter_type_engine::semantic_query::PropertyKey::identifier("anything")));
         assert!(cursor.is_whole_surface());
         // Descending any segment self-pins (no narrowing).
         let descended = cursor.descend(&PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("foo"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
         ));
         assert!(descended.is_some(), "whole-surface descend must self-pin");
         assert!(descended.unwrap().is_whole_surface());
@@ -445,26 +446,32 @@ mod tests {
     fn cursor_include_filter_rejects_unlisted() {
         let mut node = ProjectionNode::whole_surface_expanded();
         node.key_filter = KeyFilter::Include(Arc::from([
-            crate::semantic_query::PropertyKey::identifier("a"),
-            crate::semantic_query::PropertyKey::identifier("b"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("a"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("b"),
         ]));
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root: node,
         };
         let cursor = proj.cursor();
-        assert!(cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("a")));
-        assert!(cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("b")));
-        assert!(!cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("c")));
+        assert!(
+            cursor.admits_key(&verter_type_engine::semantic_query::PropertyKey::identifier("a"))
+        );
+        assert!(
+            cursor.admits_key(&verter_type_engine::semantic_query::PropertyKey::identifier("b"))
+        );
+        assert!(
+            !cursor.admits_key(&verter_type_engine::semantic_query::PropertyKey::identifier("c"))
+        );
         // Descending a non-included Member returns None.
         assert!(cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("c")
+                verter_type_engine::semantic_query::PropertyKey::identifier("c")
             ))
             .is_none());
         assert!(cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("a")
+                verter_type_engine::semantic_query::PropertyKey::identifier("a")
             ))
             .is_some());
     }
@@ -472,25 +479,26 @@ mod tests {
     #[test]
     fn cursor_exclude_filter_rejects_listed() {
         let mut node = ProjectionNode::whole_surface_expanded();
-        node.key_filter =
-            KeyFilter::Exclude(Arc::from([crate::semantic_query::PropertyKey::identifier(
-                "hidden",
-            )]));
+        node.key_filter = KeyFilter::Exclude(Arc::from([
+            verter_type_engine::semantic_query::PropertyKey::identifier("hidden"),
+        ]));
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root: node,
         };
         let cursor = proj.cursor();
-        assert!(cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("visible")));
-        assert!(!cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("hidden")));
+        assert!(cursor
+            .admits_key(&verter_type_engine::semantic_query::PropertyKey::identifier("visible")));
+        assert!(!cursor
+            .admits_key(&verter_type_engine::semantic_query::PropertyKey::identifier("hidden")));
         assert!(cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("hidden")
+                verter_type_engine::semantic_query::PropertyKey::identifier("hidden")
             ))
             .is_none());
         assert!(cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("visible")
+                verter_type_engine::semantic_query::PropertyKey::identifier("visible")
             ))
             .is_some());
     }
@@ -515,12 +523,16 @@ mod tests {
         bar_node.terminal_mode = Some(ProjectionMode::Expanded);
         let mut foo_node = ProjectionNode::whole_surface_expanded();
         foo_node.children.insert(
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "bar",
+            )),
             bar_node,
         );
         let mut root = ProjectionNode::whole_surface_expanded();
         root.children.insert(
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo")),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "foo",
+            )),
             foo_node,
         );
         let proj = SurfaceProjection {
@@ -530,12 +542,12 @@ mod tests {
         let cursor = proj.cursor();
         let foo_cursor = cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("foo"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
             ))
             .expect("explicit foo child must descend");
         let bar_cursor = foo_cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("bar"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("bar"),
             ))
             .expect("explicit bar child must descend");
         assert!(bar_cursor.is_terminal());
@@ -556,7 +568,9 @@ mod tests {
         let foo_node = ProjectionNode::whole_surface_expanded();
         let mut root = ProjectionNode::whole_surface_expanded();
         root.children.insert(
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo")),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "foo",
+            )),
             foo_node,
         );
         let proj = SurfaceProjection {
@@ -568,7 +582,7 @@ mod tests {
         // The enumerated child still descends.
         assert!(cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("foo")
+                verter_type_engine::semantic_query::PropertyKey::identifier("foo")
             ))
             .is_some());
         // An un-enumerated sibling MUST return None — this is the
@@ -576,7 +590,7 @@ mod tests {
         assert!(
             cursor
                 .descend(&PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier("bar")
+                    verter_type_engine::semantic_query::PropertyKey::identifier("bar")
                 ))
                 .is_none(),
             "F2: explicit children + KeyFilter::All must reject \
@@ -589,7 +603,7 @@ mod tests {
         let whole_cursor = whole.cursor();
         assert!(whole_cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("anything")
+                verter_type_engine::semantic_query::PropertyKey::identifier("anything")
             ))
             .is_some());
     }
@@ -609,12 +623,16 @@ mod tests {
         b_node.terminal_mode = Some(ProjectionMode::Shallow);
         let mut a_node = ProjectionNode::whole_surface_expanded();
         a_node.children.insert(
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "b",
+            )),
             b_node,
         );
         let mut root = ProjectionNode::whole_surface_expanded();
         root.children.insert(
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "a",
+            )),
             a_node,
         );
         let proj = SurfaceProjection {
@@ -626,12 +644,12 @@ mod tests {
         // a → b returns the Shallow terminal.
         let a_cursor = cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("a"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             ))
             .expect("explicit a child descends");
         let b_cursor = a_cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("b"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("b"),
             ))
             .expect("explicit b child under a descends");
         assert!(b_cursor.is_terminal());
@@ -642,7 +660,7 @@ mod tests {
         assert!(
             a_cursor
                 .descend(&PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier("c")
+                    verter_type_engine::semantic_query::PropertyKey::identifier("c")
                 ))
                 .is_none(),
             "F3: deep path-precision must reject unspecified child \
@@ -656,10 +674,9 @@ mod tests {
         // 'a' MUST return a cursor whose filter is `All` at the child
         // level — the parent narrowing applied at THIS hop only.
         let mut root = ProjectionNode::whole_surface_expanded();
-        root.key_filter =
-            KeyFilter::Include(Arc::from([crate::semantic_query::PropertyKey::identifier(
-                "a",
-            )]));
+        root.key_filter = KeyFilter::Include(Arc::from([
+            verter_type_engine::semantic_query::PropertyKey::identifier("a"),
+        ]));
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root,
@@ -669,7 +686,7 @@ mod tests {
         // 'a' admits at this hop.
         let a_cursor = cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("a"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             ))
             .expect("Include-admitted key must descend");
 
@@ -677,7 +694,9 @@ mod tests {
         // does not re-apply at child level). The child admits any
         // sibling at the next level.
         assert!(
-            a_cursor.admits_key(&crate::semantic_query::PropertyKey::identifier("anything")),
+            a_cursor.admits_key(
+                &verter_type_engine::semantic_query::PropertyKey::identifier("anything")
+            ),
             "F3: descended cursor under Include('a') must be \
              whole-surface at the next level (parent filter \
              applied at one hop only)"
@@ -686,7 +705,7 @@ mod tests {
         // 'b' is rejected at the parent — descend returns None.
         assert!(cursor
             .descend(&PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("b")
+                verter_type_engine::semantic_query::PropertyKey::identifier("b")
             ))
             .is_none());
     }
@@ -703,7 +722,8 @@ mod tests {
     #[should_panic(expected = "Rule-5 violation site")]
     fn key_filter_admits_panics_on_unknown_deferred() {
         let filter = KeyFilter::UnknownDeferred;
-        let _ = filter.admits(&crate::semantic_query::PropertyKey::identifier("anything"));
+        let _ =
+            filter.admits(&verter_type_engine::semantic_query::PropertyKey::identifier("anything"));
     }
 
     // -----------------------------------------------------------------
@@ -721,9 +741,9 @@ mod tests {
         // Descending a published member yields a TERMINAL CARRIER
         // cursor whose publication mode is Navigate — NOT Expanded.
         let member = cursor
-            .descend_published_member(&crate::semantic_query::PropertyKey::identifier(
-                "searchTool",
-            ))
+            .descend_published_member(
+                &verter_type_engine::semantic_query::PropertyKey::identifier("searchTool"),
+            )
             .expect("whole-surface admits every member");
         assert_eq!(
             member.terminal_publication_mode(),
@@ -742,7 +762,9 @@ mod tests {
         child.terminal_mode = Some(ProjectionMode::Expanded);
         let mut root = ProjectionNode::whole_surface_expanded();
         root.children.insert(
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("searchTool")),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "searchTool",
+            )),
             child,
         );
         let proj = SurfaceProjection {
@@ -752,16 +774,18 @@ mod tests {
         let cursor = proj.cursor();
         // The explicit child carries deep demand → Expanded honoured.
         let member = cursor
-            .descend_published_member(&crate::semantic_query::PropertyKey::identifier(
-                "searchTool",
-            ))
+            .descend_published_member(
+                &verter_type_engine::semantic_query::PropertyKey::identifier("searchTool"),
+            )
             .expect("explicit child descends");
         assert_eq!(member.terminal_publication_mode(), ProjectionMode::Expanded);
         // A sibling with no explicit child is OUT OF SCOPE under an
         // explicit-children + KeyFilter::All root.
         assert!(
             cursor
-                .descend_published_member(&crate::semantic_query::PropertyKey::identifier("other"))
+                .descend_published_member(
+                    &verter_type_engine::semantic_query::PropertyKey::identifier("other")
+                )
                 .is_none(),
             "AX: explicit children + KeyFilter::All must reject \
              un-enumerated members"
@@ -771,20 +795,23 @@ mod tests {
     #[test]
     fn descend_published_member_rejects_excluded_keys() {
         let mut node = ProjectionNode::whole_surface_expanded();
-        node.key_filter =
-            KeyFilter::Exclude(Arc::from([crate::semantic_query::PropertyKey::identifier(
-                "hidden",
-            )]));
+        node.key_filter = KeyFilter::Exclude(Arc::from([
+            verter_type_engine::semantic_query::PropertyKey::identifier("hidden"),
+        ]));
         let proj = SurfaceProjection {
             surface: PublishedSurfaceKind::Props,
             root: node,
         };
         let cursor = proj.cursor();
         assert!(cursor
-            .descend_published_member(&crate::semantic_query::PropertyKey::identifier("hidden"))
+            .descend_published_member(
+                &verter_type_engine::semantic_query::PropertyKey::identifier("hidden")
+            )
             .is_none());
         assert!(cursor
-            .descend_published_member(&crate::semantic_query::PropertyKey::identifier("visible"))
+            .descend_published_member(
+                &verter_type_engine::semantic_query::PropertyKey::identifier("visible")
+            )
             .is_some());
     }
 
@@ -800,7 +827,7 @@ mod tests {
         };
         let cursor = proj.cursor();
         let _ = cursor.descend(&PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("any"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("any"),
         ));
     }
 }

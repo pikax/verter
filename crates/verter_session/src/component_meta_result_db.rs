@@ -42,7 +42,7 @@ use std::sync::Arc;
 
 use verter_session_query::analysis::types::Hash16;
 
-use crate::bounded_query_retention::BoundedCandidateMap;
+use verter_type_engine::bounded_query_retention::BoundedCandidateMap;
 
 /// Stable fingerprint over output-affecting options. Constructed by the
 /// caller from an explicitly versioned serialization; the type alias
@@ -169,7 +169,7 @@ pub(crate) enum ComponentMetaPublishDecision<P> {
         validated_at_generation: u64,
     },
     /// A valid caller-visible value must not warm this cache.
-    ReturnOnly(crate::cache_runtime::NonAdmissionReason),
+    ReturnOnly(verter_audit::NonAdmissionReason),
     /// The cold computation produced no result to retain.
     NoValue,
 }
@@ -191,7 +191,7 @@ impl<P> ComponentMetaPublishDecision<P> {
     }
 
     #[inline]
-    pub(crate) fn return_only(reason: crate::cache_runtime::NonAdmissionReason) -> Self {
+    pub(crate) fn return_only(reason: verter_audit::NonAdmissionReason) -> Self {
         Self::ReturnOnly(reason)
     }
 
@@ -258,7 +258,7 @@ pub struct ComponentMetaResultDb<P> {
     /// "stale sweep" counter.
     stale_sweeps: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract.
+    /// [`verter_type_engine::cache_schema`] for the contract.
     schema_version: u32,
     /// The aggregate retained-byte account this cache admits against.
     ///
@@ -273,7 +273,7 @@ pub struct ComponentMetaResultDb<P> {
 
 impl<P> ComponentMetaResultDb<P> {
     pub(crate) fn is_current_schema(&self) -> bool {
-        self.schema_version == crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
+        self.schema_version == verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
     }
     pub(crate) fn candidate(
         &self,
@@ -281,7 +281,10 @@ impl<P> ComponentMetaResultDb<P> {
         owner_whole_hash: Hash16,
     ) -> Option<
         Arc<
-            crate::bounded_query_retention::RetentionCandidate<Hash16, ComponentMetaResultEntry<P>>,
+            verter_type_engine::bounded_query_retention::RetentionCandidate<
+                Hash16,
+                ComponentMetaResultEntry<P>,
+            >,
         >,
     > {
         self.inner.get_candidate(key, &owner_whole_hash)
@@ -292,8 +295,9 @@ impl<P> ComponentMetaResultDb<P> {
     /// the slot, capped here. A fifth version evicts the oldest. Four
     /// covers the `{current, previous, two concurrent overlay}` working
     /// set (architecture rule R20 multi-candidate model) — the shared
-    /// substrate's [`crate::bounded_query_retention::DEFAULT_CANDIDATE_CAP`].
-    pub const PER_SLOT_CANDIDATE_CAP: usize = crate::bounded_query_retention::DEFAULT_CANDIDATE_CAP;
+    /// substrate's [`verter_type_engine::bounded_query_retention::DEFAULT_CANDIDATE_CAP`].
+    pub const PER_SLOT_CANDIDATE_CAP: usize =
+        verter_type_engine::bounded_query_retention::DEFAULT_CANDIDATE_CAP;
 
     /// Global total-candidate budget across every slot. A long-lived
     /// editor session touching many distinct owners caps here before
@@ -313,7 +317,7 @@ impl<P> ComponentMetaResultDb<P> {
         Self::with_counters_and_schema_version(
             live_counter,
             stale_sweeps,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
             verter_session_query::retention::StoreAccount::default(),
         )
     }
@@ -329,7 +333,7 @@ impl<P> ComponentMetaResultDb<P> {
         Self::with_counters_and_schema_version(
             live_counter,
             stale_sweeps,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
             retention_account,
         )
     }
@@ -431,7 +435,7 @@ impl<P> ComponentMetaResultDb<P> {
     /// the live host.
     ///
     /// Lookups against a Db whose `schema_version` does not match the
-    /// current [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]
+    /// current [`verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]
     /// return `None`.
     #[must_use]
     #[cfg(any(test, feature = "test-support"))]
@@ -440,14 +444,14 @@ impl<P> ComponentMetaResultDb<P> {
         key: &ComponentMetaResultKey,
         owner_whole_hash: Hash16,
     ) -> Option<ComponentMetaResultEntry<P>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self
             .inner
             .get_candidate(key, &owner_whole_hash)
             .map(|c| c.value.clone());
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .component_meta
@@ -498,7 +502,7 @@ impl<P> ComponentMetaResultDb<P> {
         ) {
             verter_session_query::retention::RetentionAdmission::Admitted(charge) => charge,
             verter_session_query::retention::RetentionAdmission::Refused(refusal) => {
-                crate::cache_runtime::admission::propagate_non_admission(
+                verter_type_engine::cache_runtime::admission::propagate_non_admission(
                     refusal.non_admission_reason(),
                 );
                 tracing::debug!(
@@ -635,7 +639,7 @@ impl<P> Default for ComponentMetaResultDb<P> {
     }
 }
 
-impl<P> crate::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
+impl<P> verter_type_engine::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -655,23 +659,25 @@ impl<P> crate::cache_schema::CacheSchemaVersioned for ComponentMetaResultDb<P> {
     }
 }
 
-impl<P> crate::invalidation_domain::ParticipatesInInvalidation for ComponentMetaResultDb<P>
+impl<P> verter_type_engine::invalidation_domain::ParticipatesInInvalidation
+    for ComponentMetaResultDb<P>
 where
     P: Send + Sync,
 {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ComponentMeta, ProjectGeneration]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
             self.invalidate_all();
         }
     }
 }
 
-impl<P> crate::invalidation_domain::InvalidationByCanonical for ComponentMetaResultDb<P>
+impl<P> verter_type_engine::invalidation_domain::InvalidationByCanonical
+    for ComponentMetaResultDb<P>
 where
     P: Send + Sync,
 {
@@ -702,9 +708,10 @@ mod tests {
         let base_producer = include_str!("host_manage/component_meta_entry.rs");
         let resolution_producer = include_str!("host_manage/component_meta_entry_resolution.rs");
 
-        let engine_source = include_str!("project_semantic_dispatch/memo.rs");
+        let engine_source =
+            include_str!("../../verter_type_engine/src/project_semantic_dispatch/memo.rs");
         let trace_start = engine_source
-            .find("    pub(crate) fn traced_compute<R>(")
+            .find("    pub fn traced_compute<R>(")
             .expect("the engine must export the traced cold-compute operation");
         let trace_end = engine_source[trace_start..]
             .find("\n\n")
@@ -806,14 +813,17 @@ mod tests {
             hash: owner_hash,
         };
 
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
         let results =
             crate::component_meta_result_admission::ComponentMetaResultPublish::new(&dispatch, &db);
         let value = results.compute_and_admit(
             "/w/owner.vue",
             "unit-test",
             || {
-                crate::resolver_core::resolver_context::observe_fan_out(owner_fact.clone());
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    owner_fact.clone(),
+                );
                 41u32
             },
             |_value| {
@@ -832,7 +842,7 @@ mod tests {
             "/w/refused.vue",
             "unit-test",
             || {
-                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 42u32

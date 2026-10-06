@@ -7,7 +7,7 @@
 use super::checker_probe_lane_tests::{mismatches, with_probe};
 use super::dispatch_txn::RelationStep;
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
 /// `type S = { p0: 0 } | … ; type T = { p0: number } | … ;` over `count`
 /// arms each: every arm of `S` fits the arm of `T` with its property and no
@@ -109,17 +109,20 @@ fn reversed_object_unions(count: usize) -> String {
 #[test]
 fn a_union_source_relates_each_arm_to_its_position_first() {
     let relate = "[S] extends [T] ? 1 : 2";
-    crate::semantic_query::checker_policy::with_relation_comparisons_for_tests(600, || {
-        let aligned = mismatches(&object_unions(200), &[(relate, "1")]);
-        assert!(aligned.is_empty(), "{}", aligned.join("\n"));
-        let reversed = mismatches(&reversed_object_unions(200), &[(relate, "2")]);
-        assert!(reversed.is_empty(), "{}", reversed.join("\n"));
-        super::checker_probe_lane_tests::with_recovered_probe(
-            &reversed_object_unions(200),
-            relate,
-            |_, _| {},
-        );
-    });
+    verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests(
+        600,
+        || {
+            let aligned = mismatches(&object_unions(200), &[(relate, "1")]);
+            assert!(aligned.is_empty(), "{}", aligned.join("\n"));
+            let reversed = mismatches(&reversed_object_unions(200), &[(relate, "2")]);
+            assert!(reversed.is_empty(), "{}", reversed.join("\n"));
+            super::checker_probe_lane_tests::with_recovered_probe(
+                &reversed_object_unions(200),
+                relate,
+                |_, _| {},
+            );
+        },
+    );
     let reversed = mismatches(&reversed_object_unions(200), &[(relate, "1")]);
     assert!(reversed.is_empty(), "{}", reversed.join("\n"));
 }
@@ -142,10 +145,13 @@ fn a_relation_refused_for_complexity_is_never_kept() {
             |_, outcome| matches!(outcome, StructuralFactDemandOutcome::Recovered { .. }),
         )
     };
-    crate::semantic_query::checker_policy::with_relation_comparisons_for_tests(600, || {
-        assert!(read(), "cold");
-        assert!(read(), "warm");
-    });
+    verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests(
+        600,
+        || {
+            assert!(read(), "cold");
+            assert!(read(), "warm");
+        },
+    );
 }
 
 /// Aligned unions of 600, 1,800 and 3,200 arms relate within the production

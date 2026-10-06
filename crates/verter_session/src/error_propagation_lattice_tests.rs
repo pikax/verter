@@ -8,17 +8,17 @@
 
 use std::sync::Arc;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::admit::{admit_decision, Admission};
-use crate::semantic_query::{
-    BrokenInputClass, IndexKey, PathSegment, PrimitiveKind, QueryError, QueryResult,
-    RelationResult, ResultTaint, SemanticNodeData, SemanticNodeId,
-};
 use crate::{CompileErrorPolicy, HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
 use verter_session_query::facts::registry::{
     FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
+};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::admit::{admit_decision, Admission};
+use verter_type_engine::semantic_query::{
+    BrokenInputClass, IndexKey, PathSegment, PrimitiveKind, QueryError, QueryResult,
+    RelationResult, ResultTaint, SemanticNodeData, SemanticNodeId,
 };
 
 fn host() -> VerterHost {
@@ -58,7 +58,9 @@ fn negative_resolved_import_fact() -> FactVersionRef {
 }
 
 /// Resolve the absorbed result node id from a reducer's `QueryBuildOutput`.
-fn absorbed_node(out: crate::project_semantic_dispatch::walk::QueryBuildOutput) -> SemanticNodeId {
+fn absorbed_node(
+    out: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput,
+) -> SemanticNodeId {
     match out.result {
         QueryResult::Value(id) => id,
         other => panic!("expected an absorbed Value, got {other:?}"),
@@ -172,7 +174,7 @@ fn error_any_never_propagation_lattice() {
     // algebra; every construction routes through the one canonical
     // builder pair, so the laws are exercised at the authority itself —
     // not via retired per-reducer hooks.
-    use crate::project_semantic_dispatch::canonical_algebra;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra;
     // union: X | never = X (the `never` arm is dropped, singleton folds).
     let u = canonical_algebra::intern_ordered_union(
         graph,
@@ -313,7 +315,9 @@ fn error_any_never_propagation_lattice() {
     assert!(!ProjectSemanticDispatch::<
         crate::resolver_core::HostCapabilities,
     >::project_path_is_indexed_access(&[
-        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo"))
+        PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+            "foo"
+        ))
     ]));
 
     // mapped over never = {} (empty object); a DIRECT mapping over unknown is
@@ -467,7 +471,7 @@ fn conditional_any_check_unions_both_branches() {
 /// infer-binding path (`absorb_conditional` returns `None`).
 #[test]
 fn conditional_any_check_detects_nested_infer_patterns() {
-    use crate::semantic_query::{DeclIdentity, SurfaceMember};
+    use verter_type_engine::semantic_query::{DeclIdentity, SurfaceMember};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -501,19 +505,19 @@ fn conditional_any_check_detects_nested_infer_patterns() {
 
     // (2) infer nested inside an `Object` property value:
     //     `any extends { x: infer U } ? U : Y`.
-    let obj_surface = crate::test_surface_view! {
+    let obj_surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("x"),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("x"),
                 value: infer_u,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]

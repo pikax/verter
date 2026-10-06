@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use smallvec::SmallVec;
 use verter_type_expr::LiteralValue;
 
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     AuthoredPropertyKey, DeclIdentity, IndexKey, SemanticNodeData, SemanticNodeId,
 };
 
@@ -250,7 +250,7 @@ fn hash_node(node: SemanticNodeId, ctx: &PolicyCtx<'_, '_>) -> ShapeHash {
 /// literal values, and composite structural shape stay distinct). It is an
 /// ephemeral recursion-guard identity only — never a cache key.
 pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -266,7 +266,7 @@ pub(crate) fn hash_semantic_node_structurally<H: std::hash::Hasher>(
 }
 
 fn hash_node_rec<H: std::hash::Hasher>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -289,7 +289,9 @@ fn hash_node_rec<H: std::hash::Hasher>(
     let ordinal = seen.len() as u64;
     seen.insert(node, ordinal);
 
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) else {
+    let Some(data) =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+    else {
         hasher.write_u8(0xFD);
         return;
     };
@@ -569,8 +571,8 @@ fn hash_node_rec<H: std::hash::Hasher>(
             // The kind is semantic identity: `() => R` and `new () => R`
             // must never fingerprint-collide.
             hasher.write_u8(match kind {
-                crate::semantic_query::SignatureKind::Call => 0,
-                crate::semantic_query::SignatureKind::Construct => 1,
+                verter_type_engine::semantic_query::SignatureKind::Call => 0,
+                verter_type_engine::semantic_query::SignatureKind::Construct => 1,
             });
             hasher.write_u64(params.len() as u64);
             for param in params.iter() {
@@ -665,9 +667,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::semantic_query::NodeScopeId;
     use crate::types::HostConfig;
     use crate::VerterHost;
+    use verter_type_engine::semantic_query::NodeScopeId;
 
     fn scope() -> NodeScopeId {
         NodeScopeId::File {
@@ -678,11 +680,12 @@ mod tests {
         }
     }
 
-    fn digest(host: &VerterHost, node: crate::semantic_query::SemanticNodeId) -> u64 {
+    fn digest(host: &VerterHost, node: verter_type_engine::semantic_query::SemanticNodeId) -> u64 {
         let mut hasher = xxhash_rust::xxh3::Xxh3::new();
         let mut bridge = LiteralHashBridge(&mut hasher);
         crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-            let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
             hash_semantic_node_structurally(dispatch, node, &mut bridge);
         });
@@ -700,7 +703,7 @@ mod tests {
     /// (deterministic structural identity, not allocation identity).
     #[test]
     fn node_structural_hash_discriminates_structure_not_interning() {
-        use crate::semantic_query::SemanticNodeData;
+        use verter_type_engine::semantic_query::SemanticNodeData;
         use verter_type_expr::LiteralValue;
 
         let host = VerterHost::new_standalone(HostConfig::default());
@@ -729,7 +732,7 @@ mod tests {
 
     #[test]
     fn node_structural_hash_discriminates_exact_infer_binder_identity() {
-        use crate::semantic_query::SemanticNodeData;
+        use verter_type_engine::semantic_query::SemanticNodeData;
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();
@@ -768,7 +771,7 @@ mod tests {
     /// a union is distinct from its own single arm (complete).
     #[test]
     fn node_structural_hash_is_ordered_and_complete() {
-        use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+        use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData};
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();
@@ -778,19 +781,17 @@ mod tests {
             .intern_node_with_scope(SemanticNodeData::Primitive(PrimitiveKind::Number), scope());
         let union_ab = graph.intern_node_with_scope(
             SemanticNodeData::Union(
-                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
-                    string_node,
-                    number_node,
-                ])),
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    Arc::from([string_node, number_node]),
+                ),
             ),
             scope(),
         );
         let union_ba = graph.intern_node_with_scope(
             SemanticNodeData::Union(
-                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from([
-                    number_node,
-                    string_node,
-                ])),
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    Arc::from([number_node, string_node]),
+                ),
             ),
             scope(),
         );
@@ -808,24 +809,24 @@ mod tests {
 
     #[test]
     fn node_structural_hash_discriminates_spread_operand_identity() {
-        use crate::semantic_query::{
+        use verter_type_engine::semantic_query::{
             MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember,
         };
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();
         let value = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
+            verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         let operand = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
             param_index: 0,
             constraint: None,
             default: None,
             display_name: Arc::from("T"),
         });
         let member = SurfaceMember {
-            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
             value,
             optional: true,
             readonly: false,
@@ -839,7 +840,7 @@ mod tests {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
         };
         let other_operand = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("U"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("U"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -847,10 +848,10 @@ mod tests {
         });
         let object = |operand| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-                crate::semantic_query::ObjectSpreadProgram {
+                verter_type_engine::semantic_query::ObjectSpreadProgram {
                     effects: Arc::from([
-                        crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                            crate::semantic_query::AuthoredPropertyEffect {
+                        verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                            verter_type_engine::semantic_query::AuthoredPropertyEffect {
                                 key: member.key.clone(),
                                 value: member.value,
                                 optional: member.optional,
@@ -863,7 +864,7 @@ mod tests {
                                 excess_origin: member.excess_origin,
                             },
                         ),
-                        crate::semantic_query::ObjectConstructionEffect::Spread(operand),
+                        verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(operand),
                     ]),
                 },
             ))
@@ -880,7 +881,7 @@ mod tests {
     /// the digest is stable across walks.
     #[test]
     fn node_structural_hash_terminates_on_cyclic_graph() {
-        use crate::semantic_query::{
+        use verter_type_engine::semantic_query::{
             MacroOwnBodyStamp, MergeRoleStamp, SemanticNodeData, SurfaceMember,
         };
 
@@ -892,12 +893,12 @@ mod tests {
         // in-arena id cycles cannot be built through interning, but a
         // DIAMOND of shared children walks the same code path).
         let leaf = graph.intern_node_with_scope(
-            SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
+            SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::String),
             scope(),
         );
         let member = |name: &str| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
             value: leaf,
             optional: false,
             readonly: false,
@@ -910,7 +911,7 @@ mod tests {
             merge_role: MergeRoleStamp::NEUTRAL,
         };
         let object = graph.intern_node_with_scope(
-            SemanticNodeData::Object(crate::test_surface_view! {
+            SemanticNodeData::Object(verter_type_engine::test_surface_view! {
                 members: Arc::from([member("a"), member("b")]),
                 call_signatures: Arc::from([]),
                 construct_signatures: Arc::from([]),
@@ -954,9 +955,9 @@ mod tests {
         use super::super::core::{PolicyCtx, PolicyRegistry};
         use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
         use crate::resolver_core::ComponentMetaQueryEngine;
-        use crate::semantic_query::{DeclIdentity, SemanticNodeData};
         use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
         use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+        use verter_type_engine::semantic_query::{DeclIdentity, SemanticNodeData};
 
         let host = VerterHost::new_standalone(HostConfig::default());
         let graph = host.project_type_store().semantic_graph();
@@ -1020,7 +1021,7 @@ mod tests {
 
         crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
             let fixture_dispatch_0 =
-                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
             let mut engine = ComponentMetaQueryEngine::new(ctx, &fixture_dispatch_0);
             let mut pctx = PolicyCtx {

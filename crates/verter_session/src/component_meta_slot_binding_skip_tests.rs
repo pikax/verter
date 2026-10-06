@@ -30,10 +30,11 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::CaptureToken;
 use crate::meta_resolve::SLOT_BINDING_REGISTRY_COLLECTION_SKIP_COUNTER;
-use crate::types::{HostConfig, ProjectionMode};
+use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::capture_token::CaptureToken;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// Build a hermetic [`VerterHost`] backed by a [`MemoryWorkspace`]
 /// pre-populated with the supplied files.

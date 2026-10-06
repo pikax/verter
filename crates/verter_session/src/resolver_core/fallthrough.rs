@@ -241,7 +241,7 @@ pub struct KnownSpreadKeys {
 #[derive(Debug, Clone)]
 pub struct FallthroughPropOverride {
     pub name: String,
-    pub node: crate::semantic_query::SemanticNodeId,
+    pub node: verter_type_engine::semantic_query::SemanticNodeId,
 }
 
 /// Node-backed child prop-type override set threaded through fallthrough
@@ -258,7 +258,7 @@ pub struct FallthroughPropOverrideSet {
 impl FallthroughPropOverrideSet {
     /// Look up the override value node for `name`, if present.
     #[must_use]
-    pub fn lookup(&self, name: &str) -> Option<crate::semantic_query::SemanticNodeId> {
+    pub fn lookup(&self, name: &str) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
         self.entries
             .iter()
             .find(|entry| entry.name == name)
@@ -1126,7 +1126,7 @@ pub fn structural_substitute_typeof_refs(
 ///   (the fact producer guarantees a single-hop, non-self target), rebuilt as
 ///   the target's `TypeOf` reference;
 /// - a closed LEAF annotation projects through the shared closed-grammar
-///   [`leaf_type_fact_expr`](crate::project_semantic_dispatch::lower::leaf_type_fact_expr)
+///   [`leaf_type_fact_expr`](verter_type_engine::project_semantic_dispatch::lower::leaf_type_fact_expr)
 ///   projection.
 ///
 /// Any other source (an authored body locator, a projected / synthesized
@@ -1147,7 +1147,7 @@ fn concrete_annotation_expr(
     }
     match fact.annotation.as_ref()? {
         SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)) => {
-            Some(crate::project_semantic_dispatch::lower::leaf_type_fact_expr(leaf))
+            Some(verter_type_engine::project_semantic_dispatch::lower::leaf_type_fact_expr(leaf))
         }
         _ => None,
     }
@@ -1938,7 +1938,7 @@ mod tests {
         // two key values differ and the override-bearing one is never
         // warm-reused. An empty set canonicalizes to the same key as `None`.
         use crate::resolver_core::FallthroughPropOverride;
-        use crate::semantic_query::SemanticNodeId;
+        use verter_type_engine::semantic_query::SemanticNodeId;
 
         let none_key = fallthrough_cache_key("/App.vue", true, None);
         assert!(none_key.is_cacheable(), "a no-override key is cacheable");
@@ -1972,7 +1972,7 @@ mod tests {
     #[test]
     fn for_overrides_maps_nonempty_to_uncacheable_and_empty_to_no_overrides() {
         use crate::resolver_core::{FallthroughOverrideIdentity, FallthroughPropOverride};
-        use crate::semantic_query::SemanticNodeId;
+        use verter_type_engine::semantic_query::SemanticNodeId;
 
         assert_eq!(
             FallthroughOverrideIdentity::for_overrides(None),

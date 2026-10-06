@@ -13,12 +13,12 @@
 //! invalid-first victim selection is reachable at all.
 
 use super::*;
-use crate::semantic_query::{
+use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
+use verter_type_engine::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
     FlowReturnKey, FlowReturnResult, PrimitiveKind, RelateMemoKey, RelationContext,
     RelationOutcome, ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData,
 };
-use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
 
 /// Seed a decided root candidate and return the witness a batch fences on.
 fn seed_root(store: &SemanticGraphStore, key: &RelateMemoKey) -> SccRootWitness {
@@ -43,7 +43,9 @@ fn distinct_keys(store: &SemanticGraphStore, count: usize) -> Vec<RelateMemoKey>
     (0..count)
         .map(|index| {
             let source = store.intern_node(SemanticNodeData::Literal(
-                crate::semantic_query::LiteralValue::String(format!("scc-member-{index}")),
+                verter_type_engine::semantic_query::LiteralValue::String(format!(
+                    "scc-member-{index}"
+                )),
             ));
             RelateMemoKey::assignable(source, target, RelationContext::default())
         })
@@ -75,7 +77,7 @@ fn distinct_flow_keys(count: usize) -> Vec<FlowReturnKey> {
                 type_env_hash: [0u8; 16],
                 lib_env_hash: [0u8; 16],
                 project_identity: [0u8; 16],
-                result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
+                result_evaluation: verter_type_engine::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
                 policy: FlowReturnPolicy {
                     nullability: NullabilityPolicy::Strict,
@@ -87,7 +89,7 @@ fn distinct_flow_keys(count: usize) -> Vec<FlowReturnKey> {
             demand: ReturnProjectionDemand::whole_return(),
             input: FlowInputContext::empty(),
             result_contract:
-                crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+                verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
         })
         .collect()
 }
@@ -107,9 +109,11 @@ fn flow_whole_return_projection() -> MaterializedSet {
 fn flow_proof_for_member(
     key: &FlowReturnKey,
     value: FlowReturnResult,
-) -> crate::project_semantic_dispatch::flow_solve::CompleteFlowResult {
-    use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowConvergenceEvidence;
-    use crate::project_semantic_dispatch::flow_solve::{CompleteFlowResult, FlowConvergencePolicy};
+) -> verter_type_engine::project_semantic_dispatch::flow_solve::CompleteFlowResult {
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowConvergenceEvidence;
+    use verter_type_engine::project_semantic_dispatch::flow_solve::{
+        CompleteFlowResult, FlowConvergencePolicy,
+    };
     CompleteFlowResult::for_tests(
         flow_demand_basis_for_member(key),
         value,
@@ -122,9 +126,9 @@ fn flow_proof_for_member(
 /// hand-staged mirror of the planner's basis mint).
 fn flow_demand_basis_for_member(
     key: &FlowReturnKey,
-) -> crate::project_semantic_dispatch::flow_solve::FlowDemandBasis {
-    use crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance;
-    use crate::project_semantic_dispatch::flow_solve::FlowDemandBasis;
+) -> verter_type_engine::project_semantic_dispatch::flow_solve::FlowDemandBasis {
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance;
+    use verter_type_engine::project_semantic_dispatch::flow_solve::FlowDemandBasis;
     let file_language =
         verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
     let parse_key = verter_language::default_parse_identity_for("export {};\n", &file_language)
@@ -151,7 +155,9 @@ fn flow_demand_basis_for_member(
             build_toolchain_fingerprint:
                 verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         },
-        query: crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key.clone())),
+        query: verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(
+            key.clone(),
+        )),
         input_basis: verter_identity::identity::InputBasisId::from_canonical(
             &FlowEvaluationProvenance::new(1, 1, 1, 0),
         ),
@@ -218,7 +224,11 @@ fn run_batch(cap: usize, member_order: &[usize], flow_members: usize) -> (bool, 
     let pending_flow = pending_flow_members(&store, &flow_keys);
 
     let published = store.publish_scc_members_fenced(
-        None::<&dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>>,
+        None::<
+            &dyn verter_type_engine::resolver_core::ResolverContext<
+                crate::resolver_core::HostCapabilities,
+            >,
+        >,
         &witness,
         &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
         &Arc::from(Vec::<Arc<str>>::new()),
@@ -482,7 +492,9 @@ fn scc_batch_refuses_whole_on_a_proof_key_mismatch() {
         pending_flow[1].result = pending_flow[0].result.clone();
         let published = store.publish_scc_members_fenced(
             None::<
-                &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+                &dyn verter_type_engine::resolver_core::ResolverContext<
+                    crate::resolver_core::HostCapabilities,
+                >,
             >,
             &witness,
             &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -659,7 +671,9 @@ fn run_exact_fit_pressure_batch(
     assert!(
         store.publish_scc_members_fenced(
             None::<
-                &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+                &dyn verter_type_engine::resolver_core::ResolverContext<
+                    crate::resolver_core::HostCapabilities,
+                >,
             >,
             &witness,
             &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -923,14 +937,14 @@ fn flow_scc_publish_accepts_proof_tokens_only() {
         &store,
         degraded_node,
         verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
-        Some(crate::semantic_query::FlowReturnDegradation::NonCallableBinding),
+        Some(verter_type_engine::semantic_query::FlowReturnDegradation::NonCallableBinding),
     );
     assert!(
-        crate::project_semantic_dispatch::flow_solve::CompleteFlowResult::for_tests(
+        verter_type_engine::project_semantic_dispatch::flow_solve::CompleteFlowResult::for_tests(
             flow_demand_basis_for_member(&keys[0]),
             degraded,
-            crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowConvergenceEvidence::for_tests(
-                crate::project_semantic_dispatch::flow_solve::FlowConvergencePolicy { max_iterations: 16 },
+            verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowConvergenceEvidence::for_tests(
+                verter_type_engine::project_semantic_dispatch::flow_solve::FlowConvergencePolicy { max_iterations: 16 },
                 1,
                 true,
             ),

@@ -46,7 +46,7 @@
 //! [`VerterHost::resolve_named_symbol_wire_with_audit`], which lowers the
 //! payloads INSIDE the audited request — under the SAME proven-current
 //! store view / dispatch the resolution runs against, via the sanctioned
-//! [`crate::project_semantic_dispatch::ProjectSemanticDispatch::lower_type_expr_in_scope_with_mode`]
+//! [`verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::lower_type_expr_in_scope_with_mode`]
 //! bridge in `Navigate` mode — and then resolves. No PUBLIC entry accepts
 //! raw symbolic IR OR caller-pre-lowered node ids, so generation-local node
 //! ids never cross store views (lowering under one view and resolving under
@@ -66,14 +66,14 @@ use verter_type_expr::TypeExpr;
 
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
-use crate::instant::Instant;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::{
+use crate::VerterHost;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::{
     NodeScopeId, ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
-use crate::VerterHost;
 
 /// Sentinel that flags the caller wants the host's default mode.
 /// Distinct from the `ProjectionMode` enum so callers can opt out
@@ -188,7 +188,7 @@ impl VerterHost {
         // BEFORE installing the TLS guard so the `Noop` arm can
         // short-circuit when the consumer filter rejects the kind.
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
@@ -597,7 +597,9 @@ fn resolve_named_symbol_in_current_view(
             canonical_id: Arc::clone(&scope_arc),
             owner: entry_owner,
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(entry_owner),
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                entry_owner,
+            ),
         },
         name: Arc::from(name),
     });
@@ -647,12 +649,14 @@ fn resolve_named_symbol_in_current_view(
     let base = dispatch.type_slot_for(Arc::clone(&scope_arc), entry_owner, Arc::from(name));
 
     let instantiate_key =
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             base,
             Arc::from(type_args.to_vec().into_boxed_slice()),
             dispatch.instantiate_context_for(
                 &scope_arc,
-                crate::semantic_query::ProjectionReductionContext::published(effective_mode),
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    effective_mode,
+                ),
             ),
         ));
     let node = match dispatch.execute_type_node(instantiate_key) {
@@ -701,7 +705,7 @@ fn resolve_named_symbol_in_current_view(
 /// `QueryResult::Error` arms through this single decode point, so a real
 /// dispatch fault is never indistinguishable from a miss.
 pub(crate) fn classify_dispatch_error(
-    err: &crate::semantic_query::QueryError,
+    err: &verter_type_engine::semantic_query::QueryError,
     fallback: Option<SemanticNodeId>,
 ) -> Result<Option<SemanticNodeId>, TypeResolutionRequestError> {
     match TypeResolutionRequestError::from_query_error(err) {
@@ -748,7 +752,7 @@ pub(crate) fn materialize_through_aliases(
                 continue;
             }
             Some(SemanticNodeData::Opaque(
-                crate::semantic_query::QueryError::DeclPlaceholder {
+                verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
                     canonical_id,
                     owner,
                     name,
@@ -760,12 +764,12 @@ pub(crate) fn materialize_through_aliases(
                 let base =
                     dispatch.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
                 let key =
-                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                    SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                         base,
                         Arc::from(Vec::new().into_boxed_slice()),
                         dispatch.instantiate_context_for(
                             canonical_id,
-                            crate::semantic_query::ProjectionReductionContext::published(mode),
+                            verter_type_engine::semantic_query::ProjectionReductionContext::published(mode),
                         ),
                     ));
                 let step_result = match dispatch.execute_type_node(key) {
@@ -871,7 +875,7 @@ pub(crate) fn materialize_through_aliases(
                                     owner: identity.owner,
                                     local_scope: None,
                                     binder_scope_id:
-                                        crate::semantic_query::BinderScopeId::file_scope(
+                                        verter_type_engine::semantic_query::BinderScopeId::file_scope(
                                             identity.owner,
                                         ),
                                 },
@@ -897,12 +901,12 @@ pub(crate) fn materialize_through_aliases(
                         );
                         let inst_result = match dispatch
                             .execute_type_node(SemanticQueryKey::Instantiate(
-                            crate::semantic_query::InstantiateKey::new(
+                            verter_type_engine::semantic_query::InstantiateKey::new(
                                 inst_base,
                                 Arc::clone(args),
                                 dispatch.instantiate_context_for(
                                     &ref_base.canonical_id,
-                                    crate::semantic_query::ProjectionReductionContext::published(
+                                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                                         mode,
                                     ),
                                 ),
@@ -918,24 +922,28 @@ pub(crate) fn materialize_through_aliases(
                     }
                     _ => *base,
                 };
-                let surfaced_result =
-                    match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
-                        base: reference_resolved,
-                        path: Arc::from(Vec::new().into_boxed_slice()),
-                        context: crate::semantic_query::ProjectionReductionContext::published(
+                let surfaced_result = match dispatch
+                    .execute_type_node(SemanticQueryKey::ProjectPath {
+                    base: reference_resolved,
+                    path: Arc::from(Vec::new().into_boxed_slice()),
+                    context:
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Expanded,
                         ),
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
-                            QueryResult::Value(node)
-                        }
-                        QueryResult::Recursive(node) => QueryResult::Recursive(node),
-                        QueryResult::Error(err) => QueryResult::Error(err),
-                    };
+                }) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
                 let surfaced_base = classify_base_surfacing(surfaced_result, reference_resolved)?;
                 let key = SemanticQueryKey::KeyOf {
                     base: surfaced_base,
-                    context: crate::semantic_query::ProjectionReductionContext::published(mode),
+                    context:
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                            mode,
+                        ),
                 };
                 let step_result = match dispatch.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
@@ -1087,7 +1095,7 @@ pub(crate) fn classify_base_surfacing(
 /// [`classify_dispatch_error`] fault/miss split the rest of the resolver
 /// uses: a fault surfaces as `Err`, a non-fault preserves the carrier.
 pub(crate) fn classify_operator_reduction_step(
-    store: &crate::semantic_query_memo::SemanticGraphStore,
+    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     result: QueryResult<SemanticNodeId>,
     carrier: SemanticNodeId,
 ) -> Result<MaterializationStep, TypeResolutionRequestError> {

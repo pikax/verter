@@ -37,17 +37,18 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::{display, SemanticGraphStore};
-use verter_session::semantic_query::demand::{
+use verter_type_engine::semantic_query::demand::{
     apply_mask, relevant_demand_axes, AxisMask, Demand, DemandAxis, DisplayFacet, DisplayNeeds,
     ProjectionPath,
 };
-use verter_session::semantic_query::{
+use verter_type_engine::semantic_query::display::display;
+use verter_type_engine::semantic_query::{
     DeclIdentity, DeclarationAnalysisValue, FunctionParam, IndexKey, LiteralValue, MapperKey,
     MapperKind, MemberMergeRole, NodeScopeId, OptionalityMod, PrimitiveKind, ReadonlyMod, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryValue, SurfaceMember, SurfaceView,
     TypeParamDecl, ValueRootKey,
 };
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 /// A `Demand` that is `Expanded` on every semantic axis and carries `dn` as its
 /// (display-only) `display_needs`. Two such demands differ ONLY in
@@ -265,11 +266,11 @@ fn func_node(
         .map(|(n, t)| FunctionParam::synthetic(Some(Arc::from(*n)), *t, false, false))
         .collect();
     store.intern_node(SemanticNodeData::Signature {
-        kind: verter_session::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(params.into_boxed_slice()),
         return_type: ret,
         occurrence: None,
-        return_carrier: verter_session::semantic_query::SignatureReturnCarrier::Declared(ret),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(ret),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -283,14 +284,14 @@ fn member(name: &str, value: SemanticNodeId, is_method: bool) -> SurfaceMember {
     SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        key: verter_session::semantic_query::AuthoredPropertyKey::string(name),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
         method_kind: is_method.then_some(verter_type_expr::ObjectMethodKind::Method),
         has_implementation_body: false,
-        declared_in_macro_type_arg: verter_session::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: verter_session::semantic_query::MergeRoleStamp::NEUTRAL,
+        declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
         declaration_origin: None,
     }
@@ -303,8 +304,8 @@ fn member_with_role(
     merge_role: MemberMergeRole,
 ) -> SurfaceMember {
     SurfaceMember {
-        merge_role: verter_session::semantic_query::ProjectionReductionContext::published(
-            verter_session::semantic_query::ProjectionMode::Shallow,
+        merge_role: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Shallow,
         )
         .stamp_role(merge_role),
         ..member(name, value, is_method)
@@ -321,16 +322,16 @@ fn object(
     store.intern_node(SemanticNodeData::Object(SurfaceView::from_entries(
         members
             .into_iter()
-            .map(verter_session::semantic_query::SurfaceEntry::Member)
+            .map(verter_type_engine::semantic_query::SurfaceEntry::Member)
             .chain(
                 call_signatures
                     .into_iter()
-                    .map(verter_session::semantic_query::SurfaceEntry::CallSignature),
+                    .map(verter_type_engine::semantic_query::SurfaceEntry::CallSignature),
             )
             .chain(
                 construct_signatures
                     .into_iter()
-                    .map(verter_session::semantic_query::SurfaceEntry::ConstructSignature),
+                    .map(verter_type_engine::semantic_query::SurfaceEntry::ConstructSignature),
             )
             .collect(),
         None,
@@ -656,11 +657,13 @@ fn function_type_parameters_render_constraint_and_default() {
     });
 
     let func = store.intern_node(SemanticNodeData::Signature {
-        kind: verter_session::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: void_id,
         occurrence: None,
-        return_carrier: verter_session::semantic_query::SignatureReturnCarrier::Declared(void_id),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            void_id,
+        ),
         type_parameters: Arc::from([TypeParamDecl {
             name: Arc::from("T"),
             param: t_decl_param,
@@ -869,7 +872,7 @@ fn indexed_access_object_readonly_is_parenthesised_under_readonly_facet() {
     let idx = store.intern_node(SemanticNodeData::IndexedAccess {
         object: arr,
         index: IndexKey::Number(
-            verter_session::semantic_query::CanonicalIndexInt::from_canonical_i64(0)
+            verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(0)
                 .expect("canonical"),
         ),
     });
@@ -1175,7 +1178,7 @@ fn typeof_carrier_renders_type_args() {
             canonical_id: Arc::from("/m.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },

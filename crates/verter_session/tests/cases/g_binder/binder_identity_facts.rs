@@ -28,13 +28,13 @@ use verter_session::binder_identity_facts::{
     negative_lookup_admission, BinderIdentityFacts, BinderIdentityFactsEntry,
 };
 use verter_session::for_tests::binder_identity_facts_get_or_compute_for_tests;
-use verter_session::semantic_query::admit::Admission;
-use verter_session::semantic_query::{
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_type_engine::semantic_query::admit::Admission;
+use verter_type_engine::semantic_query::{
     BinderScopeId, BinderScopeKind, DeclarationSlotSeed, ResolvedDeclSlotIdentity, ScopeId,
     SemanticQueryKey, SemanticSymbolSpace,
 };
-use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
-use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_type_expr::TopLevelOwnerId;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -542,7 +542,7 @@ pub(crate) fn binder_scope_id_enters_context_sensitive_query_identity() {
     scope_beta.binder_scope_id = BinderScopeId::namespace_scope(owner, Arc::from("Beta"));
 
     let key = |scope: &ScopeId| {
-        SemanticQueryKey::ResolveDecl(verter_session::semantic_query::ResolveDeclKey {
+        SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {
             scope: scope.clone(),
             name: Arc::from("Foo"),
         })

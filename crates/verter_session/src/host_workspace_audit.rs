@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use verter_audit::{RequestAuditRecord, RequestKind, WorkspaceOp};
 
-use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::VerterHost;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 impl VerterHost {
     /// Drive a workspace [`WorkspaceOp`] under audit.

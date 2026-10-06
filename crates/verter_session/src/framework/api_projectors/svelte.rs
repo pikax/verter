@@ -203,8 +203,9 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         let resolver_ctx = resolver_ctx
             .as_ref()
             .map(|ctx| ctx as &dyn crate::resolver_core::HostRequestContext);
-        let dispatch = resolver_ctx
-            .map(|ctx| crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx));
+        let dispatch = resolver_ctx.map(|ctx| {
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+        });
         let script_fact_evidence = resolver_ctx
             .map(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
         let script_fact_state =
@@ -610,7 +611,7 @@ fn public_component_name<'a>(
 /// and is never admitted by the executor's surface cache.
 fn resolve_public_props_text(
     ctx: &dyn crate::resolver_core::HostRequestContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -741,7 +742,7 @@ fn resolve_public_props_text(
 /// retain their best safe rows and are never admitted to the surface cache.
 fn resolve_public_dispatcher_text(
     ctx: &dyn crate::resolver_core::HostRequestContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -782,7 +783,7 @@ fn resolve_public_dispatcher_text(
 /// its type from the real local identity.
 fn resolve_public_exports_text(
     ctx: &dyn crate::resolver_core::HostRequestContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -829,7 +830,7 @@ fn resolve_public_exports_text(
 }
 
 fn resolve_public_module_exports(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,

@@ -18,8 +18,8 @@ use super::route_admission::{
     admit_expanded_surface, admit_expanded_surface_changed, AdmittedRouteProjectionNode,
 };
 use crate::output_sinks::OutputProjector;
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SurfaceView};
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId, SurfaceView};
 
 crate::output_sinks::define_output_capability! {
     /// The component-meta query-engine SURFACE projector's output-sink
@@ -52,7 +52,7 @@ crate::output_sinks::define_output_capability! {
 /// handed back to the demand-bound adapters below as the accepted publication
 /// value — a raw node is never accepted from outside the adapters.
 fn materialize_published_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -77,7 +77,7 @@ fn materialize_published_node(
 /// node→`TypeExpr` materialisation except through the engine's sink-local
 /// publication methods.
 pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_projection_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -94,7 +94,7 @@ pub(in crate::resolver_core::component_meta_query_engine) fn materialize_route_p
 /// materialise the accepted result node ONCE at this sink. `None` on
 /// lower-miss, dispatch error/recursive, gate-reject, or raise-miss.
 pub(crate) fn lower_and_project_to_expanded_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -102,9 +102,11 @@ pub(crate) fn lower_and_project_to_expanded_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
-    use crate::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
+    use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_for_eq_with_dispatch;
 
-    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
+    use verter_type_engine::semantic_query::{
+        PathSegment, ProjectionMode, QueryResult, SemanticQueryKey,
+    };
 
     let base = dispatch.lower_type_expr_in_owner_scope_with_mode(
         scope_canonical_id,
@@ -115,7 +117,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base,
         path: std::sync::Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -141,7 +143,7 @@ pub(crate) fn lower_and_project_to_expanded_node(
 /// node crosses in; the `*_published` wrapper materialises the accepted node
 /// ONCE at the surface sink.
 pub(crate) fn project_class_a_terminal_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -149,9 +151,11 @@ pub(crate) fn project_class_a_terminal_node(
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &TypeExpr,
 ) -> Option<AdmittedRouteProjectionNode> {
-    use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
+    use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
 
-    use crate::semantic_query::{PathSegment, ProjectionMode, QueryResult, SemanticQueryKey};
+    use verter_type_engine::semantic_query::{
+        PathSegment, ProjectionMode, QueryResult, SemanticQueryKey,
+    };
 
     let (base_expr, path_segments) =
         crate::meta_resolve::dispatch_helpers::decompose_indexed_access_chain(expr);
@@ -178,7 +182,7 @@ pub(crate) fn project_class_a_terminal_node(
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base,
         path: project_path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -192,7 +196,7 @@ pub(crate) fn project_class_a_terminal_node(
     // pre-carrier `Opaque(Miss)` terminal did. (`DeclRef` /
     // `InstantiationRef` identity carriers are NOT in this class — they
     // name a resolved declaration.)
-    if crate::project_semantic_dispatch::node_data_for(dispatch.graph(), result_node)
+    if verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), result_node)
         .as_deref()
         .is_some_and(|data| data.bare_ref_head().is_some())
     {
@@ -217,7 +221,7 @@ pub(crate) fn project_class_a_terminal_node(
 /// `project_expr_class_a_via_dispatch` callers.
 pub(crate) fn project_class_a_published(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -246,7 +250,7 @@ pub(crate) fn project_class_a_published(
 /// [`compound_root_surface_view_via_dispatch`] driven from the decl anchor
 /// (carrier intact).
 pub(super) fn surface_view_from_semantic_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -257,14 +261,15 @@ pub(super) fn surface_view_from_semantic_node(
 }
 
 fn surface_view_from_semantic_node_inner(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,
 ) -> Option<SurfaceView> {
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let data =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
     match data.as_ref() {
         SemanticNodeData::Alias(target) => {
             if !active.insert(node) {
@@ -301,13 +306,13 @@ fn surface_view_from_semantic_node_inner(
 /// raise keeps heritage / import carriers unresolved (materialized) and would
 /// admit a partial composed surface the surface-materialization filter rejects.
 pub(super) fn compound_root_surface_view_via_dispatch(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
     node: SemanticNodeId,
 ) -> Option<(SurfaceView, SemanticNodeId)> {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         ProjectionMode, ProjectionReductionContext, SurfaceProvenanceContext,
     };
 

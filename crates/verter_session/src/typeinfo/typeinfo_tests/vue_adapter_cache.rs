@@ -590,7 +590,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     let _call_signatures: &Arc<[TypeInfoSurfaceSignature]> = call_signatures;
     let _construct_signatures: &Arc<[TypeInfoSurfaceSignature]> = construct_signatures;
     let _index_signatures: &Arc<[TypeInfoIndexSignature]> = index_signatures;
-    let _keyspace: &Option<crate::semantic_query::SemanticNodeId> = keyspace;
+    let _keyspace: &Option<verter_type_engine::semantic_query::SemanticNodeId> = keyspace;
     let _has_index_signature: &bool = has_index_signature;
 
     for member in members.iter() {
@@ -611,8 +611,8 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
         } = member;
         // Typed key (not an owned type body) + node-id value (not an
         // expanded body).
-        let _key: &crate::semantic_query::AuthoredPropertyKey = key;
-        let _value: &crate::semantic_query::SemanticNodeId = value;
+        let _key: &verter_type_engine::semantic_query::AuthoredPropertyKey = key;
+        let _value: &verter_type_engine::semantic_query::SemanticNodeId = value;
         let _method_kind: &Option<verter_type_expr::ObjectMethodKind> = method_kind;
         let _has_implementation_body: &bool = has_implementation_body;
         // Every text-bearing field is a SPAN (`CanonicalSpan`), never a
@@ -638,7 +638,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
         } = origin;
         let _canonical_file: &Option<Arc<str>> = canonical_file;
         let _declaration_span: &Option<CanonicalSpan> = declaration_span;
-        let _merge_role: &crate::semantic_query::MemberMergeRole = merge_role;
+        let _merge_role: &verter_type_engine::semantic_query::MemberMergeRole = merge_role;
     }
 
     // The whole surface is `Eq + Hash` (a structural value of spans/ids/flags),
@@ -718,9 +718,9 @@ fn dto_partial_sfc() -> String {
 
 #[test]
 fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
     use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
     use crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     const HELPER: &str = "/w/dto_helper.ts";
     const FILE: &str = "/w/DtoPartial.vue";
@@ -735,7 +735,7 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
     upsert(&host, FILE, &dto_partial_sfc());
 
     // Build a request-bound ctx so `vue_macro_dtos_with_ctx` can read
-    // `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and observe its OWN per-request completeness (the bare
+    // `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and observe its OWN per-request completeness (the bare
     // `host.vue_macro_dtos` returner drops `.completeness`, so we drive the
     // ctx-bound entry directly to assert the partial flag).
     host.ensure_indexed_ready(FILE).expect("indexed");
@@ -773,7 +773,7 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
         let _g = install_budget(6);
 
         let fixture_dispatch_0 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         vue_macro_dtos_with_ctx(&ctx, &fixture_dispatch_0, &partial_request)
             .expect("the Vue adapter is admitted")
     };
@@ -811,7 +811,7 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
         // own (trivial) surface, never the partial call's exhausted counter.
         let _g = install_budget(100_000);
         let fixture_dispatch_0 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         vue_macro_dtos_with_ctx(&ctx, &fixture_dispatch_0, &complete_request)
             .expect("the Vue adapter is admitted")
     };

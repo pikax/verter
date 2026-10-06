@@ -65,10 +65,10 @@ use verter_protocol::verter::v1::{
 
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
-use crate::instant::Instant;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::ProjectionMode;
 use crate::VerterHost;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 impl VerterHost {
     /// Resolve a named declaration through the typeinfo graph operation
@@ -85,7 +85,7 @@ impl VerterHost {
         envelope: TypeInfoGraphRequest,
     ) -> AuditedResult<TypeInfoGraphResponse, TypeInfoRequestError> {
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;

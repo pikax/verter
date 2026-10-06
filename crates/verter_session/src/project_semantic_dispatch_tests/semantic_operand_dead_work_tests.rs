@@ -45,18 +45,18 @@ use std::sync::Arc;
 
 use verter_type_expr::locators::{AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep};
 
-use crate::project_semantic_dispatch::raise::{
+use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::raise::{
     dispatch_cold_for, dispatch_warm_for, enable_dispatch_trace_for_test,
 };
-use crate::semantic_query::operand::{
+use verter_type_engine::semantic_query::operand::{
     ForcedSemanticOperand, SemanticOperand, SemanticOperandForceProjection,
     SemanticOperandForceRequest,
 };
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext, PropertyKey,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
-use crate::VerterHost;
 
 use super::semantic_operand_tests::{
     assert_primitive, dispatch_classes_since, force_key_at, force_projecting, interned_nodes,
@@ -133,8 +133,8 @@ const COUNTER_VOCABULARY: [Counter; 9] = [
 ];
 
 fn counter_delta(
-    before: &crate::semantic_query::SemanticGraphStats,
-    after: &crate::semantic_query::SemanticGraphStats,
+    before: &verter_type_engine::semantic_query::SemanticGraphStats,
+    after: &verter_type_engine::semantic_query::SemanticGraphStats,
     counter: Counter,
 ) -> u64 {
     match counter {
@@ -156,7 +156,7 @@ fn counter_delta(
     }
 }
 
-fn stats(host: &VerterHost) -> crate::semantic_query::SemanticGraphStats {
+fn stats(host: &VerterHost) -> verter_type_engine::semantic_query::SemanticGraphStats {
     host.project_type_store().semantic_graph().stats_snapshot()
 }
 
@@ -320,7 +320,7 @@ fn run_matrix_row(row: &MatrixRow) {
         None => match dispatch
             .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context))
         {
-            crate::semantic_query::QueryResult::Value(forced) => forced,
+            verter_type_engine::semantic_query::QueryResult::Value(forced) => forced,
             other => panic!(
                 "row {}: whole-surface force must resolve, got {other:?}",
                 row.label
@@ -401,7 +401,7 @@ fn run_matrix_row(row: &MatrixRow) {
         None => match dispatch
             .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context))
         {
-            crate::semantic_query::QueryResult::Value(forced) => forced,
+            verter_type_engine::semantic_query::QueryResult::Value(forced) => forced,
             other => panic!(
                 "row {}: warm whole-surface force must resolve, got {other:?}",
                 row.label
@@ -507,7 +507,7 @@ fn row_conditional_dead_branch() -> MatrixRow {
                     ProjectionMode::Identity,
                 )),
             ) {
-                crate::semantic_query::QueryResult::Value(forced) => forced,
+                verter_type_engine::semantic_query::QueryResult::Value(forced) => forced,
                 other => panic!("check operand must force, got {other:?}"),
             };
             let check_operand = dispatch
@@ -614,7 +614,7 @@ fn row_unrelated_mapped_key() -> MatrixRow {
                     ProjectionMode::Identity,
                 )),
             ) {
-                crate::semantic_query::QueryResult::Value(forced) => forced,
+                verter_type_engine::semantic_query::QueryResult::Value(forced) => forced,
                 other => panic!("mapped carrier must force, got {other:?}"),
             };
             dispatch
@@ -635,7 +635,7 @@ fn row_unrelated_mapped_key() -> MatrixRow {
                     ProjectionMode::Identity,
                 )),
             ) {
-                crate::semantic_query::QueryResult::Value(forced) => forced,
+                verter_type_engine::semantic_query::QueryResult::Value(forced) => forced,
                 other => panic!("mapped carrier must force, got {other:?}"),
             };
             let base = carrier.node();
@@ -787,7 +787,7 @@ fn matrix_dead_key_probe_discriminates() {
     match dispatch
         .force_semantic_operand_for_tests(&sibling, SemanticOperandForceRequest::new(context))
     {
-        crate::semantic_query::QueryResult::Value(forced) => {
+        verter_type_engine::semantic_query::QueryResult::Value(forced) => {
             // Shallow-by-default: the sibling's value publishes as its local
             // `ColdShell` alias carrier, never the dead file's body.
             match graph_node_data(&host, forced.node()).as_ref() {
@@ -837,7 +837,9 @@ fn matrix_dead_file_fact_probe_discriminates() {
         force_projecting(&dispatch, &deep, context, path_of(&["cold", "p"]))
     });
     match graph_node_data(&host, forced.node()).as_ref() {
-        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value)) => {
+        SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(
+            value,
+        )) => {
             assert_eq!(value, "c0", "`Deep.cold.p` answers the dead file's literal");
         }
         other => panic!("`Deep.cold.p` must answer a string literal, got {other:?}"),
@@ -858,26 +860,26 @@ fn matrix_dead_file_fact_probe_discriminates() {
 /// second candidate / a cold miss on the second construction.
 #[test]
 fn builtin_utility_route_is_one_instantiate_family() {
-    use crate::semantic_query::{InstantiateKey, LiteralValue, SemanticQueryApi};
+    use verter_type_engine::semantic_query::{InstantiateKey, LiteralValue, SemanticQueryApi};
 
     let host = host_with_source();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _trace = enable_dispatch_trace_for_test();
 
     let graph = host.project_type_store().semantic_graph();
-    let base = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+    let base = graph.intern_node(SemanticNodeData::Object(verter_type_engine::test_surface_view! {
         members: Arc::from(
-            vec![crate::semantic_query::SurfaceMember {
+            vec![verter_type_engine::semantic_query::SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("foo"),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("foo"),
                 value: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -886,7 +888,7 @@ fn builtin_utility_route_is_one_instantiate_family() {
         call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         index_signatures: Arc::from(
-            Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice(),
+            Vec::<verter_type_engine::semantic_query::IndexSignature>::new().into_boxed_slice(),
         ),
         keyspace: None,
         has_index_signature: false,
@@ -894,7 +896,7 @@ fn builtin_utility_route_is_one_instantiate_family() {
 
     let build_key = |name: &str| {
         let key_set = graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::query_subject(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::query_subject(Arc::from(
                 vec![
                     graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
                         "foo".to_string(),
@@ -918,11 +920,11 @@ fn builtin_utility_route_is_one_instantiate_family() {
     assert_eq!(pick, pick_again, "canonical constructions agree on the key");
 
     let first = match dispatch.execute_type_node(pick.clone()) {
-        crate::semantic_query::QueryResult::Value(output) => output.value,
+        verter_type_engine::semantic_query::QueryResult::Value(output) => output.value,
         other => panic!("Pick utility must evaluate, got {other:?}"),
     };
     let second = match dispatch.execute_type_node(pick_again) {
-        crate::semantic_query::QueryResult::Value(output) => output.value,
+        verter_type_engine::semantic_query::QueryResult::Value(output) => output.value,
         other => panic!("second Pick construction must evaluate, got {other:?}"),
     };
     assert_eq!(

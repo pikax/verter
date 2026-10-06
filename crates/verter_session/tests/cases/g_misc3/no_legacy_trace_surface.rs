@@ -318,11 +318,11 @@ fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace(
 fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
     use std::sync::Arc;
     use verter_session::component_meta_audit::StructuredAuditEvent;
-    use verter_session::request_context::{RequestContext, RequestContextGuard};
-    use verter_session::request_footprint::RequestFootprintAccumulator;
     use verter_session::{
         file_artifact_store::FileArtifactStore, project_type_store::IndexedReady,
     };
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 
     let acc = Arc::new(RequestFootprintAccumulator::new());
     let ctx = RequestContext::new(1, Arc::from("/owner"), true, Some(Arc::clone(&acc)));
@@ -364,11 +364,11 @@ fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
 fn indexed_ready_built_event_fires_per_new_content_version_not_on_same_content_reinsert() {
     use std::sync::Arc;
     use verter_session::component_meta_audit::StructuredAuditEvent;
-    use verter_session::request_context::{RequestContext, RequestContextGuard};
-    use verter_session::request_footprint::RequestFootprintAccumulator;
     use verter_session::{
         file_artifact_store::FileArtifactStore, project_type_store::IndexedReady,
     };
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 
     let db = FileArtifactStore::new();
     let mut whole_hash_a = [0u8; 16];

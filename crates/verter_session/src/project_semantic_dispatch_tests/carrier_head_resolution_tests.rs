@@ -32,14 +32,14 @@ use verter_type_expr::TypeExpr;
 
 use super::carrier::CarrierResolverContext;
 use super::ProjectSemanticDispatch;
-use crate::resolver_core::scope_shadowing::ScopeShadowing;
-use crate::semantic_query::{
+use crate::types::HostConfig;
+use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
+use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+use verter_type_engine::semantic_query::{
     NodeScopeId, PartialReasonSet, PathSegment, PrimitiveKind, ProjectionMode,
     ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey, SemanticQueryOutput, SurfaceProvenanceContext, VueHeritagePolicy,
 };
-use crate::types::HostConfig;
-use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
 
 pub(super) fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -199,7 +199,7 @@ fn eager_lower_subject(
     let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
         FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle(canonical).map(|bundle| {
-        crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+        verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
             &bundle,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
         )
@@ -668,7 +668,7 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         let eager_scope = file_scope(&dispatch, "/ns.ts");
         let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
         let scope_payload = dispatch.ctx.prepared_decl_bundle("/ns.ts").map(|bundle| {
-            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+            verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                 &bundle,
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             )
@@ -832,7 +832,7 @@ fn bare_ref_head_recursive_ref_terminates_bounded() {
             // The active back-edge mints `Opaque(RecursiveRef { name: "Tree" })`.
             match dispatch.graph().node_data(resolved).as_deref() {
                 Some(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::RecursiveRef { name, .. },
+                    verter_type_engine::semantic_query::QueryError::RecursiveRef { name, .. },
                 )) => {
                     assert_eq!(
                         name.as_ref(),
@@ -885,7 +885,7 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
             dispatch.pop_instantiate_active();
             match dispatch.graph().node_data(resolved).as_deref() {
                 Some(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::RecursiveRef { name, args },
+                    verter_type_engine::semantic_query::QueryError::RecursiveRef { name, args },
                 )) => {
                     assert_eq!(name.as_ref(), "G");
                     assert_eq!(args.len(), 1, "the back-edge records its own arguments");
@@ -925,7 +925,7 @@ fn nested_bare_ref_carrier_in_intersection_resolves() {
     let b = bare_ref_carrier(&dispatch, "B", scope, &[]);
     let intersection = graph.intern_node_with_scope(
         SemanticNodeData::Intersection(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 vec![a, b].into_boxed_slice(),
             )),
         ),
@@ -1082,7 +1082,7 @@ fn eager_resolved_with_name_resolution(
     let scope = file_scope(dispatch, canonical);
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle(canonical).map(|bundle| {
-        crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+        verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
             &bundle,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
         )
@@ -1158,7 +1158,7 @@ fn normal_path_walker_reenters_carrier_normalization_behind_alias() {
         base: alias,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("a"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             )]
             .into_boxed_slice(),
         ),
@@ -1211,7 +1211,7 @@ fn normal_path_walker_unresolvable_carrier_behind_alias_misses() {
         base: alias,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("a"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             )]
             .into_boxed_slice(),
         ),
@@ -1245,7 +1245,7 @@ fn carrier_resolver_context_drives_shared_head_resolver() {
     let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
         FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle("/ctx.ts").map(|bundle| {
-        crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+        verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
             &bundle,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
         )
@@ -1745,9 +1745,10 @@ defineProps<Copy<ImportedProps>>()
         .as_ref()
         .expect("fixture must publish script analysis")
         .macros[macro_index];
-    let product = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
-        .macro_type_arg_hot_ref(canonical, macro_index)
-        .expect("macro type argument must have a hot carrier");
+    let product =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+            .macro_type_arg_hot_ref(canonical, macro_index)
+            .expect("macro type argument must have a hot carrier");
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         let runtime_context = ProjectionReductionContext::vue_runtime_object_surface(
@@ -1797,7 +1798,7 @@ defineProps<Copy<ImportedProps>>()
             VueHeritagePolicy::SuppressIgnored
         );
         let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
                     Arc::clone(&base.canonical_id),
                     base.owner,
@@ -1962,7 +1963,7 @@ defineProps<{ setupOnly: string }>()
         ),
         "the sole validated Module companion must remain visible from setup"
     );
-    let _completeness = crate::request_context::ColdComputeCompletenessScope::enter();
+    let _completeness = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: carrier,
         path: Arc::from([]),
@@ -1978,7 +1979,7 @@ defineProps<{ setupOnly: string }>()
         "an unresolved exact head is ReturnOnly"
     );
     assert!(
-        crate::request_context::current_cold_compute_completeness()
+        verter_type_engine::request_context::current_cold_compute_completeness()
             .reasons()
             .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT),
         "the unresolved exact-head reason must remain typed"
@@ -2137,8 +2138,8 @@ fn a_builtin_utility_build_reads_the_scope_payload_once() {
 #[test]
 fn a_budget_trip_after_resolution_never_answers_complete() {
     use super::evaluate::StructuralFactDemandOutcome;
-    use crate::semantic_query::composite::CompositeList;
-    use crate::semantic_query::{LiteralValue, SurfaceMember};
+    use verter_type_engine::semantic_query::composite::CompositeList;
+    use verter_type_engine::semantic_query::{LiteralValue, SurfaceMember};
 
     #[derive(Clone, Copy, Debug)]
     enum Case {
@@ -2164,23 +2165,24 @@ fn a_budget_trip_after_resolution_never_answers_complete() {
             let member = SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string(name),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
                 value: literal("x"),
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             };
-            graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+            graph.intern_node(SemanticNodeData::Object(verter_type_engine::test_surface_view! {
                 members: Arc::from(vec![member].into_boxed_slice()),
                 call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 index_signatures: Arc::from(
-                    Vec::<crate::semantic_query::IndexSignature>::new().into_boxed_slice()
+                    Vec::<verter_type_engine::semantic_query::IndexSignature>::new().into_boxed_slice()
                 ),
                 keyspace: None,
                 has_index_signature: false,

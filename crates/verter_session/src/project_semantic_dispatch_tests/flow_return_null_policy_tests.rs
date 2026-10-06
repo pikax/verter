@@ -12,14 +12,14 @@
 
 use std::sync::Arc;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    FlowReturnStep, LiteralValue, PrimitiveKind, QueryResult, ReturnProjectionDemand,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
-};
 use crate::types::HostConfig;
 use crate::VerterHost;
 use verter_session_query::flow::policy::NullabilityPolicy;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    FlowReturnStep, LiteralValue, PrimitiveKind, QueryResult, ReturnProjectionDemand,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+};
 
 const STRICT_ROOT: &str = "/strict";
 const LOOSE_ROOT: &str = "/loose";
@@ -142,8 +142,10 @@ fn answer_text(host: &VerterHost, node: SemanticNodeId) -> String {
             let result = match predicate {
                 Some(predicate) => {
                     let subject = match predicate.subject {
-                        crate::semantic_query::PredicateSubject::This => "this".to_string(),
-                        crate::semantic_query::PredicateSubject::Parameter(index) => {
+                        verter_type_engine::semantic_query::PredicateSubject::This => {
+                            "this".to_string()
+                        }
+                        verter_type_engine::semantic_query::PredicateSubject::Parameter(index) => {
                             params_names(&params, index as usize)
                         }
                     };
@@ -763,7 +765,7 @@ fn reduce_union_null_policies_do_not_warm_hit() {
 /// `string`, never passed through as already canonical.
 #[test]
 fn canonical_stamp_is_scoped_to_its_null_algebra() {
-    use crate::semantic_query::composite::CompositeOriginCategory;
+    use verter_type_engine::semantic_query::composite::CompositeOriginCategory;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -790,7 +792,7 @@ fn canonical_stamp_is_scoped_to_its_null_algebra() {
 
     let strict_with_null =
         dispatch.intern_normalized_union(&[string, null], NullabilityPolicy::Strict);
-    let result = crate::semantic_query::FlowReturnResult::new(
+    let result = verter_type_engine::semantic_query::FlowReturnResult::new(
         graph,
         strict_with_null,
         verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(false),
@@ -2151,8 +2153,8 @@ fn observe_at_checker_altitude(host: &VerterHost, canonical: &str, symbol: &str)
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let demand = dispatch.normalize_node_keeping_declaration_refs_for_tests(
         result.return_type(),
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     );
     match demand.into_complete_node() {
@@ -5940,7 +5942,8 @@ export function spreadArm(c: boolean, s: { z: number }) { return c ? { a: 1, q: 
         let surface = dispatch
             .resolve_typeinfo_surface_view(
                 program,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
             )
             .unwrap_or_else(|| panic!("{root}: the spread arm has a surface"));
         let q = surface

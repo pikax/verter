@@ -30,14 +30,16 @@ use verter_type_expr::locators::{
 };
 use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
-use crate::locator_identity::{SessionDemandIdentity, SessionDemandOwner, SessionDemandRoute};
-use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{CompileErrorPolicy, FileLanguage, VerterHost};
+use verter_type_engine::locator_identity::{
+    SessionDemandIdentity, SessionDemandOwner, SessionDemandRoute,
+};
+use verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
+};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -151,7 +153,7 @@ fn authored_decl_body_source_raises_to_the_lower_locator_node() {
     );
 
     // Negative: the raised node is a real object surface, not a miss shell.
-    let data = crate::project_semantic_dispatch::node_data_for(
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         raised.node(),
     );
@@ -198,7 +200,7 @@ fn authored_macro_type_argument_routes_to_the_sole_hot_mirror_producer() {
         .at_optional_boundary()
         .expect("the macro type-argument source must raise through the hot mirror");
 
-    let mirror = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+    let mirror = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
         .macro_type_arg_hot_ref(SFC_ID, macro_index)
         .expect("the hot mirror must produce the macro type-arg handle");
     assert_eq!(
@@ -226,7 +228,7 @@ fn closed_leaf_sources_lower_in_scope() {
         .expect("a primitive leaf must raise");
     assert!(
         matches!(
-            crate::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::node_data_for(
                 host.project_type_store().semantic_graph(),
                 primitive.node()
             )
@@ -247,7 +249,7 @@ fn closed_leaf_sources_lower_in_scope() {
         )
         .at_optional_boundary()
         .expect("a bare Ref leaf must raise");
-    let data = crate::project_semantic_dispatch::node_data_for(
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         reference.node(),
     );
@@ -293,8 +295,11 @@ defineProps<{ value?: Shared }>()
     host
 }
 
-fn assert_instance_target(host: &VerterHost, node: crate::semantic_query::SemanticNodeId) {
-    let data = crate::project_semantic_dispatch::node_data_for(
+fn assert_instance_target(
+    host: &VerterHost,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+) {
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         node,
     );
@@ -390,7 +395,7 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
         .at_optional_boundary()
         .expect("a closed tuple with a leaf-union element must raise");
 
-    let data = crate::project_semantic_dispatch::node_data_for(
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         raised.node(),
     );
@@ -410,7 +415,7 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
     // The leaf-union element interns the ORDERED Union node whose members
     // are the lowered leaves — string THEN number, exactly as produced.
     let union_node = elements[0].value;
-    let union_data = crate::project_semantic_dispatch::node_data_for(
+    let union_data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         union_node,
     );
@@ -500,7 +505,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
         )
         .at_optional_boundary()
         .expect("a synthesized object shape must raise");
-    let data = crate::project_semantic_dispatch::node_data_for(
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         raised.node(),
     );
@@ -520,7 +525,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
         .expect("the leaf member must be present");
     assert!(
         matches!(
-            crate::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::node_data_for(
                 host.project_type_store().semantic_graph(),
                 flag.value
             )
@@ -539,7 +544,7 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     assert!(base.optional, "the locator member carries its optionality");
     assert!(
         matches!(
-            crate::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::node_data_for(
                 host.project_type_store().semantic_graph(),
                 base.value
             )
@@ -573,7 +578,7 @@ fn session_demand_replay_projects_the_member_path_off_the_macro_mirror() {
         .expect("the session demand must replay to the member node");
     assert!(
         matches!(
-            crate::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::node_data_for(
                 host.project_type_store().semantic_graph(),
                 raised.node()
             )
@@ -599,7 +604,7 @@ fn session_demand_replay_projects_the_member_path_off_the_macro_mirror() {
     );
     let fabricated_concrete = replayed.is_some_and(|handle| {
         matches!(
-            crate::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::node_data_for(
                 host.project_type_store().semantic_graph(),
                 handle.node()
             )
@@ -616,7 +621,7 @@ fn session_demand_replay_projects_the_member_path_off_the_macro_mirror() {
 /// The synthetic slot-binding DEEPEN route
 /// (`SemanticTypeSource::SyntheticSlotBinding` → `deepen_synthetic_binding_to_hot`
 /// under an `Expanded` / `Identity` demand) admits into the shared
-/// [`crate::component_meta_caches::ShapeCacheDb`] under
+/// [`verter_type_engine::component_meta_caches::ShapeCacheDb`] under
 /// `ShapeCacheKey::synthetic_binding_whole_with_context`. Its cold reduce
 /// (`raise_and_reduce_with_context`) resolves the seed's carrier head through the
 /// shared resolver's `ensure_indexed_ready_serve` — so a FENCED (ReturnOnly,
@@ -635,10 +640,10 @@ fn session_demand_replay_projects_the_member_path_off_the_macro_mirror() {
 /// never the value) and the request stays `Complete`.
 #[test]
 fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
-    use crate::component_meta_caches::ShapeCacheKey;
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::semantic_query::{NodeScopeId, SemanticNodeId, SyntheticBindingId};
     use std::sync::atomic::Ordering;
+    use verter_type_engine::component_meta_caches::ShapeCacheKey;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{NodeScopeId, SemanticNodeId, SyntheticBindingId};
     use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
 
     const SCOPE: &str = "/binding_scope.ts";
@@ -648,7 +653,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     /// and whose reduce resolves the reference head through
     /// `ensure_indexed_ready_serve` (so the fence has a serve to catch).
     fn intern_seed(host: &VerterHost) -> SemanticNodeId {
-        let ctx: &dyn crate::resolver_core::ResolverContext<
+        let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = host;
         let whole_hash = ctx
@@ -687,7 +692,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     }
 
     fn slot_warm(host: &VerterHost, carrier: &SyntheticCarrierKey) -> bool {
-        let ctx: &dyn crate::resolver_core::ResolverContext<
+        let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = host;
         let key = ShapeCacheKey::synthetic_binding_whole_with_context(
@@ -704,7 +709,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     /// Raise the synthetic-binding source under an `Expanded` demand — the deepen
     /// route (a `Navigate` demand would intern the shallow carrier instead).
     fn drive(host: &VerterHost, carrier: &SyntheticCarrierKey) -> bool {
-        let ctx: &dyn crate::resolver_core::ResolverContext<
+        let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = host;
         let dispatch = ProjectSemanticDispatch::new(ctx);
@@ -763,7 +768,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
             .force_indexed_ready_serve_fence_for_tests
             .store(false, Ordering::Relaxed);
         assert!(
-            !crate::request_context::current_request_result_is_partial(),
+            !verter_type_engine::request_context::current_request_result_is_partial(),
             "a fenced serve is non-cacheable, NOT partial — the deepened shape stays Complete",
         );
     }
@@ -789,9 +794,9 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
 mod query_error_raise_routing {
     use std::sync::Arc;
 
-    use crate::project_semantic_dispatch::semantic_source::SourceRaiseOutcome;
-    use crate::semantic_query::{QueryError, SemanticNodeId, SemanticQueryValueTag};
     use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+    use verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseOutcome;
+    use verter_type_engine::semantic_query::{QueryError, SemanticNodeId, SemanticQueryValueTag};
 
     /// Stand-in carrier minting: returns a fixed node id so the test can
     /// observe WHETHER the routing asked for a carrier at all.
@@ -946,9 +951,11 @@ mod query_error_raise_routing {
             .at_optional_boundary()
             .is_none());
         assert!(
-            SourceRaiseOutcome::Raised(crate::semantic_query::HotTypeRef::new(CARRIER))
-                .at_optional_boundary()
-                .is_some()
+            SourceRaiseOutcome::Raised(verter_type_engine::semantic_query::HotTypeRef::new(
+                CARRIER
+            ))
+            .at_optional_boundary()
+            .is_some()
         );
     }
 }
@@ -979,12 +986,14 @@ fn closed_leaf_union_with_duplicate_leaves_raises_to_the_singleton_literal() {
         .at_optional_boundary()
         .expect("a closed leaf union must raise");
 
-    let data = crate::project_semantic_dispatch::node_data_for(
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         raised.node(),
     );
     match data.as_deref() {
-        Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
+        Some(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::String(value),
+        )) => {
             assert_eq!(value, "a", "the surviving literal is the decided leaf");
         }
         other => panic!(
@@ -1031,19 +1040,21 @@ fn nested_leaf_union_with_duplicate_leaves_composes_the_singleton_literal() {
         .at_optional_boundary()
         .expect("a closed tuple with a duplicate-leaf union element must raise");
 
-    let data = crate::project_semantic_dispatch::node_data_for(
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         raised.node(),
     );
     let Some(SemanticNodeData::Tuple { elements, .. }) = data.as_deref() else {
         panic!("the closed tuple must compose a Tuple node, got {data:?}");
     };
-    let element_data = crate::project_semantic_dispatch::node_data_for(
+    let element_data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         elements[0].value,
     );
     match element_data.as_deref() {
-        Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
+        Some(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::String(value),
+        )) => {
             assert_eq!(value, "a", "the surviving literal is the decided leaf");
         }
         other => panic!(
@@ -1093,7 +1104,7 @@ fn closed_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
         .whole_hash;
     assert_eq!(
         graph.node_scope(raised.node()),
-        Some(crate::semantic_query::NodeScopeId::File {
+        Some(verter_type_engine::semantic_query::NodeScopeId::File {
             canonical_id: Arc::from(OWNER_ID),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
@@ -1160,7 +1171,7 @@ fn nested_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
         .whole_hash;
     assert_eq!(
         graph.node_scope(element),
-        Some(crate::semantic_query::NodeScopeId::File {
+        Some(verter_type_engine::semantic_query::NodeScopeId::File {
             canonical_id: Arc::from(OWNER_ID),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,

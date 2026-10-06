@@ -216,7 +216,7 @@ impl MetaSession {
             let (executor_view, captured_fp) = fixed.executor_fixed_view();
             host.resolve_component_meta_with_view_and_fixed_admission(
                 canonical.as_str(),
-                crate::types::ProjectionMode::Expanded,
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 view,
                 Some((executor_view, captured_fp, fixed.current_view().is_some())),
             )
@@ -238,7 +238,8 @@ impl MetaSession {
             overlay,
         );
         let ctx: &dyn crate::resolver_core::HostRequestContext = &session_ctx;
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let crate::host_manage::ComponentMetaExtractOutcome {
             analysis,
             fallthrough_fact_versions,
@@ -252,7 +253,7 @@ impl MetaSession {
         );
         host.merge_extraction_facts_into_admitted_resolved_meta(
             canonical.as_str(),
-            crate::types::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
             view.fingerprint(),
             &mut resolved,
             fallthrough_fact_versions.as_deref(),
@@ -276,9 +277,9 @@ impl MetaSession {
         }
 
         // An aborted computation publishes nothing.
-        if let Some(abort) =
-            crate::semantic_query::ExecutionAbort::observed_in(final_completeness.get())
-        {
+        if let Some(abort) = verter_type_engine::semantic_query::ExecutionAbort::observed_in(
+            final_completeness.get(),
+        ) {
             return Err(MetaError::Aborted(abort));
         }
         if let Some(err) =
@@ -305,8 +306,8 @@ impl MetaSession {
         // on the owning SFC — the macro hot mirror, member-path, or callable-
         // params replay) therefore observes the same view as extraction.
         let (output_result, output_read_set) =
-            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx).with_fact_tracer(
-                || {
+            verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx)
+                .with_fact_tracer(|| {
                     crate::meta_resolve::projectors::build_component_meta_output(
                         ctx,
                         dispatch,
@@ -321,8 +322,7 @@ impl MetaSession {
                         // declines to warm it.
                         final_completeness,
                     )
-                },
-            );
+                });
         let output = output_result?;
         // Snapshot the output-materialization tracer's non-cacheability bit
         // BEFORE `finalise` consumes the read-set below. A fenced (ReturnOnly,

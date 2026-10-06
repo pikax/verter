@@ -86,7 +86,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use verter_session::semantic_query::SemanticQueryKeyTag;
+use verter_type_engine::semantic_query::SemanticQueryKeyTag;
 
 fn workspace_root() -> PathBuf {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -378,7 +378,7 @@ macro_rules! semantic_query_names {
         /// The live `SemanticQueryKey` variant set, mirrored as a name-only
         /// closed enum (the U0 ledger keys queries by NAME — no payloads).
         /// Kept in sync — variant-for-variant — with the live
-        /// [`verter_session::semantic_query::SemanticQueryKeyTag`] discriminant
+        /// [`verter_type_engine::semantic_query::SemanticQueryKeyTag`] discriminant
         /// set (`SemanticQueryKeyTag::ALL`). The
         /// `semantic_query_name_mirror_matches_live_tag_set` guard FAILS if this
         /// mirror omits (or invents) any live tag, so the mirror can never
@@ -2495,9 +2495,9 @@ fn semantic_query_name_from_str(s: &str) -> Option<SemanticQueryName> {
 /// Map a registry projection-mode spec onto the resolver's `ProjectionMode`.
 fn registry_mode_to_resolver(
     mode: oracle_registry::ProjectionModeSpec,
-) -> verter_session::ProjectionMode {
+) -> verter_type_engine::semantic_query::ProjectionMode {
     use oracle_registry::ProjectionModeSpec as S;
-    use verter_session::ProjectionMode as P;
+    use verter_type_engine::semantic_query::ProjectionMode as P;
     match mode {
         S::Shallow => P::Shallow,
         S::Navigate => P::Navigate,

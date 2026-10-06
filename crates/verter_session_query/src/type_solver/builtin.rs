@@ -3,7 +3,7 @@
 //! Owns the `BuiltinUtility` enum and its name/arity/intrinsic
 //! metadata. Utility expansion logic itself lives on the shared
 //! semantic dispatch layer
-//! (`verter_session::project_semantic_dispatch`); callers such as
+//! (`verter_type_engine::project_semantic_dispatch`); callers such as
 //! `IntrinsicRegistry`, `component_meta_query_engine`, and dispatch
 //! lower only need to classify whether a name is a recognized utility.
 
@@ -83,7 +83,7 @@ impl BuiltinUtility {
     ///
     /// This is the registry-owned per-utility OUTPUT-KEY semantics the
     /// key-domain closedness classifiers consume (see
-    /// `verter_session::project_semantic_dispatch::raise::builtin_utility_key_domain_is_closed`):
+    /// `verter_type_engine::project_semantic_dispatch::raise::builtin_utility_key_domain_is_closed`):
     /// a utility's produced key set is provably closed iff every listed
     /// argument's key domain is closed — arguments NOT listed (e.g.
     /// `Record`'s value argument) never open the produced key domain.

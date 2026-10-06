@@ -6,14 +6,14 @@ use std::sync::Arc;
 
 use super::dispatch_txn::{InferenceOccurrence, InferenceSessionState, PendingObligationDomain};
 use super::*;
-use crate::semantic_query::{
+use crate::types::UpsertRequest;
+use crate::{HostConfig, VerterHost};
+use verter_type_engine::semantic_query::{
     ArgumentLiteralMode, CallArgKey, CallKind, FunctionParam, PrimitiveKind, ProgramPointId,
     QueryResult, ResolveCallContext, ResolveCallKey, ResolvedCallResult, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
     SignatureKind, SignatureNodeOccurrence, SignatureReturnCarrier, TupleElement, TypeParamDecl,
 };
-use crate::types::UpsertRequest;
-use crate::{HostConfig, VerterHost};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
@@ -208,7 +208,7 @@ fn relation_only_assumption_replays_but_own_return_assumption_refuses() {
             vec![eager(number)],
         )),
         super::call_resolve::ResolveCallStep::Degraded(
-            crate::semantic_query::ResolveCallFailure::Undecidable
+            verter_type_engine::semantic_query::ResolveCallFailure::Undecidable
         )
     ));
     let mut txn = dispatch.dispatch_txn.borrow_mut();
@@ -246,7 +246,7 @@ pub(super) fn callable(
     constructs: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(calls.into_boxed_slice()),
             construct_signatures: Arc::from(constructs.into_boxed_slice()),
@@ -296,7 +296,7 @@ pub(super) fn call_key_at(
         receiver,
         args: Arc::from(args.into_boxed_slice()),
         explicit_type_args: Arc::from(Vec::new().into_boxed_slice()),
-        flow: crate::semantic_query::FlowNarrowingKey::empty(),
+        flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
         context: ResolveCallContext {
             parse_env_hash,
             resolve_env_hash,
@@ -345,7 +345,7 @@ fn selected(step: super::call_resolve::ResolveCallStep) -> ResolvedCallResult {
 /// that applied, or one that did not resolve at all.
 fn recovery_code(
     step: super::call_resolve::ResolveCallStep,
-) -> Option<crate::semantic_query::CheckerDiagnosticCode> {
+) -> Option<verter_type_engine::semantic_query::CheckerDiagnosticCode> {
     match step {
         super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
             recovery_diagnostic: Some(diagnostic),
@@ -426,8 +426,8 @@ fn first_fully_applicable_literal_overload_wins() {
     assert!(
         matches!(
             selected_identity,
-            crate::semantic_query::SignatureCandidateOrigin::Authored(
-                crate::semantic_query::SignatureOccurrenceIdentity {
+            verter_type_engine::semantic_query::SignatureCandidateOrigin::Authored(
+                verter_type_engine::semantic_query::SignatureOccurrenceIdentity {
                     signature_ordinal: 0,
                     ..
                 }
@@ -457,8 +457,8 @@ fn first_fully_applicable_literal_overload_wins() {
     assert!(
         matches!(
             fresh_identity,
-            crate::semantic_query::SignatureCandidateOrigin::Authored(
-                crate::semantic_query::SignatureOccurrenceIdentity {
+            verter_type_engine::semantic_query::SignatureCandidateOrigin::Authored(
+                verter_type_engine::semantic_query::SignatureOccurrenceIdentity {
                     signature_ordinal: 0,
                     ..
                 }
@@ -588,7 +588,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
             }],
         )),
         super::call_resolve::ResolveCallStep::Degraded(
-            crate::semantic_query::ResolveCallFailure::Undecidable
+            verter_type_engine::semantic_query::ResolveCallFailure::Undecidable
         )
     ));
 }
@@ -639,14 +639,14 @@ fn mixed_const_policy_is_applied_per_parameter() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
     let u = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("U"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("U"),
         param_index: 1,
         constraint: None,
         default: None,
@@ -762,7 +762,7 @@ fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
     let bad_ret = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
     let good_ret = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("ConstrainedT"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("ConstrainedT"),
         param_index: 0,
         constraint: Some(string),
         default: None,
@@ -851,7 +851,7 @@ fn declared_return_uses_the_final_substitution() {
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("DeclaredT"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("DeclaredT"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -915,7 +915,7 @@ fn body_derived_return_uses_the_final_substitution() {
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("BodyT"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("BodyT"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -1076,7 +1076,7 @@ fn call_resolution_budget_exceeded_admits_nothing() {
     assert!(matches!(
         dispatch.execute_resolve_call(key.clone()),
         super::call_resolve::ResolveCallStep::Degraded(
-            crate::semantic_query::ResolveCallFailure::Budget
+            verter_type_engine::semantic_query::ResolveCallFailure::Budget
         )
     ));
     assert!(dispatch
@@ -1149,7 +1149,7 @@ fn anonymous_candidate_pairs_with_its_own_instantiation() {
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("AnonT"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("AnonT"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -1215,7 +1215,7 @@ fn admission_follows_the_dependency_proof_not_the_winners_origin() {
         matches!(
             &result,
             ResolvedCallResult::Selected {
-                selected: crate::semantic_query::SignatureCandidateOrigin::Rootless,
+                selected: verter_type_engine::semantic_query::SignatureCandidateOrigin::Rootless,
                 ..
             }
         ),
@@ -1379,7 +1379,8 @@ fn incomplete_nested_call_proof_refuses_component_admission() {
         "an incomplete nested member proof must poison the component flag"
     );
     assert!(
-        crate::semantic_query::AdmissibleCallResult::new(result, proof_complete).is_none(),
+        verter_type_engine::semantic_query::AdmissibleCallResult::new(result, proof_complete)
+            .is_none(),
         "the poisoned component must not be admissible"
     );
 
@@ -1494,7 +1495,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         verter_type_expr::LiteralValue::String("literal".into()),
     ));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -1559,7 +1560,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         vec![lambda_arg(true), eager(literal)],
     ));
     let super::call_resolve::ResolveCallStep::Degraded(
-        crate::semantic_query::ResolveCallFailure::ContextSensitiveInference {
+        verter_type_engine::semantic_query::ResolveCallFailure::ContextSensitiveInference {
             contextual: Some((0, contextual)),
         },
     ) = withheld
@@ -1638,11 +1639,11 @@ fn receiverless_call_admits_only_a_this_that_accepts_undefined() {
     let unknown = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let ret = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let data_object = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(
-                vec![crate::semantic_query::SurfaceMember {
+                vec![verter_type_engine::semantic_query::SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("data"),
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("data"),
                     value: string,
                     optional: false,
                     readonly: false,
@@ -1651,8 +1652,8 @@ fn receiverless_call_admits_only_a_this_that_accepts_undefined() {
                     visibility: verter_type_expr::MemberVisibility::Public,
                     spans: Default::default(),
                     declaration_origin: None,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 }]
                 .into_boxed_slice(),
             ),
@@ -1705,7 +1706,7 @@ fn receiverless_call_admits_only_a_this_that_accepts_undefined() {
         matches!(
             receiverless(data_object, "objectThis"),
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
+                verter_type_engine::semantic_query::ResolveCallFailure::NoApplicableOverload
             )
         ),
         "a `this` demanding a concrete object is NOT satisfied by the absent \
@@ -1772,7 +1773,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
     // `<A extends CONSTRAINT>(...args: A): RETURN`
     let variadic = |name: &str, constraint: SemanticNodeId, return_type: SemanticNodeId| {
         let param = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic(name),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic(name),
             param_index: 0,
             constraint: Some(constraint),
             default: None,
@@ -1840,7 +1841,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
             None,
             vec![eager(number), eager(number)],
         ))),
-        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
+        Some(verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
         "an assembled tuple that violates the declaration-site constraint is rejected"
     );
 
@@ -1864,7 +1865,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
             None,
             vec![eager(number), eager(number)],
         ))),
-        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentCount),
+        Some(verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentCount),
         "a concrete one-parameter candidate still caps arity at one"
     );
 }
@@ -1891,9 +1892,9 @@ fn excess_property_checking_is_an_argument_position_rule() {
     let ret = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let member =
         |name: &str, value: SemanticNodeId, origin: verter_type_expr::ExcessPropertyOrigin| {
-            crate::semantic_query::SurfaceMember {
+            verter_type_engine::semantic_query::SurfaceMember {
                 excess_origin: origin,
-                key: crate::semantic_query::AuthoredPropertyKey::string(name),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
                 value,
                 optional: false,
                 readonly: false,
@@ -1902,13 +1903,14 @@ fn excess_property_checking_is_an_argument_position_rule() {
                 visibility: verter_type_expr::MemberVisibility::Public,
                 spans: Default::default(),
                 declaration_origin: None,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             }
         };
-    let object = |members: Vec<crate::semantic_query::SurfaceMember>| {
+    let object = |members: Vec<verter_type_engine::semantic_query::SurfaceMember>| {
         graph.intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+            verter_type_engine::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -1940,7 +1942,7 @@ fn excess_property_checking_is_an_argument_position_rule() {
     ]);
     assert_eq!(
         dispatch.freshness_for_source_node(fresh),
-        crate::semantic_query::FreshnessKey::Fresh,
+        verter_type_engine::semantic_query::FreshnessKey::Fresh,
         "the fixture literal is a proven fresh source on both rows"
     );
 
@@ -2000,7 +2002,7 @@ fn excess_property_checking_is_an_argument_position_rule() {
             None,
             vec![eager(fresh)],
         ))),
-        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
+        Some(verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
         "an argument position DOES excess-check the identical fresh literal"
     );
 
@@ -2026,7 +2028,7 @@ fn excess_property_checking_is_an_argument_position_rule() {
     let regular = dispatch.regularized_source_node(nested);
     assert_eq!(
         dispatch.freshness_for_source_node(regular),
-        crate::semantic_query::FreshnessKey::Regular,
+        verter_type_engine::semantic_query::FreshnessKey::Regular,
         "a regularized surface is no longer a fresh source"
     );
     let Some(SemanticNodeData::Object(view)) = graph.node_data(regular).as_deref().cloned() else {
@@ -2035,7 +2037,7 @@ fn excess_property_checking_is_an_argument_position_rule() {
     for slot in view.positive_members() {
         assert_eq!(
             dispatch.freshness_for_source_node(slot.value),
-            crate::semantic_query::FreshnessKey::Regular,
+            verter_type_engine::semantic_query::FreshnessKey::Regular,
             "every member value — including the SHARED one reached twice — is regularized"
         );
     }
@@ -2096,16 +2098,16 @@ fn overload_call_key(
 ) -> ResolveCallKey {
     let graph = dispatch.graph();
     let alpha = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("alpha".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("alpha".to_owned()),
     ));
     let gamma = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("gamma".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("gamma".to_owned()),
     ));
     let picked_alpha = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("picked-alpha".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("picked-alpha".to_owned()),
     ));
     let picked_gamma = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("picked-gamma".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("picked-gamma".to_owned()),
     ));
     let first = signature(
         dispatch,
@@ -2155,7 +2157,7 @@ fn overload_call_key(
             .into_boxed_slice(),
         ),
         explicit_type_args: Arc::from(Vec::new().into_boxed_slice()),
-        flow: crate::semantic_query::FlowNarrowingKey::empty(),
+        flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
         context: ResolveCallContext {
             parse_env_hash,
             resolve_env_hash,
@@ -2177,9 +2179,9 @@ fn selected_return_literal(
         | ResolvedCallResult::DynamicAny { return_type } => return_type,
     };
     match dispatch.graph().node_data(return_type).as_deref() {
-        Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(value))) => {
-            value.to_string()
-        }
+        Some(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::String(value),
+        )) => value.to_string(),
         other => panic!("the call must select a string-literal return, got {other:?}"),
     }
 }
@@ -2289,7 +2291,7 @@ fn source_flow_type(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    let key = crate::semantic_query::FlowReturnKey {
+    let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -2299,8 +2301,8 @@ fn source_flow_type(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     };
     let QueryResult::Value(SemanticQueryOutput {
@@ -2454,7 +2456,7 @@ fn explicit_type_args_rejected_by_every_candidate_keep_the_callee_callable() {
         matches!(
             step,
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NoApplicableOverload
+                verter_type_engine::semantic_query::ResolveCallFailure::NoApplicableOverload
             )
         ),
         "a non-generic callable rejects the explicit type argument but stays callable; got {step:?}"
@@ -2477,7 +2479,7 @@ fn explicit_type_args_rejected_by_every_candidate_keep_the_callee_callable() {
         matches!(
             step,
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NotCallable
+                verter_type_engine::semantic_query::ResolveCallFailure::NotCallable
             )
         ),
         "a construct-only callee has an empty call bucket and is not callable; got {step:?}"
@@ -2653,7 +2655,7 @@ fn type_param(
     index: u16,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic(name),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic(name),
         param_index: index,
         constraint: None,
         default: None,
@@ -2762,7 +2764,7 @@ fn tuple_argument_literal_elements_select_concrete_tuple_targets() {
             None,
             vec![eager(tuple_of(&dispatch, vec![number]))],
         ))),
-        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
+        Some(verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable),
         "[number] must not satisfy (x: [1])"
     );
 }
@@ -2911,7 +2913,7 @@ fn required_arity_ends_at_last_required_position() {
             None,
             vec![fresh_literal(one)],
         ))),
-        Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentCount),
+        Some(verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentCount),
         "f(1) must reject: the required span ends at the second parameter"
     );
     let both = selected(dispatch.execute_resolve_call(call_key(
@@ -2986,7 +2988,7 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
                 None,
                 args,
             ))),
-            Some(crate::semantic_query::CheckerDiagnosticCode::ArgumentCount),
+            Some(verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentCount),
             "(a?: number, ...rest: [string]) requires two arguments, accepted {arg_count}"
         );
     }
@@ -3190,10 +3192,10 @@ fn approximate_spread_mapping_degrades_instead_of_selecting_weaker_overload() {
         readonly: false,
     });
     let exact = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("exact".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("exact".to_owned()),
     ));
     let weaker = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("weaker".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("weaker".to_owned()),
     ));
     let first = signature(
         &dispatch,
@@ -3233,7 +3235,7 @@ fn approximate_spread_mapping_degrades_instead_of_selecting_weaker_overload() {
         matches!(
             dispatch.execute_resolve_call(key.clone()),
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::Undecidable
+                verter_type_engine::semantic_query::ResolveCallFailure::Undecidable
             )
         ),
         "an indefinite spread against a positional first candidate is approximate \
@@ -3259,10 +3261,10 @@ fn exact_arity_mismatch_still_selects_the_later_overload() {
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let first_ret = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("first".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("first".to_owned()),
     ));
     let second_ret = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("second".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("second".to_owned()),
     ));
     let first = signature(
         &dispatch,
@@ -3318,7 +3320,7 @@ fn unresolved_argument_mapping_degrades_and_admits_nothing() {
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let weaker = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("weaker".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("weaker".to_owned()),
     ));
     let first = signature(
         &dispatch,
@@ -3353,7 +3355,7 @@ fn unresolved_argument_mapping_degrades_and_admits_nothing() {
         matches!(
             dispatch.execute_resolve_call(key.clone()),
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::Undecidable
+                verter_type_engine::semantic_query::ResolveCallFailure::Undecidable
             )
         ),
         "an unresolved argument stops the call as Undecidable"
@@ -3382,7 +3384,7 @@ fn union_signature_return(result: &ResolvedCallResult) -> SemanticNodeId {
     };
     assert_eq!(
         *selected,
-        crate::semantic_query::SignatureCandidateOrigin::Rootless,
+        verter_type_engine::semantic_query::SignatureCandidateOrigin::Rootless,
         "a union signature is a composite, never one arm's authored occurrence"
     );
     *return_type
@@ -3393,7 +3395,7 @@ fn union_callee(
     arms: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             arms.into_boxed_slice(),
         )),
     ))
@@ -3409,10 +3411,10 @@ fn union_callee_selects_every_arm_and_unions_returns() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let two = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(2.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(2.0),
     ));
     let arm_a = signature(
         &dispatch,
@@ -3506,7 +3508,7 @@ fn union_arm_overload_order_is_per_arm_not_cross_arm() {
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let lit = |value: &str| {
         graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::String(value.to_owned()),
+            verter_type_engine::semantic_query::LiteralValue::String(value.to_owned()),
         ))
     };
     let a_str = signature(
@@ -3579,13 +3581,13 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let one = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let two = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(2.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(2.0),
     ));
     let s_lit = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("s".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("s".to_owned()),
     ));
     let arm_a = signature(
         &dispatch,
@@ -3613,8 +3615,8 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
             &step,
             super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
                 return_type,
-                recovery_diagnostic: Some(crate::semantic_query::CheckerDiagnostic {
-                    code: crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                recovery_diagnostic: Some(verter_type_engine::semantic_query::CheckerDiagnostic {
+                    code: verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
                     ..
                 }),
                 ..
@@ -3637,7 +3639,7 @@ fn union_non_callable_arm_is_not_callable() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let arm_a = signature(
@@ -3660,7 +3662,7 @@ fn union_non_callable_arm_is_not_callable() {
                 Vec::new(),
             )),
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NotCallable
+                verter_type_engine::semantic_query::ResolveCallFailure::NotCallable
             )
         ),
         "a non-callable arm makes the union callee not callable"
@@ -3681,7 +3683,7 @@ fn incomplete_opaque_callee_is_not_classified_not_callable() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let missing = graph.intern_node(SemanticNodeData::Opaque(
-        crate::semantic_query::QueryError::Miss,
+        verter_type_engine::semantic_query::QueryError::Miss,
     ));
     assert!(
         matches!(
@@ -3693,14 +3695,14 @@ fn incomplete_opaque_callee_is_not_classified_not_callable() {
                 Vec::new(),
             )),
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::NotCallable
+                verter_type_engine::semantic_query::ResolveCallFailure::NotCallable
             )
         ),
         "a typed miss has no type to enumerate and is not callable"
     );
     for incomplete in [
-        crate::semantic_query::QueryError::Cancelled,
-        crate::semantic_query::QueryError::Other(Arc::from("unsettled")),
+        verter_type_engine::semantic_query::QueryError::Cancelled,
+        verter_type_engine::semantic_query::QueryError::Other(Arc::from("unsettled")),
     ] {
         let callee = graph.intern_node(SemanticNodeData::Opaque(incomplete.clone()));
         let step = dispatch.execute_resolve_call(call_key(
@@ -3714,8 +3716,8 @@ fn incomplete_opaque_callee_is_not_classified_not_callable() {
             matches!(
                 step,
                 super::call_resolve::ResolveCallStep::Degraded(
-                    crate::semantic_query::ResolveCallFailure::Budget
-                        | crate::semantic_query::ResolveCallFailure::Undecidable
+                    verter_type_engine::semantic_query::ResolveCallFailure::Budget
+                        | verter_type_engine::semantic_query::ResolveCallFailure::Undecidable
                 )
             ),
             "an incomplete callee ({incomplete:?}) degrades as incomplete, never \
@@ -3735,17 +3737,17 @@ fn union_undecidable_arm_degrades_the_whole_call() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let two = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(2.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(2.0),
     ));
     let s_lit = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("s".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("s".to_owned()),
     ));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let unresolved = graph.intern_node(SemanticNodeData::Opaque(
-        crate::semantic_query::QueryError::Miss,
+        verter_type_engine::semantic_query::QueryError::Miss,
     ));
     let arm_a = signature(
         &dispatch,
@@ -3776,7 +3778,7 @@ fn union_undecidable_arm_degrades_the_whole_call() {
                 vec![eager(s_lit)],
             )),
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::Undecidable
+                verter_type_engine::semantic_query::ResolveCallFailure::Undecidable
             )
         ),
         "an undecidable arm degrades the whole union call"
@@ -3800,13 +3802,13 @@ fn unsettled_construct_bucket_never_degrades_a_call() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let two = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(2.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(2.0),
     ));
     let s_lit = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("s".to_owned()),
+        verter_type_engine::semantic_query::LiteralValue::String("s".to_owned()),
     ));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -3879,7 +3881,7 @@ fn unsettled_construct_bucket_never_degrades_a_call() {
         matches!(
             construct,
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::Undecidable
+                verter_type_engine::semantic_query::ResolveCallFailure::Undecidable
             )
         ),
         "the construct list is the one that does not settle; got {construct:?}"
@@ -3903,7 +3905,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let anon = anonymous_signature(&dispatch, Vec::new(), Vec::new(), one);
     let callee = callable(&dispatch, vec![anon], Vec::new());
@@ -3912,7 +3914,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
         callee,
         kind: SignatureKind::Call,
         type_args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::OverloadSetContext {
+        context: verter_type_engine::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
             ..Default::default()
         },
@@ -3925,7 +3927,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
             assert_eq!(refs.len(), 1, "the anonymous set resolves");
             assert_eq!(
                 refs[0].occurrence,
-                crate::semantic_query::SignatureCandidateOrigin::Rootless,
+                verter_type_engine::semantic_query::SignatureCandidateOrigin::Rootless,
                 "the candidate keeps its rootless provenance"
             );
         }
@@ -3947,7 +3949,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
 
     // A union mixing an anonymous arm with an authored one admits too.
     let two = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(2.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(2.0),
     ));
     let authored = signature(
         &dispatch,
@@ -3963,7 +3965,7 @@ fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
         callee: union,
         kind: SignatureKind::Call,
         type_args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::OverloadSetContext {
+        context: verter_type_engine::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
             ..Default::default()
         },
@@ -4022,15 +4024,15 @@ fn typeof_value_node(
     name: &str,
 ) -> SemanticNodeId {
     let key = dispatch.typeof_key_for(
-        crate::semantic_query::ValueRootKey {
-            scope: crate::semantic_query::ScopeId::file(
+        verter_type_engine::semantic_query::ValueRootKey {
+            scope: verter_type_engine::semantic_query::ScopeId::file(
                 Arc::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
             name: Arc::from(name),
         },
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     );
     match dispatch.execute_type_node(key) {
@@ -4046,7 +4048,9 @@ fn declaring_file(
     node: SemanticNodeId,
 ) -> Option<Arc<str>> {
     match dispatch.graph().node_scope(node) {
-        Some(crate::semantic_query::NodeScopeId::File { canonical_id, .. }) => Some(canonical_id),
+        Some(verter_type_engine::semantic_query::NodeScopeId::File { canonical_id, .. }) => {
+            Some(canonical_id)
+        }
         _ => None,
     }
 }
@@ -4111,8 +4115,8 @@ fn inline_callable_call_admits_rooted_on_its_declaring_file() {
     assert!(
         matches!(
             selected,
-            crate::semantic_query::SignatureCandidateOrigin::Rootless
-                | crate::semantic_query::SignatureCandidateOrigin::Authored(_)
+            verter_type_engine::semantic_query::SignatureCandidateOrigin::Rootless
+                | verter_type_engine::semantic_query::SignatureCandidateOrigin::Authored(_)
         ),
         "origin is provenance, not the admission oracle, got {selected:?}"
     );
@@ -4213,7 +4217,7 @@ fn global_union_callee_call_admits_rooted_on_every_arm_file() {
     // scope-less; only its arms carry file scopes.
     assert_eq!(
         graph.node_scope(callee),
-        Some(crate::semantic_query::NodeScopeId::Global),
+        Some(verter_type_engine::semantic_query::NodeScopeId::Global),
         "a multi-arm canonical union interns scope-less"
     );
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4225,7 +4229,7 @@ fn global_union_callee_call_admits_rooted_on_every_arm_file() {
         matches!(
             &fresh,
             ResolvedCallResult::Selected {
-                selected: crate::semantic_query::SignatureCandidateOrigin::Rootless,
+                selected: verter_type_engine::semantic_query::SignatureCandidateOrigin::Rootless,
                 ..
             }
         ),
@@ -4289,7 +4293,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
         callee,
         kind: SignatureKind::Call,
         type_args: Arc::from(Vec::new().into_boxed_slice()),
-        context: crate::semantic_query::OverloadSetContext {
+        context: verter_type_engine::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
             ..Default::default()
         },
@@ -4409,7 +4413,7 @@ fn call_utility_and_flow_consumers_read_one_signature_list() {
                 callee: subject,
                 kind: bucket,
                 type_args: Arc::from(Vec::new().into_boxed_slice()),
-                context: crate::semantic_query::OverloadSetContext {
+                context: verter_type_engine::semantic_query::OverloadSetContext {
                     resolve_env_hash: env.resolve_env_hash,
                     ..Default::default()
                 },
@@ -4467,11 +4471,11 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let data_object = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(
-                vec![crate::semantic_query::SurfaceMember {
+                vec![verter_type_engine::semantic_query::SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("data"),
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("data"),
                     value: string,
                     optional: false,
                     readonly: false,
@@ -4480,8 +4484,8 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
                     visibility: verter_type_expr::MemberVisibility::Public,
                     spans: Default::default(),
                     declaration_origin: None,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 }]
                 .into_boxed_slice(),
             ),
@@ -4493,7 +4497,7 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
         },
     ));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("KeysT"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("KeysT"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -4545,14 +4549,15 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
     let tripped = call_of("keysTripped");
     {
         let _partial = super::evaluate::force_partial_closed_operator_evaluation_for_tests();
-        let _completeness = crate::request_context::ColdComputeCompletenessScope::enter();
+        let _completeness =
+            verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let element = element_of(dispatch.execute_resolve_call(tripped.clone()));
         assert!(
             matches!(element.as_deref(), Some(SemanticNodeData::KeyOf { .. })),
             "the call keeps the operator it could not evaluate, got {element:?}"
         );
         assert!(
-            crate::request_context::current_cold_compute_completeness().is_partial(),
+            verter_type_engine::request_context::current_cold_compute_completeness().is_partial(),
             "the kept operator makes the enclosing compute partial"
         );
     }
@@ -4589,17 +4594,17 @@ fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve:
     );
     let graph = dispatch.graph();
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("ChainT"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("ChainT"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
     let chain = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: crate::semantic_query::DeclIdentity {
+        base: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: crate::semantic_query::HashValue::default(),
+            whole_hash: verter_type_engine::semantic_query::HashValue::default(),
             decl_name: Arc::from("A2"),
         },
         args: Arc::from(vec![t].into_boxed_slice()),

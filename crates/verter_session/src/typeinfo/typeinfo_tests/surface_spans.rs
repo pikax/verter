@@ -334,7 +334,7 @@ fn inherited_member_span_references_origin_file_not_consumer() {
 
 #[test]
 fn public_accessor_projects_full_surface_with_flags_and_roles() {
-    use crate::semantic_query::MemberMergeRole;
+    use verter_type_engine::semantic_query::MemberMergeRole;
 
     let host = make_host_with_footprint();
     upsert_ts(&host, FILE, SHALLOW_SURFACE_FACTS);
@@ -392,7 +392,7 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
     assert!(
         !matches!(
             graph.node_data(nested.value).as_deref(),
-            Some(crate::semantic_query::SemanticNodeData::Object(_))
+            Some(verter_type_engine::semantic_query::SemanticNodeData::Object(_))
         ),
         "Shallow projection must NOT eagerly expand the object-alias member `nested` into an \
          Object surface (would indicate an Expanded Instantiate); value node = {:?}",
@@ -402,7 +402,7 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
     for m in surface.members.iter() {
         let is_object = matches!(
             graph.node_data(m.value).as_deref(),
-            Some(crate::semantic_query::SemanticNodeData::Object(_))
+            Some(verter_type_engine::semantic_query::SemanticNodeData::Object(_))
         );
         assert!(
             !is_object,
@@ -453,7 +453,7 @@ fn nested_object_member_stays_shallow_reference_not_materialized() {
     assert!(
         !matches!(
             outer_data.as_deref(),
-            Some(crate::semantic_query::SemanticNodeData::Object(_))
+            Some(verter_type_engine::semantic_query::SemanticNodeData::Object(_))
         ),
         "nested-object member `outer` must stay a SHALLOW reference carrier, not be \
          materialised into an Object surface; value node data = {:?}",
@@ -563,8 +563,8 @@ fn member_with_unresolved_value_type_keeps_real_declaration_spans() {
 
 #[test]
 fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
-    use crate::semantic_query::{IndexSignature, SemanticNodeData};
     use verter_span::Span;
+    use verter_type_engine::semantic_query::{IndexSignature, SemanticNodeData};
 
     const FILE: &str = "/src/idx_decl.ts";
 
@@ -574,10 +574,10 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
     // SCOPE-LESS key + value nodes (interned via the unscoped `intern_node` →
     // `NodeScopeId::Global` → `node_scope` is `None`).
     let key_node = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let value_node = graph.intern_node(SemanticNodeData::Opaque(
-        crate::semantic_query::QueryError::Miss,
+        verter_type_engine::semantic_query::QueryError::Miss,
     ));
     // Precondition: BOTH key + value nodes yield NO origin file, so the pre-fix
     // `node_origin_file(value).or(key)` fallback chain yields `None`.
@@ -606,7 +606,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
         // at production time; the only correct span anchor.
         declaration_origin: Some(std::sync::Arc::from(FILE)),
     };
-    let view = crate::test_surface_view! {
+    let view = verter_type_engine::test_surface_view! {
         members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
@@ -621,7 +621,7 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
     assert_eq!(
         TypeInfoSurface::from_one_level(
             graph,
-            &crate::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view(&view),
+            &verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view(&view),
         ),
         surface,
     );
@@ -669,8 +669,8 @@ fn index_signature_build_uses_declaration_origin_for_scopeless_nodes() {
 
 #[test]
 fn member_build_uses_declaration_origin_for_scopeless_value() {
-    use crate::semantic_query::{MemberMergeRole, SemanticNodeData, SurfaceMember};
     use verter_span::Span;
+    use verter_type_engine::semantic_query::{MemberMergeRole, SemanticNodeData, SurfaceMember};
 
     const FILE: &str = "/src/member_decl.ts";
 
@@ -679,7 +679,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
 
     // SCOPE-LESS value node — `node_origin_file(value)` is `None` (pre-fix path).
     let value_node = graph.intern_node(SemanticNodeData::Opaque(
-        crate::semantic_query::QueryError::Miss,
+        verter_type_engine::semantic_query::QueryError::Miss,
     ));
     // Precondition: the value node yields NO origin file (the pre-fix path).
     // `intern_node` (unscoped) → `Global` scope → `node_scope` is `None` OR
@@ -695,7 +695,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     let built_member = SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        key: crate::semantic_query::AuthoredPropertyKey::string("present"),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("present"),
         value: value_node,
         optional: false,
         readonly: false,
@@ -709,13 +709,13 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
         // The member's DECLARATION file — the only correct anchor for a member
         // whose value is scope-less.
         declaration_origin: Some(std::sync::Arc::from(FILE)),
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Shallow,
+        declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Shallow,
         )
         .stamp_role(MemberMergeRole::OwnBody),
     };
-    let view = crate::test_surface_view! {
+    let view = verter_type_engine::test_surface_view! {
         members: std::sync::Arc::from(vec![built_member].into_boxed_slice()),
         call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
@@ -730,7 +730,7 @@ fn member_build_uses_declaration_origin_for_scopeless_value() {
     assert_eq!(
         TypeInfoSurface::from_one_level(
             graph,
-            &crate::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view(&view),
+            &verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface::from_view(&view),
         ),
         surface,
     );
@@ -994,14 +994,14 @@ export class C {
 
 #[test]
 fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
-    use crate::project_semantic_dispatch::one_level_surface::OneLevelSurface;
-    use crate::semantic_query::surface_resolution::SurfaceResolution;
-    use crate::semantic_query::{
+    use std::sync::Arc;
+    use verter_span::Span;
+    use verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface;
+    use verter_type_engine::semantic_query::surface_resolution::SurfaceResolution;
+    use verter_type_engine::semantic_query::{
         IndexSignature, NodeScopeId, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
         SemanticNodeData, SignatureKind, SignatureReturnCarrier, SurfaceMember,
     };
-    use std::sync::Arc;
-    use verter_span::Span;
 
     const FILE: &str = "/src/one_level.ts";
 
@@ -1037,7 +1037,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
     let member = SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        key: crate::semantic_query::AuthoredPropertyKey::string("m"),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("m"),
         value: string,
         optional: true,
         readonly: true,
@@ -1049,8 +1049,8 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
             type_annotation: Some(Span::new(4, 10)),
         },
         declaration_origin: Some(Arc::from(FILE)),
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
     };
     let index = IndexSignature {
         key_type: string,
@@ -1063,7 +1063,7 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
         },
         declaration_origin: Some(Arc::from(FILE)),
     };
-    let view = crate::test_surface_view! {
+    let view = verter_type_engine::test_surface_view! {
         members: Arc::from(vec![member].into_boxed_slice()),
         call_signatures: Arc::from(vec![call].into_boxed_slice()),
         construct_signatures: Arc::from(vec![construct].into_boxed_slice()),
@@ -1088,13 +1088,14 @@ fn one_level_surface_converts_every_entry_kind_and_generic_roots_stay_open() {
     // constraint's members as OPEN presence — never a closed claim.
     let constraint = graph.intern_node_with_scope(SemanticNodeData::Object(view), scope);
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: Some(constraint),
         default: None,
         display_name: Arc::from("T"),
     });
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let SurfaceResolution::OpenPresence(surface) =
         crate::typeinfo::shallow_surface::project_shallow_surface_graph_only(
             host.as_ref(),

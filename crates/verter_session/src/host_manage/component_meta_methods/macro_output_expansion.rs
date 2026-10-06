@@ -20,10 +20,10 @@
 
 use std::sync::Arc;
 
-use crate::types::ProjectionMode;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// A session-local node-bearing expansion result: the produced
-/// [`SemanticNodeId`](crate::semantic_query::SemanticNodeId) plus the cache
+/// [`SemanticNodeId`](verter_type_engine::semantic_query::SemanticNodeId) plus the cache
 /// metadata the expansion carries, held in NODE-DOMAIN until the sink materialises
 /// it. Distinct from
 /// [`ExpandedNormalizedExpr`](verter_session_query::analysis::type_expand::ExpandedNormalizedExpr),
@@ -44,7 +44,7 @@ use crate::types::ProjectionMode;
 struct AdmittedExpansionNode {
     /// The produced expansion node (the `ProjectPath` / lower+resolve result),
     /// produced INSIDE the sink from the caller's closed demand.
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     /// The accumulated dependency signature observed while producing `node`.
     /// Facts-rail metadata carried ON the artifact, not consumed by the
     /// materialiser. The current expansion branches mirror the former
@@ -60,7 +60,7 @@ struct AdmittedExpansionNode {
                       round-trip pinned by the parity suite"
         )
     )]
-    dep_signature: crate::semantic_query::DepSignature,
+    dep_signature: verter_type_engine::semantic_query::DepSignature,
     /// `true` when producing `node` returned a PARTIAL value (budget /
     /// cancellation / same-path recursion). Retained alongside `dep_signature`
     /// for a future caller's admission gate; same carried-not-folded contract.
@@ -83,8 +83,8 @@ impl AdmittedExpansionNode {
     /// a caller-supplied node.
     #[must_use]
     fn new(
-        node: crate::semantic_query::SemanticNodeId,
-        dep_signature: crate::semantic_query::DepSignature,
+        node: verter_type_engine::semantic_query::SemanticNodeId,
+        dep_signature: verter_type_engine::semantic_query::DepSignature,
         result_is_partial: bool,
     ) -> Self {
         Self {
@@ -117,7 +117,7 @@ impl AdmittedExpansionNode {
 /// preserves symbolically instead of publishing a fabricated value).
 #[must_use]
 fn materialize_admitted_expansion_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -126,7 +126,7 @@ fn materialize_admitted_expansion_node(
 ) -> Option<verter_session_query::analysis::type_expand::ExpandedNormalizedExpr> {
     use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
 
-    if crate::project_semantic_dispatch::raise::node_raise_misses_or_root_sentinel_with_dispatch(
+    if verter_type_engine::project_semantic_dispatch::raise::node_raise_misses_or_root_sentinel_with_dispatch(
         dispatch,
         artifact.node,
     ) {
@@ -159,14 +159,14 @@ pub(crate) enum DefineModelOutputExpansion {
     /// The carrier head resolved and materialised. `produced_node_id` is the
     /// resolved head; `normalized` the sealed materialisation.
     Materialized {
-        produced_node_id: crate::semantic_query::SemanticNodeId,
+        produced_node_id: verter_type_engine::semantic_query::SemanticNodeId,
         normalized: verter_session_query::analysis::type_expand::ExpandedNormalizedExpr,
     },
     /// The carrier head resolved but the sink materialisation missed. The caller
     /// keeps its `parsed` fallback (already the model's type); `produced_node_id`
     /// is still set for audit parity.
     RaiseMiss {
-        produced_node_id: crate::semantic_query::SemanticNodeId,
+        produced_node_id: verter_type_engine::semantic_query::SemanticNodeId,
     },
     /// No macro-argument carrier head (hot-ref producer miss). The caller keeps
     /// its `parsed` fallback; no node is produced.
@@ -183,14 +183,14 @@ pub(crate) enum DefineModelOutputExpansion {
 pub(crate) enum MacroPathOutputExpansion {
     /// The terminal hop resolved to a node and materialised.
     Materialized {
-        produced_node_id: crate::semantic_query::SemanticNodeId,
+        produced_node_id: verter_type_engine::semantic_query::SemanticNodeId,
         normalized: verter_session_query::analysis::type_expand::ExpandedNormalizedExpr,
     },
     /// The terminal hop resolved to a node but the sink materialisation missed.
     /// `produced_node_id` is set for audit parity; the caller emits its
     /// branch-specific raise-miss trace and preserves symbolically.
     RaiseMiss {
-        produced_node_id: crate::semantic_query::SemanticNodeId,
+        produced_node_id: verter_type_engine::semantic_query::SemanticNodeId,
     },
     /// The terminal hop did NOT yield a node (`Error`/`Recursive`). The caller
     /// emits its branch-specific projection-miss trace and preserves symbolically.
@@ -211,14 +211,14 @@ pub(crate) enum MacroPathOutputExpansion {
 /// crosses in. The hot-ref producer is the ONE mode-neutral carrier producer; a
 /// different DEMAND on its handle, never a second lowering of the macro argument.
 fn lower_macro_arg_carrier_head(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
     owner_canonical: &str,
     macro_index: usize,
     mode: ProjectionMode,
-) -> Option<crate::semantic_query::SemanticNodeId> {
+) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
     dispatch
         .macro_type_arg_hot_ref(owner_canonical, macro_index)
         .map(|product| dispatch.resolve_hot_handle_at_mode(product.hot, mode))
@@ -234,7 +234,7 @@ fn lower_macro_arg_carrier_head(
 /// former branch (produced-node-id audit parity + the `parsed` fallback) EXACTLY.
 #[must_use]
 pub(crate) fn expand_define_model_output(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -280,17 +280,17 @@ pub(crate) fn expand_define_model_output(
 /// accepting a raw node or a forgeable wrapper.
 #[must_use]
 pub(crate) fn expand_generic_project_path_output(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
     owner_canonical: &str,
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,
-    terminal_path: Arc<[crate::semantic_query::PathSegment]>,
+    terminal_path: Arc<[verter_type_engine::semantic_query::PathSegment]>,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     };
     let Some(base_id) =
@@ -308,7 +308,7 @@ pub(crate) fn expand_generic_project_path_output(
         // `Pick` expansion) that the carrier-stop and the ChatMessages
         // zero-eager-expansion gate forbid. The terminal materialisation
         // happens on demand at the sealed sink below.
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -344,7 +344,7 @@ pub(crate) fn expand_generic_project_path_output(
 /// wrapper.
 #[must_use]
 pub(crate) fn expand_slot_binding_output(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -355,7 +355,7 @@ pub(crate) fn expand_slot_binding_output(
     binding_name: &str,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
-    use crate::semantic_query::QueryResult;
+    use verter_type_engine::semantic_query::QueryResult;
     let Some(base_id) =
         lower_macro_arg_carrier_head(dispatch, owner_canonical, macro_index, carrier_lower_mode)
     else {

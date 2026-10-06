@@ -24,9 +24,9 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::{ProjectionMode, SemanticNodeData};
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -60,7 +60,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
 /// the dispatch hands the consumer (carrier or resolved body).
 fn node_data(
     host: &VerterHost,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Arc<SemanticNodeData> {
     host.project_type_store()
         .semantic_graph()

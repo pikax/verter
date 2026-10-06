@@ -18,12 +18,12 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::{
     ApparentDemandScope, ApparentTypeContext, LiteralValue, PrimitiveKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, TemplateLiteralReduceContext,
 };
-use verter_session::{HostConfig, VerterHost};
-use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -251,7 +251,7 @@ fn callable_base(host: &VerterHost) -> SemanticNodeId {
             "/ws/owner.ts",
             "Callable",
             &[],
-            Some(verter_session::semantic_query::ProjectionMode::Expanded),
+            Some(verter_type_engine::semantic_query::ProjectionMode::Expanded),
         )
         .into_parts();
     let node = outcome
@@ -295,7 +295,7 @@ fn call_member_origins(host: &VerterHost, node: SemanticNodeId) -> Vec<Option<Ar
         .filter(|member| {
             matches!(
                 &member.key,
-                verter_session::semantic_query::AuthoredPropertyKey::String(name)
+                verter_type_engine::semantic_query::AuthoredPropertyKey::String(name)
                     if name.as_ref() == "call"
             )
         })

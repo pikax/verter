@@ -1,12 +1,12 @@
 use super::dispatch_txn::RelationStep;
 use super::*;
 use crate::output_sinks::DispatchOutputTestExt;
-use crate::semantic_query::{
+use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     IndexSignature, NodeScopeId, OriginEdgeKind, PathSegment, ProjectionMode,
     ProjectionReductionContext, RelationOutcome, ScopeId, SemanticNodeData, SemanticQueryOutput,
     SurfaceMember, SurfaceView, ValueRootKey,
 };
-use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 #[test]
 fn decided_lowering_does_not_allocate_the_losing_branch() {
@@ -279,7 +279,7 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
 
 #[test]
 fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
-    use crate::semantic_query::ConditionalPendingSubstitution;
+    use verter_type_engine::semantic_query::ConditionalPendingSubstitution;
     let host = host();
     for file in ["argument", "winner", "loser"] {
         upsert_ts(
@@ -329,11 +329,15 @@ fn pending_conditional_keeps_argument_roots_and_cancelled_work_cold() {
             ConditionalPendingSubstitution::empty().append_both(parameter, argument),
         )),
     };
-    let cancelled =
-        crate::request_context::RequestContext::new(70_003, Arc::from("/w/winner.ts"), false, None);
+    let cancelled = verter_type_engine::request_context::RequestContext::new(
+        70_003,
+        Arc::from("/w/winner.ts"),
+        false,
+        None,
+    );
     cancelled.cancel();
     {
-        let _guard = crate::request_context::RequestContextGuard::install(cancelled);
+        let _guard = verter_type_engine::request_context::RequestContextGuard::install(cancelled);
         let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
         assert!(read.cache_suppress && read.result_is_partial);
         assert!(matches!(
@@ -377,7 +381,7 @@ fn pending_arguments_remain_visible_to_clause_instantiation() {
     let graph = dispatch.graph();
     let (_, parameter) = reverse_test_binders(graph, "Branch", 9010);
     let argument = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("<clause>"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("<clause>"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -398,7 +402,7 @@ fn pending_arguments_remain_visible_to_clause_instantiation() {
         let instantiated = dispatch.instantiate_clause_params_at_call(
             [("U", default)],
             pending,
-            crate::semantic_query::ClauseSpelling::Bound,
+            verter_type_engine::semantic_query::ClauseSpelling::Bound,
         );
         assert_eq!(
             graph.stats_snapshot().relation_check_count,
@@ -445,7 +449,7 @@ fn pending_arguments_remain_visible_to_infer_routing() {
 
 #[test]
 fn duplicate_pending_conditionals_retain_argument_roots_cold_warm_and_after_edit() {
-    use crate::semantic_query::ConditionalPendingSubstitution;
+    use verter_type_engine::semantic_query::ConditionalPendingSubstitution;
     let host = host();
     for file in ["first", "second"] {
         upsert_ts(
@@ -535,15 +539,15 @@ fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
     let keys = dispatch.intern_normalized_union_or_intersection(&[a, b], true);
     let read = dispatch.execute_read(SemanticQueryKey::MappedType {
         source: keys,
-        mapper: crate::semantic_query::MapperKey {
+        mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
             parameter_node: key_parameter,
             key_space: keys,
             value_expr: value,
-            optionality: crate::semantic_query::OptionalityMod::Keep,
-            readonly: crate::semantic_query::ReadonlyMod::Keep,
+            optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+            readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
             name_remap: None,
-            kind: crate::semantic_query::MapperKind::Computed,
+            kind: verter_type_engine::semantic_query::MapperKind::Computed,
         },
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
@@ -564,8 +568,8 @@ fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
 
 #[test]
 fn conditional_edits_match_fresh_results_at_both_forcing_sites() {
-    use crate::semantic_query::demand::DisplayNeeds;
-    use crate::semantic_query::SemanticQueryValue;
+    use verter_type_engine::semantic_query::demand::DisplayNeeds;
+    use verter_type_engine::semantic_query::SemanticQueryValue;
     for generic in [false, true] {
         let incremental = host();
         for (check, yes, no, expected) in [
@@ -597,7 +601,7 @@ fn conditional_edits_match_fresh_results_at_both_forcing_sites() {
                 let graph = host.project_type_store().semantic_graph();
                 assert!(matches!(graph.node_data(node).as_deref(),
                     Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == expected));
-                crate::semantic_query::display::display(
+                verter_type_engine::semantic_query::display::display(
                     graph,
                     &SemanticQueryValue::TypeNode(node),
                     DisplayNeeds::empty(),
@@ -688,12 +692,12 @@ fn distributive_pending_substitution_does_not_traverse_the_losing_branch() {
     let (_, parameter) = reverse_test_binders(graph, "Distributed", 9002);
     let string = primitive(graph, PrimitiveKind::String);
     let hello = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("hello".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("hello".to_string()),
     ));
     let union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(vec![
-            string, hello,
-        ])),
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![string, hello],
+        )),
     ));
     let yes = primitive(graph, PrimitiveKind::Boolean);
     let loser = graph.intern_node(SemanticNodeData::Array {
@@ -732,15 +736,16 @@ fn distributive_pending_substitution_does_not_traverse_the_losing_branch() {
 /// Test-side `IndexKey::Number` constructor. The payload field is
 /// private (proof-carrying `CanonicalIndexInt`), so fixtures route
 /// through the `Display`-checked blessed constructor.
-fn num_key(value: i64) -> crate::semantic_query::IndexKey {
-    crate::semantic_query::IndexKey::Number(
-        crate::semantic_query::CanonicalIndexInt::from_canonical_i64(value).expect("canonical"),
+fn num_key(value: i64) -> verter_type_engine::semantic_query::IndexKey {
+    verter_type_engine::semantic_query::IndexKey::Number(
+        verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(value)
+            .expect("canonical"),
     )
 }
 
 #[test]
 fn reverse_homomorphic_reduces_more_than_eight_root_conditionals() {
-    use crate::semantic_query::{IndexKey, LiteralValue, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{IndexKey, LiteralValue, OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -793,7 +798,7 @@ fn reverse_homomorphic_reduces_more_than_eight_root_conditionals() {
 #[test]
 // @ai-generated - Direct query admission and typed callers share symmetric relation entries.
 fn direct_symmetric_relation_queries_share_memo_entries_in_both_orders() {
-    use crate::semantic_query::{RelateMemoKey, RelationKind};
+    use verter_type_engine::semantic_query::{RelateMemoKey, RelationKind};
     let host = host();
     let canonical = "/w/symmetric-relations.ts";
     upsert_ts(
@@ -865,7 +870,10 @@ fn positive_binding_scc_redischarge_runs_after_fixation() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let (outcome, bindings, execute_visits) = dispatch.binding_scc_discharge_for_tests(false);
-    assert_eq!(outcome, crate::semantic_query::RelationOutcome::Assignable);
+    assert_eq!(
+        outcome,
+        verter_type_engine::semantic_query::RelationOutcome::Assignable
+    );
     assert_eq!(
         execute_visits, 1,
         "the cyclic binding member must redischarge through execute after fixation"
@@ -884,7 +892,7 @@ fn negative_binding_scc_redischarge_runs_after_fixation() {
     let (outcome, _bindings, execute_visits) = dispatch.binding_scc_discharge_for_tests(true);
     assert_eq!(
         outcome,
-        crate::semantic_query::RelationOutcome::NotAssignable
+        verter_type_engine::semantic_query::RelationOutcome::NotAssignable
     );
     assert_eq!(
         execute_visits, 1,
@@ -897,7 +905,10 @@ fn mixed_binding_scc_redischarge_rechecks_negative_nonbinding_consumers() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let (outcome, bindings, execute_visits) = dispatch.mixed_binding_scc_discharge_for_tests();
-    assert_eq!(outcome, crate::semantic_query::RelationOutcome::Assignable);
+    assert_eq!(
+        outcome,
+        verter_type_engine::semantic_query::RelationOutcome::Assignable
+    );
     assert_eq!(
         bindings.len(),
         1,
@@ -932,7 +943,9 @@ fn binding_scc_substitution_edge_preserves_the_fixed_binding_snapshot() {
 /// string]: infer U }`, and the call and construct forms, are `string`).
 #[test]
 fn conditional_infer_reaches_object_index_call_and_construct_positions() {
-    use crate::semantic_query::{FunctionParam, IndexSignature, SignatureKind, TypeParamDecl};
+    use verter_type_engine::semantic_query::{
+        FunctionParam, IndexSignature, SignatureKind, TypeParamDecl,
+    };
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -958,7 +971,9 @@ fn conditional_infer_reaches_object_index_call_and_construct_positions() {
             ),
             return_type: value,
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(value),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                value,
+            ),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -972,7 +987,7 @@ fn conditional_infer_reaches_object_index_call_and_construct_positions() {
                   index_signatures: Vec<IndexSignature>| {
         let has_index_signature = !index_signatures.is_empty();
         graph.intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+            verter_type_engine::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::from(call_signatures.into_boxed_slice()),
                 construct_signatures: Arc::from(construct_signatures.into_boxed_slice()),
@@ -1216,11 +1231,12 @@ fn macro_hot_script_setup_infer_bounds_share_eager_authored_identities() {
         .expect("defineProps must be type-based");
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let macro_members = || {
-        let root = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
-            .macro_type_arg_hot_ref(canonical, macro_index)
-            .expect("macro type argument must lower")
-            .hot
-            .node();
+        let root =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+                .macro_type_arg_hot_ref(canonical, macro_index)
+                .expect("macro type argument must lower")
+                .hot
+                .node();
         let surface = match graph.node_data(root).as_deref() {
             Some(SemanticNodeData::Object(surface)) => surface.clone(),
             other => panic!("defineProps object must lower structurally, got {other:?}"),
@@ -1532,7 +1548,7 @@ fn cancellation_after_root_admission_loses_to_relation_publication() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let root_key = dispatch.relate_key_for(string, unknown);
     let member_key = dispatch.relate_key_for(number, unknown);
-    let context = crate::request_context::RequestContext::new(
+    let context = verter_type_engine::request_context::RequestContext::new(
         0x7b_7001,
         Arc::from("/w/relation-cancel.ts"),
         false,
@@ -1546,7 +1562,9 @@ fn cancellation_after_root_admission_loses_to_relation_publication() {
     let (step, admitted_root_seq) = std::thread::scope(|scope| {
         let context_for_worker = Arc::clone(&context);
         let worker = scope.spawn(|| {
-            let _request = crate::request_context::RequestContextGuard::install(context_for_worker);
+            let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                context_for_worker,
+            );
             ProjectSemanticDispatch::new(&host)
                 .publish_staged_scc_member_for_tests(root_for_worker, member_for_worker)
         });
@@ -1763,7 +1781,7 @@ fn production_nested_same_name_conditional_does_not_bind_outer_reverse_session()
 
 #[test]
 fn reverse_projection_rejects_nested_materialized_opaque_candidates() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         IndexKey, OptionalityMod, ReadonlyMod, SemanticQueryValueTag, TupleElement,
     };
 
@@ -1837,7 +1855,7 @@ fn reverse_projection_rejects_nested_materialized_opaque_candidates() {
 
 #[test]
 fn mutable_container_nested_projection_subtrees_use_only_the_binding_direction() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         IndexKey, OptionalityMod, ReadonlyMod, RelationResult, TupleElement,
     };
 
@@ -1946,7 +1964,9 @@ fn mutable_container_nested_projection_subtrees_use_only_the_binding_direction()
 
 #[test]
 fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns() {
-    use crate::semantic_query::{FunctionParam, SignatureKind, TupleElement, TypeParamDecl};
+    use verter_type_engine::semantic_query::{
+        FunctionParam, SignatureKind, TupleElement, TypeParamDecl,
+    };
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -2012,7 +2032,9 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
             ),
             return_type: void,
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                void,
+            ),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -2037,7 +2059,9 @@ fn tuple_rest_inference_decides_covariant_and_contravariant_single_rest_patterns
 
 #[test]
 fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
-    use crate::semantic_query::{FunctionParam, SignatureKind, TupleElement, TypeParamDecl};
+    use verter_type_engine::semantic_query::{
+        FunctionParam, SignatureKind, TupleElement, TypeParamDecl,
+    };
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -2118,7 +2142,9 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
             ),
             return_type: void,
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                void,
+            ),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -2141,7 +2167,7 @@ fn tuple_rest_capture_preserves_exact_metadata_in_both_variances() {
 
 #[test]
 fn tuple_rest_does_not_bypass_required_prefix_validation() {
-    use crate::semantic_query::TupleElement;
+    use verter_type_engine::semantic_query::TupleElement;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -2194,7 +2220,7 @@ fn tuple_rest_does_not_bypass_required_prefix_validation() {
 
 #[test]
 fn reverse_homomorphic_nonterminal_tuple_rest_uses_the_broad_number_key() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         IndexKey, LiteralValue, OptionalityMod, ReadonlyMod, TupleElement,
     };
 
@@ -2311,7 +2337,7 @@ fn semantic_publication_refuses_a_post_finalise_over_cap_carrier() {
         .expect("semantic root is indexed")
         .whole_hash;
     let traced = crate::semantic_graph_self_root_tests::exact_cap_terminal_witness_facts();
-    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+    let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput =
         (QueryResult::Error(QueryError::Miss), Arc::from([])).into();
     output.observed_self_roots = vec![(Arc::<str>::from(canonical), whole_hash)];
 
@@ -2385,12 +2411,17 @@ fn cancelled_dispatch_is_typed_return_only_and_cold_retry_succeeds() {
         "Foo",
     ));
 
-    let cancelled =
-        crate::request_context::RequestContext::new(70_001, Arc::from("/w/cancel.ts"), false, None);
+    let cancelled = verter_type_engine::request_context::RequestContext::new(
+        70_001,
+        Arc::from("/w/cancel.ts"),
+        false,
+        None,
+    );
     cancelled.cancel();
     {
-        let _guard = crate::request_context::RequestContextGuard::install(cancelled);
-        let _completeness = crate::request_context::ColdComputeCompletenessScope::enter();
+        let _guard = verter_type_engine::request_context::RequestContextGuard::install(cancelled);
+        let _completeness =
+            verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let read = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
         assert!(matches!(
             read.value,
@@ -2402,16 +2433,20 @@ fn cancelled_dispatch_is_typed_return_only_and_cold_retry_succeeds() {
             "cancelled reads are structurally partial"
         );
         assert!(
-            crate::request_context::current_cold_compute_completeness()
+            verter_type_engine::request_context::current_cold_compute_completeness()
                 .reasons()
-                .contains(crate::semantic_query::PartialReasonSet::CANCELLED),
+                .contains(verter_type_engine::semantic_query::PartialReasonSet::CANCELLED),
             "the exact cancellation reason must survive the dispatch boundary"
         );
     }
 
-    let retry =
-        crate::request_context::RequestContext::new(70_002, Arc::from("/w/cancel.ts"), false, None);
-    let _guard = crate::request_context::RequestContextGuard::install(retry);
+    let retry = verter_type_engine::request_context::RequestContext::new(
+        70_002,
+        Arc::from("/w/cancel.ts"),
+        false,
+        None,
+    );
+    let _guard = verter_type_engine::request_context::RequestContextGuard::install(retry);
     let first = ProjectSemanticDispatch::new(&host).execute_read(key.clone());
     assert!(matches!(first.value, QueryResult::Value(_)));
     let warm = ProjectSemanticDispatch::new(&host).execute_read(key);
@@ -2652,22 +2687,22 @@ fn instantiate_dedups_by_args() {
     let args_number: Arc<[SemanticNodeId]> = Arc::from(vec![arg_number].into_boxed_slice());
     let args_string: Arc<[SemanticNodeId]> = Arc::from(vec![arg_string].into_boxed_slice());
 
-    let k_number = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+    let k_number = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         base.clone(),
         args_number.clone(),
-        crate::semantic_query::InstantiateContext::non_file(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        verter_type_engine::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
-    let k_string = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+    let k_string = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         base.clone(),
         args_string.clone(),
-        crate::semantic_query::InstantiateContext::non_file(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        verter_type_engine::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
 
@@ -2716,7 +2751,7 @@ fn instantiate_dedups_by_args() {
 
 /// Test helper — look up a member by name on an Object-shaped node.
 fn member_value(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     node: SemanticNodeId,
     member: &str,
 ) -> SemanticNodeId {
@@ -2797,7 +2832,7 @@ fn reduce_union_dedups_cross_scope_duplicates_and_roots_discarded_arm() {
         whole_hash: [hash; 16],
         local_scope: None,
     };
-    let lit = SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(
+    let lit = SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(
         "dup".to_string(),
     ));
     let kept = graph.intern_node_with_scope(lit.clone(), file_scope("/w/dup_kept.ts", 3));
@@ -2930,7 +2965,7 @@ fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates()
     };
     let chain = |leaf_file: &str, leaf: &str| {
         let mut node = graph.intern_node_with_scope(
-            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(
+            SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(
                 leaf.to_string(),
             )),
             file_scope(leaf_file),
@@ -2994,7 +3029,7 @@ fn reduce_union_incomplete_comparison_is_return_only_with_zero_warm_candidates()
 /// reduces to `never`.
 #[test]
 fn canonical_algebra_collapses_only_proven_facts() {
-    use crate::project_semantic_dispatch::canonical_algebra;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3002,10 +3037,10 @@ fn canonical_algebra_collapses_only_proven_facts() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let lit_a = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("a".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_string()),
     ));
     let lit_b = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("b".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("b".to_string()),
     ));
 
     // Distinct literal arms stay a two-arm union.
@@ -3045,7 +3080,7 @@ fn canonical_algebra_collapses_only_proven_facts() {
     // Nested composites FLATTEN recursively (a union is never an arm of a
     // union), across the raw-constructor seam too.
     let inner = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![lit_a, string].into_boxed_slice(),
         )),
     ));
@@ -3079,32 +3114,34 @@ fn canonical_algebra_collapses_only_proven_facts() {
 /// fire for multi-return functions.
 #[test]
 fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() {
-    use crate::project_semantic_dispatch::canonical_algebra;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    let member_span_object = |span_start: u32, value: SemanticNodeId| -> SemanticNodeId {
-        let member = SurfaceMember {
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            visibility: verter_type_expr::MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::string("label"),
-            value,
-            optional: false,
-            readonly: false,
-            method_kind: None,
-            has_implementation_body: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            spans: verter_type_expr::MemberSpans {
-                declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
-                name: Some(verter_span::Span::new(span_start, span_start + 5)),
-                type_annotation: None,
-            },
-            declaration_origin: None,
-        };
-        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+    let member_span_object =
+        |span_start: u32, value: SemanticNodeId| -> SemanticNodeId {
+            let member = SurfaceMember {
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("label"),
+                value,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
+                spans: verter_type_expr::MemberSpans {
+                    declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
+                    name: Some(verter_span::Span::new(span_start, span_start + 5)),
+                    type_annotation: None,
+                },
+                declaration_origin: None,
+            };
+            graph.intern_node(SemanticNodeData::Object(verter_type_engine::test_surface_view! {
             members: Arc::from(vec![member].into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -3112,7 +3149,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
             keyspace: None,
             has_index_signature: false,
         }))
-    };
+        };
 
     // Declaration-site interning is span-bearing and UNCHANGED: the same
     // shape at two source locations is two arena nodes. This assertion
@@ -3170,19 +3207,20 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     );
 
     // Index-signature spans are excluded the same way.
-    let index_span_object = |span_start: u32| -> SemanticNodeId {
-        let signature = IndexSignature {
-            key_type: string,
-            value_type: string,
-            readonly: false,
-            spans: verter_type_expr::IndexSignatureSpans {
-                declaration: Some(verter_span::Span::new(span_start, span_start + 12)),
-                key: Some(verter_span::Span::new(span_start + 1, span_start + 4)),
-                value: None,
-            },
-            declaration_origin: None,
-        };
-        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+    let index_span_object =
+        |span_start: u32| -> SemanticNodeId {
+            let signature = IndexSignature {
+                key_type: string,
+                value_type: string,
+                readonly: false,
+                spans: verter_type_expr::IndexSignatureSpans {
+                    declaration: Some(verter_span::Span::new(span_start, span_start + 12)),
+                    key: Some(verter_span::Span::new(span_start + 1, span_start + 4)),
+                    value: None,
+                },
+                declaration_origin: None,
+            };
+            graph.intern_node(SemanticNodeData::Object(verter_type_engine::test_surface_view! {
             members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -3190,7 +3228,7 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
             keyspace: None,
             has_index_signature: true,
         }))
-    };
+        };
     let index_a = index_span_object(10);
     let index_b = index_span_object(200);
     assert_ne!(
@@ -3211,9 +3249,9 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
     // excluded too; the occurrence and return-carrier identities remain.
     let signature_node = |span_start: u32| -> SemanticNodeId {
         graph.intern_node(SemanticNodeData::Signature {
-            kind: crate::semantic_query::SignatureKind::Call,
+            kind: verter_type_engine::semantic_query::SignatureKind::Call,
             params: Arc::from(
-                vec![crate::semantic_query::FunctionParam {
+                vec![verter_type_engine::semantic_query::FunctionParam {
                     name: Some("p".into()),
                     ty: string,
                     optional: false,
@@ -3225,10 +3263,12 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
             ),
             return_type: string,
             type_parameters: Arc::from(
-                Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+                Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
             ),
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                string,
+            ),
             signature_span: Some(verter_span::Span::new(span_start, span_start + 20)),
             return_type_span: Some(verter_span::Span::new(span_start + 15, span_start + 20)),
             predicate: None,
@@ -3258,8 +3298,8 @@ fn span_only_distinct_arms_collapse_in_derived_composites_yet_intern_distinct() 
 /// exact identity — it selects which binding a branch resolves.
 #[test]
 fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exact() {
-    use crate::project_semantic_dispatch::canonical_algebra;
-    use crate::semantic_query::ConditionalPendingSubstitution;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra;
+    use verter_type_engine::semantic_query::ConditionalPendingSubstitution;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3267,26 +3307,28 @@ fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exac
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
     // Span-only variants: distinct arena ids, deep-equal structure.
-    let spanned_object = |span_start: u32| -> SemanticNodeId {
-        let member = SurfaceMember {
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            visibility: verter_type_expr::MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::string("k"),
-            value: string,
-            optional: false,
-            readonly: false,
-            method_kind: None,
-            has_implementation_body: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            spans: verter_type_expr::MemberSpans {
-                declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
-                name: Some(verter_span::Span::new(span_start, span_start + 5)),
-                type_annotation: None,
-            },
-            declaration_origin: None,
-        };
-        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+    let spanned_object =
+        |span_start: u32| -> SemanticNodeId {
+            let member = SurfaceMember {
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("k"),
+                value: string,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
+                spans: verter_type_expr::MemberSpans {
+                    declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
+                    name: Some(verter_span::Span::new(span_start, span_start + 5)),
+                    type_annotation: None,
+                },
+                declaration_origin: None,
+            };
+            graph.intern_node(SemanticNodeData::Object(verter_type_engine::test_surface_view! {
             members: Arc::from(vec![member].into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -3294,11 +3336,11 @@ fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exac
             keyspace: None,
             has_index_signature: false,
         }))
-    };
+        };
 
     let type_param = |index: u16| -> SemanticNodeId {
         graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("<pending>"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("<pending>"),
             param_index: index,
             constraint: None,
             default: None,
@@ -3368,32 +3410,34 @@ fn pending_substitution_arguments_collapse_structurally_but_parameters_stay_exac
 /// while wide unions keep the duplicate.
 #[test]
 fn span_only_duplicates_collapse_above_prehash_narrowing_threshold() {
-    use crate::project_semantic_dispatch::canonical_algebra;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    let spanned_object = |name: &str, span_start: u32| -> SemanticNodeId {
-        let member = SurfaceMember {
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            visibility: verter_type_expr::MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::string(name),
-            value: string,
-            optional: false,
-            readonly: false,
-            method_kind: None,
-            has_implementation_body: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            spans: verter_type_expr::MemberSpans {
-                declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
-                name: Some(verter_span::Span::new(span_start, span_start + 5)),
-                type_annotation: None,
-            },
-            declaration_origin: None,
-        };
-        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
+    let spanned_object =
+        |name: &str, span_start: u32| -> SemanticNodeId {
+            let member = SurfaceMember {
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
+                value: string,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
+                spans: verter_type_expr::MemberSpans {
+                    declaration: Some(verter_span::Span::new(span_start, span_start + 10)),
+                    name: Some(verter_span::Span::new(span_start, span_start + 5)),
+                    type_annotation: None,
+                },
+                declaration_origin: None,
+            };
+            graph.intern_node(SemanticNodeData::Object(verter_type_engine::test_surface_view! {
             members: Arc::from(vec![member].into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -3401,7 +3445,7 @@ fn span_only_duplicates_collapse_above_prehash_narrowing_threshold() {
             keyspace: None,
             has_index_signature: false,
         }))
-    };
+        };
 
     // Ten structurally DISTINCT child-bearing arms (distinct member names)
     // plus one span-variant duplicate of the first — 11 child-bearing arms,
@@ -3450,7 +3494,7 @@ fn span_only_duplicates_collapse_above_prehash_narrowing_threshold() {
 /// oracle can never read them as a proven-empty intersection.
 #[test]
 fn negative_zero_and_zero_are_one_numeric_literal_type() {
-    use crate::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query::LiteralValue;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3464,7 +3508,7 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
 
     // `0 & -0` is the inhabited literal `0`, never `never`.
     let intersection =
-        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
             &graph,
             &[zero, neg_zero],
         );
@@ -3478,11 +3522,12 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     );
 
     // `0 | -0` folds to ONE arm.
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[zero, neg_zero],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[zero, neg_zero],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert!(
         matches!(
             graph.node_data(union.node).as_deref(),
@@ -3498,7 +3543,7 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     let neg_bits = f64::from_bits(0.0f64.to_bits() | (1u64 << 63));
     assert!(neg_bits.is_sign_negative());
     assert!(
-        !crate::project_semantic_dispatch::canonical_algebra::numeric_literal_values_disjoint(
+        !verter_type_engine::project_semantic_dispatch::canonical_algebra::numeric_literal_values_disjoint(
             0.0, neg_bits
         ),
         "the disjointness oracle must treat 0 and -0 as one TS literal value"
@@ -3507,14 +3552,14 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
     // payloads compare by SameValueZero too (never proven disjoint from
     // themselves).
     assert!(
-        !crate::project_semantic_dispatch::canonical_algebra::numeric_literal_values_disjoint(
+        !verter_type_engine::project_semantic_dispatch::canonical_algebra::numeric_literal_values_disjoint(
             f64::INFINITY,
             f64::INFINITY
         ),
         "1e999 and 2e999 both parse to Infinity — one literal type (verified against tsc)"
     );
     assert!(
-        !crate::project_semantic_dispatch::canonical_algebra::numeric_literal_values_disjoint(
+        !verter_type_engine::project_semantic_dispatch::canonical_algebra::numeric_literal_values_disjoint(
             f64::NAN,
             f64::NAN
         )
@@ -3528,7 +3573,7 @@ fn negative_zero_and_zero_are_one_numeric_literal_type() {
 /// canonical result's direct member list.
 #[test]
 fn tier1_payload_equal_discard_roots_descendant_files() {
-    use crate::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query::LiteralValue;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3550,11 +3595,12 @@ fn tier1_payload_equal_discard_roots_descendant_files() {
     let f = graph.intern_node_with_scope(payload, file_scope("/w/file_a.ts", 9));
     assert_ne!(g, f, "scope is arena identity — the fixture needs two ids");
 
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[g, f],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[g, f],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert_eq!(union.node, g, "tier-1 keeps the first payload-equal arm");
     let roots: Vec<&str> = union
         .evidence
@@ -3593,11 +3639,12 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
         SemanticNodeData::Primitive(PrimitiveKind::Any),
         file_scope("/w/any_owner.ts"),
     );
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[scoped_any],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[scoped_any],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert_eq!(
         union.node, scoped_any,
         "singleton union of a file-scoped `any` returns the INPUT node, not the Global primitive"
@@ -3607,11 +3654,12 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
         SemanticNodeData::Primitive(PrimitiveKind::Never),
         file_scope("/w/never_owner.ts"),
     );
-    let never_union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[scoped_never],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let never_union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[scoped_never],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert_eq!(
         never_union.node, scoped_never,
         "singleton union of a file-scoped `never` returns the input node"
@@ -3622,7 +3670,7 @@ fn singleton_extreme_normalization_returns_input_node_with_scope() {
         file_scope("/w/unknown_owner.ts"),
     );
     let intersection =
-        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
             &graph,
             &[scoped_unknown],
         );
@@ -3646,9 +3694,9 @@ fn extreme_and_disjoint_folds_record_contributor_origin_edge() {
 
     let members: Arc<[SemanticNodeId]> = Arc::from(vec![string, number].into_boxed_slice());
     let output = dispatch.build_reduce_intersection(
-        crate::semantic_query::IntersectionInputRef::from_operands(&members),
-        crate::semantic_query::IntersectionPurpose::CheckerReduction,
-        crate::semantic_query::SemanticContextId::production(),
+        verter_type_engine::semantic_query::IntersectionInputRef::from_operands(&members),
+        verter_type_engine::semantic_query::IntersectionPurpose::CheckerReduction,
+        verter_type_engine::semantic_query::SemanticContextId::production(),
     );
     let QueryResult::Value(node) = output.result else {
         panic!("normalization must produce a value");
@@ -3722,11 +3770,12 @@ fn comparator_object_arm_discriminates_diverged_positive_members() {
         "the arena interns the diverged surface as a DISTINCT node"
     );
 
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[base, diverged],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[base, diverged],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert!(
         matches!(
             graph.node_data(union.node).as_deref(),
@@ -3752,11 +3801,12 @@ fn over_deep_alias_peek_marks_evidence_incomplete() {
     }
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[aliased, string],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[aliased, string],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert!(
         union.evidence.incomplete,
         "an alias chain deeper than the peek bound is UNDECIDED — the result \
@@ -3777,7 +3827,7 @@ fn over_deep_alias_peek_marks_evidence_incomplete() {
 /// not exhausted and the result is not permanently denied warm admission.
 #[test]
 fn wide_distinct_object_union_canonicalizes_without_budget_exhaustion() {
-    use crate::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query::LiteralValue;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3790,11 +3840,12 @@ fn wide_distinct_object_union_canonicalizes_without_budget_exhaustion() {
         })
         .collect();
 
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &arms,
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &arms,
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert!(
         matches!(
             graph.node_data(union.node).as_deref(),
@@ -3829,25 +3880,26 @@ fn frameless_incomplete_canonical_evidence_marks_request_partial() {
         aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
     }
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[aliased, string],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[aliased, string],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert!(union.evidence.incomplete, "fixture produces incompleteness");
 
-    let request = crate::request_context::RequestContext::new(
+    let request = verter_type_engine::request_context::RequestContext::new(
         70_090,
         Arc::from("/w/frameless.ts"),
         false,
         None,
     );
-    let _guard = crate::request_context::RequestContextGuard::install(request);
-    assert!(!crate::request_context::current_request_result_is_partial());
+    let _guard = verter_type_engine::request_context::RequestContextGuard::install(request);
+    assert!(!verter_type_engine::request_context::current_request_result_is_partial());
     // No cold build is active on this fresh dispatch — the frameless arm.
     ProjectSemanticDispatch::new(&host).deposit_canonical_evidence(union.evidence);
     assert!(
-        crate::request_context::current_request_result_is_partial(),
+        verter_type_engine::request_context::current_request_result_is_partial(),
         "a frameless caller's Incomplete must reach the request partial \
          sticky — never silently dropped"
     );
@@ -3884,15 +3936,17 @@ fn framed_incomplete_canonical_evidence_taints_frame_partial_not_only_suppressed
         aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
     }
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[aliased, string],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[aliased, string],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert!(union.evidence.incomplete, "fixture produces incompleteness");
 
-    let guard =
-        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let guard = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+        &dispatch.build_local_taint,
+    );
     dispatch.deposit_canonical_evidence(union.evidence);
     let frame = guard.finish();
     assert!(
@@ -3908,10 +3962,11 @@ fn framed_incomplete_canonical_evidence_taints_frame_partial_not_only_suppressed
     );
 
     // AC3 fence: a COMPLETE deposit (roots only) leaves the frame clean.
-    let complete_guard =
-        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let complete_guard = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+        &dispatch.build_local_taint,
+    );
     let mut complete =
-        crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
     complete
         .inspected_file_roots
         .push((Arc::from("/w/frame_complete.ts"), [7u8; 16]));
@@ -3943,7 +3998,7 @@ fn framed_incomplete_canonical_evidence_taints_frame_partial_not_only_suppressed
 /// to the declaration order.
 #[test]
 fn path_projection_through_intersection_keeps_callable_member_order() {
-    use crate::semantic_query::{SurfaceEntry, SurfaceView};
+    use verter_type_engine::semantic_query::{SurfaceEntry, SurfaceView};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -3965,16 +4020,17 @@ fn path_projection_through_intersection_keeps_callable_member_order() {
     assert!(value_b.0 < value_a.0, "fixture needs the reversed ordinals");
 
     let member_obj = |value: SemanticNodeId| {
-        let member = crate::semantic_query::SurfaceMember {
-            key: crate::semantic_query::AuthoredPropertyKey::string("m"),
+        let member = verter_type_engine::semantic_query::SurfaceMember {
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("m"),
             value,
             optional: false,
             readonly: false,
             method_kind: None,
             has_implementation_body: false,
             visibility: verter_type_expr::MemberVisibility::Public,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
@@ -3988,7 +4044,7 @@ fn path_projection_through_intersection_keeps_callable_member_order() {
     let obj_a = member_obj(value_a);
     let obj_b = member_obj(value_b);
     let base = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![obj_a, obj_b].into_boxed_slice(),
         )),
     ));
@@ -3997,11 +4053,11 @@ fn path_projection_through_intersection_keeps_callable_member_order() {
         base,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("m"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("m"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -4056,18 +4112,18 @@ fn project_member_reads_object_surface() {
     let graph = host.project_type_store().semantic_graph();
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("foo"),                value: string_id,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("foo"),                value: string_id,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -4138,19 +4194,20 @@ fn project_member_rejects_non_public_members_from_external_surface() {
             SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility,
-                key: crate::semantic_query::AuthoredPropertyKey::string(name),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
                 value,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }
         };
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![
                 mk_member("pub", string_id, verter_type_expr::MemberVisibility::Public),
@@ -4209,11 +4266,11 @@ fn project_member_rejects_non_public_members_from_external_surface() {
         base: obj,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("priv"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("priv"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -4247,7 +4304,7 @@ fn project_member_rejects_non_public_members_from_external_surface() {
 /// full resolution (which carries visibility and applies the public gate).
 #[test]
 fn base_member_admission_fact_fast_path_is_inconclusive_for_present_members() {
-    use crate::semantic_query::{DeclIdentity, QueryError};
+    use verter_type_engine::semantic_query::{DeclIdentity, QueryError};
 
     let host = host();
     // The class members reference a declared type (`Dep`) so they enter the
@@ -4303,7 +4360,7 @@ fn base_member_admission_fact_fast_path_is_inconclusive_for_present_members() {
     assert_eq!(
         dispatch.base_member_admission_non_emitting(
             declref,
-            &crate::semantic_query::PropertyKey::identifier("a")
+            &verter_type_engine::semantic_query::PropertyKey::identifier("a")
         ),
         None,
         "present PUBLIC member must be inconclusive via the fact fast path \
@@ -4312,7 +4369,7 @@ fn base_member_admission_fact_fast_path_is_inconclusive_for_present_members() {
     assert_eq!(
         dispatch.base_member_admission_non_emitting(
             declref,
-            &crate::semantic_query::PropertyKey::identifier("b")
+            &verter_type_engine::semantic_query::PropertyKey::identifier("b")
         ),
         None,
         "present PROTECTED member must be inconclusive (not admitted from presence alone)"
@@ -4320,7 +4377,7 @@ fn base_member_admission_fact_fast_path_is_inconclusive_for_present_members() {
     assert_eq!(
         dispatch.base_member_admission_non_emitting(
             declref,
-            &crate::semantic_query::PropertyKey::identifier("c")
+            &verter_type_engine::semantic_query::PropertyKey::identifier("c")
         ),
         None,
         "present PRIVATE member must be inconclusive (not admitted from presence alone)"
@@ -4330,7 +4387,7 @@ fn base_member_admission_fact_fast_path_is_inconclusive_for_present_members() {
     assert_eq!(
         dispatch.base_member_admission_non_emitting(
             declref,
-            &crate::semantic_query::PropertyKey::identifier("definitely_absent")
+            &verter_type_engine::semantic_query::PropertyKey::identifier("definitely_absent")
         ),
         Some(false),
         "absent member is refuted regardless of visibility (the fact registry has no entry)"
@@ -4347,33 +4404,33 @@ fn key_of_object_yields_string_union() {
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("a"),                    value: string_id,
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),                    value: string_id,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("b"),
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("b"),
                     value: num_id,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
@@ -4390,8 +4447,8 @@ fn key_of_object_yields_string_union() {
 
     let keyof = dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: obj,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     });
     let id = match keyof {
@@ -4415,18 +4472,18 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("foo"),                value: string_id,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("foo"),                value: string_id,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -4449,11 +4506,11 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
         base: obj,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("foo"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     });
@@ -4474,11 +4531,11 @@ fn project_path_of_length_one_dedups_with_project_member_at_memo() {
         base: obj,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("foo"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     };
@@ -4511,18 +4568,18 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("k"),                value: num_id,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("k"),                value: num_id,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -4546,7 +4603,7 @@ fn indexed_access_canonicalises_to_project_path_before_admission() {
         path: Arc::from(
             vec![PathSegment::Index(IndexKey::String(Arc::from("k")))].into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     });
@@ -4633,11 +4690,11 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
         base: shell,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("b"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("b"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     }) {
@@ -4719,19 +4776,19 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
         other => panic!("MixedNested must resolve: {other:?}"),
     };
     let mixed_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/w/nested.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("MixedNested"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -4819,7 +4876,7 @@ fn indexed_access_intermediate_hop_stays_navigate_only_terminal_expands() {
 /// `!contains_key(...)` assertions FAIL. The fix keeps both ABSENT.
 #[test]
 fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
-    use crate::semantic_query::ProjectionReductionContext;
+    use verter_type_engine::semantic_query::ProjectionReductionContext;
     use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
     let host = host();
     upsert_ts(
@@ -4878,17 +4935,17 @@ fn raise_path_indexed_access_intermediate_stays_navigate_terminal_expands() {
     // member value is descended (a consequence of whole-surface
     // expansion). Neither node identity depends on a transient lowered
     // shell node-id, so the probe is robust.
-    let mid_expanded = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let mid_expanded = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/w/rnested.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Mid"),
         ),
         Arc::from(Vec::new().into_boxed_slice()),
-        crate::semantic_query::InstantiateContext::non_file(
+        verter_type_engine::semantic_query::InstantiateContext::non_file(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
     let _ = whole_hash;
@@ -4955,33 +5012,33 @@ fn surface_view_carries_surface_member_optional_readonly_is_method() {
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("optional_readonly_method"),                    value: string_id,
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("optional_readonly_method"),                    value: string_id,
                     optional: true,
                     readonly: true,
                     method_kind: Some(verter_type_expr::ObjectMethodKind::Method),
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("plain"),
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("plain"),
                     value: string_id,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
@@ -5028,7 +5085,7 @@ fn surface_view_carries_call_signatures_and_construct_signatures() {
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let num_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
         call_signatures: Arc::from(vec![string_id].into_boxed_slice()),
         construct_signatures: Arc::from(vec![num_id].into_boxed_slice()),
@@ -5064,7 +5121,7 @@ fn type_of_resolves_value_binding() {
             canonical_id: Arc::from("/w/v.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -5081,7 +5138,7 @@ fn type_of_resolves_value_binding() {
             canonical_id: Arc::from("/w/v.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -5135,18 +5192,18 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("foo"),                value: string_id,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("foo"),                value: string_id,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -5176,11 +5233,11 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
                 base: obj,
                 path: Arc::from(
                     vec![PathSegment::Member(
-                        crate::semantic_query::PropertyKey::identifier("foo"),
+                        verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
                     )]
                     .into_boxed_slice(),
                 ),
-                context: crate::semantic_query::ProjectionReductionContext::published(
+                context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Identity,
                 ),
             })
@@ -5205,11 +5262,11 @@ fn concurrent_sugar_and_canonical_requests_share_in_flight_entry() {
         base: obj,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("foo"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("foo"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     };
@@ -5390,10 +5447,10 @@ fn dispatch_host_preserves_prepared_outcomes_and_final_hop_identity() {
     assert!(
         declaration
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("bad"))
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("bad"))
             && declaration
                 .member_index
-                .contains_key(&crate::semantic_query::PropertyKey::identifier("good"))
+                .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("good"))
     );
 
     assert!(adapter
@@ -5519,10 +5576,10 @@ fn decl_identity(
     _host: &VerterHost,
     canonical_id: &str,
     name: &str,
-) -> crate::semantic_query::ResolvedDeclSlotIdentity {
+) -> verter_type_engine::semantic_query::ResolvedDeclSlotIdentity {
     // Content-free key (R6); the cold build re-sources the live
     // whole_hash from `ensure_indexed_ready` at value-compute time.
-    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical_id),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(name),
@@ -5538,12 +5595,12 @@ fn decl_identity_value(
     host: &VerterHost,
     canonical_id: &str,
     name: &str,
-) -> crate::semantic_query::DeclIdentity {
+) -> verter_type_engine::semantic_query::DeclIdentity {
     let whole_hash = host
         .ensure_indexed_ready(canonical_id)
         .map(|indexed| indexed.whole_hash)
         .unwrap_or([0u8; 16]);
-    crate::semantic_query::DeclIdentity {
+    verter_type_engine::semantic_query::DeclIdentity {
         canonical_id: Arc::from(canonical_id),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash,
@@ -5566,7 +5623,9 @@ fn resolve_decl_produces_materialized_body() {
     assert!(
         matches!(
             &*data,
-            SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder { .. })
+            SemanticNodeData::Opaque(
+                verter_type_engine::semantic_query::QueryError::DeclPlaceholder { .. }
+            )
         ),
         "build_resolve_decl should produce DeclPlaceholder, got {data:?}",
     );
@@ -5593,15 +5652,15 @@ fn instantiate_scopes_unresolved_owner_debt_by_demanded_body_role() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let read = |name: &str| {
         dispatch.execute_read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 decl_identity(&host, "/w/debt.ts", name),
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
                     ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ),
         ))
@@ -5645,13 +5704,13 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
-    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+    let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         base.clone(),
         args.clone(),
-        crate::semantic_query::InstantiateContext::non_file(
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        verter_type_engine::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
     let _ = dispatch.execute_type_node(key.clone());
@@ -5665,14 +5724,14 @@ fn instantiate_is_mode_free_one_entry_across_depth_requests() {
     let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: result,
         path: empty_path.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     });
     let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: result,
         path: empty_path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -5712,15 +5771,15 @@ fn instantiate_with_concrete_args_emits_substitute_edges() {
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -5796,15 +5855,15 @@ fn shallow_instantiate_does_not_materialise_member_bodies() {
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -5868,15 +5927,15 @@ fn same_args_different_callers_dedup_to_one_entry() {
 
     let stats_before = graph.stats_snapshot();
     let first = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -5884,15 +5943,15 @@ fn same_args_different_callers_dedup_to_one_entry() {
         other => panic!("expected Value, got {other:?}"),
     };
     let second = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -5935,15 +5994,15 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -5954,7 +6013,7 @@ fn expanded_instantiate_materialises_through_dispatcher_not_private_walker() {
     let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: result,
         path: empty_path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -6004,15 +6063,15 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     let args_n: Arc<[SemanticNodeId]> = Arc::from(vec![number_arg].into_boxed_slice());
 
     let inst_s = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             args_s,
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -6020,15 +6079,15 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
         other => panic!("expected Value, got {other:?}"),
     };
     let inst_n = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             args_n,
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -6039,14 +6098,14 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     // Path projections at [a] for each instantiation.
     let a_path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("a"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("a"),
         )]
         .into_boxed_slice(),
     );
     let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: inst_s,
         path: a_path.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     });
@@ -6054,7 +6113,7 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
     let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: inst_n,
         path: a_path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     });
@@ -6073,10 +6132,10 @@ fn distinct_instantiations_share_visited_subpath_lowering_not_full_body() {
 // real `build_conditional` (lazy block)
 // ──────────────────────────────────────────────────────────────────
 
-use crate::semantic_query::BranchSelection;
+use verter_type_engine::semantic_query::BranchSelection;
 
 fn primitive(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     kind: PrimitiveKind,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Primitive(kind))
@@ -6207,15 +6266,16 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
          attribute to one branch"
     );
 
-    let rooted_files = |output: &crate::project_semantic_dispatch::walk::QueryBuildOutput| {
-        let mut files: Vec<String> = output
-            .observed_self_roots
-            .iter()
-            .map(|(canonical, _)| canonical.to_string())
-            .collect();
-        files.sort();
-        files
-    };
+    let rooted_files =
+        |output: &verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput| {
+            let mut files: Vec<String> = output
+                .observed_self_roots
+                .iter()
+                .map(|(canonical, _)| canonical.to_string())
+                .collect();
+            files.sort();
+            files
+        };
 
     // `string extends string` decides TRUE: only the true branch's file
     // is a dependency of the answer.
@@ -6262,14 +6322,14 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
     // An OPEN check keeps both branch references in the published shell,
     // so both files remain genuine dependencies.
     let open_check = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("OpenCheck"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("OpenCheck"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("OpenCheck"),
     });
     let open_extends = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("OpenExtends"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("OpenExtends"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -6346,8 +6406,8 @@ fn decided_conditional_roots_only_on_check_extends_and_the_winner() {
 
 #[test]
 fn distributed_conditional_dependencies_follow_member_selections() {
-    use crate::semantic_query::LiteralValue;
     use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_type_engine::semantic_query::LiteralValue;
 
     for case in ["true", "false", "mixed", "open"] {
         let host = host();
@@ -6376,7 +6436,7 @@ fn distributed_conditional_dependencies_follow_member_selections() {
             "value".to_string(),
         )));
         let open = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("Open"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Open"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -6391,7 +6451,9 @@ fn distributed_conditional_dependencies_follow_member_selections() {
         };
         let check = graph.intern_node_with_scope(
             SemanticNodeData::Union(
-                crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(members)),
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    Arc::from(members),
+                ),
             ),
             scope("check"),
         );
@@ -6504,14 +6566,14 @@ fn open_conditional_stays_deferred_with_shell_branch_refs_not_expanded_bodies() 
     // test's intent (deferred Conditional path projection) on the
     // relation engine.
     let foo = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Foo"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("Foo"),
     });
     let bar = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Bar"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -6595,47 +6657,47 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
         element: string_node,
         readonly: false,
     });
-    let surface = crate::test_surface_view! {
+    let surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("a"),                    value: string_node,
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),                    value: string_node,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("b"),
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("b"),
                     value: number_node,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("c"),
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("c"),
                     value: array_node,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
@@ -6650,7 +6712,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
     };
     let object_node = graph.intern_node(SemanticNodeData::Object(surface));
     let union_node = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![object_node, array_node, string_node].into_boxed_slice(),
         )),
     ));
@@ -6658,7 +6720,7 @@ fn substitute_no_op_short_circuits_intern_preserving_scope() {
     // Substituted parameter (TypeParam K) is not present anywhere
     // in the tree above.
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -6708,14 +6770,14 @@ fn substitute_change_tracking_preserves_correctness_when_parameter_appears() {
 
     let string_node = primitive(&graph, PrimitiveKind::String);
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
     let union_node = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![parameter_node, string_node].into_boxed_slice(),
         )),
     ));
@@ -6755,7 +6817,7 @@ fn substitute_publish_suppressed_when_canonicalization_inspects_file_scope() {
 
     let number = primitive(&graph, PrimitiveKind::Number);
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -6773,7 +6835,7 @@ fn substitute_publish_suppressed_when_canonicalization_inspects_file_scope() {
         },
     );
     let union_node = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![parameter_node, file_string].into_boxed_slice(),
         )),
     ));
@@ -6817,14 +6879,14 @@ fn evidence_free_substitute_walk_still_publishes_to_the_memo() {
     let number = primitive(&graph, PrimitiveKind::Number);
     let string = primitive(&graph, PrimitiveKind::String);
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
     let union_node = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![parameter_node, string].into_boxed_slice(),
         )),
     ));
@@ -6868,7 +6930,7 @@ fn substituted_possibly_callable_intersection_preserves_authored_arm_order() {
 
     let string = primitive(&graph, PrimitiveKind::String);
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -6878,11 +6940,11 @@ fn substituted_possibly_callable_intersection_preserves_authored_arm_order() {
     // Adversarial ordinals: mint the SECOND authored arm's substituted
     // form first so it sorts lower than the first's.
     let a_substituted = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: crate::semantic_query::DeclIdentity::synthetic("A"),
+        base: verter_type_engine::semantic_query::DeclIdentity::synthetic("A"),
         args: Arc::from(vec![string].into_boxed_slice()),
     });
     let b_substituted = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: crate::semantic_query::DeclIdentity::synthetic("B"),
+        base: verter_type_engine::semantic_query::DeclIdentity::synthetic("B"),
         args: Arc::from(vec![string].into_boxed_slice()),
     });
     assert!(
@@ -6896,16 +6958,16 @@ fn substituted_possibly_callable_intersection_preserves_authored_arm_order() {
     // intersection is genuinely CHANGED, and it is fail-closed
     // possibly-callable, so it takes the order-preserving leg.
     let a_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: crate::semantic_query::DeclIdentity::synthetic("A"),
+        base: verter_type_engine::semantic_query::DeclIdentity::synthetic("A"),
         args: Arc::from(vec![parameter_node].into_boxed_slice()),
     });
     let b_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: crate::semantic_query::DeclIdentity::synthetic("B"),
+        base: verter_type_engine::semantic_query::DeclIdentity::synthetic("B"),
         args: Arc::from(vec![parameter_node].into_boxed_slice()),
     });
     // Authored order is `B<T> & A<T>`.
     let intersection_node = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![b_ref, a_ref].into_boxed_slice(),
         )),
     ));
@@ -6945,14 +7007,14 @@ fn substituted_order_safe_intersection_routes_through_the_canonical_authority() 
     let number = primitive(&graph, PrimitiveKind::Number);
     let never = primitive(&graph, PrimitiveKind::Never);
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
     let intersection_node = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![parameter_node, string].into_boxed_slice(),
         )),
     ));
@@ -7049,7 +7111,7 @@ fn infer_in_open_conditional_stays_symbolic_without_private_bind() {
     // shortcut does not fire. The relation engine evaluates
     // `TypeParam extends Object` → Unknown, keeping the conditional open.
     let check = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -7143,7 +7205,7 @@ fn distinct_projections_into_same_open_conditional_materialise_only_visited_sube
     let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: cond,
         path: empty_path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     }) {
@@ -7184,7 +7246,7 @@ fn build_conditional_distributive_union_distributes_per_member_via_execute_no_st
     // distributive = true → expect ReduceUnion([ true_branch (for
     // string), false_branch (for number) ]).
     let union_check = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![string_node, number_node].into_boxed_slice(),
         )),
     ));
@@ -7245,7 +7307,7 @@ fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
     let false_branch = primitive(&graph, PrimitiveKind::Symbol);
 
     let union_check = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![string_node, number_node].into_boxed_slice(),
         )),
     ));
@@ -7275,7 +7337,7 @@ fn build_conditional_distributive_false_on_union_check_does_not_distribute() {
     let relation = dispatch.execute_relate_pair_as_result_for_tests(union_check, string_node);
     assert_eq!(
         relation,
-        crate::semantic_query::RelationResult::NotAssignable,
+        verter_type_engine::semantic_query::RelationResult::NotAssignable,
         "relation memo should carry the decided NotAssignable outcome"
     );
 }
@@ -7303,7 +7365,7 @@ fn build_conditional_distributive_union_behind_alias_carrier_distributes_per_mem
     let false_branch = primitive(&graph, PrimitiveKind::Symbol);
 
     let union_node = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![string_node, number_node].into_boxed_slice(),
         )),
     ));
@@ -7374,7 +7436,7 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
     // conditional returns a deferred `Conditional` shell because the
     // shallow relation check cannot decide the relation.
     let union_check = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![a, b].into_boxed_slice(),
         )),
     ));
@@ -7439,7 +7501,7 @@ fn build_conditional_distributive_per_member_subquery_has_distributive_false() {
 // ──────────────────────────────────────────────────────────────────
 
 fn simple_object(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     members: &[(&str, SemanticNodeId)],
 ) -> SemanticNodeId {
     let members: Vec<SurfaceMember> = members
@@ -7447,57 +7509,66 @@ fn simple_object(
         .map(|(n, v)| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::string(*n),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(*n),
             value: *v,
             optional: false,
             readonly: false,
             method_kind: None,
             has_implementation_body: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
             declaration_origin: None,
         })
         .collect();
-    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(members.into_boxed_slice()),
-        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }))
+    graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(members.into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ))
 }
 
 fn simple_object_with_known_keys(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
-    members: &[(crate::semantic_query::PropertyKey, SemanticNodeId)],
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
+    members: &[(
+        verter_type_engine::semantic_query::PropertyKey,
+        SemanticNodeId,
+    )],
 ) -> SemanticNodeId {
     let members = members
         .iter()
         .map(|(key, value)| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
             value: *value,
             optional: false,
             readonly: false,
             method_kind: None,
             has_implementation_body: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
             declaration_origin: None,
         })
         .collect::<Vec<_>>();
-    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(members.into_boxed_slice()),
-        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }))
+    graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(members.into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ))
 }
 
 /// Projecting `a.b.c` into a narrow path does not materialise
@@ -7514,15 +7585,19 @@ fn narrow_path_does_not_materialize_siblings() {
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("c")),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "a",
+            )),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "c",
+            )),
         ]
         .into_boxed_slice(),
     );
     let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: outer,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     }) {
@@ -7550,21 +7625,21 @@ fn intersection_arm_without_path_segment_is_ignored() {
     let with_m = simple_object(&graph, &[("m", num)]);
     let without_m = simple_object(&graph, &[("n", num)]);
     let intersection = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![with_m, without_m].into_boxed_slice(),
         )),
     ));
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("m"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("m"),
         )]
         .into_boxed_slice(),
     );
     let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: intersection,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     }) {
@@ -7591,21 +7666,21 @@ fn union_miss_propagates() {
     let with_m = simple_object(&graph, &[("m", num)]);
     let without_m = simple_object(&graph, &[("n", num)]);
     let union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![with_m, without_m].into_boxed_slice(),
         )),
     ));
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("m"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("m"),
         )]
         .into_boxed_slice(),
     );
     let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: union,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     }) {
@@ -7645,14 +7720,14 @@ fn open_conditional_distributes_path_into_both_branches_via_execute_not_private_
     // shells preserve the test intent without depending on a
     // short-circuit.
     let a = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("A"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("A"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("A"),
     });
     let b = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("B"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("B"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -7672,14 +7747,14 @@ fn open_conditional_distributes_path_into_both_branches_via_execute_not_private_
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("m"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("m"),
         )]
         .into_boxed_slice(),
     );
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: cond,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     }) {
@@ -7736,14 +7811,14 @@ fn closed_conditional_projects_into_selected_branch_only() {
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("m"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("m"),
         )]
         .into_boxed_slice(),
     );
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: cond,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     }) {
@@ -7768,14 +7843,14 @@ fn alias_unwrap_during_path_walk_emits_alias_resolve() {
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("x"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("x"),
         )]
         .into_boxed_slice(),
     );
     let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: alias,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     });
@@ -7818,14 +7893,14 @@ fn alias_cycle_returns_opaque_cyclic_not_stack_overflow() {
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("any"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("any"),
         )]
         .into_boxed_slice(),
     );
     let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: outer_alias,
         path: Arc::clone(&path),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     }) {
@@ -7870,14 +7945,14 @@ fn mutual_alias_cycle_x_y_x_returns_opaque_with_chain_of_length_2() {
 
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("any"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("any"),
         )]
         .into_boxed_slice(),
     );
     let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: y_to_x,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     }) {
@@ -7964,8 +8039,8 @@ fn key_of_records_source_members() {
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: obj,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -8020,7 +8095,7 @@ fn key_of_records_source_members() {
 // build_mapped_type (lazy block)
 // ──────────────────────────────────────────────────────────────────
 
-use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
+use verter_type_engine::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
 
 /// A homomorphic mapped type over a RESOLVED EMPTY object source
 /// (`Partial<{}>`, `{ [K in keyof {}]: ... }`) is a legitimately complete
@@ -8041,7 +8116,7 @@ fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
     let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: source });
     let value_placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let binder = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -8055,14 +8130,14 @@ fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
         optionality: OptionalityMod::Add,
         readonly: ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Identity,
+        kind: verter_type_engine::semantic_query::MapperKind::Identity,
     };
 
     let read = dispatch.execute_read(SemanticQueryKey::MappedType {
         source,
         mapper,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     });
     let QueryResult::Value(id) = read.value else {
@@ -8102,7 +8177,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
 
     let make_binder = || {
         graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -8117,7 +8192,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
         optionality: OptionalityMod::Add,
         readonly: ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let mapper_remove = MapperKey {
         over_type_variable: false,
@@ -8127,7 +8202,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
         optionality: OptionalityMod::Remove,
         readonly: ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let mapper_ro_add = MapperKey {
         over_type_variable: false,
@@ -8137,14 +8212,14 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
         optionality: OptionalityMod::Keep,
         readonly: ReadonlyMod::Add,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
 
     let r1 = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper_add,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -8153,8 +8228,8 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     let r2 = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper_remove,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -8163,8 +8238,8 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     let r3 = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper_ro_add,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -8216,7 +8291,7 @@ fn mapped_type_value_materialised_from_source_member_for_known_keys() {
     let mapper = MapperKey {
         over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -8227,13 +8302,13 @@ fn mapped_type_value_materialised_from_source_member_for_known_keys() {
         optionality: OptionalityMod::Keep,
         readonly: ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Identity,
+        kind: verter_type_engine::semantic_query::MapperKind::Identity,
     };
     let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -8284,7 +8359,7 @@ fn mapped_type_resolves_key_space_via_key_of_subquery() {
     let mapper = MapperKey {
         over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -8295,13 +8370,13 @@ fn mapped_type_resolves_key_space_via_key_of_subquery() {
         optionality: OptionalityMod::Keep,
         readonly: ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -8383,14 +8458,14 @@ fn alias_identity_extraction_uses_target_not_current() {
     // two AliasResolve edges (one per hop).
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("any"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("any"),
         )]
         .into_boxed_slice(),
     );
     let _ = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: alias_b,
         path,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Identity,
         ),
     });
@@ -8428,15 +8503,15 @@ fn instantiate_ref_with_args_produces_sub_instantiate_shell_with_edge() {
     let string_arg = primitive(&graph, PrimitiveKind::String);
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![string_arg].into_boxed_slice());
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             foo,
             Arc::clone(&args),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8483,10 +8558,10 @@ fn mapped_type_uses_source_member_names_when_object_source() {
     let key_space = primitive(&graph, PrimitiveKind::String);
     let value_expr = num;
 
-    let mapper = crate::semantic_query::MapperKey {
+    let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -8494,16 +8569,16 @@ fn mapped_type_uses_source_member_names_when_object_source() {
         }),
         key_space,
         value_expr,
-        optionality: crate::semantic_query::OptionalityMod::Keep,
-        readonly: crate::semantic_query::ReadonlyMod::Keep,
+        optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+        readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -8543,8 +8618,8 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 fn utility_identity(
     _graph: &Arc<SemanticGraphStore>,
     name: &str,
-) -> crate::semantic_query::ResolvedDeclSlotIdentity {
-    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+) -> verter_type_engine::semantic_query::ResolvedDeclSlotIdentity {
+    verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from("/w/lib.ts"),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from(name),
@@ -8565,15 +8640,15 @@ fn partial_routes_through_mapped_type_dispatch() {
 
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![source].into_boxed_slice());
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             partial,
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8612,15 +8687,15 @@ fn required_routes_through_mapped_type_dispatch() {
     let required = utility_identity(&graph, "Required");
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             required,
             Arc::from(vec![source].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8653,15 +8728,15 @@ fn readonly_routes_through_mapped_type_dispatch() {
     let ro = utility_identity(&graph, "Readonly");
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ro,
             Arc::from(vec![source].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8694,15 +8769,15 @@ fn no_infer_returns_arg_with_alias_resolve_edge() {
     let no_infer = utility_identity(&graph, "NoInfer");
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             no_infer,
             Arc::from(vec![source].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8738,15 +8813,15 @@ fn utility_dispatch_emits_instantiate_edge() {
     let partial = utility_identity(&graph, "Partial");
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             partial,
             Arc::from(vec![source].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8783,15 +8858,15 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let source = simple_object(&graph, &[("a", num)]);
     let partial = utility_identity(&graph, "Partial");
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             partial,
             Arc::from(vec![source].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8818,15 +8893,15 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     let v = primitive(&graph, PrimitiveKind::Number);
     let record = utility_identity(&graph, "Record");
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             record,
             Arc::from(vec![k, v].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8852,15 +8927,15 @@ fn utility_substitute_type_param_edges_use_real_parameter_names() {
     // `Pick<T, K>` → parameter names ["T", "K"] in order.
     let pick = utility_identity(&graph, "Pick");
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             pick,
             Arc::from(vec![source, k].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8891,15 +8966,15 @@ fn same_utility_and_args_dedup_to_one_entry() {
     let args: Arc<[SemanticNodeId]> = Arc::from(vec![source].into_boxed_slice());
 
     let first = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             partial.clone(),
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8907,15 +8982,15 @@ fn same_utility_and_args_dedup_to_one_entry() {
         other => panic!("expected Value, got {other:?}"),
     };
     let second = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             partial,
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8940,15 +9015,15 @@ fn string_intrinsics_keep_the_application_over_string() {
     let upper = utility_identity(&graph, "Uppercase");
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             upper,
             Arc::from(vec![s].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -8981,7 +9056,7 @@ fn string_intrinsics_keep_the_application_over_string() {
 /// equivalence rule cares about.
 #[test]
 fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
-    use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -8996,8 +9071,8 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     // placeholder the utility path uses).
     let key_space = match dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: source,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -9014,7 +9089,7 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     let mapper = MapperKey {
         over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -9029,13 +9104,13 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
         // construct: kind = Identity with a Miss placeholder
         // value_expr — the build path reads source member values
         // directly for these kinds.
-        kind: crate::semantic_query::MapperKind::Identity,
+        kind: verter_type_engine::semantic_query::MapperKind::Identity,
     };
     let userland = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source,
         mapper: mapper.clone(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -9057,15 +9132,15 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     // flag set per Partial semantics).
     let partial = utility_identity(&graph, "Partial");
     let utility_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             partial,
             Arc::from(vec![source].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -9132,15 +9207,15 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
     ] {
         let anchor = utility_identity(&graph, name);
         let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 anchor,
                 Arc::from(vec![source].into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ),
         )) {
@@ -9165,21 +9240,21 @@ fn deferred_utilities_return_opaque_miss_with_instantiate_edge() {
 /// in `Published(Expanded)` and return the produced value node.
 fn instantiate_utility(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     name: &str,
     args: &[SemanticNodeId],
 ) -> SemanticNodeId {
     let anchor = utility_identity(graph, name);
     match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             anchor,
             Arc::from(args.to_vec().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -9189,7 +9264,7 @@ fn instantiate_utility(
 }
 
 fn assert_node_primitive(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     node: SemanticNodeId,
     expected: PrimitiveKind,
     label: &str,
@@ -9278,13 +9353,13 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let any = primitive(&graph, PrimitiveKind::Any);
     let key_x = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("x".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("x".to_string()),
     ));
     let key_y = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("y".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("y".to_string()),
     ));
     let keys_xy = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![key_x, key_y].into_boxed_slice(),
         )),
     ));
@@ -9416,7 +9491,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
     // Pick<any, 1> = { 1: any } — the member NAME is the canonical JS
     // numeric string (probe10: Eq<Pick<any, 1>, { "1": any }> = true).
     let key_1 = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let picked_num = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_1]);
     match graph.node_data(picked_num).as_deref() {
@@ -9429,7 +9504,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
             let member = &surface.positive_members()[0];
             assert_eq!(
                 member.key.cloned_known(),
-                Some(crate::semantic_query::PropertyKey::from_js_number(1.0)),
+                Some(verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0)),
                 "Pick<any, 1>: the member key is the canonical numeric literal"
             );
             assert!(!member.optional, "Pick<any, 1>: member is required");
@@ -9444,14 +9519,14 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
 
     // Pick<any, "x" | 1> = { x: any; 1: any } — mixed literal union.
     let keys_x_or_1 = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![key_x, key_1].into_boxed_slice(),
         )),
     ));
     let picked_mixed = instantiate_utility(&dispatch, &graph, "Pick", &[any, keys_x_or_1]);
     match graph.node_data(picked_mixed).as_deref() {
         Some(SemanticNodeData::Object(surface)) => {
-            let mut keys: Vec<crate::semantic_query::PropertyKey> = surface
+            let mut keys: Vec<verter_type_engine::semantic_query::PropertyKey> = surface
                 .positive_members()
                 .iter()
                 .filter_map(|m| m.key.cloned_known())
@@ -9460,8 +9535,8 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
             assert_eq!(
                 keys,
                 [
-                    crate::semantic_query::PropertyKey::identifier("x"),
-                    crate::semantic_query::PropertyKey::from_js_number(1.0),
+                    verter_type_engine::semantic_query::PropertyKey::identifier("x"),
+                    verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0),
                 ],
                 "Pick<any, \"x\" | 1>: both typed keys"
             );
@@ -9471,7 +9546,7 @@ fn object_filter_and_mapper_utilities_over_any_materialize_tsgo_shapes() {
 
     // Pick<any, 1.5> = { "1.5": any } — fractional literal canonical form.
     let key_frac = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.5),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.5),
     ));
     let picked_frac = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_frac]);
     match graph.node_data(picked_frac).as_deref() {
@@ -9537,8 +9612,8 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string_node = primitive(&graph, PrimitiveKind::String);
     let number_node = primitive(&graph, PrimitiveKind::Number);
-    let numeric_one = crate::semantic_query::PropertyKey::from_js_number(1.0);
-    let string_a = crate::semantic_query::PropertyKey::identifier("a");
+    let numeric_one = verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0);
+    let string_a = verter_type_engine::semantic_query::PropertyKey::identifier("a");
     let source = simple_object_with_known_keys(
         &graph,
         &[
@@ -9547,13 +9622,13 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
         ],
     );
     let key_a = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("a".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_string()),
     ));
     let key_1 = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let keys_a_or_1 = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![key_a, key_1].into_boxed_slice(),
         )),
     ));
@@ -9601,7 +9676,7 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
     let mapper = MapperKey {
         over_type_variable: false,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -9612,12 +9687,12 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
         optionality: OptionalityMod::Keep,
         readonly: ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let mapped = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source: empty_source,
         mapper,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     }) {
@@ -9664,7 +9739,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     let empty_source = simple_object(&graph, &[]);
     let key_param = || {
         graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -9672,16 +9747,17 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
         })
     };
     let key_1 = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
     ));
     let key_a = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("a".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_string()),
     ));
     let key_1_str = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("1".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("1".to_string()),
     ));
-    let expanded =
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let expanded = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Expanded,
+    );
     let mapper_over = |key_space: SemanticNodeId,
                        parameter_node: SemanticNodeId,
                        value_expr: SemanticNodeId,
@@ -9693,7 +9769,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
         optionality: OptionalityMod::Keep,
         readonly: ReadonlyMod::Keep,
         name_remap,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let build_mapped =
         |mapper: MapperKey| match dispatch.execute_type_node(SemanticQueryKey::MappedType {
@@ -9707,7 +9783,9 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     let assert_numeric_literal = |node: SemanticNodeId, expected: f64, label: &str| {
         let data = graph.node_data(node).expect("value node");
         match &*data {
-            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) => {
+            SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(n),
+            ) => {
                 assert_eq!(*n, expected, "{label}: numeric literal value");
             }
             other => panic!("{label}: value must be the NUMERIC literal {expected}, got {other:?}"),
@@ -9716,7 +9794,9 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     let assert_string_literal = |node: SemanticNodeId, expected: &str, label: &str| {
         let data = graph.node_data(node).expect("value node");
         match &*data {
-            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s)) => {
+            SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::String(s),
+            ) => {
                 assert_eq!(s.as_str(), expected, "{label}: string literal value");
             }
             other => {
@@ -9737,7 +9817,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
             );
             assert_eq!(
                 surface.positive_members()[0].key.cloned_known(),
-                Some(crate::semantic_query::PropertyKey::from_js_number(1.0)),
+                Some(verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0)),
                 "{{ [K in 1]: K }}: the numeric literal key publishes typed"
             );
             assert_numeric_literal(surface.positive_members()[0].value, 1.0, "{ [K in 1]: K }");
@@ -9747,7 +9827,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
 
     // `{ [K in 1 | "a"]: K }` = `{ 1: 1; a: "a" }`.
     let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![key_1, key_a].into_boxed_slice(),
         )),
     ));
@@ -9760,7 +9840,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
                 2,
                 "mixed union: two members"
             );
-            let by_key = |k: crate::semantic_query::PropertyKey| {
+            let by_key = |k: verter_type_engine::semantic_query::PropertyKey| {
                 surface
                     .positive_members()
                     .iter()
@@ -9768,12 +9848,15 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
                     .unwrap_or_else(|| panic!("mixed union: member {k:?} missing"))
             };
             assert_numeric_literal(
-                by_key(crate::semantic_query::PropertyKey::from_js_number(1.0)).value,
+                by_key(verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0)).value,
                 1.0,
                 "mixed union member 1",
             );
             assert_string_literal(
-                by_key(crate::semantic_query::PropertyKey::identifier("a")).value,
+                by_key(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                ))
+                .value,
                 "a",
                 "mixed union member a",
             );
@@ -9785,7 +9868,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     let param = key_param();
     let tuple_of_k = graph.intern_node(SemanticNodeData::Tuple {
         elements: Arc::from(
-            vec![crate::semantic_query::TupleElement {
+            vec![verter_type_engine::semantic_query::TupleElement {
                 label: None,
                 value: param,
                 optional: false,
@@ -9820,7 +9903,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }` — duplicate produced names
     // UNION their per-K values.
     let keys_dup = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![key_1, key_1_str].into_boxed_slice(),
         )),
     ));
@@ -9835,7 +9918,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
             );
             assert_eq!(
                 surface.positive_members()[0].key.cloned_known(),
-                Some(crate::semantic_query::PropertyKey::from_js_number(1.0)),
+                Some(verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0)),
                 "dup-name union: the numeric and string spellings collide to one typed key"
             );
             let value_data = graph
@@ -9849,10 +9932,10 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
                     for arm in arms.iter() {
                         match graph.node_data(*arm).as_deref() {
                             Some(SemanticNodeData::Literal(
-                                crate::semantic_query::LiteralValue::Number(n),
+                                verter_type_engine::semantic_query::LiteralValue::Number(n),
                             )) if *n == 1.0 => has_num = true,
                             Some(SemanticNodeData::Literal(
-                                crate::semantic_query::LiteralValue::String(s),
+                                verter_type_engine::semantic_query::LiteralValue::String(s),
                             )) if s == "1" => has_str = true,
                             other => panic!("dup-name union: unexpected arm {other:?}"),
                         }
@@ -9872,10 +9955,10 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
         check: param,
         extends: primitive(&graph, PrimitiveKind::Number),
         true_branch_ref: graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::String("n".to_string()),
+            verter_type_engine::semantic_query::LiteralValue::String("n".to_string()),
         )),
         false_branch_ref: graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::String("s".to_string()),
+            verter_type_engine::semantic_query::LiteralValue::String("s".to_string()),
         )),
         distributive: true,
         pending: None,
@@ -9911,8 +9994,9 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
         source: empty_source,
         mapper: mapper_over(keys_1_or_a, param, param, None),
     });
-    let shallow =
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
+    let shallow = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Shallow,
+    );
     let result = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: mapped_carrier,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
@@ -9923,7 +10007,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
     };
     match graph.node_data(result).as_deref() {
         Some(SemanticNodeData::Object(surface)) => {
-            let by_key = |k: crate::semantic_query::PropertyKey| {
+            let by_key = |k: verter_type_engine::semantic_query::PropertyKey| {
                 surface
                     .positive_members()
                     .iter()
@@ -9931,12 +10015,15 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
                     .unwrap_or_else(|| panic!("shallow mixed union: member {k:?} missing"))
             };
             assert_numeric_literal(
-                by_key(crate::semantic_query::PropertyKey::from_js_number(1.0)).value,
+                by_key(verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0)).value,
                 1.0,
                 "shallow mixed union member 1",
             );
             assert_string_literal(
-                by_key(crate::semantic_query::PropertyKey::identifier("a")).value,
+                by_key(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                ))
+                .value,
                 "a",
                 "shallow mixed union member a",
             );
@@ -9956,7 +10043,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
 /// form.
 #[test]
 fn js_numeric_names_use_exact_js_exponent_spellings() {
-    use super::build::js_number_to_string;
+    use verter_ecma::js_number_to_string;
 
     // Large-magnitude exponent regime (probe13).
     assert_eq!(js_number_to_string(1e21), "1e+21");
@@ -10015,7 +10102,7 @@ fn js_numeric_names_use_exact_js_exponent_spellings() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let any = primitive(&graph, PrimitiveKind::Any);
     let key_large = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1e21),
+        verter_type_engine::semantic_query::LiteralValue::Number(1e21),
     ));
     let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_large]);
     match graph.node_data(picked).as_deref() {
@@ -10045,7 +10132,7 @@ fn js_numeric_names_use_exact_js_exponent_spellings() {
 
     // Small-regime key on the publication surface too.
     let key_small = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1e-7),
+        verter_type_engine::semantic_query::LiteralValue::Number(1e-7),
     ));
     let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_small]);
     match graph.node_data(picked).as_deref() {
@@ -10076,8 +10163,8 @@ fn js_numeric_names_use_exact_js_exponent_spellings() {
 /// every non-integral / non-finite literal stay `TypeNode`.
 #[test]
 fn integer_convention_fold_is_bounded_by_canonical_display() {
-    use super::build::integer_convention_index_key;
-    use crate::semantic_query::CanonicalIndexInt;
+    use verter_type_engine::semantic_query::index_key::integer_convention_index_key;
+    use verter_type_engine::semantic_query::CanonicalIndexInt;
 
     // Safe domain — folds, and the folded i64 equals the literal.
     for value in [
@@ -10164,7 +10251,7 @@ fn integer_convention_fold_is_bounded_by_canonical_display() {
 /// the Rust `Display` form.
 #[test]
 fn indexed_projection_reaches_canonical_numeric_member_names() {
-    use crate::semantic_query::IndexKey;
+    use verter_type_engine::semantic_query::IndexKey;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -10184,7 +10271,7 @@ fn indexed_projection_reaches_canonical_numeric_member_names() {
     );
     let project_by_number = |value: f64| -> SemanticNodeId {
         let lit = graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::Number(value),
+            verter_type_engine::semantic_query::LiteralValue::Number(value),
         ));
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: source,
@@ -10256,14 +10343,14 @@ fn indexed_projection_reaches_canonical_numeric_member_names() {
 /// projected back by its own key is an inconsistency, not a defer.
 #[test]
 fn pick_surface_reprojects_by_its_own_numeric_key() {
-    use crate::semantic_query::IndexKey;
+    use verter_type_engine::semantic_query::IndexKey;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let any = primitive(&graph, PrimitiveKind::Any);
     let key_large = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(1e21),
+        verter_type_engine::semantic_query::LiteralValue::Number(1e21),
     ));
     let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_large]);
     let reprojected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -10290,7 +10377,7 @@ fn pick_surface_reprojects_by_its_own_numeric_key() {
 /// matches the published key-domain name.
 #[test]
 fn mapped_narrowing_admits_exponent_range_numeric_keys() {
-    use crate::semantic_query::IndexKey;
+    use verter_type_engine::semantic_query::IndexKey;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -10298,10 +10385,10 @@ fn mapped_narrowing_admits_exponent_range_numeric_keys() {
     let empty_source = simple_object(&graph, &[]);
     let narrow = |key_value: f64| -> SemanticNodeId {
         let key_space = graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::Number(key_value),
+            verter_type_engine::semantic_query::LiteralValue::Number(key_value),
         ));
         let param = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -10317,7 +10404,7 @@ fn mapped_narrowing_admits_exponent_range_numeric_keys() {
                 optionality: OptionalityMod::Keep,
                 readonly: ReadonlyMod::Keep,
                 name_remap: None,
-                kind: crate::semantic_query::MapperKind::Computed,
+                kind: verter_type_engine::semantic_query::MapperKind::Computed,
             },
         });
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -10334,7 +10421,9 @@ fn mapped_narrowing_admits_exponent_range_numeric_keys() {
     let assert_numeric_literal = |node: SemanticNodeId, expected: f64, label: &str| {
         let data = graph.node_data(node).expect("value node");
         match &*data {
-            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) => {
+            SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(n),
+            ) => {
                 assert_eq!(*n, expected, "{label}: numeric literal value");
             }
             other => panic!("{label}: value must be the NUMERIC literal {expected}, got {other:?}"),
@@ -10359,7 +10448,7 @@ fn key_remap_publishes_numeric_literal_keys() {
     let empty_source = simple_object(&graph, &[]);
     let key_param = || {
         graph.intern_node(SemanticNodeData::TypeParam {
-            decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
             constraint: None,
             default: None,
@@ -10368,7 +10457,7 @@ fn key_remap_publishes_numeric_literal_keys() {
     };
     let number_literal = |value: f64| {
         graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::Number(value),
+            verter_type_engine::semantic_query::LiteralValue::Number(value),
         ))
     };
     let build_mapped = |key_space: SemanticNodeId,
@@ -10385,7 +10474,7 @@ fn key_remap_publishes_numeric_literal_keys() {
                 optionality: OptionalityMod::Keep,
                 readonly: ReadonlyMod::Keep,
                 name_remap,
-                kind: crate::semantic_query::MapperKind::Computed,
+                kind: verter_type_engine::semantic_query::MapperKind::Computed,
             },
             context: ProjectionReductionContext::published(ProjectionMode::Expanded),
         }) {
@@ -10396,7 +10485,9 @@ fn key_remap_publishes_numeric_literal_keys() {
     let assert_numeric_literal = |node: SemanticNodeId, expected: f64, label: &str| {
         let data = graph.node_data(node).expect("value node");
         match &*data {
-            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(n)) => {
+            SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(n),
+            ) => {
                 assert_eq!(*n, expected, "{label}: numeric literal value");
             }
             other => panic!("{label}: value must be the NUMERIC literal {expected}, got {other:?}"),
@@ -10416,7 +10507,7 @@ fn key_remap_publishes_numeric_literal_keys() {
             );
             assert_eq!(
                 surface.positive_members()[0].key.cloned_known(),
-                Some(crate::semantic_query::PropertyKey::from_js_number(1.0)),
+                Some(verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0)),
                 "{{ [K in 1 as K]: K }}: the numeric literal key publishes typed"
             );
             assert_numeric_literal(
@@ -10431,10 +10522,10 @@ fn key_remap_publishes_numeric_literal_keys() {
     // `{ [K in 1 | "a" as K]: K }` = `{ 1: 1; a: "a" }` — mixed-kind
     // union; the numeric arm publishes alongside the string arm.
     let key_a = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("a".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_string()),
     ));
     let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![number_literal(1.0), key_a].into_boxed_slice(),
         )),
     ));
@@ -10442,7 +10533,7 @@ fn key_remap_publishes_numeric_literal_keys() {
     let mapped = build_mapped(keys_1_or_a, param, Some(param));
     match graph.node_data(mapped).as_deref() {
         Some(SemanticNodeData::Object(surface)) => {
-            let mut keys: Vec<crate::semantic_query::PropertyKey> = surface
+            let mut keys: Vec<verter_type_engine::semantic_query::PropertyKey> = surface
                 .positive_members()
                 .iter()
                 .filter_map(|m| m.key.cloned_known())
@@ -10451,8 +10542,8 @@ fn key_remap_publishes_numeric_literal_keys() {
             assert_eq!(
                 keys,
                 [
-                    crate::semantic_query::PropertyKey::identifier("a"),
-                    crate::semantic_query::PropertyKey::from_js_number(1.0),
+                    verter_type_engine::semantic_query::PropertyKey::identifier("a"),
+                    verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0),
                 ],
                 "mixed-kind remap union: both typed keys"
             );
@@ -10500,14 +10591,16 @@ fn key_remap_publishes_numeric_literal_keys() {
             );
             assert_eq!(
                 surface.positive_members()[0].key.cloned_known(),
-                Some(crate::semantic_query::PropertyKey::from_js_number(1.0)),
+                Some(verter_type_engine::semantic_query::PropertyKey::from_js_number(1.0)),
                 "constant numeric remap publishes the typed numeric key"
             );
             match graph
                 .node_data(surface.positive_members()[0].value)
                 .as_deref()
             {
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s))) => {
+                Some(SemanticNodeData::Literal(
+                    verter_type_engine::semantic_query::LiteralValue::String(s),
+                )) => {
                     assert_eq!(s, "a", "constant numeric remap keeps the K value")
                 }
                 other => panic!("constant numeric remap value must be \"a\", got {other:?}"),
@@ -10558,7 +10651,7 @@ fn number_index_signature_applies_to_canonical_numeric_names() {
             index_signature_applies_to_property(
                 &graph,
                 number_key,
-                &crate::semantic_query::PropertyKey::identifier(name),
+                &verter_type_engine::semantic_query::PropertyKey::identifier(name),
             ),
             "number index signature must apply to the canonical numeric name {name:?}"
         );
@@ -10568,7 +10661,7 @@ fn number_index_signature_applies_to_canonical_numeric_names() {
             !index_signature_applies_to_property(
                 &graph,
                 number_key,
-                &crate::semantic_query::PropertyKey::identifier(name),
+                &verter_type_engine::semantic_query::PropertyKey::identifier(name),
             ),
             "number index signature must NOT apply to the non-canonical name {name:?}"
         );
@@ -10582,13 +10675,13 @@ fn number_index_signature_applies_to_canonical_numeric_names() {
         (1e-7, "1e-7", "0.0000001"),
     ] {
         let literal_key = graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::Number(value),
+            verter_type_engine::semantic_query::LiteralValue::Number(value),
         ));
         assert!(
             index_signature_applies_to_property(
                 &graph,
                 literal_key,
-                &crate::semantic_query::PropertyKey::identifier(canonical),
+                &verter_type_engine::semantic_query::PropertyKey::identifier(canonical),
             ),
             "literal key {value} must apply to its canonical name {canonical:?}"
         );
@@ -10596,7 +10689,7 @@ fn number_index_signature_applies_to_canonical_numeric_names() {
             !index_signature_applies_to_property(
                 &graph,
                 literal_key,
-                &crate::semantic_query::PropertyKey::identifier(wrong),
+                &verter_type_engine::semantic_query::PropertyKey::identifier(wrong),
             ),
             "literal key {value} must NOT apply to the non-canonical spelling {wrong:?}"
         );
@@ -10614,7 +10707,7 @@ fn number_index_signature_applies_to_canonical_numeric_names() {
 /// are NOT property names.
 #[test]
 fn indexed_projection_uses_canonical_js_names_beyond_2_pow_53() {
-    use crate::semantic_query::IndexKey;
+    use verter_type_engine::semantic_query::IndexKey;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -10636,7 +10729,7 @@ fn indexed_projection_uses_canonical_js_names_beyond_2_pow_53() {
     );
     let project_by_number = |value: f64| -> SemanticNodeId {
         let lit = graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::Number(value),
+            verter_type_engine::semantic_query::LiteralValue::Number(value),
         ));
         match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: source,
@@ -10715,14 +10808,14 @@ fn indexed_projection_uses_canonical_js_names_beyond_2_pow_53() {
 /// AND `Pick<any, 4611686018427387904>[4611686018427387904]` = `any`.
 #[test]
 fn pick_surface_reprojects_by_big_integer_key() {
-    use crate::semantic_query::IndexKey;
+    use verter_type_engine::semantic_query::IndexKey;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let any = primitive(&graph, PrimitiveKind::Any);
     let key_big = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::Number(4_611_686_018_427_387_904.0),
+        verter_type_engine::semantic_query::LiteralValue::Number(4_611_686_018_427_387_904.0),
     ));
     let picked = instantiate_utility(&dispatch, &graph, "Pick", &[any, key_big]);
     match graph.node_data(picked).as_deref() {
@@ -10765,7 +10858,7 @@ fn pick_surface_reprojects_by_big_integer_key() {
 /// distributes; an arm with no member is an honest miss).
 #[test]
 fn union_index_distribution_projects_numeric_literal_arms() {
-    use crate::semantic_query::IndexKey;
+    use verter_type_engine::semantic_query::IndexKey;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -10775,12 +10868,12 @@ fn union_index_distribution_projects_numeric_literal_arms() {
     let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
     let number_literal = |value: f64| {
         graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::Number(value),
+            verter_type_engine::semantic_query::LiteralValue::Number(value),
         ))
     };
     let project_by_union = |base: SemanticNodeId, arms: &[SemanticNodeId]| -> SemanticNodeId {
         let union = graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 arms.to_vec().into_boxed_slice(),
             )),
         ));
@@ -10821,7 +10914,7 @@ fn union_index_distribution_projects_numeric_literal_arms() {
     // probe20 U2: mixed string|numeric union distributes.
     let mixed = simple_object(&graph, &[("a", boolean_node), ("1.5", string_node)]);
     let key_a = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("a".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_string()),
     ));
     let mut expected = vec![boolean_node, string_node];
     expected.sort_unstable();
@@ -10877,7 +10970,7 @@ fn union_index_distribution_projects_numeric_literal_arms() {
 /// missing, never merely because a key's value is unresolved.
 #[test]
 fn union_index_distribution_preserves_carrier_valued_member_arms() {
-    use crate::semantic_query::{HashValue, IndexKey, LiteralValue, QueryError};
+    use verter_type_engine::semantic_query::{HashValue, IndexKey, LiteralValue, QueryError};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -10910,7 +11003,7 @@ fn union_index_distribution_preserves_carrier_valued_member_arms() {
     };
     let union_of = |arms: &[SemanticNodeId]| -> SemanticNodeId {
         graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 arms.to_vec().into_boxed_slice(),
             )),
         ))
@@ -10979,7 +11072,7 @@ fn object_record_relation_accepts_numeric_literal_keys() {
             mapper: MapperKey {
                 over_type_variable: false,
                 parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
-                    decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+                    decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
                     param_index: 0,
                     constraint: None,
                     default: None,
@@ -10990,7 +11083,7 @@ fn object_record_relation_accepts_numeric_literal_keys() {
                 optionality: OptionalityMod::Keep,
                 readonly: ReadonlyMod::Keep,
                 name_remap: None,
-                kind: crate::semantic_query::MapperKind::Computed,
+                kind: verter_type_engine::semantic_query::MapperKind::Computed,
             },
         })
     };
@@ -11009,7 +11102,7 @@ fn object_record_relation_accepts_numeric_literal_keys() {
     };
     let number_literal = |value: f64| {
         graph.intern_node(SemanticNodeData::Literal(
-            crate::semantic_query::LiteralValue::Number(value),
+            verter_type_engine::semantic_query::LiteralValue::Number(value),
         ))
     };
 
@@ -11042,10 +11135,10 @@ fn object_record_relation_accepts_numeric_literal_keys() {
     // Mixed-kind union key: `{ 1: string; a: string } extends
     // Record<1 | "a", string>` → true.
     let key_a = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("a".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_string()),
     ));
     let keys_1_or_a = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![number_literal(1.0), key_a].into_boxed_slice(),
         )),
     ));
@@ -11063,7 +11156,7 @@ fn object_record_relation_accepts_numeric_literal_keys() {
 /// renormalised union of every element's contribution.
 #[test]
 fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
-    use crate::semantic_query::{IndexKey, TupleElement};
+    use verter_type_engine::semantic_query::{IndexKey, TupleElement};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -11153,7 +11246,7 @@ fn project_path_tuple_numeric_index_projects_positions_and_broad_union() {
 /// through to a position.
 #[test]
 fn project_path_tuple_string_index_requires_canonical_digits() {
-    use crate::semantic_query::{IndexKey, TupleElement};
+    use verter_type_engine::semantic_query::{IndexKey, TupleElement};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -11210,7 +11303,7 @@ fn project_path_tuple_string_index_requires_canonical_digits() {
 /// number, ...rest: boolean[]]`.
 #[test]
 fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
-    use crate::semantic_query::TupleElement;
+    use verter_type_engine::semantic_query::TupleElement;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -11296,7 +11389,7 @@ fn project_path_tuple_numeric_index_resolves_fixed_prefix_before_rest() {
 /// labelled-slot shape TS reports.
 #[test]
 fn parameters_tuple_widens_optional_slot_and_keeps_label() {
-    use crate::semantic_query::FunctionParam;
+    use verter_type_engine::semantic_query::FunctionParam;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -11305,7 +11398,7 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
     let boolean_node = primitive(&graph, PrimitiveKind::Boolean);
     let void_node = primitive(&graph, PrimitiveKind::Void);
     let function = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![
                 FunctionParam {
@@ -11329,7 +11422,9 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
         ),
         return_type: void_node,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void_node),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            void_node,
+        ),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -11366,8 +11461,8 @@ fn parameters_tuple_widens_optional_slot_and_keeps_label() {
 /// materialisation.
 #[test]
 fn tuple_spread_normalization_splices_collapses_and_preserves_carriers() {
-    use crate::project_semantic_dispatch::build::NormalizedTupleShape;
-    use crate::semantic_query::{LiteralValue, TupleElement};
+    use verter_type_engine::project_semantic_dispatch::build::NormalizedTupleShape;
+    use verter_type_engine::semantic_query::{LiteralValue, TupleElement};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -11428,10 +11523,10 @@ fn tuple_spread_normalization_splices_collapses_and_preserves_carriers() {
 
     // An OPEN rest value (unbound TypeParam) is preserved verbatim.
     let open = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity {
+        decl: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/w/open.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: crate::semantic_query::HashValue::default(),
+            whole_hash: verter_type_engine::semantic_query::HashValue::default(),
             decl_name: Arc::from("T"),
         },
         param_index: 0,
@@ -11518,8 +11613,8 @@ fn tuple_sole_rest_collapse_reconciles_outer_readonly() {
 /// whole-hash — a cache-validity rail hole.
 #[test]
 fn tuple_sole_rest_collapse_replacement_array_preserves_origin_scope() {
-    use crate::project_semantic_dispatch::build::NormalizedTupleShape;
-    use crate::semantic_query::TupleElement;
+    use verter_type_engine::project_semantic_dispatch::build::NormalizedTupleShape;
+    use verter_type_engine::semantic_query::TupleElement;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -11583,8 +11678,8 @@ fn tuple_sole_rest_collapse_replacement_array_preserves_origin_scope() {
 /// REQUIRED after it (a rest tail does not count) — keeps its `?`.
 #[test]
 fn tuple_spread_non_trailing_optional_converts_to_required_undefined_union() {
-    use crate::project_semantic_dispatch::build::NormalizedTupleShape;
-    use crate::semantic_query::TupleElement;
+    use verter_type_engine::project_semantic_dispatch::build::NormalizedTupleShape;
+    use verter_type_engine::semantic_query::TupleElement;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -11687,14 +11782,14 @@ fn tuple_spread_non_trailing_optional_converts_to_required_undefined_union() {
 /// lowering fast path interns for an unshadowed global `Promise<...>`
 /// reference.
 fn promise_carrier(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     payload: SemanticNodeId,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: crate::semantic_query::DeclIdentity {
+        base: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from("__builtin__"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: crate::semantic_query::HashValue::default(),
+            whole_hash: verter_type_engine::semantic_query::HashValue::default(),
             decl_name: Arc::from("Promise"),
         },
         args: Arc::from(vec![payload].into_boxed_slice()),
@@ -11750,7 +11845,7 @@ fn awaited_distributes_over_union_arms() {
     let string_node = primitive(&graph, PrimitiveKind::String);
     let num = primitive(&graph, PrimitiveKind::Number);
     let union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![promise_carrier(&graph, string_node), num].into_boxed_slice(),
         )),
     ));
@@ -11874,15 +11969,15 @@ fn non_nullable_reduces_settled_operands() {
     let anchor = utility_identity(&graph, "NonNullable");
     let run = |arg: SemanticNodeId| -> SemanticNodeId {
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 anchor.clone(),
                 Arc::from(vec![arg].into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ),
         )) {
@@ -11910,7 +12005,7 @@ fn non_nullable_reduces_settled_operands() {
     let null_node = primitive(&graph, PrimitiveKind::Null);
     let undefined_node = primitive(&graph, PrimitiveKind::Undefined);
     let union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![string_node, null_node, undefined_node].into_boxed_slice(),
         )),
     ));
@@ -11945,7 +12040,7 @@ fn non_nullable_reduces_settled_operands() {
     );
     // `NonNullable<null | undefined>` = `never` (every arm filtered).
     let nullish_union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![null_node, undefined_node].into_boxed_slice(),
         )),
     ));
@@ -11958,7 +12053,7 @@ fn non_nullable_reduces_settled_operands() {
     // UNSETTLED operand (an unsubstituted TypeParam carrier) keeps the
     // deferred Opaque(Miss) shell with the Instantiate edge.
     let open_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -12003,7 +12098,7 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
                 canonical_id: Arc::from("/w/fns.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -12046,15 +12141,15 @@ fn return_type_of_typeof_local_fn_resolves_via_dispatch() {
     // utility; result is the call signature's return type node.
     let return_type_anchor = utility_identity(&graph, "ReturnType");
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             return_type_anchor,
             Arc::from(vec![typeof_id].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -12129,7 +12224,7 @@ fn signature_utilities_distribute_over_union_subjects() {
                     canonical_id: Arc::from("/w/fns.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
-                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },
@@ -12143,15 +12238,15 @@ fn signature_utilities_distribute_over_union_subjects() {
     };
     let instantiate = |utility: &str, subject: SemanticNodeId| -> SemanticNodeId {
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 utility_identity(&graph, utility),
                 Arc::from(vec![subject].into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ),
         )) {
@@ -12227,7 +12322,7 @@ fn signature_utilities_distribute_over_union_subjects() {
     for member in &stripped {
         match graph.node_data(*member).as_deref() {
             Some(SemanticNodeData::Signature { params, .. }) => assert!(
-                crate::semantic_query::split_this_receiver(params)
+                verter_type_engine::semantic_query::split_this_receiver(params)
                     .0
                     .is_none(),
                 "the republished arm carries no `this` receiver"
@@ -12264,15 +12359,15 @@ fn return_type_of_plain_object_stays_opaque() {
     let anchor = utility_identity(&graph, "ReturnType");
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             anchor,
             Arc::from(vec![plain_object].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -12320,15 +12415,15 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
     let _ = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Mut"); // ensure indexed
     let mut_base = decl_identity(&host, "/w/arr.ts", "Mut");
     let mut_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             mut_base,
             Arc::clone(&args),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -12362,15 +12457,15 @@ fn semantic_graph_array_variant_preserves_element_and_readonly() {
     let _ = resolve_decl_anchor(&dispatch, "/w/arr.ts", "Ro"); // ensure indexed
     let ro_base = decl_identity(&host, "/w/arr.ts", "Ro");
     let ro_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ro_base,
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -12408,15 +12503,15 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
     let _ = resolve_decl_anchor(&dispatch, "/w/tup.ts", "Tup"); // ensure indexed
     let base = decl_identity(&host, "/w/tup.ts", "Tup");
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             Arc::clone(&args),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -12464,15 +12559,15 @@ fn semantic_graph_tuple_variant_preserves_label_optional_rest_and_readonly() {
     let _ = resolve_decl_anchor(&dispatch, "/w/tup.ts", "Ro"); // ensure indexed
     let ro_base = decl_identity(&host, "/w/tup.ts", "Ro");
     let ro_result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ro_base,
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -12509,15 +12604,15 @@ fn semantic_graph_template_literal_variant_preserves_quasis_and_expression_refs(
     let _ = resolve_decl_anchor(&dispatch, "/w/tl.ts", "Greet"); // ensure indexed
     let base = decl_identity(&host, "/w/tl.ts", "Greet");
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             base.clone(),
             args.clone(),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -12570,7 +12665,7 @@ fn function_surface_publishes_as_object_with_call_signatures() {
     let sig_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let sig_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let ctor_sig = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-    let view = crate::test_surface_view! {
+    let view = verter_type_engine::test_surface_view! {
         members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
         call_signatures: Arc::from(vec![sig_a, sig_b].into_boxed_slice()),
         construct_signatures: Arc::from(vec![ctor_sig].into_boxed_slice()),
@@ -12673,28 +12768,28 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
         "B",
     )));
     let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             decl_identity(&host, "/w/two_mapped.ts", "A"),
             Arc::from(vec![num].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     ));
     let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             decl_identity(&host, "/w/two_mapped.ts", "B"),
             Arc::from(vec![str_].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     ));
@@ -12702,7 +12797,8 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
     // Walk every interned node id in the arena and collect the
     // identity tuples of TypeParams whose decl_name sentinels
     // indicate they are mapped binders.
-    let mut mapper_binder_identities: Vec<(crate::semantic_query::DeclIdentity, u16)> = Vec::new();
+    let mut mapper_binder_identities: Vec<(verter_type_engine::semantic_query::DeclIdentity, u16)> =
+        Vec::new();
     for id in 0u64..(graph.node_count() as u64) {
         let nid = SemanticNodeId(id);
         if let Some(data) = graph.node_data(nid) {
@@ -12710,7 +12806,9 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
                 decl, param_index, ..
             } = data.as_ref()
             {
-                if crate::mapper_binder_registry::is_mapper_binder_decl_name(&decl.decl_name) {
+                if verter_type_engine::mapper_binder_registry::is_mapper_binder_decl_name(
+                    &decl.decl_name,
+                ) {
                     mapper_binder_identities.push((decl.clone(), *param_index));
                 }
             }
@@ -12737,7 +12835,7 @@ fn typeparam_identity_discriminates_distinct_mapped_binders_in_same_file() {
 /// shell over each value type the same keys.
 #[test]
 fn mapped_binder_keys_do_not_depend_on_lowering_order() {
-    use crate::semantic_query::stable_key::stable_key_for_node;
+    use verter_type_engine::semantic_query::stable_key::stable_key_for_node;
     let keys = |order: [(&'static str, SemanticNodeId); 2], host: &VerterHost| {
         let dispatch = ProjectSemanticDispatch::new(host);
         let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -12748,15 +12846,15 @@ fn mapped_binder_keys_do_not_depend_on_lowering_order() {
                 name,
             )));
             let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(
+                verter_type_engine::semantic_query::InstantiateKey::new(
                     decl_identity(host, "/w/two_mapped.ts", name),
                     Arc::from(vec![argument].into_boxed_slice()),
-                    crate::semantic_query::InstantiateContext::non_file(
-                        crate::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::InstantiateContext::non_file(
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Expanded,
                         ),
                         Default::default(),
-                        crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                        verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                     ),
                 ),
             ));
@@ -12809,7 +12907,7 @@ fn mapped_binder_keys_do_not_depend_on_lowering_order() {
 /// structural walk over it can meet a cycle.
 #[test]
 fn a_resolved_workload_arena_is_a_dag() {
-    use crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR;
+    use verter_type_engine::semantic_query_memo::UNALLOCATABLE_ID_FLOOR;
     let host = host();
     upsert_ts(
         &host,
@@ -12835,15 +12933,15 @@ fn a_resolved_workload_arena_is_a_dag() {
     }
     for name in ["Node", "Partialize", "Unwrap"] {
         let _ = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 decl_identity(&host, "/w/dag.ts", name),
                 Arc::from(vec![number].into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ),
         ));
@@ -12887,8 +12985,8 @@ fn node_ids_printed_in(data: &SemanticNodeData) -> Vec<u64> {
 /// match names every variant, so a new one does not compile until it is
 /// placed here: either the workload produces it (and the sweep checks
 /// that every id it holds is retained) or the arm says why it cannot.
-fn retention_workload_produces(tag: crate::semantic_query::SemanticNodeTag) -> bool {
-    use crate::semantic_query::SemanticNodeTag as Tag;
+fn retention_workload_produces(tag: verter_type_engine::semantic_query::SemanticNodeTag) -> bool {
+    use verter_type_engine::semantic_query::SemanticNodeTag as Tag;
     match tag {
         Tag::Object
         | Tag::Union
@@ -12941,7 +13039,7 @@ fn retention_workload_produces(tag: crate::semantic_query::SemanticNodeTag) -> b
 /// it would otherwise keep the node that field names alive.
 #[test]
 fn every_node_id_a_payload_holds_is_a_retained_child() {
-    use crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR;
+    use verter_type_engine::semantic_query_memo::UNALLOCATABLE_ID_FLOOR;
     let host = host();
     upsert_ts(
         &host,
@@ -12969,15 +13067,15 @@ fn every_node_id_a_payload_holds_is_a_retained_child() {
     let string = primitive(&graph, PrimitiveKind::String);
     let instantiate = |name: &str, arg: SemanticNodeId| {
         dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 decl_identity(&host, "/w/retained.ts", name),
                 Arc::from(vec![arg].into_boxed_slice()),
-                crate::semantic_query::InstantiateContext::non_file(
-                    crate::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::InstantiateContext::non_file(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ),
         ))
@@ -13030,7 +13128,7 @@ fn every_node_id_a_payload_holds_is_a_retained_child() {
             );
         }
     }
-    let missing: Vec<_> = crate::semantic_query::SemanticNodeTag::ALL
+    let missing: Vec<_> = verter_type_engine::semantic_query::SemanticNodeTag::ALL
         .into_iter()
         .filter(|&tag| retention_workload_produces(tag) && !seen.contains(&tag))
         .collect();
@@ -13070,15 +13168,15 @@ fn substitute_preserves_scope_on_shell_rebuilds() {
     )));
     let num = primitive(&graph, PrimitiveKind::Number);
     let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             decl_identity(&host, "/w/scope_pres.ts", "Wrap"),
             Arc::from(vec![num].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -13123,15 +13221,15 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
     )));
     let num = primitive(&graph, PrimitiveKind::Number);
     let inst = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             decl_identity(&host, "/w/unresolved.ts", "Has"),
             Arc::from(vec![num].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Expanded,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -13175,7 +13273,7 @@ fn unresolved_typeparameter_references_alias_by_name_within_same_file() {
 /// covariant (forward only), so descent is linear in depth.
 #[test]
 fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
-    use crate::semantic_query::RelationResult;
+    use verter_type_engine::semantic_query::RelationResult;
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -13186,7 +13284,7 @@ fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
     // any fixed per-frame recursion cap; the iterative engine bounds
     // itself on the graph-size work budget instead.
     fn nest_readonly_array(
-        graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+        graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
         base: PrimitiveKind,
         depth: u32,
     ) -> SemanticNodeId {
@@ -13223,7 +13321,7 @@ fn relation_handles_deeply_nested_arrays_beyond_recursion_depth() {
 /// pair one more.
 #[test]
 fn iterative_deep_array_relation_reaches_the_nested_conditional_oracle() {
-    use crate::semantic_query::{LiteralValue, RelationResult};
+    use verter_type_engine::semantic_query::{LiteralValue, RelationResult};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -13271,7 +13369,7 @@ fn iterative_deep_array_relation_reaches_the_nested_conditional_oracle() {
 /// true_branch surfaces the concrete binding.
 #[test]
 fn nested_function_infer_binds_per_position_to_check_signature() {
-    use crate::semantic_query::{FunctionParam, TypeParamDecl};
+    use verter_type_engine::semantic_query::{FunctionParam, TypeParamDecl};
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -13287,7 +13385,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         constraint: None,
     });
     let extends = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
@@ -13299,7 +13397,9 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         ),
         return_type: any_node,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any_node),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            any_node,
+        ),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -13308,7 +13408,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
     });
     // check = `(x: string) => any` — concrete Function.
     let check = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
@@ -13320,7 +13420,9 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
         ),
         return_type: any_node,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(any_node),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            any_node,
+        ),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -13360,7 +13462,7 @@ fn nested_function_infer_binds_per_position_to_check_signature() {
 /// collapses to `never`.
 #[test]
 fn losing_overload_alternative_deposits_do_not_reach_fixation() {
-    use crate::semantic_query::{FunctionParam, SignatureKind, TypeParamDecl};
+    use verter_type_engine::semantic_query::{FunctionParam, SignatureKind, TypeParamDecl};
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -13382,7 +13484,9 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
             ),
             return_type: void_node,
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void_node),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                void_node,
+            ),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -13394,7 +13498,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
     // check = the overloaded callable object:
     // `{ (a: number, b: number): void; (a: string, b: string): void }`.
     let check = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(
                 vec![
@@ -13440,7 +13544,7 @@ fn losing_overload_alternative_deposits_do_not_reach_fixation() {
 }
 
 fn reverse_test_binders(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     infer_name: &str,
     ordinal: u16,
 ) -> (SemanticNodeId, SemanticNodeId) {
@@ -13450,7 +13554,7 @@ fn reverse_test_binders(
         constraint: None,
     });
     let parameter = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("<reverse-mapper>"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("<reverse-mapper>"),
         param_index: ordinal,
         constraint: None,
         default: None,
@@ -13460,9 +13564,9 @@ fn reverse_test_binders(
 }
 
 fn reverse_test_binder_id(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     infer: SemanticNodeId,
-) -> crate::semantic_query::InferBinderId {
+) -> verter_type_engine::semantic_query::InferBinderId {
     match graph.node_data(infer).as_deref() {
         Some(SemanticNodeData::Infer { binder, .. }) => binder.clone(),
         other => panic!("expected an infer declaration, got {other:?}"),
@@ -13470,17 +13574,17 @@ fn reverse_test_binder_id(
 }
 
 fn reverse_test_target(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     infer: SemanticNodeId,
     parameter: SemanticNodeId,
     template: SemanticNodeId,
-    optionality: crate::semantic_query::OptionalityMod,
-    readonly: crate::semantic_query::ReadonlyMod,
+    optionality: verter_type_engine::semantic_query::OptionalityMod,
+    readonly: verter_type_engine::semantic_query::ReadonlyMod,
 ) -> SemanticNodeId {
     let key_space = graph.intern_node(SemanticNodeData::KeyOf { base: infer });
     graph.intern_node(SemanticNodeData::Mapped {
         source: infer,
-        mapper: crate::semantic_query::MapperKey {
+        mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
             parameter_node: parameter,
             key_space,
@@ -13488,7 +13592,7 @@ fn reverse_test_target(
             optionality,
             readonly,
             name_remap: None,
-            kind: crate::semantic_query::MapperKind::Computed,
+            kind: verter_type_engine::semantic_query::MapperKind::Computed,
         },
     })
 }
@@ -13597,7 +13701,7 @@ fn production_lowering_keeps_an_inner_same_name_binder_innermost() {
 
 #[test]
 fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TypeParamDecl,
     };
 
@@ -13613,7 +13717,9 @@ fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: raw_fallback,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(raw_fallback),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            raw_fallback,
+        ),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -13650,7 +13756,7 @@ fn reverse_homomorphic_raw_fallback_projection_candidate_stays_deferred() {
 
 #[test]
 fn reverse_homomorphic_nested_bare_ref_projection_candidate_stays_deferred() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -13658,7 +13764,7 @@ fn reverse_homomorphic_nested_bare_ref_projection_candidate_stays_deferred() {
     let never = primitive(&graph, PrimitiveKind::Never);
     let missing = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Missing"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(Vec::new().into_boxed_slice()),
     ));
     let nested =
@@ -13694,7 +13800,7 @@ fn reverse_homomorphic_nested_bare_ref_projection_candidate_stays_deferred() {
 
 #[test]
 fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TypeParamDecl,
     };
 
@@ -13705,7 +13811,7 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
     let void = primitive(&graph, PrimitiveKind::Void);
     let missing = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("NoSuch"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(Vec::new().into_boxed_slice()),
     ));
     let signature = graph.intern_node(SemanticNodeData::Signature {
@@ -13721,7 +13827,7 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
         ),
         return_type: void,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(void),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -13759,7 +13865,7 @@ fn reverse_homomorphic_nested_signature_parameter_bare_ref_stays_deferred() {
 
 #[test]
 fn reverse_homomorphic_nested_type_param_bound_poison_stays_deferred() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -13767,11 +13873,11 @@ fn reverse_homomorphic_nested_type_param_bound_poison_stays_deferred() {
     let never = primitive(&graph, PrimitiveKind::Never);
     let missing = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("MissingBound"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(Vec::new().into_boxed_slice()),
     ));
     let bounded_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("<nested-bound>"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("<nested-bound>"),
         param_index: 0,
         constraint: Some(missing),
         default: None,
@@ -13812,7 +13918,9 @@ fn reverse_homomorphic_nested_type_param_bound_poison_stays_deferred() {
 
 #[test]
 fn reverse_homomorphic_synthetic_binding_descends_value_node_without_over_refusal() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod, SyntheticBindingId};
+    use verter_type_engine::semantic_query::{
+        IndexKey, OptionalityMod, ReadonlyMod, SyntheticBindingId,
+    };
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -13859,7 +13967,7 @@ fn reverse_homomorphic_synthetic_binding_descends_value_node_without_over_refusa
 
     let missing = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Missing"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(Vec::new().into_boxed_slice()),
     ));
     let unresolved_binding = synthetic("unresolved", missing);
@@ -13902,7 +14010,7 @@ fn reverse_homomorphic_synthetic_binding_descends_value_node_without_over_refusa
 
 #[test]
 fn watched_red_reverse_homomorphic_recursive_ref_is_publishable() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, QueryError, ReadonlyMod};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, QueryError, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -13939,7 +14047,7 @@ fn watched_red_reverse_homomorphic_recursive_ref_is_publishable() {
 
 #[test]
 fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poison() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TypeParamDecl,
     };
 
@@ -13967,7 +14075,9 @@ fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poiso
         ),
         return_type: raw_fallback,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(raw_fallback),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            raw_fallback,
+        ),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -13975,7 +14085,7 @@ fn watched_red_reverse_homomorphic_discards_noncontributing_call_signature_poiso
         is_abstract: false,
     });
     let source = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(
                 vec![surface_member("a", source_value, false, false)].into_boxed_slice(),
             ),
@@ -14081,7 +14191,7 @@ fn production_reverse_homomorphic_recovers_named_and_instantiated_sources() {
 
 #[test]
 fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, IndexKey, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
     };
 
@@ -14135,12 +14245,12 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
         },
     });
 
-    let mismatched_raw_key = crate::semantic_query::RelateMemoKey {
-        inference_context: Some(crate::semantic_query::InferenceContextKey::default()),
-        ..crate::semantic_query::RelateMemoKey::assignable(
+    let mismatched_raw_key = verter_type_engine::semantic_query::RelateMemoKey {
+        inference_context: Some(verter_type_engine::semantic_query::InferenceContextKey::default()),
+        ..verter_type_engine::semantic_query::RelateMemoKey::assignable(
             source,
             mapped_target,
-            crate::semantic_query::RelationContext::default(),
+            verter_type_engine::semantic_query::RelationContext::default(),
         )
     };
     assert!(
@@ -14182,12 +14292,12 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = primitive(&graph, PrimitiveKind::String);
-    let forged = crate::semantic_query::RelateMemoKey {
-        inference_context: Some(crate::semantic_query::InferenceContextKey::default()),
-        ..crate::semantic_query::RelateMemoKey::assignable(
+    let forged = verter_type_engine::semantic_query::RelateMemoKey {
+        inference_context: Some(verter_type_engine::semantic_query::InferenceContextKey::default()),
+        ..verter_type_engine::semantic_query::RelateMemoKey::assignable(
             string,
             string,
-            crate::semantic_query::RelationContext::default(),
+            verter_type_engine::semantic_query::RelationContext::default(),
         )
     };
 
@@ -14202,7 +14312,7 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
     assert!(
         matches!(
             dispatch.execute_relate_pair_as_result_for_tests(string, string),
-            crate::semantic_query::RelationResult::Assignable { .. }
+            verter_type_engine::semantic_query::RelationResult::Assignable { .. }
         ),
         "control: the same ordinary relation remains assignable through the \
          canonical no-session key"
@@ -14215,7 +14325,7 @@ fn raw_relate_rejects_forged_inference_context_when_target_has_no_pattern() {
 /// never an in-scope structural `Unknown`.
 #[test]
 fn subtype_decides_primitives_without_structural_unknown() {
-    use crate::semantic_query::RelationKind;
+    use verter_type_engine::semantic_query::RelationKind;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -14272,7 +14382,7 @@ fn subtype_decides_primitives_without_structural_unknown() {
 /// a false positive here.
 #[test]
 fn subtype_refuses_any_source_that_assignability_accepts() {
-    use crate::semantic_query::RelationKind;
+    use verter_type_engine::semantic_query::RelationKind;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -14313,7 +14423,7 @@ fn subtype_refuses_any_source_that_assignability_accepts() {
 /// unknown[]` is `any[]` (`unknown[]` is absorbed, `any[]` is not).
 #[test]
 fn strict_subtype_is_the_checkers_strict_subtype_relation() {
-    use crate::semantic_query::{LiteralValue, RelationKind};
+    use verter_type_engine::semantic_query::{LiteralValue, RelationKind};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -14377,7 +14487,7 @@ fn strict_subtype_is_the_checkers_strict_subtype_relation() {
 /// extra target-side arguments.
 #[test]
 fn relate_function_rest_never_exempts_uncallable_source_arity() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         FunctionParam, RelationKind, SignatureKind, SignatureReturnCarrier, TypeParamDecl,
     };
 
@@ -14454,8 +14564,8 @@ fn relate_function_rest_never_exempts_uncallable_source_arity() {
 /// the order policy changes.
 #[test]
 fn relate_parent_key_invalidates_on_semantic_context_change() {
-    use crate::semantic_query::{RelationContext, RelationKind, SemanticContext};
     use std::hash::{Hash, Hasher};
+    use verter_type_engine::semantic_query::{RelationContext, RelationKind, SemanticContext};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -14463,7 +14573,7 @@ fn relate_parent_key_invalidates_on_semantic_context_change() {
     let string = primitive(&graph, PrimitiveKind::String);
     let number = primitive(&graph, PrimitiveKind::Number);
 
-    let mut other_policy = crate::semantic_query::SemanticPolicySet::production();
+    let mut other_policy = verter_type_engine::semantic_query::SemanticPolicySet::production();
     other_policy.compatibility_version = 2;
     let context_a = SemanticContext::production().intern();
     let context_b = SemanticContext {
@@ -14477,14 +14587,14 @@ fn relate_parent_key_invalidates_on_semantic_context_change() {
     );
 
     let base = dispatch.relate_key_for_kind(string, number, RelationKind::Subtype);
-    let key_a = crate::semantic_query::RelateMemoKey {
+    let key_a = verter_type_engine::semantic_query::RelateMemoKey {
         context: RelationContext {
             semantic_context: context_a,
             ..base.context
         },
         ..base.clone()
     };
-    let key_b = crate::semantic_query::RelateMemoKey {
+    let key_b = verter_type_engine::semantic_query::RelateMemoKey {
         context: RelationContext {
             semantic_context: context_b,
             ..base.context
@@ -14495,7 +14605,7 @@ fn relate_parent_key_invalidates_on_semantic_context_change() {
         key_a, key_b,
         "Relate keys differing only in semantic_context must not compare equal"
     );
-    let hash_of = |key: &crate::semantic_query::RelateMemoKey| {
+    let hash_of = |key: &verter_type_engine::semantic_query::RelateMemoKey| {
         let mut hasher = rustc_hash::FxHasher::default();
         key.hash(&mut hasher);
         hasher.finish()
@@ -14551,7 +14661,7 @@ fn relate_parent_key_invalidates_on_semantic_context_change() {
 
 #[test]
 fn reverse_homomorphic_reduces_key_sensitive_conditionals_nested_in_template_members() {
-    use crate::semantic_query::{IndexKey, LiteralValue, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{IndexKey, LiteralValue, OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -14607,7 +14717,7 @@ fn reverse_homomorphic_reduces_key_sensitive_conditionals_nested_in_template_mem
 
 #[test]
 fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function_children() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         FunctionParam, IndexKey, OptionalityMod, PrimitiveKind, ReadonlyMod, SignatureKind,
         TupleElement, TypeParamDecl,
     };
@@ -14618,7 +14728,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
     let never = primitive(&graph, PrimitiveKind::Never);
     let string = primitive(&graph, PrimitiveKind::String);
     let key_a = graph.intern_node(SemanticNodeData::Literal(
-        crate::semantic_query::LiteralValue::String("a".to_string()),
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_string()),
     ));
     let signature = |parameter: SemanticNodeId, return_type: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::Signature {
@@ -14634,7 +14744,9 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
             ),
             return_type,
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                return_type,
+            ),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -14726,7 +14838,7 @@ fn reverse_homomorphic_reduces_key_conditionals_through_array_tuple_and_function
 
 #[test]
 fn reverse_homomorphic_array_and_tuple_containers_preserve_source_readonly_across_modifiers() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod, TupleElement};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod, TupleElement};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -14816,18 +14928,18 @@ fn reverse_homomorphic_array_and_tuple_containers_preserve_source_readonly_acros
 
 #[test]
 fn binding_relation_roots_bypass_cross_transaction_singleflight() {
-    let non_binding = crate::semantic_query::RelateMemoKey::assignable(
+    let non_binding = verter_type_engine::semantic_query::RelateMemoKey::assignable(
         SemanticNodeId(1),
         SemanticNodeId(2),
-        crate::semantic_query::RelationContext::default(),
+        verter_type_engine::semantic_query::RelationContext::default(),
     );
     assert!(
         ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relate_root_uses_family_singleflight(&non_binding),
         "non-binding roots retain cooperative singleflight"
     );
 
-    let binding = crate::semantic_query::RelateMemoKey {
-        inference_context: Some(crate::semantic_query::InferenceContextKey::default()),
+    let binding = verter_type_engine::semantic_query::RelateMemoKey {
+        inference_context: Some(verter_type_engine::semantic_query::InferenceContextKey::default()),
         ..non_binding
     };
     assert!(
@@ -14869,7 +14981,7 @@ fn binding_relation_cold_publish_obeys_store_owned_abort_fence() {
 
 #[test]
 fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_modifiers() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         IndexKey, IndexSignature, OptionalityMod, ReadonlyMod, TupleElement,
     };
 
@@ -14974,7 +15086,7 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
     );
     let string_key = primitive(&graph, PrimitiveKind::String);
     let object_source = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(
                 vec![surface_member("named", boxed(string), true, true)].into_boxed_slice()
             ),
@@ -15010,7 +15122,7 @@ fn reverse_homomorphic_preserves_array_tuple_and_index_shapes_and_inverts_add_mo
 
 #[test]
 fn reverse_homomorphic_partial_requires_a_decided_positive_property_relation() {
-    use crate::semantic_query::{OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -15084,8 +15196,8 @@ fn reverse_homomorphic_partial_requires_a_decided_positive_property_relation() {
 
 #[test]
 fn reverse_homomorphic_projectionless_templates_reject_control_and_degraded_sources() {
-    use crate::semantic_query::{OptionalityMod, ReadonlyMod};
     use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+    use verter_type_engine::semantic_query::{OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -15144,8 +15256,8 @@ fn reverse_homomorphic_projectionless_templates_reject_control_and_degraded_sour
 
 #[test]
 fn reverse_projection_control_and_degraded_candidates_fail_closed() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
     use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -15214,7 +15326,7 @@ fn reverse_projection_control_and_degraded_candidates_fail_closed() {
 
 #[test]
 fn reverse_homomorphic_normalizes_a_transparent_closed_source_alias() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -15244,7 +15356,7 @@ fn reverse_homomorphic_normalizes_a_transparent_closed_source_alias() {
 
 #[test]
 fn reverse_homomorphic_normalizes_declref_and_instantiationref_sources() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
 
     let host = host();
     upsert_ts(
@@ -15331,7 +15443,7 @@ fn reverse_homomorphic_normalizes_declref_and_instantiationref_sources() {
 
 #[test]
 fn reverse_homomorphic_rejects_an_inactive_additional_infer() {
-    use crate::semantic_query::{OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -15366,7 +15478,7 @@ fn reverse_homomorphic_rejects_an_inactive_additional_infer() {
 
 #[test]
 fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod, TupleElement};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod, TupleElement};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -15422,12 +15534,12 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
         "TypeScript reverse construction preserves a readonly source property through `-readonly`"
     );
     let readonly_index_source = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             index_signatures: Arc::from(
-                vec![crate::semantic_query::IndexSignature {
+                vec![verter_type_engine::semantic_query::IndexSignature {
                     key_type: primitive(&graph, PrimitiveKind::String),
                     value_type: string,
                     readonly: true,
@@ -15602,7 +15714,7 @@ fn reverse_homomorphic_remove_modifiers_reject_incompatible_metadata() {
 
 #[test]
 fn reverse_homomorphic_tuple_uses_string_fixed_keys_and_number_rest_keys() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         IndexKey, LiteralValue, OptionalityMod, ReadonlyMod, TupleElement,
     };
 
@@ -15696,7 +15808,7 @@ fn reverse_homomorphic_tuple_uses_string_fixed_keys_and_number_rest_keys() {
 
 #[test]
 fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TypeParamDecl,
     };
 
@@ -15719,7 +15831,9 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
             ),
             return_type: void,
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                void,
+            ),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -15728,7 +15842,7 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
         })
     };
     let overloaded = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
             call_signatures: Arc::from(
                 vec![signature(number, number), signature(string, string)].into_boxed_slice()
@@ -15766,7 +15880,7 @@ fn reverse_projection_candidates_from_a_losing_signature_alternative_roll_back()
 
 #[test]
 fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_back() {
-    use crate::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{IndexKey, OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -15793,7 +15907,7 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
         vec![surface_member("keep", union_projection, false, false)],
     );
     let union_template = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![losing_target, winning_target].into_boxed_slice(),
         )),
     ));
@@ -15855,7 +15969,7 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
         ],
     );
     let intersection_source_value = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![losing_source_arm, winning_source_arm].into_boxed_slice(),
         )),
     ));
@@ -15892,7 +16006,7 @@ fn reverse_projection_candidates_from_losing_union_and_intersection_arms_roll_ba
 
 #[test]
 fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_nesting() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         FunctionParam, IndexKey, OptionalityMod, ReadonlyMod, SignatureKind, TupleElement,
         TypeParamDecl,
     };
@@ -15924,7 +16038,9 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
             ),
             return_type: void,
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                void,
+            ),
             type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
             signature_span: None,
             return_type_span: None,
@@ -15994,7 +16110,7 @@ fn reverse_projection_preserves_contravariance_through_object_array_and_tuple_ne
 #[test]
 fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
     use super::dispatch_txn::InferenceCandidate;
-    use crate::semantic_query::InferenceCandidatePriority;
+    use verter_type_engine::semantic_query::InferenceCandidatePriority;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -16003,7 +16119,7 @@ fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
     let candidate = |node, priority| InferenceCandidate {
         node,
         priority,
-        variance: crate::semantic_query::VariancePhase::Covariant,
+        variance: verter_type_engine::semantic_query::VariancePhase::Covariant,
     };
     let winning = super::inference::winning_candidates(&[
         candidate(string, InferenceCandidatePriority::HomomorphicMapped),
@@ -16015,10 +16131,10 @@ fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
         "the direct Argument candidate must outrank the aggregate HomomorphicMapped candidate"
     );
     assert!(
-        crate::semantic_query::inference_candidate_precedence(
-            crate::semantic_query::InferenceCandidatePriority::HomomorphicMapped
-        ) > crate::semantic_query::inference_candidate_precedence(
-            crate::semantic_query::InferenceCandidatePriority::PartialHomomorphicMapped
+        verter_type_engine::semantic_query::inference_candidate_precedence(
+            verter_type_engine::semantic_query::InferenceCandidatePriority::HomomorphicMapped
+        ) > verter_type_engine::semantic_query::inference_candidate_precedence(
+            verter_type_engine::semantic_query::InferenceCandidatePriority::PartialHomomorphicMapped
         ),
         "full homomorphic recovery must outrank partial recovery"
     );
@@ -16026,7 +16142,7 @@ fn direct_inference_candidate_outranks_a_reverse_homomorphic_candidate() {
 
 #[test]
 fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_refs() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, FunctionParam, IndexKey, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
         SignatureKind, TypeParamDecl,
     };
@@ -16119,7 +16235,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         ),
         return_type: void,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(void),
         type_parameters: Arc::from(
             vec![TypeParamDecl {
                 name: Arc::from("ShadowT"),
@@ -16148,7 +16264,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         ),
         return_type: void,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(void),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -16244,7 +16360,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
 /// Function param would NOT be substituted.
 #[test]
 fn substitute_recurses_into_function_params_and_return_type() {
-    use crate::semantic_query::{DeclIdentity, FunctionParam, TypeParamDecl};
+    use verter_type_engine::semantic_query::{DeclIdentity, FunctionParam, TypeParamDecl};
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -16259,7 +16375,7 @@ fn substitute_recurses_into_function_params_and_return_type() {
     });
     // `(x: T) => T` — both param and return reference T.
     let fn_node = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("x")),
@@ -16271,7 +16387,9 @@ fn substitute_recurses_into_function_params_and_return_type() {
         ),
         return_type: t_param,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(t_param),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            t_param,
+        ),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -16320,7 +16438,7 @@ fn substitute_recurses_into_function_params_and_return_type() {
 /// rather than collapsing to a deferred KeyOf shell.
 #[test]
 fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
-    use crate::semantic_query::DeclIdentity;
+    use verter_type_engine::semantic_query::DeclIdentity;
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -16337,15 +16455,15 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
         display_name: Arc::from("K"),
     });
     let intersection = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![obj, type_param].into_boxed_slice(),
         )),
     ));
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::KeyOf {
         base: intersection,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -16357,14 +16475,14 @@ fn keyof_intersection_accumulates_enumerable_arms_and_ignores_unresolvable() {
         SemanticNodeData::Union(arms) => arms
             .iter()
             .filter_map(|a| match graph.node_data(*a).as_deref() {
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s))) => {
-                    Some(s.clone())
-                }
+                Some(SemanticNodeData::Literal(
+                    verter_type_engine::semantic_query::LiteralValue::String(s),
+                )) => Some(s.clone()),
                 Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => Some(String::new()),
                 _ => None,
             })
             .collect(),
-        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(s)) => {
+        SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(s)) => {
             vec![s.clone()]
         }
         SemanticNodeData::KeyOf { .. } => {
@@ -16525,19 +16643,19 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
     host.shallow_file_state("/gen.ts")
         .expect("gen.ts must have shallow file state");
     let wrap_body = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
                 Arc::from("/gen.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Wrap"),
             ),
             Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
-                crate::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Skeleton,
                 ),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -16668,7 +16786,7 @@ fn navigate_lowering_pick_omit_preserve_carrier_other_utilities_unchanged() {
 /// (no carrier) and PASSES post-change.
 #[test]
 fn open_pick_omit_carrier_stops_in_expanded_and_structural_transit() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -16709,13 +16827,13 @@ fn open_pick_omit_carrier_stops_in_expanded_and_structural_transit() {
                 Arc::from(util),
             );
             let result = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(
+                verter_type_engine::semantic_query::InstantiateKey::new(
                     base.clone(),
                     args.clone(),
                     InstantiateContext::non_file(
                         reduction,
                         Default::default(),
-                        crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                        verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                     ),
                 ),
             ));
@@ -16867,7 +16985,7 @@ fn open_pick_lowering_preserves_carrier_all_modes_closed_still_materializes() {
     let surface = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: shallow_carrier,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Shallow,
         ),
     }) {
@@ -16906,13 +17024,13 @@ fn open_pick_lowering_preserves_carrier_all_modes_closed_still_materializes() {
 /// Intern a one-parameter `Function` node `(p: param_ty) => return_ty`
 /// for the mapped value-body fixtures.
 fn unary_function(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     param_ty: SemanticNodeId,
     return_ty: SemanticNodeId,
 ) -> SemanticNodeId {
-    use crate::semantic_query::FunctionParam;
+    use verter_type_engine::semantic_query::FunctionParam;
     graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(
             vec![FunctionParam {
                 name: Some(Arc::from("p")),
@@ -16926,7 +17044,9 @@ fn unary_function(
         ),
         return_type: return_ty,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_ty),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            return_ty,
+        ),
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -16955,7 +17075,7 @@ fn unary_function(
 /// assertions FAIL pre-change and PASS post-change.
 #[test]
 fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, IndexKey, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
         ReadonlyMod, SurfaceProvenanceContext,
     };
@@ -17080,7 +17200,7 @@ fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
 /// over-firing predicate and PASS on the correct one.
 #[test]
 fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
         ReadonlyMod,
     };
@@ -17161,7 +17281,7 @@ fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
 /// enumerate both (the `Foo<T>` arm FAILS).
 #[test]
 fn mapped_binder_bound_outer_generic_open_value_discrimination() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
         ReadonlyMod,
     };
@@ -17242,10 +17362,10 @@ fn mapped_binder_bound_outer_generic_open_value_discrimination() {
 
 /// Intern an unsubstituted outer `TypeParam` for the openness fixtures.
 fn outer_type_param(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     name: &str,
 ) -> SemanticNodeId {
-    use crate::semantic_query::DeclIdentity;
+    use verter_type_engine::semantic_query::DeclIdentity;
     graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic(name),
         param_index: 0,
@@ -17263,7 +17383,7 @@ fn outer_type_param(
 /// the controls keep the arms honest against over-fire.
 #[test]
 fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
-    use crate::semantic_query::{MapperKey, MapperKind, OptionalityMod, ReadonlyMod};
+    use verter_type_engine::semantic_query::{MapperKey, MapperKind, OptionalityMod, ReadonlyMod};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -17377,7 +17497,7 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
     // `Foo<T>` with an open outer-generic arg → OPEN (BareRef.type_args).
     let bare_open = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(vec![t_param].into_boxed_slice()),
     ));
     assert!(
@@ -17387,12 +17507,12 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
 
     // `typeof make<T>` with an open outer-generic arg → OPEN (TypeOf.type_args).
     let typeof_open = graph.intern_node(SemanticNodeData::new_typeof(
-        crate::semantic_query::ValueRootKey {
-            scope: crate::semantic_query::ScopeId {
+        verter_type_engine::semantic_query::ValueRootKey {
+            scope: verter_type_engine::semantic_query::ScopeId {
                 canonical_id: Arc::from("/w/open_carrier.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -17410,7 +17530,7 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
     // CLOSED (no outer generic reached), so the carrier-stop must NOT over-fire.
     let bare_closed = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(vec![string_ty].into_boxed_slice()),
     ));
     assert!(
@@ -17432,7 +17552,7 @@ fn carrier_type_args_open_node_judges_bareref_and_typeof_open_over_outer_generic
 /// implementation and passes on the per-argument rule.
 #[test]
 fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext,
         ReadonlyMod,
     };
@@ -17543,7 +17663,7 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
 /// terminal half.
 #[test]
 fn intrinsic_application_is_known_symbolic_and_not_terminal() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         ChildWalk, CompilerIntrinsicTypeOp, DeclIdentity, HashValue, LiteralValue, PrimitiveKind,
     };
 
@@ -17620,7 +17740,7 @@ fn intrinsic_application_is_known_symbolic_and_not_terminal() {
 /// returns CLOSED), passes on memoized verdicts (predicate returns OPEN).
 #[test]
 fn repeated_open_type_param_argument_stays_open_on_revisit() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -17675,7 +17795,7 @@ fn repeated_open_type_param_argument_stays_open_on_revisit() {
 /// unresolved-ref rule (second arm fails).
 #[test]
 fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -17749,7 +17869,7 @@ fn key_domain_classifier_ignores_mapped_value_positions_and_binds_mapper_binder(
 /// named members ⇒ CLOSED (the documented decision).
 #[test]
 fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -17767,23 +17887,25 @@ fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
     };
 
     let object_with_index_key = |key_type: SemanticNodeId| {
-        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-            members: Arc::from(Vec::new().into_boxed_slice()),
-            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: Arc::from(
-                vec![IndexSignature {
-                    key_type,
-                    value_type: string_ty,
-                    readonly: false,
-                    spans: Default::default(),
-                    declaration_origin: None,
-                }]
-                .into_boxed_slice(),
-            ),
-            keyspace: None,
-            has_index_signature: true,
-        }))
+        graph.intern_node(SemanticNodeData::Object(
+            verter_type_engine::test_surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(
+                    vec![IndexSignature {
+                        key_type,
+                        value_type: string_ty,
+                        readonly: false,
+                        spans: Default::default(),
+                        declaration_origin: None,
+                    }]
+                    .into_boxed_slice(),
+                ),
+                keyspace: None,
+                has_index_signature: true,
+            },
+        ))
     };
 
     // OPEN: the index-signature KEY depends on the unbound outer T.
@@ -17827,7 +17949,7 @@ fn index_signature_key_type_opens_domain_concrete_key_stays_closed() {
 /// recursion.
 #[test]
 fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -17908,7 +18030,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
     // NOT `items`, and specifically NOT the builtin InstantiationRef
     // carrier the L1 carrier-stop would publish.
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -17918,7 +18040,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -17962,7 +18084,7 @@ fn nested_instantiation_wrappers_apply_per_argument_key_domain_rule() {
 /// CLOSED assertions fail on that implementation.
 #[test]
 fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -18034,7 +18156,7 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
     // MATERIALISE the remapped key — an Object surface carrying `ona`,
     // NOT the builtin carrier.
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -18044,7 +18166,7 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -18089,7 +18211,7 @@ fn k_only_remapped_mapped_alias_closes_on_prepared_decl_route() {
 /// against an implementation that instead WEAKENED the source proof.
 #[test]
 fn capitalize_remap_closes_but_returntype_source_opens_on_prepared_decl_route() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
     upsert_ts(
@@ -18173,7 +18295,7 @@ fn capitalize_remap_closes_but_returntype_source_opens_on_prepared_decl_route() 
 /// against that pre-arm implementation.
 #[test]
 fn import_type_source_closes_on_prepared_decl_route_matching_node_route() {
-    use crate::semantic_query::{DeclIdentity, HashValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue};
 
     let host = host();
     upsert_ts(
@@ -18240,7 +18362,7 @@ fn self_referential_import_type_source_terminates_on_prepared_decl_route() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+            use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
             let host = host();
             // `SelfRec<T>` maps over `keyof import('./self').SelfRec<T>` — a
             // self-referential import-type carrier source.
@@ -18314,7 +18436,7 @@ fn zero_arg_self_import_type_source_terminates_via_decl_hop() {
     let handle = std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
-            use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+            use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
             let host = host();
             // No type parameter ⇒ the import head resolves to a zero-arg DeclRef.
             upsert_ts(
@@ -18384,7 +18506,7 @@ fn zero_arg_self_import_type_source_terminates_via_decl_hop() {
 /// on the remap rule, not on a span-less fixture.
 #[test]
 fn mapped_key_remap_inherits_declaration_site_only_for_identity_produced_names() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, ResolvedDeclSlotIdentity,
     };
     use verter_type_expr::MemberSpans;
@@ -18410,8 +18532,9 @@ fn mapped_key_remap_inherits_declaration_site_only_for_identity_produced_names()
             decl_name: Arc::from("Src"),
         },
     });
-    let instantiate = |alias: &str| match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+    let instantiate = |alias: &str| {
+        match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/remap_origin.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -18421,12 +18544,13 @@ fn mapped_key_remap_inherits_declaration_site_only_for_identity_produced_names()
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("{alias}<Src> must materialise, got {other:?}"),
+    }
     };
 
     // Harness baseline: the homomorphic (no-`as`) production inherits the
@@ -18530,7 +18654,7 @@ fn mapped_key_remap_inherits_declaration_site_only_for_identity_produced_names()
 /// Mapped-carrier match below.
 #[test]
 fn one_to_many_remap_with_non_finite_arm_fails_closed_to_mapped_carrier() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, ResolvedDeclSlotIdentity,
     };
 
@@ -18553,7 +18677,7 @@ fn one_to_many_remap_with_non_finite_arm_fails_closed_to_mapped_carrier() {
         },
     });
     let value = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("/remap_non_finite.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -18563,7 +18687,7 @@ fn one_to_many_remap_with_non_finite_arm_fails_closed_to_mapped_carrier() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -18609,7 +18733,7 @@ fn one_to_many_remap_with_non_finite_arm_fails_closed_to_mapped_carrier() {
 /// `__builtin__` closed) fails the first assertion.
 #[test]
 fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -18624,7 +18748,7 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
         )))
     };
     let keys_ab = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![lit("a"), lit("b")].into_boxed_slice(),
         )),
     ));
@@ -18700,7 +18824,7 @@ fn nested_builtin_object_filter_key_domain_judged_by_family_semantics() {
 /// CLOSED — the node-route OPEN assertion fails on that implementation.
 #[test]
 fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -18817,7 +18941,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
     // MATERIALISE — an Object surface carrying `label`, NOT the builtin
     // carrier the L1 carrier-stop would publish, and NOT any other shape.
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -18827,7 +18951,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -18872,7 +18996,7 @@ fn conditional_key_domain_classifies_only_the_oracle_selected_branch() {
 /// on that implementation.
 #[test]
 fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, IndexKey, InstantiateContext, LiteralValue,
         ProjectionReductionContext, ResolvedDeclSlotIdentity,
     };
@@ -19000,7 +19124,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
     // the SHALLOW builtin carrier, not materialise the open `BigOpen<T>`
     // surface.
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -19010,7 +19134,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -19043,7 +19167,7 @@ fn value_sensitive_operands_judge_instantiations_by_any_open_argument() {
 /// CLOSED assertion fails on that implementation.
 #[test]
 fn builtin_key_domain_verdict_is_route_independent() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -19182,7 +19306,7 @@ fn builtin_key_domain_verdict_is_route_independent() {
 /// leaves `Omit<InferSel<string>, 'x'>` unmaterialised.
 #[test]
 fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -19314,8 +19438,9 @@ fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
 
     // Dispatch-level witness: over `string` the TRUE-selected source
     // MATERIALISES `label`; over `T` nothing materialises.
-    let omit = |arg: SemanticNodeId| match dispatch.execute_type_node(
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+    let omit = |arg: SemanticNodeId| {
+        match dispatch.execute_type_node(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -19325,12 +19450,13 @@ fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         )),
     ) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
         other => panic!("Omit<InferSel<…>, 'x'> must produce a Value, got {other:?}"),
+    }
     };
     let label_names = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(view)) => view
@@ -19366,7 +19492,9 @@ fn bare_infer_extends_defers_over_a_generic_check_through_the_shared_oracle() {
 /// implementation.
 #[test]
 fn value_sensitive_operands_descend_compound_value_surfaces() {
-    use crate::semantic_query::{DeclIdentity, FunctionParam, HashValue, IndexKey, LiteralValue};
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, FunctionParam, HashValue, IndexKey, LiteralValue,
+    };
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -19494,13 +19622,15 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
     // Node route, FUNCTION value surface: `Wrap2<() => T>['a']` is OPEN,
     // the `() => string` twin CLOSED.
     let fn_open = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: t_param,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(t_param),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            t_param,
+        ),
         type_parameters: Arc::from(
-            Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+            Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
         ),
         signature_span: None,
         return_type_span: None,
@@ -19521,13 +19651,15 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
          params/returns are value surfaces at ValueSensitive"
     );
     let fn_closed = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: string_ty,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_ty),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            string_ty,
+        ),
         type_parameters: Arc::from(
-            Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+            Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
         ),
         signature_span: None,
         return_type_span: None,
@@ -19563,7 +19695,7 @@ fn value_sensitive_operands_descend_compound_value_surfaces() {
 /// on that implementation.
 #[test]
 fn defaulted_type_parameters_bind_their_default_identity() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -19639,7 +19771,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
 
     // Dispatch-level witness (strict): materialise `label`.
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -19649,7 +19781,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -19690,7 +19822,7 @@ fn defaulted_type_parameters_bind_their_default_identity() {
 /// assertions and the witness fail on that implementation.
 #[test]
 fn closed_named_ref_operands_select_through_the_shared_oracle() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -19771,7 +19903,7 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
 
     // Dispatch-level witness (strict): materialise `label`.
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -19781,7 +19913,7 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -19820,7 +19952,7 @@ fn closed_named_ref_operands_select_through_the_shared_oracle() {
 /// implementation.
 #[test]
 fn mapped_name_remap_is_judged_by_key_domain_policy() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, LiteralValue, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
     };
 
@@ -19948,7 +20080,9 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
 /// leaves under value-sensitive operands.
 #[test]
 fn tuple_and_array_elements_are_value_positions_on_both_routes() {
-    use crate::semantic_query::{DeclIdentity, HashValue, IndexKey, LiteralValue, TupleElement};
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, HashValue, IndexKey, LiteralValue, TupleElement,
+    };
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -20040,7 +20174,8 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
     let tuple_indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: tuple_node,
         index: IndexKey::Number(
-            crate::semantic_query::CanonicalIndexInt::from_canonical_i64(0).expect("canonical"),
+            verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(0)
+                .expect("canonical"),
         ),
     });
     assert!(
@@ -20065,7 +20200,7 @@ fn tuple_and_array_elements_are_value_positions_on_both_routes() {
 /// `Deferred` ⇒ the open `T` losing branch false-OPENs the domain.
 #[test]
 fn binding_identity_selects_conditionals_through_concrete_arguments() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -20129,7 +20264,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
 
     // Dispatch-level witness (strict): materialise `label`.
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -20141,7 +20276,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -20178,7 +20313,7 @@ fn binding_identity_selects_conditionals_through_concrete_arguments() {
 /// implementation.
 #[test]
 fn node_keyof_operand_resets_to_key_domain_position() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -20254,7 +20389,7 @@ fn node_keyof_operand_resets_to_key_domain_position() {
 /// over-fire.
 #[test]
 fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -20353,7 +20488,7 @@ fn value_sensitive_all_closed_instantiation_requires_resolvable_base() {
 /// closed leaf at `KeyDomain`) — the node-route OPEN assertion fails.
 #[test]
 fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, FunctionParam, HashValue, InstantiateContext, LiteralValue,
         ProjectionReductionContext, ResolvedDeclSlotIdentity, TypeParamDecl,
     };
@@ -20426,11 +20561,13 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // `KeyDomain`, so an all-args rule would wrongly prove the produced
     // key domain (the open `T`!) closed.
     let fn_to_t = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: t_param,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(t_param),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            t_param,
+        ),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -20452,14 +20589,13 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // fallback behind it can: `ReturnType<() => {a}>` reduces to the
     // finite object surface `{ a: string }`, whose key domain is exact.
     let fn_to_obj = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: simple_object(&graph, &[("a", string_ty)]),
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(simple_object(
-            &graph,
-            &[("a", string_ty)],
-        )),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            simple_object(&graph, &[("a", string_ty)]),
+        ),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -20504,7 +20640,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
     // (closed-key/open-value mapped enumeration in the shared Shallow
     // surface reader).
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from("__builtin__"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -20514,7 +20650,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -20547,7 +20683,7 @@ fn builtin_key_domain_is_judged_per_utility_output_key_semantics() {
 /// assertions fail).
 #[test]
 fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, IndexKey, LiteralValue, MapperKey, MapperKind, OptionalityMod,
         ReadonlyMod,
     };
@@ -20685,7 +20821,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
 /// assertions fail on that implementation.
 #[test]
 fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
-    use crate::semantic_query::{DeclIdentity, HashValue, LiteralValue, TupleElement};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, LiteralValue, TupleElement};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -20806,7 +20942,7 @@ fn variadic_tuple_rest_elements_open_the_key_domain_on_both_routes() {
 /// query warm-hits the stale carrier and the second assertion fails.
 #[test]
 fn open_pick_carrier_invalidates_when_cross_file_closedness_dependency_flips() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, LiteralValue, ProjectionReductionContext,
         ResolvedDeclSlotIdentity,
     };
@@ -20843,13 +20979,13 @@ fn open_pick_carrier_invalidates_when_cross_file_closedness_dependency_flips() {
             Arc::from("Pick"),
         );
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 base.clone(),
                 args.clone(),
                 InstantiateContext::non_file(
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ),
         )) {
@@ -20901,7 +21037,7 @@ fn open_pick_carrier_invalidates_when_cross_file_closedness_dependency_flips() {
 /// pins shut.
 #[test]
 fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         MapperKey, MapperKind, OptionalityMod, ProjectionReductionContext, ReadonlyMod,
     };
 
@@ -20916,7 +21052,7 @@ fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
     // was lowered from). Unique payload ⇒ fresh intern ⇒ the sidecar
     // records this scope.
     let remap_origin: Arc<str> = Arc::from("/remap-origin.ts");
-    let remap_hash: crate::semantic_query::HashValue = [7u8; 16];
+    let remap_hash: verter_type_engine::semantic_query::HashValue = [7u8; 16];
     let remap = graph.intern_node_with_scope(
         SemanticNodeData::TemplateLiteral {
             quasis: Arc::from(
@@ -21015,33 +21151,33 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     // Use Primitive(String) for the value types — the test exercises
     // the path-walker prefix machinery, not literal-type matching.
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let variants_surface = crate::test_surface_view! {
+    let variants_surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("loadingAnimation"),                    value: string_id,
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("loadingAnimation"),                    value: string_id,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
                 SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: verter_type_expr::MemberVisibility::Public,
-                    key: crate::semantic_query::AuthoredPropertyKey::string("loadingColor"),
+                    key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("loadingColor"),
                     value: string_id,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 },
@@ -21057,19 +21193,19 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let variants_obj = graph.intern_node(SemanticNodeData::Object(variants_surface));
 
     // Build Table = { variants: TableVariants; }
-    let table_surface = crate::test_surface_view! {
+    let table_surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("variants"),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("variants"),
                 value: variants_obj,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -21085,14 +21221,16 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
 
     let prefix_path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("variants"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("variants"),
         )]
         .into_boxed_slice(),
     );
     let full_path_anim: Arc<[PathSegment]> = Arc::from(
         vec![
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("variants")),
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "variants",
+            )),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                 "loadingAnimation",
             )),
         ]
@@ -21100,8 +21238,10 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     );
     let full_path_color: Arc<[PathSegment]> = Arc::from(
         vec![
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("variants")),
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "variants",
+            )),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                 "loadingColor",
             )),
         ]
@@ -21113,7 +21253,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let prefix_key = SemanticQueryKey::ProjectPath {
         base: table_obj,
         path: Arc::clone(&prefix_path),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     };
@@ -21135,7 +21275,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let first = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: table_obj,
         path: Arc::clone(&full_path_anim),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -21175,7 +21315,7 @@ fn project_path_prefix_peek_short_circuits_sibling_walk() {
     let second = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: table_obj,
         path: Arc::clone(&full_path_color),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -21209,11 +21349,11 @@ use verter_session_query::analysis::types::AnalyzedMacroKind;
 fn synthetic_macro_owner(
     _host: &VerterHost,
     canonical: &str,
-) -> crate::semantic_query::ResolvedDeclSlotIdentity {
+) -> verter_type_engine::semantic_query::ResolvedDeclSlotIdentity {
     // Content-free key (R6); `build_resolve_macro_payload`
     // re-sources the owner's live `whole_hash` from
     // `ensure_indexed_ready` at value-compute time.
-    crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
         Arc::from(canonical),
         verter_type_expr::TopLevelOwnerId::instance(0),
         Arc::from("<sfc-script-setup>"),
@@ -21232,7 +21372,7 @@ fn resolve_macro_payload_define_props_no_args_opaque_miss() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21268,7 +21408,7 @@ fn resolve_macro_payload_define_props_single_arg_returns_arg_unchanged() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21308,7 +21448,7 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![a, b].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21348,21 +21488,23 @@ fn resolve_macro_payload_define_props_multi_arg_normalize_intersection() {
 /// because the early-exit returns BEFORE `execute_cooperative` ever runs.
 #[test]
 fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_sticky() {
-    use crate::request_context::{
+    use verter_type_engine::request_context::{
         current_request_budget, current_request_result_is_partial, RequestContext,
         RequestContextGuard,
     };
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let obj = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let obj = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
 
@@ -21395,14 +21537,15 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
     );
 
     // Simulate an enclosing cold build by pushing a build-local taint frame.
-    let guard =
-        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let guard = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+        &dispatch.build_local_taint,
+    );
 
     // Budget-kind read → EARLY-EXIT (budget pre-exhausted). The early-exit
     // return must fold its rails BEFORE returning.
     let read = dispatch.execute_read(SemanticQueryKey::KeyOf {
         base: obj,
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -21458,8 +21601,8 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
 /// PASSES against the post-fix code.
 #[test]
 fn dispatch_mask_records_execute_read_only_nested_normalize_intersection() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::semantic_query::SemanticQueryKeyTag;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -21477,7 +21620,7 @@ fn dispatch_mask_records_execute_read_only_nested_normalize_intersection() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![a, b].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21531,7 +21674,7 @@ fn resolve_macro_payload_define_expose_passthrough() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineExpose,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21556,7 +21699,7 @@ fn resolve_macro_payload_define_expose_passthrough() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineExpose,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21574,7 +21717,7 @@ fn resolve_macro_payload_define_expose_passthrough() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineOptions,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21625,7 +21768,7 @@ fn resolve_macro_payload_define_slots_dispatches_through_project_path() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineSlots,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21672,7 +21815,7 @@ fn resolve_macro_payload_define_model_branches_distinctly() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineModel,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21736,7 +21879,7 @@ fn resolve_macro_payload_self_reference_does_not_loop() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![recursive_ref].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21797,7 +21940,7 @@ fn resolve_macro_payload_dedups_via_interning() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21872,7 +22015,7 @@ fn resolve_macro_payload_stale_real_file_owner_does_not_warm_publish() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineExpose,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -21955,7 +22098,7 @@ fn resolve_macro_payload_non_file_owner_has_no_filewholehash_self_root() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineExpose,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -22010,7 +22153,7 @@ fn resolve_macro_payload_distinct_family_does_not_collapse() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -22021,7 +22164,7 @@ fn resolve_macro_payload_distinct_family_does_not_collapse() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineExpose,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -22107,7 +22250,7 @@ fn resolve_macro_payload_rematerializes_evicted_but_current_owner_artifact() {
         macro_index,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -22196,7 +22339,7 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
         macro_index,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -22229,7 +22372,7 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
         macro_index: macro_index_v2,
         macro_kind: AnalyzedMacroKind::DefineEmits,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -22330,18 +22473,18 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
 
     // Construct a non-trivial base (Object surface with a member).
     let inner = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let base_view = crate::test_surface_view! {
+    let base_view = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("foo"),                value: inner,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("foo"),                value: inner,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -22362,7 +22505,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
     let _navigate_result = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -22376,7 +22519,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![inner].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Navigate,
         ),
@@ -22413,7 +22556,7 @@ fn navigate_integrity_project_path_does_not_route_through_macro_payload() {
 // ──────────────────────────────────────────────────────────────────────────
 
 use super::{omit_builtin_decl_identity, pick_builtin_decl_identity, ProjectSemanticDispatch};
-use crate::semantic_query::LiteralValue;
+use verter_type_engine::semantic_query::LiteralValue;
 
 /// `intern_string_literal_union` empty case folds to `Primitive(Never)`
 /// per the TS spec §4.4 rule that `Pick<T, never>` reduces to `{}`.
@@ -22639,7 +22782,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
         macro_index: 0,
         macro_kind: AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
             ProjectionMode::Expanded,
         ),
@@ -22652,7 +22795,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
     let project_path_key = SemanticQueryKey::ProjectPath {
         base: n,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -22693,7 +22836,7 @@ fn empty_path_shallow_key(base: SemanticNodeId) -> SemanticQueryKey {
     SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Shallow,
         ),
     }
@@ -22702,17 +22845,19 @@ fn empty_path_shallow_key(base: SemanticNodeId) -> SemanticQueryKey {
 /// Intern an `Object` surface with the supplied members and no
 /// signatures. Used to construct compositional bases.
 fn intern_object_with_members(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     members: Vec<SurfaceMember>,
 ) -> SemanticNodeId {
-    graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(members.into_boxed_slice()),
-        call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }))
+    graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(members.into_boxed_slice()),
+            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ))
 }
 
 /// Construct one `SurfaceMember` (helper to keep test bodies dense).
@@ -22725,14 +22870,14 @@ fn surface_member(
     SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        key: crate::semantic_query::AuthoredPropertyKey::string(name),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional,
         readonly,
         method_kind: None,
         has_implementation_body: false,
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
         declaration_origin: None,
     }
@@ -22744,7 +22889,7 @@ fn surface_member(
 /// pattern match. Uses `assert!` so the failure renders as
 /// `assertion failed: ...` (FAIL-FIRST gate).
 fn require_object_surface(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     node: SemanticNodeId,
     context: &str,
 ) -> SurfaceView {
@@ -22834,7 +22979,7 @@ fn shallow_intersection_object_and_instantiation_ref_merges_members() {
         args: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
     });
     let base = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![object_a, inst_ref].into_boxed_slice(),
         )),
     ));
@@ -22876,7 +23021,7 @@ fn shallow_intersection_optionality_required_wins() {
     let optional_a = intern_object_with_members(&graph, vec![surface_member("a", t, true, false)]);
     let required_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, false)]);
     let base = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![optional_a, required_a].into_boxed_slice(),
         )),
     ));
@@ -22909,7 +23054,7 @@ fn shallow_intersection_readonly_or_merged() {
     let readonly_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, true)]);
     let mutable_a = intern_object_with_members(&graph, vec![surface_member("a", t, false, false)]);
     let base = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![readonly_a, mutable_a].into_boxed_slice(),
         )),
     ));
@@ -23048,7 +23193,7 @@ fn shallow_intersection_value_merge_intersection_node() {
     let arm_b =
         intern_object_with_members(&graph, vec![surface_member("a", value_b, false, false)]);
     let base = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![arm_a, arm_b].into_boxed_slice(),
         )),
     ));
@@ -23102,7 +23247,7 @@ fn shallow_union_member_intersection_of_arms() {
     let arm_a = intern_object_with_members(&graph, vec![surface_member("a", str_id, false, false)]);
     let arm_b = intern_object_with_members(&graph, vec![surface_member("a", num_id, false, false)]);
     let base = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![arm_a, arm_b].into_boxed_slice(),
         )),
     ));
@@ -23121,7 +23266,7 @@ fn shallow_union_member_intersection_of_arms() {
 
     // Negative: `{a: A} | string` — string arm has no `a` member.
     let mixed = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![arm_a, str_id].into_boxed_slice(),
         )),
     ));
@@ -23238,12 +23383,12 @@ fn shallow_mapped_type_enumerates_keyset() {
         "b".to_string(),
     )));
     let key_space = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![key_a, key_b].into_boxed_slice(),
         )),
     ));
     let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("__Mapper"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("__Mapper"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -23251,15 +23396,15 @@ fn shallow_mapped_type_enumerates_keyset() {
     });
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: str_id,
-        mapper: crate::semantic_query::MapperKey {
+        mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
             parameter_node: mapper_param,
             key_space,
             value_expr: num_id,
-            optionality: crate::semantic_query::OptionalityMod::Keep,
-            readonly: crate::semantic_query::ReadonlyMod::Keep,
+            optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+            readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
             name_remap: None,
-            kind: crate::semantic_query::MapperKind::Computed,
+            kind: verter_type_engine::semantic_query::MapperKind::Computed,
         },
     });
 
@@ -23289,14 +23434,14 @@ fn shallow_conditional_open_returns_empty_surface_with_diagnostic() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let foo = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Foo"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("Foo"),
     });
     let bar = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Bar"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -23433,7 +23578,7 @@ fn shallow_walker_stack_depth_bounded_for_100_intersection() {
         })
         .collect();
     let base = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             arms.into_boxed_slice(),
         )),
     ));
@@ -23443,14 +23588,16 @@ fn shallow_walker_stack_depth_bounded_for_100_intersection() {
     // 100-arm intersection cannot overflow.
     //
     // Frame-depth probe surface:
-    //   `crate::project_semantic_dispatch::walk::probe_max_walker_frame_depth(&dispatch, &key)`
+    //   `verter_type_engine::project_semantic_dispatch::walk::probe_max_walker_frame_depth(&dispatch, &key)`
     // returns the maximum frame-stack depth observed during the
     // walk. The test asserts the depth ≤ 10 — comfortably below
     // the 100 arms — to discriminate iterative-worklist from any
     // recursive descent.
     let key = empty_path_shallow_key(base);
     let max_depth =
-        crate::project_semantic_dispatch::walk::probe_max_walker_frame_depth(&dispatch, &key);
+        verter_type_engine::project_semantic_dispatch::walk::probe_max_walker_frame_depth(
+            &dispatch, &key,
+        );
     assert!(
         max_depth <= 10,
         "walker frame-stack depth must stay bounded for 100-arm intersection \
@@ -23478,7 +23625,7 @@ fn shallow_walker_stack_depth_bounded_for_100_intersection() {
 fn read_shallow_metadata(
     host: &VerterHost,
     base: SemanticNodeId,
-) -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>> {
+) -> verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticNodeId>> {
     let dispatch = ProjectSemanticDispatch::new(host);
     let key = empty_path_shallow_key(base);
     // Drive the build via `execute` so the cooperative-admission flow
@@ -23502,14 +23649,14 @@ fn cacheread_carries_walker_diagnostics_for_shallow_with_open_conditional() {
     // Open conditional: check is an unbound TypeParam, so the walker
     // emits `OpenConditional` and contributes an empty surface.
     let foo = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Foo"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("Foo"),
     });
     let bar = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Bar"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -23536,7 +23683,7 @@ fn cacheread_carries_walker_diagnostics_for_shallow_with_open_conditional() {
     assert!(
         cache_read.walker_diagnostics.iter().any(|d| matches!(
             d,
-            crate::project_semantic_dispatch::walk::ShallowDiagnostic::OpenConditional { .. }
+            verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::OpenConditional { .. }
         )),
         "warm-read walker_diagnostics must carry the OpenConditional variant emitted \
          during shallow-mode terminal-surface synthesis; observed diagnostics={:?}",
@@ -23552,14 +23699,14 @@ fn cacheread_warm_replays_walker_diagnostics_after_memo_hit() {
 
     // Open conditional emits `OpenConditional` reliably.
     let foo = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Foo"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("Foo"),
     });
     let bar = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Bar"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -23703,7 +23850,7 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
     assert!(
         prepared
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("label")),
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("label")),
         "fixture premise: the prepared decl indexes its own-body `label` member",
     );
 
@@ -23720,9 +23867,12 @@ fn backfill_member_index_surface_carries_prepared_member_spans_and_origin() {
         whole_hash,
         local_scope: None,
     };
-    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+    let shadowing =
+        verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            None,
+        );
     let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-    let context = crate::semantic_query::ProjectionReductionContext::published_macro_type_arg_body(
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published_macro_type_arg_body(
         ProjectionMode::Shallow,
     );
 
@@ -23823,10 +23973,14 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
         whole_hash: [0u8; 16],
         local_scope: None,
     };
-    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+    let shadowing =
+        verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            None,
+        );
     let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-    let context =
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Shallow,
+    );
 
     let lowered = dispatch.shallow_lower_type_expr_with_context(
         &ctor,
@@ -23902,7 +24056,7 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
 /// pre-fix and PASSES post-fix. Verified red→green by stashing the guard.
 #[test]
 fn multi_segment_import_type_with_generic_args_fails_loud_not_silent_drop() {
-    use crate::semantic_query::QueryError;
+    use verter_type_engine::semantic_query::QueryError;
     use verter_type_expr::{PrimitiveName, TypeExpr};
 
     let host = host();
@@ -23936,9 +24090,13 @@ fn multi_segment_import_type_with_generic_args_fails_loud_not_silent_drop() {
         whole_hash: [0u8; 16],
         local_scope: None,
     };
-    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
-    let context =
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
+    let shadowing =
+        verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            None,
+        );
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Shallow,
+    );
 
     // Lower one `ImportType` shape and return its interned node data.
     let lower = |expr: &TypeExpr| -> Arc<SemanticNodeData> {
@@ -24080,11 +24238,15 @@ fn typeof_import_value_member_applies_generic_instantiation_args() {
         whole_hash: [0u8; 16],
         local_scope: None,
     };
-    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+    let shadowing =
+        verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            None,
+        );
     // Expanded so the generic `Function` signature (and its substituted
     // parameter) is fully materialised for `apply_typeof_instantiation_args`.
-    let context =
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Expanded,
+    );
 
     // Lower one `ImportType` shape and return its interned node data.
     let lower = |expr: &TypeExpr| -> Arc<SemanticNodeData> {
@@ -24261,12 +24423,12 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
     // paths route through. The `extends Omit<Base, 'a'>` heritage arm forces `Base`
     // through `object_filter_source_surface`'s carrier branch.
     let derived = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
-        crate::semantic_query::ResolveDeclKey {
+        verter_type_engine::semantic_query::ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/consumer.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -24280,7 +24442,9 @@ fn cross_file_omit_heritage_carrier_preserves_construct_and_index_signatures() {
     let surface = dispatch
         .resolve_typeinfo_surface_view(
             derived,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Shallow,
+            ),
         )
         .expect("Derived projects to an Object surface");
 
@@ -24367,7 +24531,7 @@ fn omit_over_union_source_is_common_keys_minus_k_not_distributive() {
         dispatch
             .resolve_typeinfo_surface_view(
                 node,
-                crate::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Shallow,
                 ),
             )
@@ -24474,7 +24638,9 @@ fn multi_level_omit_heritage_carriers_compose_through_all_levels() {
     let surface = dispatch
         .resolve_typeinfo_surface_view(
             a,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Shallow,
+            ),
         )
         .expect("A projects to an Object surface");
 
@@ -24524,17 +24690,23 @@ fn multi_level_omit_heritage_carriers_compose_through_all_levels() {
 /// record cannot silently drift (over-record or under-record).
 #[test]
 fn path_walk_materialized_set_records_linear_navhops_and_stops_at_arm_split() {
-    use crate::semantic_query::demand::{
+    use verter_type_engine::semantic_query::demand::{
         Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
     };
-    use crate::semantic_query::SemanticNodeId;
+    use verter_type_engine::semantic_query::SemanticNodeId;
 
     // Path A['c']['full']['bar'] (n = 3).
     let path: Arc<[PathSegment]> = Arc::from(
         vec![
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("c")),
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
-            PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "c",
+            )),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "full",
+            )),
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                "bar",
+            )),
         ]
         .into_boxed_slice(),
     );
@@ -24626,19 +24798,19 @@ fn path_walk_materialized_set_records_linear_navhops_and_stops_at_arm_split() {
 /// silently returns.
 #[test]
 fn projection_budget_counts_instantiate_and_conditional() {
-    use crate::semantic_query::{
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, InstantiateContext, ProjectionReductionContext, SemanticNodeId,
         SemanticQueryKey,
     };
-    use std::sync::Arc;
 
-    let instantiate = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+    let instantiate = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         DeclIdentity::synthetic("X").to_type_slot_unscoped(),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         InstantiateContext::non_file(
             ProjectionReductionContext::structural_transit(),
             HashValue::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
     assert!(
@@ -24676,9 +24848,9 @@ fn projection_budget_counts_instantiate_and_conditional() {
     // `Instantiate` / `Conditional`. Excluding it would leave the new
     // reducer outside the armed 2000-op fuse.
     let type_of = SemanticQueryKey::TypeOf {
-        value_root: crate::semantic_query::ValueRootSlotIdentity::new(
-            crate::semantic_query::ValueRootKey {
-                scope: crate::semantic_query::ScopeId::file(
+        value_root: verter_type_engine::semantic_query::ValueRootSlotIdentity::new(
+            verter_type_engine::semantic_query::ValueRootKey {
+                scope: verter_type_engine::semantic_query::ScopeId::file(
                     Arc::from("/budget/value.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
@@ -24689,7 +24861,7 @@ fn projection_budget_counts_instantiate_and_conditional() {
             HashValue::default(),
         ),
         path: Arc::from([]),
-        context: crate::semantic_query::TypeOfContext::new(
+        context: verter_type_engine::semantic_query::TypeOfContext::new(
             ProjectionReductionContext::structural_transit(),
             HashValue::default(),
         ),
@@ -24718,7 +24890,7 @@ fn projection_budget_counts_instantiate_and_conditional() {
 /// distribution's per-arm abort rule classifies on.
 #[test]
 fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
-    use crate::semantic_query::{IndexKey, LiteralValue, QueryError};
+    use verter_type_engine::semantic_query::{IndexKey, LiteralValue, QueryError};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -24731,13 +24903,13 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
     // family dispatches builtin utilities under `StructuralTransit`,
     // where `build_mapped_type` carrier-stops before enumeration.
     let carrier = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             utility_identity(&graph, "Partial"),
             Arc::from(vec![closed].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::structural_transit(),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -24751,7 +24923,10 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
         Some(SemanticNodeData::Mapped { source, mapper }) => {
             assert_eq!(*source, closed, "carrier must defer over the closed source");
             assert!(
-                matches!(mapper.kind, crate::semantic_query::MapperKind::Identity),
+                matches!(
+                    mapper.kind,
+                    verter_type_engine::semantic_query::MapperKind::Identity
+                ),
                 "builtin Partial lowers to an Identity mapper"
             );
         }
@@ -24775,7 +24950,7 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
     };
     let union_of = |arms: &[SemanticNodeId]| -> SemanticNodeId {
         graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 arms.to_vec().into_boxed_slice(),
             )),
         ))
@@ -24869,7 +25044,7 @@ fn identity_utility_mapped_carrier_projects_existing_members_not_miss() {
 /// surface.
 #[test]
 fn identity_utility_shallow_empty_path_surface_publishes_source_member_values_not_miss() {
-    use crate::semantic_query::QueryError;
+    use verter_type_engine::semantic_query::QueryError;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -24882,13 +25057,13 @@ fn identity_utility_shallow_empty_path_surface_publishes_source_member_values_no
     // deferred Mapped shell whose Identity mapper carries the lazy
     // placeholder.
     let carrier = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             utility_identity(&graph, "Partial"),
             Arc::from(vec![closed].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::structural_transit(),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -24899,7 +25074,10 @@ fn identity_utility_shallow_empty_path_surface_publishes_source_member_values_no
         Some(SemanticNodeData::Mapped { source, mapper }) => {
             assert_eq!(*source, closed, "carrier must defer over the closed source");
             assert!(
-                matches!(mapper.kind, crate::semantic_query::MapperKind::Identity),
+                matches!(
+                    mapper.kind,
+                    verter_type_engine::semantic_query::MapperKind::Identity
+                ),
                 "builtin Partial lowers to an Identity mapper"
             );
         }
@@ -24964,7 +25142,7 @@ fn identity_utility_shallow_empty_path_surface_publishes_source_member_values_no
 /// absent/unresolvable.
 #[test]
 fn identity_mapped_build_without_projectable_source_publishes_addressable_carrier_not_miss() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         IndexKey, LiteralValue, MapperKey, OptionalityMod, QueryError, ReadonlyMod,
     };
 
@@ -24978,10 +25156,10 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
         "p".to_string(),
     )));
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity {
+        decl: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from("<utility>"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: crate::semantic_query::HashValue::default(),
+            whole_hash: verter_type_engine::semantic_query::HashValue::default(),
             decl_name: Arc::from("<utility-mapper>"),
         },
         param_index: 0,
@@ -25000,7 +25178,7 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
         optionality: OptionalityMod::Add,
         readonly: ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Identity,
+        kind: verter_type_engine::semantic_query::MapperKind::Identity,
     };
 
     let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
@@ -26058,7 +26236,7 @@ fn reexported_class_static_surface_composes_heritage_under_origin_scope() {
         .into_iter()
         .map(|mode| {
             let key = SemanticQueryKey::ResolveClassSurface {
-                decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+                decl_slot: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot(
                     Arc::from(canonical),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     Arc::from("ReClass"),
@@ -26067,8 +26245,8 @@ fn reexported_class_static_surface_composes_heritage_under_origin_scope() {
                     env.lib_env_hash,
                 ),
                 type_args: Arc::from(Vec::new().into_boxed_slice()),
-                side: crate::semantic_query::ClassSurfaceSide::Static,
-                context: crate::semantic_query::ClassSurfaceContext {
+                side: verter_type_engine::semantic_query::ClassSurfaceSide::Static,
+                context: verter_type_engine::semantic_query::ClassSurfaceContext {
                     parse_env_hash: env.parse_env_hash,
                     resolve_env_hash: env.resolve_env_hash,
                     mode,
@@ -26103,7 +26281,7 @@ fn barrel_keyed_class_surface_composes_under_export_target_identity() {
     let env = host.host_view_env_hashes_for(barrel);
     let project_identity = host.host_view_project_identity_for(barrel).fold_u32();
     let key = SemanticQueryKey::ResolveClassSurface {
-        decl_slot: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+        decl_slot: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot(
             Arc::from(barrel),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("ReClass"),
@@ -26112,8 +26290,8 @@ fn barrel_keyed_class_surface_composes_under_export_target_identity() {
             env.lib_env_hash,
         ),
         type_args: Arc::from(Vec::new().into_boxed_slice()),
-        side: crate::semantic_query::ClassSurfaceSide::Static,
-        context: crate::semantic_query::ClassSurfaceContext {
+        side: verter_type_engine::semantic_query::ClassSurfaceSide::Static,
+        context: verter_type_engine::semantic_query::ClassSurfaceContext {
             parse_env_hash: env.parse_env_hash,
             resolve_env_hash: env.resolve_env_hash,
             mode: ProjectionMode::Shallow,
@@ -26162,7 +26340,7 @@ fn typeof_value_node(
     let env = host.host_view_env_hashes_for(canonical);
     let project_identity = host.host_view_project_identity_for(canonical).fold_u32();
     let key = SemanticQueryKey::TypeOf {
-        value_root: crate::semantic_query::ValueRootSlotIdentity::new(
+        value_root: verter_type_engine::semantic_query::ValueRootSlotIdentity::new(
             ValueRootKey {
                 scope: ScopeId::file(
                     Arc::from(canonical),
@@ -26175,7 +26353,7 @@ fn typeof_value_node(
             env.lib_env_hash,
         ),
         path: Arc::from([]),
-        context: crate::semantic_query::TypeOfContext::new(
+        context: verter_type_engine::semantic_query::TypeOfContext::new(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
             env.resolve_env_hash,
         ),
@@ -26196,7 +26374,7 @@ fn overload_set_key_for(
         host,
         canonical,
         callee,
-        crate::semantic_query::SignatureKind::Call,
+        verter_type_engine::semantic_query::SignatureKind::Call,
         type_args,
     )
 }
@@ -26205,7 +26383,7 @@ fn overload_set_key_of_kind(
     host: &VerterHost,
     canonical: &str,
     callee: SemanticNodeId,
-    kind: crate::semantic_query::SignatureKind,
+    kind: verter_type_engine::semantic_query::SignatureKind,
     type_args: Vec<SemanticNodeId>,
 ) -> SemanticQueryKey {
     let env = host.host_view_env_hashes_for(canonical);
@@ -26213,7 +26391,7 @@ fn overload_set_key_of_kind(
         callee,
         kind,
         type_args: Arc::from(type_args.into_boxed_slice()),
-        context: crate::semantic_query::OverloadSetContext {
+        context: verter_type_engine::semantic_query::OverloadSetContext {
             resolve_env_hash: env.resolve_env_hash,
             ..Default::default()
         },
@@ -26224,10 +26402,10 @@ fn overload_set_key_of_kind(
 fn execute_overload_set(
     dispatch: &ProjectSemanticDispatch<crate::resolver_core::HostCapabilities>,
     key: SemanticQueryKey,
-) -> Result<Arc<[crate::semantic_query::SignatureRef]>, QueryResult<SemanticNodeId>> {
-    match crate::semantic_query::SemanticQueryApi::execute(dispatch, key) {
+) -> Result<Arc<[verter_type_engine::semantic_query::SignatureRef]>, QueryResult<SemanticNodeId>> {
+    match verter_type_engine::semantic_query::SemanticQueryApi::execute(dispatch, key) {
         QueryResult::Value(SemanticQueryOutput { value, .. }) => match value {
-            crate::semantic_query::SemanticQueryValue::OverloadSet(refs) => Ok(refs),
+            verter_type_engine::semantic_query::SemanticQueryValue::OverloadSet(refs) => Ok(refs),
             other => {
                 panic!("ResolveOverloadSet must produce the OverloadSet domain, got {other:?}")
             }
@@ -26240,7 +26418,7 @@ fn execute_overload_set(
 /// The return-type node data of a signature entry.
 fn signature_return_data(
     host: &VerterHost,
-    sig: &crate::semantic_query::SignatureRef,
+    sig: &verter_type_engine::semantic_query::SignatureRef,
 ) -> SemanticNodeData {
     let graph = host.project_type_store().semantic_graph();
     let data = graph.node_data(sig.node);
@@ -26276,14 +26454,14 @@ fn resolve_overload_set_projects_ordered_visible_group_hiding_implementation() {
     // Exact projection: the LAST visible overload is `lookup(key: "count"): number`.
     assert_eq!(
         last,
-        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number),
+        SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::Number),
         "last visible overload returns `number`"
     );
     // Discriminating negatives: not the FIRST overload, not the implementation.
     assert_ne!(last, first, "last visible overload differs from the first");
     assert_eq!(
         first,
-        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
+        SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::String),
         "first overload returns `string`"
     );
     for sig in refs.iter() {
@@ -26319,7 +26497,7 @@ fn resolve_overload_set_candidates_carry_occurrence_and_return_carrier() {
         .unwrap_or_else(|err| panic!("overload set must resolve, got {err:?}"));
     assert_eq!(refs.len(), 2, "the two bodiless overloads are visible");
     for (ordinal, sig) in refs.iter().enumerate() {
-        let Some(crate::semantic_query::SignatureOccurrenceIdentity {
+        let Some(verter_type_engine::semantic_query::SignatureOccurrenceIdentity {
             function,
             signature_ordinal,
         }) = sig.occurrence.authored()
@@ -26359,7 +26537,7 @@ fn resolve_overload_set_candidates_carry_occurrence_and_return_carrier() {
         assert!(
             matches!(
                 sig.return_carrier,
-                crate::semantic_query::SignatureReturnCarrier::Declared(_)
+                verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(_)
             ),
             "a declared return carries the Declared carrier, got {:?}",
             sig.return_carrier
@@ -26381,7 +26559,7 @@ fn resolve_overload_set_explicit_type_args_preserve_occurrence() {
     )
     .unwrap_or_else(|err| panic!("uninstantiated set must resolve, got {err:?}"));
     let string_node = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let instantiated = execute_overload_set(
         &dispatch,
@@ -26422,16 +26600,18 @@ fn resolve_overload_set_occurrence_less_candidate_is_rootless_not_a_node_keyed_o
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let void = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Void,
+        verter_type_engine::semantic_query::PrimitiveKind::Void,
     ));
     let anonymous = || {
         graph.intern_node(SemanticNodeData::Signature {
-            kind: crate::semantic_query::SignatureKind::Call,
+            kind: verter_type_engine::semantic_query::SignatureKind::Call,
             params: Arc::from(Vec::new().into_boxed_slice()),
             return_type: void,
             type_parameters: Arc::from(Vec::new().into_boxed_slice()),
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(void),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                void,
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -26455,7 +26635,7 @@ fn resolve_overload_set_occurrence_less_candidate_is_rootless_not_a_node_keyed_o
         );
         assert_eq!(
             refs[0].occurrence,
-            crate::semantic_query::SignatureCandidateOrigin::Rootless,
+            verter_type_engine::semantic_query::SignatureCandidateOrigin::Rootless,
             "an anonymous callable is rootless"
         );
         assert!(
@@ -26494,7 +26674,7 @@ fn resolve_overload_set_serves_each_bucket_separately() {
         &host,
         "/w/class_mech.ts",
         callee,
-        crate::semantic_query::SignatureKind::Call,
+        verter_type_engine::semantic_query::SignatureKind::Call,
         Vec::new(),
     );
     let refs = execute_overload_set(&dispatch, call_key)
@@ -26502,14 +26682,14 @@ fn resolve_overload_set_serves_each_bucket_separately() {
     assert_eq!(refs.len(), 1, "the call set is the one call signature");
     assert_eq!(
         signature_return_data(&host, &refs[0]),
-        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
+        SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::String),
         "the call signature returns `string`"
     );
     let construct_key = overload_set_key_of_kind(
         &host,
         "/w/class_mech.ts",
         callee,
-        crate::semantic_query::SignatureKind::Construct,
+        verter_type_engine::semantic_query::SignatureKind::Construct,
         Vec::new(),
     );
     let refs = execute_overload_set(&dispatch, construct_key)
@@ -26537,7 +26717,7 @@ fn resolve_overload_set_applies_explicit_type_args_per_candidate() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let string_node = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
 
     // Generic lone signature instantiates: `bare<string>` → `(x: string) => string`.
@@ -26563,14 +26743,14 @@ fn resolve_overload_set_applies_explicit_type_args_per_candidate() {
     assert_eq!(
         graph.node_data(params[0].ty).as_deref(),
         Some(&SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String
+            verter_type_engine::semantic_query::PrimitiveKind::String
         )),
         "parameter substitutes to the explicit argument"
     );
     assert_eq!(
         graph.node_data(*return_type).as_deref(),
         Some(&SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String
+            verter_type_engine::semantic_query::PrimitiveKind::String
         )),
         "return substitutes to the explicit argument"
     );
@@ -26599,7 +26779,7 @@ fn resolve_overload_set_misses_on_non_signature_callee() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
     let callee = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let key = overload_set_key_for(&host, "/w/class_mech.ts", callee, Vec::new());
     let err =
@@ -26628,11 +26808,11 @@ fn resolve_overload_set_value_domain_rejects_type_node_narrowing() {
         QueryResult::Error(QueryError::ValueDomainMismatch { expected, actual }) => {
             assert_eq!(
                 expected,
-                crate::semantic_query::SemanticQueryValueTag::TypeNode
+                verter_type_engine::semantic_query::SemanticQueryValueTag::TypeNode
             );
             assert_eq!(
                 actual,
-                crate::semantic_query::SemanticQueryValueTag::OverloadSet
+                verter_type_engine::semantic_query::SemanticQueryValueTag::OverloadSet
             );
         }
         other => panic!(
@@ -26668,12 +26848,12 @@ fn resolve_overload_set_settles_decl_ref_carrier_callee() {
     let last = signature_return_data(&host, refs.last().expect("non-empty"));
     assert_eq!(
         first,
-        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::String),
+        SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::String),
         "first overload in source order returns `string`"
     );
     assert_eq!(
         last,
-        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number),
+        SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::Number),
         "last overload in source order returns `number`"
     );
     assert_ne!(first, last, "the group is ordered, not collapsed");
@@ -26683,13 +26863,13 @@ fn resolve_overload_set_settles_decl_ref_carrier_callee() {
     // signature's return — it must agree with the set's last call-bucket
     // entry, proving the two rails no longer diverge on a carrier callee.
     let return_type = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             utility_identity(&graph, "ReturnType"),
             Arc::from(vec![callee].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -26699,7 +26879,7 @@ fn resolve_overload_set_settles_decl_ref_carrier_callee() {
     assert_eq!(
         graph.node_data(return_type).as_deref(),
         Some(&SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number
+            verter_type_engine::semantic_query::PrimitiveKind::Number
         )),
         "ReturnType and ResolveOverloadSet must settle the same carrier \
          callee consistently (no dual-rail divergence)"
@@ -26715,7 +26895,7 @@ fn resolve_overload_set_settles_instantiation_ref_carrier_callee() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let number_node = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let callee = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_value(&host, "/w/class_mech.ts", "GenLookup"),
@@ -26728,7 +26908,7 @@ fn resolve_overload_set_settles_instantiation_ref_carrier_callee() {
     assert_eq!(refs.len(), 2, "both call signatures are visible");
     assert_eq!(
         signature_return_data(&host, &refs[0]),
-        SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number),
+        SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::Number),
         "`T` substitutes through the carrier's explicit argument"
     );
     match signature_return_data(&host, refs.last().expect("non-empty")) {
@@ -26736,7 +26916,7 @@ fn resolve_overload_set_settles_instantiation_ref_carrier_callee() {
             assert_eq!(
                 graph.node_data(element).as_deref(),
                 Some(&SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::Number
+                    verter_type_engine::semantic_query::PrimitiveKind::Number
                 )),
                 "`T[]` substitutes to `number[]`"
             );
@@ -26765,25 +26945,29 @@ fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, Semanti
         args: Arc::from(vec![t_param].into_boxed_slice()),
     });
     let func = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(Vec::new().into_boxed_slice()),
         return_type: carrier_return,
-        occurrence: Some(crate::semantic_query::SignatureNodeOccurrence {
-            function: verter_type_expr::facts::FlowFunctionReturnIdentity {
-                anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from("/w/class_mech.ts"),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("genericFnWithCarrierReturn"),
-                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        occurrence: Some(
+            verter_type_engine::semantic_query::SignatureNodeOccurrence {
+                function: verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: Arc::from("/w/class_mech.ts"),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: Arc::from("genericFnWithCarrierReturn"),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
                 },
-                function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
-                overload_ordinal: 0,
+                signature_ordinal: 0,
             },
-            signature_ordinal: 0,
-        }),
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(carrier_return),
+        ),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            carrier_return,
+        ),
         type_parameters: Arc::from(
-            vec![crate::semantic_query::TypeParamDecl {
+            vec![verter_type_engine::semantic_query::TypeParamDecl {
                 name: Arc::from("T"),
                 param: t_param,
                 constraint: None,
@@ -26813,7 +26997,7 @@ fn resolve_overload_set_type_args_substitute_into_return_carrier_args() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let (func, t_param) = generic_fn_with_carrier_return(&host);
     let string_node = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let key = overload_set_key_for(&host, "/w/class_mech.ts", func, vec![string_node]);
     let refs = execute_overload_set(&dispatch, key)
@@ -26850,13 +27034,13 @@ fn unknown_instantiation_substitutes_into_return_carrier_args() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let (func, t_param) = generic_fn_with_carrier_return(&host);
     let result = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             utility_identity(&graph, "ReturnType"),
             Arc::from(vec![func].into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::structural_transit(),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -26878,7 +27062,7 @@ fn unknown_instantiation_substitutes_into_return_carrier_args() {
     assert_eq!(
         graph.node_data(args[0]).as_deref(),
         Some(&SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Unknown
+            verter_type_engine::semantic_query::PrimitiveKind::Unknown
         )),
         "the bare-generic read instantiates the carrier arg at `unknown`"
     );
@@ -26912,7 +27096,7 @@ fn subtree_references_node_descends_merged_decl_contributors() {
     // Mirror consistency: substitution over the same shape DOES rewrite —
     // the walker and the rewrite engine must agree on reachability.
     let replacement = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let substituted = dispatch.substitute_semantic_type_param(merged, binder, replacement);
     assert_ne!(
@@ -26933,19 +27117,21 @@ fn subtree_references_node_descends_object_spread_program_effects() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binder = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("K"),
     });
     let program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-        crate::semantic_query::ObjectSpreadProgram {
+        verter_type_engine::semantic_query::ObjectSpreadProgram {
             effects: Arc::from(
                 vec![
-                    crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                        crate::semantic_query::AuthoredPropertyEffect {
-                            key: crate::semantic_query::AuthoredPropertyKey::string("v"),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(
+                                "v",
+                            ),
                             value: binder,
                             optional: false,
                             readonly: false,
@@ -26953,8 +27139,8 @@ fn subtree_references_node_descends_object_spread_program_effects() {
                             spans: verter_type_expr::MemberSpans::default(),
                             declaration_origin: None,
                             declared_in_macro_type_arg:
-                                crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         },
                     ),
@@ -26990,12 +27176,12 @@ fn extends_pattern_declares_infer_descends_object_spread_program() {
     let (infer, _parameter) = reverse_test_binders(&graph, "U", 0);
     let program_with = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-            crate::semantic_query::ObjectSpreadProgram {
+            verter_type_engine::semantic_query::ObjectSpreadProgram {
                 effects: Arc::from(
                     vec![
-                        crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                            crate::semantic_query::AuthoredPropertyEffect {
-                                key: crate::semantic_query::AuthoredPropertyKey::string("v"),
+                        verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                            verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("v"),
                                 value,
                                 optional: false,
                                 readonly: false,
@@ -27003,8 +27189,8 @@ fn extends_pattern_declares_infer_descends_object_spread_program() {
                                 spans: verter_type_expr::MemberSpans::default(),
                                 declaration_origin: None,
                                 declared_in_macro_type_arg:
-                                    crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                                 excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                             },
                         ),
@@ -27046,24 +27232,26 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
         "b".to_string(),
     )));
     let key_space = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![key_a, key_b].into_boxed_slice(),
         )),
     ));
     let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("__Mapper"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("__Mapper"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-        crate::semantic_query::ObjectSpreadProgram {
+        verter_type_engine::semantic_query::ObjectSpreadProgram {
             effects: Arc::from(
                 vec![
-                    crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                        crate::semantic_query::AuthoredPropertyEffect {
-                            key: crate::semantic_query::AuthoredPropertyKey::string("v"),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(
+                                "v",
+                            ),
                             value: mapper_param,
                             optional: false,
                             readonly: false,
@@ -27071,8 +27259,8 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
                             spans: verter_type_expr::MemberSpans::default(),
                             declaration_origin: None,
                             declared_in_macro_type_arg:
-                                crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         },
                     ),
@@ -27083,15 +27271,15 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     ));
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
         source: str_id,
-        mapper: crate::semantic_query::MapperKey {
+        mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
             parameter_node: mapper_param,
             key_space,
             value_expr,
-            optionality: crate::semantic_query::OptionalityMod::Keep,
-            readonly: crate::semantic_query::ReadonlyMod::Keep,
+            optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+            readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
             name_remap: None,
-            kind: crate::semantic_query::MapperKind::Computed,
+            kind: verter_type_engine::semantic_query::MapperKind::Computed,
         },
     });
 
@@ -27136,19 +27324,21 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     // the per-key construction is the narrow `{ v: 'a' }`.
     let str_id = primitive(&graph, PrimitiveKind::String);
     let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: Some(str_id),
         default: None,
         display_name: Arc::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-        crate::semantic_query::ObjectSpreadProgram {
+        verter_type_engine::semantic_query::ObjectSpreadProgram {
             effects: Arc::from(
                 vec![
-                    crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                        crate::semantic_query::AuthoredPropertyEffect {
-                            key: crate::semantic_query::AuthoredPropertyKey::string("v"),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(
+                                "v",
+                            ),
                             value: mapper_param,
                             optional: false,
                             readonly: false,
@@ -27156,8 +27346,8 @@ fn record_shape_classification_sees_binder_inside_program_value() {
                             spans: verter_type_expr::MemberSpans::default(),
                             declaration_origin: None,
                             declared_in_macro_type_arg:
-                                crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         },
                     ),
@@ -27171,15 +27361,15 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     )));
     let mapped_target = graph.intern_node(SemanticNodeData::Mapped {
         source: empty_source,
-        mapper: crate::semantic_query::MapperKey {
+        mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
             parameter_node: mapper_param,
             key_space: key_a,
             value_expr,
-            optionality: crate::semantic_query::OptionalityMod::Keep,
-            readonly: crate::semantic_query::ReadonlyMod::Keep,
+            optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+            readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
             name_remap: None,
-            kind: crate::semantic_query::MapperKind::Computed,
+            kind: verter_type_engine::semantic_query::MapperKind::Computed,
         },
     });
     let relate = |check: SemanticNodeId| -> SemanticNodeId {
@@ -27228,43 +27418,47 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
     let number = primitive(&graph, PrimitiveKind::Number);
     let string = primitive(&graph, PrimitiveKind::String);
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
-    let direct_a = crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-        crate::semantic_query::AuthoredPropertyEffect {
-            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+    let direct_a = verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
             value: number,
             optional: false,
             readonly: false,
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
         },
     );
-    let program_of = |effects: Vec<crate::semantic_query::ObjectConstructionEffect>| {
-        graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-            crate::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from(effects.into_boxed_slice()),
-            },
-        ))
-    };
+    let program_of =
+        |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
+            graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
+                verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    effects: Arc::from(effects.into_boxed_slice()),
+                },
+            ))
+        };
 
     // Open source `{ a: number, ...T }`: positive member `a`, partial.
     let open_source = program_of(vec![
         direct_a.clone(),
-        crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
+        verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(type_param),
     ]);
     let (members, partial_classes) = dispatch
         .source_members_for_published_projection(
             open_source,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Shallow,
+            ),
         )
         .expect("an open program source still yields positive evidence");
     let names: Vec<&str> = members
@@ -27284,7 +27478,7 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
     // Closed source `{ a: number, ...{ b: string } }`: exact members,
     // complete — the single closed alternative is a full witness.
     let closed_inner = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(vec![surface_member("b", string, false, false)].into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -27295,12 +27489,14 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
     ));
     let closed_source = program_of(vec![
         direct_a,
-        crate::semantic_query::ObjectConstructionEffect::Spread(closed_inner),
+        verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(closed_inner),
     ]);
     let (members, partial_classes) = dispatch
         .source_members_for_published_projection(
             closed_source,
-            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Shallow,
+            ),
         )
         .expect("a closed program source yields its exact members");
     let mut names: Vec<&str> = members
@@ -27326,19 +27522,21 @@ fn mapped_type_over_open_program_source_defers() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let number = primitive(&graph, PrimitiveKind::Number);
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
     let open_source = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-        crate::semantic_query::ObjectSpreadProgram {
+        verter_type_engine::semantic_query::ObjectSpreadProgram {
             effects: Arc::from(
                 vec![
-                    crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                        crate::semantic_query::AuthoredPropertyEffect {
-                            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(
+                                "a",
+                            ),
                             value: number,
                             optional: false,
                             readonly: false,
@@ -27346,12 +27544,14 @@ fn mapped_type_over_open_program_source_defers() {
                             spans: verter_type_expr::MemberSpans::default(),
                             declaration_origin: None,
                             declared_in_macro_type_arg:
-                                crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         },
                     ),
-                    crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(
+                        type_param,
+                    ),
                 ]
                 .into_boxed_slice(),
             ),
@@ -27361,7 +27561,7 @@ fn mapped_type_over_open_program_source_defers() {
         "a".to_string(),
     )));
     let mapper_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("__Mapper"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("__Mapper"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -27369,18 +27569,18 @@ fn mapped_type_over_open_program_source_defers() {
     });
     let result = match dispatch.execute_type_node(SemanticQueryKey::MappedType {
         source: open_source,
-        mapper: crate::semantic_query::MapperKey {
+        mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
             parameter_node: mapper_param,
             key_space: key_a,
             value_expr: mapper_param,
-            optionality: crate::semantic_query::OptionalityMod::Keep,
-            readonly: crate::semantic_query::ReadonlyMod::Keep,
+            optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+            readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
             name_remap: None,
-            kind: crate::semantic_query::MapperKind::Identity,
+            kind: verter_type_engine::semantic_query::MapperKind::Identity,
         },
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
@@ -27405,36 +27605,40 @@ fn surface_project_known_key_matches_js_property_identity() {
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let string = primitive(&graph, PrimitiveKind::String);
-    let numeric = crate::semantic_query::PropertyKey::Number(
-        crate::semantic_query::CanonicalIndexInt::from_canonical_i64(1).unwrap(),
+    let numeric = verter_type_engine::semantic_query::PropertyKey::Number(
+        verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(1).unwrap(),
     );
     let object = simple_object_with_known_keys(&graph, &[(numeric.clone(), string)]);
     let data = graph.node_data(object).expect("fixture object interned");
     let SemanticNodeData::Object(view) = &*data else {
         panic!("fixture object")
     };
-    let needle = crate::semantic_query::PropertyKey::string_literal("1");
+    let needle = verter_type_engine::semantic_query::PropertyKey::string_literal("1");
     assert!(
         matches!(
             view.project_known_key(&needle),
-            crate::semantic_query::SurfaceKeyProjection::Exact(member)
+            verter_type_engine::semantic_query::SurfaceKeyProjection::Exact(member)
                 if member.value == string
         ),
         "a numeric member answers the string-spelling needle under JS property identity"
     );
     assert!(matches!(
         view.project_known_key(&numeric),
-        crate::semantic_query::SurfaceKeyProjection::Exact(_)
+        verter_type_engine::semantic_query::SurfaceKeyProjection::Exact(_)
     ));
     // A genuinely-absent key stays AbsentProven, and a non-canonical
     // spelling ("01" is a distinct JS property) never collides.
     assert!(matches!(
-        view.project_known_key(&crate::semantic_query::PropertyKey::string_literal("2")),
-        crate::semantic_query::SurfaceKeyProjection::AbsentProven
+        view.project_known_key(
+            &verter_type_engine::semantic_query::PropertyKey::string_literal("2")
+        ),
+        verter_type_engine::semantic_query::SurfaceKeyProjection::AbsentProven
     ));
     assert!(matches!(
-        view.project_known_key(&crate::semantic_query::PropertyKey::string_literal("01")),
-        crate::semantic_query::SurfaceKeyProjection::AbsentProven
+        view.project_known_key(
+            &verter_type_engine::semantic_query::PropertyKey::string_literal("01")
+        ),
+        verter_type_engine::semantic_query::SurfaceKeyProjection::AbsentProven
     ));
 }
 
@@ -27452,41 +27656,43 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
     let number = primitive(&graph, PrimitiveKind::Number);
     let a_object = simple_object(&graph, &[("a", string)]);
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
-    let program_of = |effects: Vec<crate::semantic_query::ObjectConstructionEffect>| {
-        graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-            crate::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from(effects.into_boxed_slice()),
-            },
-        ))
-    };
+    let program_of =
+        |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
+            graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
+                verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    effects: Arc::from(effects.into_boxed_slice()),
+                },
+            ))
+        };
 
     // `{ a: string } & { b: number, ...T }` — the open program arm
     // poisons: no exact key domain exists.
     let open_program = program_of(vec![
-        crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-            crate::semantic_query::AuthoredPropertyEffect {
-                key: crate::semantic_query::AuthoredPropertyKey::string("b"),
+        verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+            verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("b"),
                 value: number,
                 optional: false,
                 readonly: false,
                 visibility: verter_type_expr::MemberVisibility::Public,
                 spans: verter_type_expr::MemberSpans::default(),
                 declaration_origin: None,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
             },
         ),
-        crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
+        verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(type_param),
     ]);
     let open_intersection = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![a_object, open_program].into_boxed_slice(),
         )),
     ));
@@ -27500,10 +27706,10 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
     // enumerates; the union of both arms' keys is exact.
     let b_object = simple_object(&graph, &[("b", number)]);
     let closed_program = program_of(vec![
-        crate::semantic_query::ObjectConstructionEffect::Spread(b_object),
+        verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(b_object),
     ]);
     let closed_intersection = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![a_object, closed_program].into_boxed_slice(),
         )),
     ));
@@ -27514,8 +27720,8 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
     assert_eq!(
         names,
         vec![
-            crate::semantic_query::PropertyKey::string_literal("a"),
-            crate::semantic_query::PropertyKey::string_literal("b"),
+            verter_type_engine::semantic_query::PropertyKey::string_literal("a"),
+            verter_type_engine::semantic_query::PropertyKey::string_literal("b"),
         ],
         "closed arms accumulate the exact union of keys; observed {names:?}"
     );
@@ -27523,15 +27729,15 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
     // Pre-existing rule unchanged: a TypeParam arm is dropped, the
     // enumerable arm's keys survive.
     let param_intersection = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![a_object, type_param].into_boxed_slice(),
         )),
     ));
     assert_eq!(
         dispatch.key_names_from_base_node(param_intersection),
-        Some(vec![crate::semantic_query::PropertyKey::string_literal(
-            "a"
-        )]),
+        Some(vec![
+            verter_type_engine::semantic_query::PropertyKey::string_literal("a")
+        ]),
         "non-program unresolvable arms keep the drop-and-accumulate rule"
     );
 }
@@ -27549,19 +27755,21 @@ fn keyof_intersection_poisons_through_union_nesting() {
     let string = primitive(&graph, PrimitiveKind::String);
     let number = primitive(&graph, PrimitiveKind::Number);
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("T"),
     });
     let open_program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-        crate::semantic_query::ObjectSpreadProgram {
+        verter_type_engine::semantic_query::ObjectSpreadProgram {
             effects: Arc::from(
                 vec![
-                    crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                        crate::semantic_query::AuthoredPropertyEffect {
-                            key: crate::semantic_query::AuthoredPropertyKey::string("b"),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(
+                                "b",
+                            ),
                             value: number,
                             optional: false,
                             readonly: false,
@@ -27569,24 +27777,26 @@ fn keyof_intersection_poisons_through_union_nesting() {
                             spans: verter_type_expr::MemberSpans::default(),
                             declaration_origin: None,
                             declared_in_macro_type_arg:
-                                crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         },
                     ),
-                    crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(
+                        type_param,
+                    ),
                 ]
                 .into_boxed_slice(),
             ),
         },
     ));
     let union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![simple_object(&graph, &[("a", string)]), open_program].into_boxed_slice(),
         )),
     ));
     let intersection = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![union, simple_object(&graph, &[("c", string)])].into_boxed_slice(),
         )),
     ));
@@ -27609,51 +27819,53 @@ fn excess_arm_knows_property_reads_program_targets() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let number = primitive(&graph, PrimitiveKind::Number);
     let string = primitive(&graph, PrimitiveKind::String);
-    let direct_a = crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-        crate::semantic_query::AuthoredPropertyEffect {
-            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+    let direct_a = verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
             value: number,
             optional: false,
             readonly: false,
             visibility: verter_type_expr::MemberVisibility::Public,
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
         },
     );
-    let program_of = |effects: Vec<crate::semantic_query::ObjectConstructionEffect>| {
-        graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-            crate::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from(effects.into_boxed_slice()),
-            },
-        ))
-    };
-    let key = |name: &str| crate::semantic_query::PropertyKey::string_literal(name);
+    let program_of =
+        |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
+            graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
+                verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    effects: Arc::from(effects.into_boxed_slice()),
+                },
+            ))
+        };
+    let key = |name: &str| verter_type_engine::semantic_query::PropertyKey::string_literal(name);
 
     // Closed program `{a, ...{b}}`: presence AND absence are proven.
     let closed_program = program_of(vec![
         direct_a.clone(),
-        crate::semantic_query::ObjectConstructionEffect::Spread(simple_object(
+        verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(simple_object(
             &graph,
             &[("b", string)],
         )),
     ]);
     assert_eq!(
         dispatch.arm_knows_property(closed_program, &key("a"), 0),
-        crate::project_semantic_dispatch::relation_excess::ArmKnows::Yes,
+        verter_type_engine::project_semantic_dispatch::relation_excess::ArmKnows::Yes,
         "a closed program proves the declared key present"
     );
     assert_eq!(
         dispatch.arm_knows_property(closed_program, &key("z"), 0),
-        crate::project_semantic_dispatch::relation_excess::ArmKnows::No,
+        verter_type_engine::project_semantic_dispatch::relation_excess::ArmKnows::No,
         "a closed program proves the unknown key absent"
     );
 
     // Open program `{a, ...T}`: `a` admits; `z` stays undecidable.
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -27661,16 +27873,16 @@ fn excess_arm_knows_property_reads_program_targets() {
     });
     let open_program = program_of(vec![
         direct_a,
-        crate::semantic_query::ObjectConstructionEffect::Spread(type_param),
+        verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(type_param),
     ]);
     assert_eq!(
         dispatch.arm_knows_property(open_program, &key("a"), 0),
-        crate::project_semantic_dispatch::relation_excess::ArmKnows::Yes,
+        verter_type_engine::project_semantic_dispatch::relation_excess::ArmKnows::Yes,
         "an open program still admits its proven key"
     );
     assert_eq!(
         dispatch.arm_knows_property(open_program, &key("z"), 0),
-        crate::project_semantic_dispatch::relation_excess::ArmKnows::Undecidable,
+        verter_type_engine::project_semantic_dispatch::relation_excess::ArmKnows::Undecidable,
         "an open program cannot decide an unproven key"
     );
 }
@@ -27695,13 +27907,13 @@ fn substitute_and_walker_descend_carrier_type_args() {
         display_name: Arc::from("T"),
     });
     let u_replacement = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
 
     // --- BareRef carrier: `Foo<T>` ---
     let bare = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(vec![t_param].into_boxed_slice()),
     ));
     assert!(
@@ -27729,12 +27941,12 @@ fn substitute_and_walker_descend_carrier_type_args() {
 
     // --- TypeOf carrier: `typeof factory<T>` ---
     let typeof_node = graph.intern_node(SemanticNodeData::new_typeof(
-        crate::semantic_query::ValueRootKey {
-            scope: crate::semantic_query::ScopeId {
+        verter_type_engine::semantic_query::ValueRootKey {
+            scope: verter_type_engine::semantic_query::ScopeId {
                 canonical_id: Arc::from("/w/carrier_args.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -27786,7 +27998,7 @@ fn substitute_and_walker_descend_import_type_carrier_type_args() {
         display_name: Arc::from("T"),
     });
     let u_replacement = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
 
     // `import("./m").Box<T>` — a non-typeof import-type carrier with a
@@ -27843,10 +28055,10 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let any = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Any,
+        verter_type_engine::semantic_query::PrimitiveKind::Any,
     ));
     let never = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Never,
+        verter_type_engine::semantic_query::PrimitiveKind::Never,
     ));
     let infer_p = graph.intern_node(SemanticNodeData::Infer {
         name: Arc::from("P"),
@@ -27854,13 +28066,13 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
         constraint: None,
     });
     let string_ty = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
 
     // `any extends Foo<infer P> ? P : never` — BareRef.type_args holds the infer.
     let foo_infer = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(vec![infer_p].into_boxed_slice()),
     ));
     assert!(
@@ -27877,12 +28089,12 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
 
     // `any extends (typeof make<infer P>) ? P : never` — TypeOf.type_args holds it.
     let typeof_infer = graph.intern_node(SemanticNodeData::new_typeof(
-        crate::semantic_query::ValueRootKey {
-            scope: crate::semantic_query::ScopeId {
+        verter_type_engine::semantic_query::ValueRootKey {
+            scope: verter_type_engine::semantic_query::ScopeId {
                 canonical_id: Arc::from("/w/absorb_carrier.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -27909,7 +28121,7 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
     // present.
     let foo_string = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(vec![string_ty].into_boxed_slice()),
     ));
     assert!(
@@ -27939,7 +28151,7 @@ fn absorb_conditional_detects_infer_in_bareref_and_typeof_carrier_type_args() {
 fn is_deferred_classifies_bareref_and_importtype_carriers_as_deferred_roots() {
     let bare = SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(Vec::new().into_boxed_slice()),
     );
     assert!(
@@ -27961,12 +28173,12 @@ fn is_deferred_classifies_bareref_and_importtype_carriers_as_deferred_roots() {
     // Carrier-model consistency control: the sibling `TypeOf` carrier is
     // ALREADY deferred (this is the precedent the fix aligns BareRef/ImportType to).
     let type_of = SemanticNodeData::new_typeof(
-        crate::semantic_query::ValueRootKey {
-            scope: crate::semantic_query::ScopeId {
+        verter_type_engine::semantic_query::ValueRootKey {
+            scope: verter_type_engine::semantic_query::ScopeId {
                 canonical_id: Arc::from("/w/deferred.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -27981,7 +28193,8 @@ fn is_deferred_classifies_bareref_and_importtype_carriers_as_deferred_roots() {
     );
 
     // A resolved/leaf root is NOT deferred — the fix must not over-classify.
-    let primitive = SemanticNodeData::Primitive(crate::semantic_query::PrimitiveKind::Number);
+    let primitive =
+        SemanticNodeData::Primitive(verter_type_engine::semantic_query::PrimitiveKind::Number);
     assert!(
         !super::relation_predicates::is_deferred(&primitive),
         "a resolved/leaf Primitive root must remain NON-deferred (verdict unchanged)"
@@ -28026,7 +28239,7 @@ fn typeparam_binder_substitution_preserves_same_name_infer_declaration() {
         pending: None,
     });
     let number = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let result = dispatch.substitute_semantic_type_param(cond, t_param, number);
     let data = graph.node_data(result).expect("substituted node interned");
@@ -28105,7 +28318,7 @@ fn subtree_references_node_ignores_same_name_infer_under_typeparam_probe() {
     );
     // Mirror consistency: substitute agrees — nothing to rewrite.
     let number = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let substituted = dispatch.substitute_semantic_type_param(root, t_param, number);
     assert_eq!(
@@ -28133,7 +28346,7 @@ fn subtree_references_node_ignores_same_name_infer_under_typeparam_probe() {
 
 #[test]
 fn relation_conjunction_keeps_distinct_same_name_infer_params() {
-    use crate::semantic_query::{InferBinding, RelationResult};
+    use verter_type_engine::semantic_query::{InferBinding, RelationResult};
 
     let first = InferBinding {
         param: SemanticNodeId(701),
@@ -28181,13 +28394,13 @@ fn resolve_overload_set_warm_entry_refused_on_type_arg_origin_edit() {
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     // Materialise the arg type so its node is scoped to ITS OWN file.
     let arg = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             decl_identity(&host, "/w/overload_arg_origin.ts", "OverloadArg"),
             Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -28294,7 +28507,7 @@ fn reexported_class_static_surface_revalidates_on_origin_edit() {
 /// lenient `filter_map` would. This is what discriminates an EXACT keyspace
 /// (`"A" | "B"`) from a fail-closed widening (`"A" | "B" | string`).
 fn exact_keyspace_string_literals(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     id: SemanticNodeId,
 ) -> Option<Vec<String>> {
     match graph.node_data(id).as_deref() {
@@ -28439,17 +28652,19 @@ fn keyof_over_merged_decl_with_conflicting_and_overload_keys_unions_keyspace() {
             .map(|(n, v)| SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string(*n),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(*n),
                 value: *v,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Shallow,
-                )
-                .stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role:
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Shallow,
+                    )
+                    .stamp_role(verter_type_engine::semantic_query::MemberMergeRole::OwnBody),
                 spans: Default::default(),
                 declaration_origin: None,
             })
@@ -28457,28 +28672,31 @@ fn keyof_over_merged_decl_with_conflicting_and_overload_keys_unions_keyspace() {
         members.push(SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::string("f"),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("f"),
             value: f_sig,
             optional: false,
             readonly: false,
             method_kind: Some(verter_type_expr::ObjectMethodKind::Method),
             has_implementation_body: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Shallow,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Shallow,
             )
-            .stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
+            .stamp_role(verter_type_engine::semantic_query::MemberMergeRole::OwnBody),
             spans: Default::default(),
             declaration_origin: None,
         });
-        graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-            members: Arc::from(members.into_boxed_slice()),
-            call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-            index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
-            keyspace: None,
-            has_index_signature: false,
-        }))
+        graph.intern_node(SemanticNodeData::Object(
+            verter_type_engine::test_surface_view! {
+                members: Arc::from(members.into_boxed_slice()),
+                call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::<IndexSignature>::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ))
     };
     // interface I { shared: number; only1: boolean; f(): sig_a }
     // interface I { shared: string; only2: bigint;  f(): sig_b }
@@ -28576,7 +28794,7 @@ fn keyof_over_merged_decl_with_conflicting_and_overload_keys_unions_keyspace() {
 /// `ComputeAdmission::ReturnOnly` / no-poison hole).
 #[test]
 fn evaluate_deferred_memo_does_not_publish_budget_tainted_result() {
-    use crate::request_context::{
+    use verter_type_engine::request_context::{
         current_request_result_is_partial, RequestContext, RequestContextGuard,
     };
     let host = host();
@@ -28635,7 +28853,7 @@ fn evaluate_deferred_memo_does_not_publish_budget_tainted_result() {
 /// repro, hardened into a permanent guard).
 #[test]
 fn roomy_request_misses_budget_tainted_evaluate_deferred_entry() {
-    use crate::request_context::{
+    use verter_type_engine::request_context::{
         current_request_result_is_partial, RequestContext, RequestContextGuard,
     };
     let host = host();
@@ -28703,7 +28921,7 @@ fn roomy_request_misses_budget_tainted_evaluate_deferred_entry() {
 /// the roomy run recomputes `number`.
 #[test]
 fn roomy_request_recomputes_correct_value_after_budget_truncation() {
-    use crate::request_context::{
+    use verter_type_engine::request_context::{
         current_request_result_is_partial, RequestContext, RequestContextGuard,
     };
     let host = host();
@@ -28715,11 +28933,11 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
     let o2 = simple_object(&graph, &[("a", inner_obj)]); // { a: { k: number } }
     let mid = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: o2,
-        index: crate::semantic_query::IndexKey::String(Arc::from("a")),
+        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("a")),
     });
     let outer = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: mid,
-        index: crate::semantic_query::IndexKey::String(Arc::from("k")),
+        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("k")),
     });
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
@@ -28748,9 +28966,9 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
     assert!(
         matches!(
             tight_completeness,
-            crate::semantic_query::ResultCompleteness::Partial(reasons)
+            verter_type_engine::semantic_query::ResultCompleteness::Partial(reasons)
                 if reasons.contains(
-                    crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT
+                    verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT
                 )
         ),
         "the tight run must report Partial(PROJECTION_WORK_LIMIT), got {tight_completeness:?}"
@@ -28795,7 +29013,7 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
     assert!(
         matches!(
             roomy_completeness,
-            crate::semantic_query::ResultCompleteness::Complete
+            verter_type_engine::semantic_query::ResultCompleteness::Complete
         ),
         "the roomy recompute must be Complete (it reaches the real member type), got \
          {roomy_completeness:?}"
@@ -28838,7 +29056,7 @@ fn roomy_request_recomputes_correct_value_after_budget_truncation() {
 /// entry-scoped gate withholds it; a request-sticky gate would not.
 #[test]
 fn evaluate_deferred_memo_withholds_partial_without_request_context() {
-    use crate::request_context::current_request_result_is_partial;
+    use verter_type_engine::request_context::current_request_result_is_partial;
 
     let host = host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -28857,7 +29075,7 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
             })
             .collect();
         graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 members.into_boxed_slice(),
             )),
         ))
@@ -28906,7 +29124,7 @@ fn evaluate_deferred_memo_withholds_partial_without_request_context() {
     assert!(
         matches!(
             result_completeness,
-            crate::semantic_query::ResultCompleteness::Partial(_)
+            verter_type_engine::semantic_query::ResultCompleteness::Partial(_)
         ),
         "the refused template evaluation must report Partial completeness (the \
          admission authority the no-poison gate consults), got {result_completeness:?}"
@@ -28942,15 +29160,15 @@ fn missing_node_data_evaluates_partial_not_laundered_complete() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let context = crate::semantic_query::ProjectionReductionContext::published(
-        crate::semantic_query::ProjectionMode::Expanded,
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
     );
 
     // An id in the never-allocated range has no arena data, and an
     // acyclic arena lets a payload name it (a child the arena could still
     // allocate would be a forward reference and refuse instead).
-    let missing = crate::semantic_query::SemanticNodeId(
-        crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 1_000_000,
+    let missing = verter_type_engine::semantic_query::SemanticNodeId(
+        verter_type_engine::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 1_000_000,
     );
     assert!(
         graph.node_data(missing).is_none(),
@@ -28961,11 +29179,13 @@ fn missing_node_data_evaluates_partial_not_laundered_complete() {
     let (_node, direct) =
         dispatch.evaluate_deferred_semantic_node_with_context_for_tests(missing, context);
     match direct {
-        crate::semantic_query::ResultCompleteness::Partial(reasons) => assert!(
-            reasons.contains(crate::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+        verter_type_engine::semantic_query::ResultCompleteness::Partial(reasons) => assert!(
+            reasons.contains(
+                verter_type_engine::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA
+            ),
             "missing arena data must carry MISSING_SEMANTIC_NODE_DATA, got {reasons:?}"
         ),
-        crate::semantic_query::ResultCompleteness::Complete => panic!(
+        verter_type_engine::semantic_query::ResultCompleteness::Complete => panic!(
             "a node id with no arena data MUST evaluate Partial(MISSING_SEMANTIC_NODE_DATA), \
              never Complete (a fabricated Opaque(Miss) carrier laundered as a settled result)"
         ),
@@ -28978,12 +29198,14 @@ fn missing_node_data_evaluates_partial_not_laundered_complete() {
     let (_node2, through_alias) =
         dispatch.evaluate_deferred_semantic_node_with_context_for_tests(aliased_missing, context);
     match through_alias {
-        crate::semantic_query::ResultCompleteness::Partial(reasons) => assert!(
-            reasons.contains(crate::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+        verter_type_engine::semantic_query::ResultCompleteness::Partial(reasons) => assert!(
+            reasons.contains(
+                verter_type_engine::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA
+            ),
             "missing arena data reached through an Alias hop must carry \
              MISSING_SEMANTIC_NODE_DATA, got {reasons:?}"
         ),
-        crate::semantic_query::ResultCompleteness::Complete => panic!(
+        verter_type_engine::semantic_query::ResultCompleteness::Complete => panic!(
             "a missing target reached through an Alias hop MUST evaluate \
              Partial(MISSING_SEMANTIC_NODE_DATA), never Complete"
         ),
@@ -29036,27 +29258,33 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
     // CYCLE: `MutA = MutB; MutB = MutA` — the demand's `visited` set catches the
     // residual-carrier cycle after `Complete` `ResolveDecl` reads.
     let muta = graph.intern_node(SemanticNodeData::DeclRef {
-        identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("MutA")),
+        identity: verter_type_engine::semantic_query::DeclIdentity::from_scope(
+            &scope,
+            Arc::from("MutA"),
+        ),
     });
     // FINITE CONTROL: an 80-hop alias chain must settle without a structural
     // depth cap.
     let t0 = graph.intern_node(SemanticNodeData::DeclRef {
-        identity: crate::semantic_query::DeclIdentity::from_scope(&scope, Arc::from("T0")),
+        identity: verter_type_engine::semantic_query::DeclIdentity::from_scope(
+            &scope,
+            Arc::from("T0"),
+        ),
     });
     // MISSING: an `Alias` to a never-allocated id — the evaluator reaches
     // absent arena data through the hop and reports
     // MISSING_SEMANTIC_NODE_DATA.
     let aliased_missing = graph.intern_node(SemanticNodeData::Alias(
-        crate::semantic_query::SemanticNodeId(
-            crate::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 5_000_000,
+        verter_type_engine::semantic_query::SemanticNodeId(
+            verter_type_engine::semantic_query_memo::UNALLOCATABLE_ID_FLOOR + 5_000_000,
         ),
     ));
 
-    let run = |subject: crate::semantic_query::SemanticNodeId,
+    let run = |subject: verter_type_engine::semantic_query::SemanticNodeId,
                label: &str,
-               reason: crate::semantic_query::PartialReasonSet| {
+               reason: verter_type_engine::semantic_query::PartialReasonSet| {
         // Install an enclosing cold-build / relation taint frame.
-        let guard = crate::project_semantic_dispatch::BuildLocalTaintGuard::push(
+        let guard = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
             &dispatch.build_local_taint,
         );
         let outcome = dispatch.normalize_node_for_structural_fact_demand(subject, navigate);
@@ -29087,16 +29315,17 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
     run(
         muta,
         "cycle",
-        crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+        verter_type_engine::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
     );
     run(
         aliased_missing,
         "missing",
-        crate::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+        verter_type_engine::semantic_query::PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
     );
 
-    let finite_guard =
-        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let finite_guard = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+        &dispatch.build_local_taint,
+    );
     let finite = dispatch.normalize_node_for_structural_fact_demand(t0, navigate);
     let finite_frame = finite_guard.finish();
     assert!(
@@ -29151,8 +29380,9 @@ fn grow_string_demand(
             super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
         ),
     };
-    let guard =
-        crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+    let guard = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+        &dispatch.build_local_taint,
+    );
     dispatch.set_connected_limits_for_tests(work, depth);
     let outcome = dispatch.normalize_node_for_structural_fact_demand(carrier, navigate);
     let frame = guard.finish();
@@ -29163,11 +29393,12 @@ fn grow_string_demand(
     );
     let context = dispatch.instantiate_context_for(&base.canonical_id, navigate);
     let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(slot, args, context),
+        verter_type_engine::semantic_query::InstantiateKey::new(slot, args, context),
     )) {
-        QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => {
-            graph.node_data(value).as_deref().cloned()
-        }
+        QueryResult::Value(verter_type_engine::semantic_query::SemanticQueryOutput {
+            value,
+            ..
+        }) => graph.node_data(value).as_deref().cloned(),
         _ => None,
     };
     (
@@ -29192,10 +29423,10 @@ fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
     let is_ts2456 = |data: &Option<SemanticNodeData>| {
         matches!(
             data,
-            Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+            Some(SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::CheckerRecovery {
                 diagnostic,
                 ..
-            })) if diagnostic.code == crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias
+            })) if diagnostic.code == verter_type_engine::semantic_query::CheckerDiagnosticCode::CircularTypeAlias
                 && diagnostic.recovery() == Some(PrimitiveKind::Any)
         )
     };
@@ -29248,12 +29479,14 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
         ),
     };
     assert!(
-        reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT),
+        reasons
+            .contains(verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT),
         "the growing-generic truncation MUST be bounded by PROJECTION_WORK_LIMIT — \
          the fresh-node-growth bound, got {reasons:?}"
     );
     assert!(
-        !reasons.contains(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION),
+        !reasons
+            .contains(verter_type_engine::semantic_query::PartialReasonSet::SAME_PATH_RECURSION),
         "fresh-node growth defeats the visited-ID guard, so the reason MUST NOT be \
          SAME_PATH_RECURSION, got {reasons:?}"
     );
@@ -29268,11 +29501,11 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     assert!(
         matches!(
             &instantiated,
-            Some(SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+            Some(SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::CheckerRecovery {
                 diagnostic,
                 ..
             })) if diagnostic.code
-                == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                == verter_type_engine::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
                 && diagnostic.recovery() == Some(PrimitiveKind::Any)
         ),
         "Grow<string> reaches the tail budget as the checker's TS2589 recovery, got \
@@ -29302,26 +29535,26 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
     let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
     let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
     let key_union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![a, b].into_boxed_slice(),
         )),
     ));
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("K"),
     });
-    let mapper = crate::semantic_query::MapperKey {
+    let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
         parameter_node,
         key_space: key_union,
         value_expr: deep_value,
-        optionality: crate::semantic_query::OptionalityMod::Keep,
-        readonly: crate::semantic_query::ReadonlyMod::Keep,
+        optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+        readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
 
@@ -29393,7 +29626,7 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
         .ctx
         .shallow_file_state("/dep.ts")
         .expect("/dep.ts must index");
-    let scope = crate::semantic_query::NodeScopeId::File {
+    let scope = verter_type_engine::semantic_query::NodeScopeId::File {
         canonical_id: Arc::from("/dep.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
@@ -29411,7 +29644,7 @@ fn carrier_subject_normalization_fenced_serve_suppresses_caching() {
         SemanticQueryKey::ProjectPath {
             base: carrier,
             path: Arc::from(Vec::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
+            context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Navigate,
             ),
         }
@@ -29506,29 +29739,29 @@ fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
     // reduces to the canonical deferred `Mapped` shell (a Value, not an error),
     // so the evaluation stays Complete while the fence sets cache_suppress.
     let key_space = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("K"),
     });
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let mapper = crate::semantic_query::MapperKey {
+    let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
-        optionality: crate::semantic_query::OptionalityMod::Keep,
-        readonly: crate::semantic_query::ReadonlyMod::Keep,
+        optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+        readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let mapped = graph.intern_node(SemanticNodeData::Mapped { source, mapper });
 
@@ -29594,29 +29827,29 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
         scope.clone(),
     );
     let key_space = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("K"),
     });
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("K"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("K"),
     });
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let mapper = crate::semantic_query::MapperKey {
+    let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
         parameter_node,
         key_space,
         value_expr,
-        optionality: crate::semantic_query::OptionalityMod::Keep,
-        readonly: crate::semantic_query::ReadonlyMod::Keep,
+        optionality: verter_type_engine::semantic_query::OptionalityMod::Keep,
+        readonly: verter_type_engine::semantic_query::ReadonlyMod::Keep,
         name_remap: None,
-        kind: crate::semantic_query::MapperKind::Computed,
+        kind: verter_type_engine::semantic_query::MapperKind::Computed,
     };
     let mapped = graph.intern_node(SemanticNodeData::Mapped { source, mapper });
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
@@ -29641,7 +29874,7 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
     assert!(
         matches!(
             completeness,
-            crate::semantic_query::ResultCompleteness::Complete
+            verter_type_engine::semantic_query::ResultCompleteness::Complete
         ),
         "FIXTURE INVALID: the suppressed mapped evaluation must stay Complete (the fix must not \
          false-Partial it), got {completeness:?}"
@@ -29736,7 +29969,7 @@ fn import_type_arm_threads_nested_read_cache_suppress_into_outcome() {
     assert!(
         matches!(
             completeness,
-            crate::semantic_query::ResultCompleteness::Complete
+            verter_type_engine::semantic_query::ResultCompleteness::Complete
         ),
         "the fenced nested read is Complete-but-non-cacheable, so the ImportType evaluation stays \
          Complete, got {completeness:?}"
@@ -29823,7 +30056,7 @@ fn carrier_direct_serve_fence_refuses_evaluate_deferred_memo_and_recomputes() {
     assert!(
         matches!(
             completeness,
-            crate::semantic_query::ResultCompleteness::Complete
+            verter_type_engine::semantic_query::ResultCompleteness::Complete
         ),
         "a fenced DIRECT carrier serve is Complete-but-non-cacheable; the outcome must stay \
          Complete, got {completeness:?}"
@@ -29898,7 +30131,7 @@ fn carrier_direct_serve_unfenced_publishes_into_evaluate_deferred_memo() {
     assert!(
         matches!(
             completeness,
-            crate::semantic_query::ResultCompleteness::Complete
+            verter_type_engine::semantic_query::ResultCompleteness::Complete
         ),
         "an unfenced carrier resolution is Complete, got {completeness:?}"
     );
@@ -29964,7 +30197,7 @@ fn carrier_unresolved_name_stays_cacheable_even_with_fence_armed() {
     assert!(
         matches!(
             completeness,
-            crate::semantic_query::ResultCompleteness::Complete
+            verter_type_engine::semantic_query::ResultCompleteness::Complete
         ),
         "a stable unresolved authored name is Complete, got {completeness:?}"
     );
@@ -30032,7 +30265,7 @@ fn single_segment_import_type_direct_serve_fence_refuses_evaluate_deferred_memo(
     assert!(
         matches!(
             completeness,
-            crate::semantic_query::ResultCompleteness::Complete
+            verter_type_engine::semantic_query::ResultCompleteness::Complete
         ),
         "a fenced single-segment ImportType direct serve is Complete-but-non-cacheable, got \
          {completeness:?}"
@@ -30074,14 +30307,15 @@ fn single_segment_import_type_direct_serve_fence_refuses_evaluate_deferred_memo(
 /// real-file parse-derived input, so the parse env is family identity).
 #[test]
 fn instantiate_context_for_maps_body_source_by_canonical() {
-    use crate::semantic_query::InstantiateBodySource;
     use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_type_engine::semantic_query::InstantiateBodySource;
 
     let host = host();
     upsert_ts(&host, "/w/body_source.ts", "export type A = { x: string }");
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let prc =
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let prc = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Expanded,
+    );
 
     for sentinel in ["", "__builtin__", "<synthetic>"] {
         let context = dispatch.instantiate_context_for(sentinel, prc);
@@ -30128,12 +30362,12 @@ fn instantiate_context_for_maps_body_source_by_canonical() {
 /// payload-equal copy at `Global` scope, which allocates a DIFFERENT id, so
 /// only the true fast path returns the original.
 fn intern_file_scoped_object(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     members: Vec<SurfaceMember>,
     has_index_signature: bool,
 ) -> SemanticNodeId {
     graph.intern_node_with_scope(
-        SemanticNodeData::Object(crate::test_surface_view! {
+        SemanticNodeData::Object(verter_type_engine::test_surface_view! {
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
@@ -30144,7 +30378,7 @@ fn intern_file_scoped_object(
         NodeScopeId::File {
             canonical_id: Arc::from("/w/fastpath_origin.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: crate::semantic_query::HashValue::default(),
+            whole_hash: verter_type_engine::semantic_query::HashValue::default(),
             local_scope: None,
         },
     )
@@ -30251,7 +30485,7 @@ fn shallow_empty_path_intersection_root_still_rebuilds_merged_surface() {
         false,
     );
     let base = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![left, right].into_boxed_slice(),
         )),
     ));
@@ -30285,7 +30519,7 @@ fn shallow_empty_path_intersection_root_still_rebuilds_merged_surface() {
 /// with the arm's signature.
 #[test]
 fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
-    use crate::semantic_query::{FunctionParam, SignatureKind, TypeParamDecl};
+    use verter_type_engine::semantic_query::{FunctionParam, SignatureKind, TypeParamDecl};
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -30297,7 +30531,9 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
         params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
         return_type: num_id,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(num_id),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            num_id,
+        ),
         type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -30310,7 +30546,7 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
         false,
     );
     let base = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![call, members].into_boxed_slice(),
         )),
     ));
@@ -30359,12 +30595,12 @@ fn shallow_intersection_signature_entries_are_the_discovery_authoritys() {
 /// through the member-ordinal index, with `extra` members appended after
 /// the padding.
 fn wide_surface_with(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     pad_value: SemanticNodeId,
     extra: Vec<SurfaceMember>,
 ) -> SemanticNodeId {
     let mut members: Vec<SurfaceMember> = (0
-        ..crate::semantic_query_memo::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX + 1)
+        ..verter_type_engine::semantic_query_memo::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX + 1)
         .map(|i| surface_member(&format!("pad{i}"), pad_value, false, false))
         .collect();
     members.extend(extra);
@@ -30391,11 +30627,11 @@ fn wide_surface_member_hop_resolves_late_ordinal_and_misses_absent() {
         base,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("target"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("target"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -30408,11 +30644,11 @@ fn wide_surface_member_hop_resolves_late_ordinal_and_misses_absent() {
         base,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("absent"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("absent"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -30455,11 +30691,11 @@ fn wide_surface_duplicate_with_nonpublic_first_occurrence_stays_miss() {
         base,
         path: Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("dup"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("dup"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -30503,7 +30739,7 @@ fn wide_surface_numeric_index_hop_resolves_member() {
     let hit = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(vec![PathSegment::Index(num_key(3))].into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
     });
@@ -30532,7 +30768,7 @@ fn wide_surface_numeric_index_hop_resolves_member() {
 // live implementation is field-for-field equal to it.
 // ──────────────────────────────────────────────────────────────────────────
 
-use crate::project_semantic_dispatch::walk::{
+use verter_type_engine::project_semantic_dispatch::walk::{
     merge_union_surfaces, merge_union_surfaces_for_macro, ShallowSurface, ShallowSurfaceEntry,
     ShallowSurfaceMember,
 };
@@ -30546,15 +30782,15 @@ fn shallow_member_full(
 ) -> ShallowSurfaceMember {
     ShallowSurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-        key: crate::semantic_query::AuthoredPropertyKey::string(name),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional,
         readonly,
         method_kind: None,
         has_implementation_body: false,
         visibility,
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
         declaration_origin: None,
     }
@@ -30614,7 +30850,7 @@ fn assert_shallow_surface_eq(actual: &ShallowSurface, expected: &ShallowSurface,
 /// selection, per-arm value collection, accessibility folds, synthesized
 /// neutrality.
 fn oracle_value_union(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     values: &[SemanticNodeId],
 ) -> SemanticNodeId {
     let mut ids: Vec<SemanticNodeId> = values.to_vec();
@@ -30626,7 +30862,7 @@ fn oracle_value_union(
         // mint ARE the intended semantics of this step, so the reference
         // delegates the intern while keeping its own dedup/singleton logic.
         _ => {
-            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
                 graph,
                 &ids,
                 verter_session_query::flow::policy::NullabilityPolicy::Strict,
@@ -30638,14 +30874,14 @@ fn oracle_value_union(
 
 /// Throwaway evidence sink for direct production-merge calls in tests.
 fn test_canonical_evidence(
-) -> crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence {
-    crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default()
+) -> verter_type_engine::project_semantic_dispatch::canonical_algebra::CanonicalEvidence {
+    verter_type_engine::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default()
 }
 
 /// Reference semantics for `merge_union_surfaces` — the retired per-name
 /// `find` implementation, kept verbatim.
 fn oracle_merge_union_surfaces(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     arm_surfaces: &[Option<ShallowSurface>],
 ) -> Option<ShallowSurface> {
     if arm_surfaces.is_empty() {
@@ -30699,8 +30935,9 @@ fn oracle_merge_union_surfaces(
             visibility: verter_type_expr::MemberVisibility::merge_member_visibility(
                 per_arm_visibilities,
             ),
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
         });
@@ -30717,7 +30954,7 @@ fn oracle_merge_union_surfaces(
 /// Reference semantics for `merge_union_surfaces_for_macro` — the retired
 /// per-name `find` implementation, kept verbatim.
 fn oracle_merge_union_surfaces_for_macro(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     arm_surfaces: &[Option<ShallowSurface>],
 ) -> Option<ShallowSurface> {
     if arm_surfaces.is_empty() {
@@ -30729,8 +30966,8 @@ fn oracle_merge_union_surfaces_for_macro(
         return Some(ShallowSurface::empty());
     }
     let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
-    let mut ordered_keys: Vec<crate::semantic_query::AuthoredPropertyKey> = Vec::new();
-    let mut seen: rustc_hash::FxHashSet<crate::semantic_query::AuthoredPropertyKey> =
+    let mut ordered_keys: Vec<verter_type_engine::semantic_query::AuthoredPropertyKey> = Vec::new();
+    let mut seen: rustc_hash::FxHashSet<verter_type_engine::semantic_query::AuthoredPropertyKey> =
         rustc_hash::FxHashSet::default();
     for arm in &live {
         for member in &arm.members {
@@ -30775,8 +31012,9 @@ fn oracle_merge_union_surfaces_for_macro(
             method_kind: None,
             has_implementation_body: false,
             visibility: merged_visibility,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: verter_type_expr::MemberSpans::default(),
             declaration_origin: None,
         });
@@ -30794,7 +31032,7 @@ fn oracle_merge_union_surfaces_for_macro(
 /// disjoint, duplicated, and visibility-mixed members; values are distinct
 /// primitives so value-union ORDER is observable.
 fn union_merge_fixture_arms(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
 ) -> Vec<Option<ShallowSurface>> {
     use verter_type_expr::MemberVisibility as V;
     let s = primitive(graph, PrimitiveKind::String);
@@ -30936,9 +31174,11 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
     // Non-neutral inputs: heritage-stamped, method-flagged, span- and
     // origin-carrying members (witnessed via a constructed reduction
     // context, exactly how the walker's heritage descent mints stamps).
-    let witness =
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow);
-    let heritage_stamp = witness.stamp_role(crate::semantic_query::MemberMergeRole::Heritage);
+    let witness = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        ProjectionMode::Shallow,
+    );
+    let heritage_stamp =
+        witness.stamp_role(verter_type_engine::semantic_query::MemberMergeRole::Heritage);
     let mut zebra_a = shallow_member_full("zebra", s, false, false, V::Public);
     zebra_a.merge_role = heritage_stamp;
     zebra_a.method_kind = Some(verter_type_expr::ObjectMethodKind::Method);
@@ -31018,7 +31258,7 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
     for member in common.members.iter().chain(macro_merged.members.iter()) {
         assert_eq!(
             member.merge_role,
-            crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             "union-synthesized member must not keep a contributor's role stamp"
         );
         assert!(
@@ -31165,7 +31405,7 @@ fn generic_function_binder_identities_are_stable_across_evaluations() {
 /// closedness from the REDUCED surface, never from the utility's name.
 #[test]
 fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, IndexKey, MapperKey, MapperKind, OptionalityMod, ProjectionMode,
         ProjectionReductionContext, ReadonlyMod,
     };
@@ -31248,7 +31488,9 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
     });
     let shallow = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: mapped_node,
-        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        path: Arc::from(
+            Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
     let shallow_node = match shallow.value {
@@ -31304,7 +31546,7 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
 /// fold: `FLOW_RETURN_UNINFERRED` survives, `PROPAGATED` does not appear.
 #[test]
 fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality_class() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, IndexKey, MapperKey, MapperKind, OptionalityMod, PartialReasonSet,
         ProjectionMode, ProjectionReductionContext, ReadonlyMod,
     };
@@ -31349,7 +31591,9 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
     });
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: mapped_node,
-        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        path: Arc::from(
+            Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
     let node = match read.value {
@@ -31368,7 +31612,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
             let kind = match graph.node_data(m.value).as_deref() {
                 Some(SemanticNodeData::Primitive(_)) => "primitive".to_string(),
                 Some(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::UnmodeledPosition,
+                    verter_type_engine::semantic_query::QueryError::UnmodeledPosition,
                 )) => "unmodelled-marker".to_string(),
                 other => format!("other:{other:?}"),
             };
@@ -31413,7 +31657,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
 /// re-closing the closed result is a no-op — the idempotence law.
 #[test]
 fn pre_seal_closure_canonicalizes_union_top_and_is_idempotent() {
-    use crate::semantic_query::FlowReturnResult;
+    use verter_type_engine::semantic_query::FlowReturnResult;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -31424,7 +31668,7 @@ fn pre_seal_closure_canonicalizes_union_top_and_is_idempotent() {
     // A raw (pre-canonical) union fixture: duplicate arms plus a `never`
     // arm the lattice absorbs.
     let raw = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![string_node, never_node, string_node].into_boxed_slice(),
         )),
     ));
@@ -31466,7 +31710,7 @@ fn pre_seal_closure_canonicalizes_union_top_and_is_idempotent() {
 /// `close_flow_result_pre_seal`).
 #[test]
 fn pre_seal_closure_leaves_intersection_top_untouched() {
-    use crate::semantic_query::FlowReturnResult;
+    use verter_type_engine::semantic_query::FlowReturnResult;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -31478,7 +31722,7 @@ fn pre_seal_closure_leaves_intersection_top_untouched() {
     // collapse (`string & number = never`) stays untouched: the closure
     // does not re-decide a constructor-owned intersection carrier.
     let inter = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![number_node, string_node].into_boxed_slice(),
         )),
     ));
@@ -31509,7 +31753,7 @@ fn pre_seal_closure_leaves_intersection_top_untouched() {
 /// file-scoped members below make the pipeline's deposit observable.)
 #[test]
 fn pre_seal_closure_skips_the_pipeline_for_a_canonical_tagged_union_top() {
-    use crate::semantic_query::FlowReturnResult;
+    use verter_type_engine::semantic_query::FlowReturnResult;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -31522,11 +31766,15 @@ fn pre_seal_closure_skips_the_pipeline_for_a_canonical_tagged_union_top() {
         local_scope: None,
     };
     let a = graph.intern_node_with_scope(
-        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("a".to_string())),
+        SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(
+            "a".to_string(),
+        )),
         file_scope("/w/pre-seal-skip-a.ts", 7),
     );
     let b = graph.intern_node_with_scope(
-        SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("b".to_string())),
+        SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(
+            "b".to_string(),
+        )),
         file_scope("/w/pre-seal-skip-b.ts", 9),
     );
     let top = dispatch.intern_normalized_union_or_intersection(&[a, b], true);
@@ -31597,7 +31845,7 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
         .expect("the fixture file must have shallow state")
         .whole_hash;
     let placeholder = graph.intern_node(SemanticNodeData::Opaque(
-        crate::semantic_query::QueryError::DeclPlaceholder {
+        verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
             canonical_id: Arc::from("/w/alias-twin-union.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: Arc::from("A"),
@@ -31605,14 +31853,14 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
         },
     ));
     let base = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::authored_shell(Arc::from(
             vec![placeholder, shared_object].into_boxed_slice(),
         )),
     ));
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -31638,7 +31886,9 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
 /// view worklist's rebuild specifically.)
 #[test]
 fn instantiation_of_duplicate_projection_union_collapses_to_the_shared_arm() {
-    use crate::semantic_query::{InstantiateContext, InstantiateKey, SemanticQueryKey};
+    use verter_type_engine::semantic_query::{
+        InstantiateContext, InstantiateKey, SemanticQueryKey,
+    };
 
     let host = host();
     upsert_ts(
@@ -31660,7 +31910,7 @@ fn instantiation_of_duplicate_projection_union_collapses_to_the_shared_arm() {
     let src_node = outcome.ok().flatten().expect("Src must resolve");
 
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/w/dup-param-union.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Both"),
@@ -31709,7 +31959,7 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
         local_scope: None,
     };
     let parameter_node = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("T"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -31722,9 +31972,9 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
     // routes the changed rebuild through the canonical authority — Global.
     let union_node = graph.intern_node_with_scope(
         SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
-                vec![parameter_node, string_node].into_boxed_slice(),
-            )),
+            verter_type_engine::semantic_query::composite::CompositeList::authored_shell(
+                Arc::from(vec![parameter_node, string_node].into_boxed_slice()),
+            ),
         ),
         file_scope(),
     );
@@ -31748,12 +31998,16 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
     // rebuild is an overload-ordered carrier and PRESERVES the origin
     // shell's File scope.
     let callable = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new().into_boxed_slice()),
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
+        params: Arc::from(
+            Vec::<verter_type_engine::semantic_query::FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: string_node,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_node),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            string_node,
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -31761,9 +32015,9 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
     });
     let intersection_node = graph.intern_node_with_scope(
         SemanticNodeData::Intersection(
-            crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
-                vec![callable, parameter_node].into_boxed_slice(),
-            )),
+            verter_type_engine::semantic_query::composite::CompositeList::authored_shell(
+                Arc::from(vec![callable, parameter_node].into_boxed_slice()),
+            ),
         ),
         file_scope(),
     );
@@ -31789,7 +32043,7 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
 /// advance), so suppression re-arms in every request that resurfaces it.
 #[test]
 fn incomplete_canonicalization_refuses_the_canonical_stamp_and_pays_the_re_close() {
-    use crate::semantic_query::FlowReturnResult;
+    use verter_type_engine::semantic_query::FlowReturnResult;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -31804,11 +32058,12 @@ fn incomplete_canonicalization_refuses_the_canonical_stamp_and_pays_the_re_close
         aliased = graph.intern_node(SemanticNodeData::Alias(aliased));
     }
     let string_node = primitive(&graph, PrimitiveKind::String);
-    let union = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        &graph,
-        &[aliased, string_node],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let union =
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+            &graph,
+            &[aliased, string_node],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        );
     assert!(union.evidence.incomplete, "fixture produces incompleteness");
     let data = graph.node_data(union.node);
     let Some(SemanticNodeData::Union(members)) = data.as_deref() else {
@@ -31816,7 +32071,7 @@ fn incomplete_canonicalization_refuses_the_canonical_stamp_and_pays_the_re_close
     };
     assert_eq!(
         members.origin_category(),
-        crate::semantic_query::composite::CompositeOriginCategory::CanonicalUnproven,
+        verter_type_engine::semantic_query::composite::CompositeOriginCategory::CanonicalUnproven,
         "an incomplete canonicalization is not proven canonical form — the \
          Canonical stamp (the O(1) skip witness) must be refused in favour \
          of the unproven fact"
@@ -31901,7 +32156,7 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
         .expect("the fixture file must have shallow state")
         .whole_hash;
     let placeholder_a = graph.intern_node(SemanticNodeData::Opaque(
-        crate::semantic_query::QueryError::DeclPlaceholder {
+        verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
             canonical_id: Arc::from("/w/ordered-preserve.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: Arc::from("A"),
@@ -31909,14 +32164,14 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
         },
     ));
     let base = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
             vec![placeholder_a, obj_b].into_boxed_slice(),
         )),
     ));
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     });
@@ -31935,7 +32190,7 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
     );
     assert_eq!(
         members.origin_category(),
-        crate::semantic_query::composite::CompositeOriginCategory::PreservingRebuild,
+        verter_type_engine::semantic_query::composite::CompositeOriginCategory::PreservingRebuild,
         "the preserved rebuild inherits the not-proven-re-decidable \
          disposition, never a canonical re-decide"
     );
@@ -31949,7 +32204,7 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
 /// regardless of the tag (the overload-ordered class).
 #[test]
 fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
-    use crate::semantic_query::composite::CompositeOriginCategory as C;
+    use verter_type_engine::semantic_query::composite::CompositeOriginCategory as C;
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -31959,12 +32214,16 @@ fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
     let number_node = primitive(&graph, PrimitiveKind::Number);
     let plain = [string_node, number_node];
     let callable = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new().into_boxed_slice()),
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
+        params: Arc::from(
+            Vec::<verter_type_engine::semantic_query::FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: string_node,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string_node),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            string_node,
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -32048,7 +32307,7 @@ fn composite_rebuild_re_decision_is_per_category_with_callable_fail_closed() {
 #[test]
 fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     let walk_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
+        .join("../verter_type_engine/src")
         .join("project_semantic_dispatch")
         .join("walk.rs");
     let source =
@@ -32161,14 +32420,14 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let foo = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Foo"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Foo"),
         param_index: 0,
         constraint: None,
         default: None,
         display_name: Arc::from("Foo"),
     });
     let bar = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("Bar"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Bar"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -32176,18 +32435,18 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     });
     let string_node = primitive(&graph, PrimitiveKind::String);
     let number_node = primitive(&graph, PrimitiveKind::Number);
-    let true_surface = crate::test_surface_view! {
+    let true_surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("x"),                value: string_node,
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("x"),                value: string_node,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -32199,19 +32458,19 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
         keyspace: None,
         has_index_signature: false,
     };
-    let false_surface = crate::test_surface_view! {
+    let false_surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("x"),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("x"),
                 value: number_node,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]
@@ -32239,14 +32498,16 @@ fn open_conditional_path_sub_dispatch_inherits_outer_terminal_mode() {
     let outer_mode = ProjectionMode::Expanded;
     let path: Arc<[PathSegment]> = Arc::from(
         vec![PathSegment::Member(
-            crate::semantic_query::PropertyKey::identifier("x"),
+            verter_type_engine::semantic_query::PropertyKey::identifier("x"),
         )]
         .into_boxed_slice(),
     );
     let result_id = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: conditional_node,
         path: Arc::clone(&path),
-        context: crate::semantic_query::ProjectionReductionContext::published(outer_mode),
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            outer_mode,
+        ),
     }) {
         QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
         other => panic!("expected ProjectPath Value, got {other:?}"),

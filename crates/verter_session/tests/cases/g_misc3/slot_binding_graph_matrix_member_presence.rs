@@ -86,7 +86,7 @@ fn slot_binding_graph_fact_tracer_carries_member_presence() {
         dep_signature_to_fact_signature_for_tests(&std::sync::Arc::from(
             Vec::<(
                 std::sync::Arc<str>,
-                verter_session::semantic_query::DepVersion,
+                verter_type_engine::semantic_query::DepVersion,
             )>::new()
             .into_boxed_slice(),
         ));

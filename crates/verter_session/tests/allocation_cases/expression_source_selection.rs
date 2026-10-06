@@ -6,10 +6,9 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::{
-    with_host_resolver_context_for_tests, ExpressionSourceSelection, IndexedInputs,
-};
+use verter_session::for_tests::with_host_resolver_context_for_tests;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::resolver_core::request_ports::{ExpressionSourceSelection, IndexedInputs};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 use super::{alloc_count, reset_alloc_counter};

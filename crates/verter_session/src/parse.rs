@@ -2607,7 +2607,7 @@ pub(crate) fn compile_template_data(
         )
     });
     if refused.is_some() {
-        crate::request_context::mark_request_result_partial();
+        verter_type_engine::request_context::mark_request_result_partial();
     }
     facts
 }

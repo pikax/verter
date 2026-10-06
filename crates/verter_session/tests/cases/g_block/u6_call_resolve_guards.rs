@@ -23,15 +23,15 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::query_key_spec::semantic_query_key_specs;
+use verter_type_engine::semantic_query::{
     ArgumentLiteralMode, CallArgKey, CallKind, CanonicalTypeSubstitution, FlowNarrowingKey,
     PrimitiveKind, ProgramPointId, QueryError, QueryResult, ResolveCallContext, ResolveCallKey,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryKeyTag, SemanticQueryValueTag,
     SignatureCandidateOrigin, SignatureRef, SignatureReturnCarrier, TypeParamDecl,
 };
-use verter_session::{HostConfig, VerterHost};
-use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -393,13 +393,13 @@ fn resolve_call_key_distinct_from_flow_narrowing_at_same_point() {
     let narrowing = SemanticQueryKey::FlowNarrowingAt {
         point: point("a.ts", 0),
         flow: FlowNarrowingKey::empty(),
-        context: verter_session::semantic_query::ProgramAnalysisContext {
+        context: verter_type_engine::semantic_query::ProgramAnalysisContext {
             parse_env_hash: hash16(0),
             resolve_env_hash: hash16(0),
             type_env_hash: hash16(0),
             lib_env_hash: hash16(0),
             project_identity: 0,
-            substitution: verter_session::semantic_query::SubstitutionCanonicalHash::empty(),
+            substitution: verter_type_engine::semantic_query::SubstitutionCanonicalHash::empty(),
         },
     };
     assert_distinct_identity(&call, &narrowing);
@@ -605,6 +605,6 @@ fn signature_ref_is_occurrence_aware() {
 //   `flow_ir_expr_taxonomy_is_exhaustive`).
 // - The candidate-session lifecycle and the mixed `FlowReturn | ResolveCall`
 //   return equation (both crate-private):
-//   `crates/verter_session/src/project_semantic_dispatch/dispatch_txn_tests.rs`
+//   `crates/verter_type_engine/src/project_semantic_dispatch/dispatch_txn_tests.rs`
 //   (`candidate_session_lifecycle_states_are_collecting_staged_committed_abandoned`,
 //   `return_equation_identity_spans_flow_return_and_resolve_call`).

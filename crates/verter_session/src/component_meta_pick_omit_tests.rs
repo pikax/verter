@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::CaptureToken;
 use crate::meta::MetaProject;
 use crate::meta_resolve::PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::capture_token::CaptureToken;
 
 /// Build a hermetic project (host wrapped in `MetaProject`) backed
 /// by a [`MemoryWorkspace`] pre-populated with the supplied files.
@@ -1600,14 +1600,14 @@ const m12 = defineModel<Cell<T, 'm12'>>('m12')
 #[test]
 fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
     use crate::output_sinks::{OutputProjector, TestOutputCap};
-    use crate::project_semantic_dispatch::output_materialization::{
-        wrap_degraded_output, wrap_output_type_expr,
-    };
-    use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{DepSignature, QueryError};
     use crate::VerterHost;
     use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+    use verter_type_engine::project_semantic_dispatch::output_materialization::{
+        wrap_degraded_output, wrap_output_type_expr,
+    };
+    use verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{DepSignature, QueryError};
     use verter_type_expr::{TypeExpr, UnknownValue};
 
     let host = VerterHost::new_standalone(Default::default());
@@ -1651,7 +1651,9 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
         "a typed BudgetExceeded must mark the payload partial"
     );
     assert!(
-        crate::cache_runtime::refuse_result_cache_admission_if_partial(carrier.result_is_partial()),
+        verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
+            carrier.result_is_partial()
+        ),
         "… and the admission gate refuses it"
     );
 
@@ -1670,7 +1672,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
         "an identically-spelled genuine UnknownValue is complete, not classified"
     );
     assert!(
-        !crate::cache_runtime::refuse_result_cache_admission_if_partial(
+        !verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
             carrier.result_is_partial()
         ),
         "… and the admission gate admits it"

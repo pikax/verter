@@ -97,7 +97,8 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_0,
@@ -176,7 +177,8 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_1 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_1,
@@ -248,7 +250,8 @@ fn define_slots_normalizer_publishes_union_of_function_slots() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_2 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_2,
@@ -322,7 +325,8 @@ fn define_slots_normalizer_drops_union_bindings_when_an_arm_has_no_param() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots must resolve a surface");
-    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_3,
@@ -395,7 +399,8 @@ fn define_slots_normalizer_extracts_pick_bindings() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a Pick first-param resolves a surface");
-    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_4 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_4,
@@ -485,7 +490,8 @@ fn define_slots_imported_inline_pick_publishes_symbolic_binding() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with an imported-inline Pick resolves a surface");
-    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_5 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_5,
@@ -554,7 +560,8 @@ fn define_slots_named_alias_pick_publishes_symbolic_binding() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a named-alias Pick first-param resolves a surface");
-    let fixture_dispatch_6 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_6 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_6,
@@ -630,7 +637,8 @@ fn define_slots_userland_pick_shadow_publishes_concrete_not_symbolic() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a userland-Pick first-param resolves a surface");
-    let fixture_dispatch_7 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_7 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_7,
@@ -687,7 +695,8 @@ fn define_slots_structural_source_pick_publishes_concrete_not_symbolic() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots with a structural-source Pick resolves a surface");
-    let fixture_dispatch_8 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_8 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_8,
@@ -748,7 +757,8 @@ fn define_slots_nullable_slot_is_intentionally_dropped() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
-    let fixture_dispatch_9 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_9 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_9,
@@ -802,7 +812,7 @@ fn define_slots_two_param_callback_binds_first_param_only() {
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
     let fixture_dispatch_10 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_10,
@@ -870,7 +880,7 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
     let fixture_dispatch_11 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_11,
@@ -891,11 +901,13 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
     // The FOLD is a node-domain fact: realize the slot member's RETURN NODE
     // through the SAME `CallableNodeView` route the DTO sink uses and mint it
     // once through the test output cap.
-    use crate::project_semantic_dispatch::callable_view::{ArmCombineNode, CallableNodeView};
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::project_semantic_dispatch::callable_view::{
+        ArmCombineNode, CallableNodeView,
+    };
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let dispatch = ProjectSemanticDispatch::new(&*host);
-    let context = crate::semantic_query::ProjectionReductionContext::published(
-        crate::semantic_query::ProjectionMode::Navigate,
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        verter_type_engine::semantic_query::ProjectionMode::Navigate,
     );
     let member = surface
         .surface

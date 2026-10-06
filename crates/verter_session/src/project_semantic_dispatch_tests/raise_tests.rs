@@ -1,10 +1,10 @@
 use crate::output_sinks::DispatchOutputTestExt;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::IndexKey;
-use crate::semantic_query::PrimitiveKind as SemanticPrimitiveKind;
-use crate::semantic_query::SemanticNodeData;
 use crate::VerterHost;
 use std::sync::Arc;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::IndexKey;
+use verter_type_engine::semantic_query::PrimitiveKind as SemanticPrimitiveKind;
+use verter_type_engine::semantic_query::SemanticNodeData;
 use verter_type_expr::TypeExpr;
 
 #[test]
@@ -15,7 +15,8 @@ fn raise_node_to_type_expr_preserves_number_index_key_values() {
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
         index: IndexKey::Number(
-            crate::semantic_query::CanonicalIndexInt::from_canonical_i64(7).expect("canonical"),
+            verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(7)
+                .expect("canonical"),
         ),
     });
 
@@ -42,10 +43,10 @@ fn raise_all_vacuous_intersection_falls_back_to_empty_object() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let empty_a = graph.intern_node(SemanticNodeData::Object(
-        crate::project_semantic_dispatch::walk::empty_surface_view(),
+        verter_type_engine::project_semantic_dispatch::walk::empty_surface_view(),
     ));
     let intersection = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![empty_a, empty_a].into_boxed_slice(),
         )),
     ));
@@ -79,11 +80,11 @@ fn raise_all_vacuous_intersection_falls_back_to_empty_object() {
 /// — so the fact cannot be the whole-surface miss check.
 #[test]
 fn node_root_sentinel_is_root_only_not_whole_surface_miss() {
-    use crate::project_semantic_dispatch::raise::{
+    use verter_type_engine::project_semantic_dispatch::raise::{
         node_raised_shape_facts_with_dispatch, node_root_is_unmaterialized_sentinel_with_dispatch,
     };
-    use crate::project_semantic_dispatch::raise_sentinel::type_expr_root_is_unmaterialized_sentinel;
-    use crate::semantic_query::QueryError;
+    use verter_type_engine::project_semantic_dispatch::raise_sentinel::type_expr_root_is_unmaterialized_sentinel;
+    use verter_type_engine::semantic_query::QueryError;
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -152,12 +153,12 @@ fn node_root_sentinel_is_root_only_not_whole_surface_miss() {
 /// root is the Array) — proving the two facts answer different questions.
 #[test]
 fn node_contains_semantic_miss_is_whole_tree_and_equals_type_expr_oracle() {
-    use crate::project_semantic_dispatch::raise::{
+    use verter_type_engine::project_semantic_dispatch::raise::{
         node_contains_semantic_miss_with_dispatch,
         node_root_is_unmaterialized_sentinel_with_dispatch,
     };
-    use crate::project_semantic_dispatch::raise_sentinel::type_expr_contains_semantic_miss;
-    use crate::semantic_query::QueryError;
+    use verter_type_engine::project_semantic_dispatch::raise_sentinel::type_expr_contains_semantic_miss;
+    use verter_type_engine::semantic_query::QueryError;
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -243,7 +244,7 @@ fn raise_node_to_type_expr_round_trips_primitive() {
 /// collapsed it would drop the operator and FAIL this test.
 #[test]
 fn raise_and_reduce_preserves_open_keyof_over_type_parameter() {
-    use crate::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -265,7 +266,9 @@ fn raise_and_reduce_preserves_open_keyof_over_type_parameter() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
         keyof,
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     );
 
     assert!(
@@ -281,7 +284,7 @@ fn raise_and_reduce_preserves_open_keyof_over_type_parameter() {
 /// without that guard would loop on the cycle and FAIL to terminate.
 #[test]
 fn raise_and_reduce_terminates_on_alias_cycle_via_visited_set() {
-    use crate::semantic_query::ProjectionMode;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -291,7 +294,9 @@ fn raise_and_reduce_terminates_on_alias_cycle_via_visited_set() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
         alias,
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     );
 
     assert!(
@@ -307,21 +312,23 @@ fn raise_and_reduce_terminates_on_alias_cycle_via_visited_set() {
 /// literal operator.
 #[test]
 fn raise_and_reduce_template_literal_becomes_unknown_hard_stop() {
-    use crate::semantic_query::ProjectionMode;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
         quasis: Arc::from(vec![Arc::from("prefix-")].into_boxed_slice()),
         expressions: Arc::from(
-            Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+            Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
         ),
     });
 
     let dispatch = ProjectSemanticDispatch::new(&host);
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
         template,
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Expanded,
+        ),
     );
 
     match &materialized {
@@ -342,7 +349,7 @@ fn raise_and_reduce_template_literal_becomes_unknown_hard_stop() {
 /// FAIL this test.
 #[test]
 fn raise_and_reduce_navigate_mode_decl_ref_raises_to_bare_ref() {
-    use crate::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
+    use verter_type_engine::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -359,7 +366,9 @@ fn raise_and_reduce_navigate_mode_decl_ref_raises_to_bare_ref() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let materialized = dispatch.materialize_reduced_output_type_expr_for_test(
         decl_ref,
-        crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            ProjectionMode::Navigate,
+        ),
     );
 
     match &materialized {
@@ -429,7 +438,9 @@ fn raise_node_to_type_expr_round_trips_indexed_access_string_key() {
 /// would return `true` for the closed cases too and fail this test.
 #[test]
 fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
-    use crate::semantic_query::{DeclIdentity, HashValue, SemanticNodeData, TupleElement};
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, HashValue, SemanticNodeData, TupleElement,
+    };
 
     let host = VerterHost::new_standalone(Default::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -463,7 +474,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
         args: Arc::from(vec![tparam].into_boxed_slice()),
     });
     assert!(
-        crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[props_base_open, keys],
@@ -497,7 +508,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
         args: Arc::from(vec![concrete_array].into_boxed_slice()),
     });
     assert!(
-        crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[props_base_concrete_unresolved, keys],
@@ -520,7 +531,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
         args: Arc::from(Vec::new().into_boxed_slice()),
     });
     assert!(
-        crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[bare_alias_unresolved, keys],
@@ -530,16 +541,18 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
     );
 
     // CLOSED: a finite object surface domain.
-    let closed_object = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(Vec::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let closed_object = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
     assert!(
-        !crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[closed_object, keys],
@@ -556,7 +569,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
         decl_name: Arc::from("Lookup"),
     };
     assert!(
-        !crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &not_a_utility,
             &[props_base_open, keys],
@@ -579,7 +592,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
         readonly: false,
     });
     assert!(
-        !crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[tuple, keys]
@@ -596,7 +609,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
 /// judge it CLOSED and materialise an undecidable key set.
 #[test]
 fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, IndexKey, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
         SemanticNodeData,
     };
@@ -614,14 +627,16 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
     let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
 
     // CONCRETE object, OPEN type-param key.
-    let concrete_object = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(Vec::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let concrete_object = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
     let open_key = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic("K"),
         param_index: 0,
@@ -636,7 +651,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         index: IndexKey::Computed(open_key),
     });
     assert!(
-        crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[indexed_open_key, keys],
@@ -651,7 +666,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         index: IndexKey::String(Arc::from("a")),
     });
     assert!(
-        !crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[indexed_closed_key, keys],
@@ -684,7 +699,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         },
     });
     assert!(
-        crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[mapped_open_keyspace, keys],
@@ -711,7 +726,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
 /// (under-fire).
 #[test]
 fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, MapperKey, MapperKind, OptionalityMod, ReadonlyMod,
         SemanticNodeData, SemanticNodeId,
     };
@@ -728,14 +743,16 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
     };
     let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
 
-    let concrete_object = graph.intern_node(SemanticNodeData::Object(crate::test_surface_view! {
-        members: Arc::from(Vec::new().into_boxed_slice()),
-        call_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        index_signatures: Arc::from(Vec::new().into_boxed_slice()),
-        keyspace: None,
-        has_index_signature: false,
-    }));
+    let concrete_object = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(Vec::new().into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
     let concrete_key =
         graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
     // The mapper's OWN binder `K` (bound) vs the open OUTER `T`.
@@ -781,7 +798,7 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
     // OPEN: `` as `on${T}` `` — the remapped key set depends on the
     // open OUTER interpolant.
     assert!(
-        crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[make_mapped(template(outer_t)), keys],
@@ -793,7 +810,7 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
     // CLOSED: `` as `on${K}` `` — interpolates ONLY the mapper's own
     // BOUND binder over a finite key space (a K-only transform).
     assert!(
-        !crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[make_mapped(template(binder_k)), keys],
@@ -809,7 +826,7 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
         expressions: Arc::from(Vec::new().into_boxed_slice()),
     });
     assert!(
-        !crate::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
+        !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
             &dispatch,
             &builtin_pick,
             &[make_mapped(closed_remap), keys],

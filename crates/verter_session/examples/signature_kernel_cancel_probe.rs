@@ -56,10 +56,10 @@ use std::sync::{Arc, Barrier, OnceLock};
 use std::time::{Duration, Instant};
 
 use verter_execution::cancellation::CancellationToken;
-use verter_session::cancel_trace::{self, CancelTrace};
 use verter_session::host_flow_return_audit::FlowReturnError;
-use verter_session::semantic_query::ReturnProjectionDemand;
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::cancel_trace::{self, CancelTrace};
+use verter_type_engine::semantic_query::ReturnProjectionDemand;
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity, TopLevelOwnerId};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 

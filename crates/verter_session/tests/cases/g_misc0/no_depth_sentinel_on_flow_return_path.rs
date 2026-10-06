@@ -1,7 +1,7 @@
 //! ARCH GUARD — no depth sentinel on the `FlowReturn` evaluation path.
 //!
 //! The demand-sliced `FlowReturn` producer
-//! (`crates/verter_session/src/project_semantic_dispatch/flow_return.rs`)
+//! (`crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs`)
 //! evaluates a demanded function through the slice-gated owned content
 //! (`crates/verter_semantic_source/src/flow_slice_content.rs`). The evaluation
 //! walk — region/statement recursion, the contributor join, the
@@ -32,7 +32,7 @@ use std::path::Path;
 
 /// The producer files the sentinel is forbidden in.
 const PRODUCER_FILES: &[&str] = &[
-    "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+    "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs",
     "crates/verter_semantic_source/src/flow_slice_content.rs",
 ];
 

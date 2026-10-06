@@ -8,11 +8,13 @@ use crate::project_type_store::IndexedReady;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
 use crate::resolver_core::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-use crate::resolver_core::resolver_context::{MaterializeScopeObservation, ResolverContext};
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_store::HostStoreView;
 use crate::session_view::SessionView;
 use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::resolver_core::resolver_context::{
+    MaterializeScopeObservation, ResolverContext,
+};
 
 pub(crate) struct SessionRequestLifecycle<'a> {
     inner: &'a crate::VerterHost,
@@ -234,7 +236,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
         canonical: &str,
     ) -> Option<MaterializeScopeObservation> {
         if let Some(overlay_hash) = self.view.overlay_content_hash_for(canonical) {
-            let _ = crate::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
+            let _ = verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
                 ctx, canonical,
             );
             let identity = self.inner.overlay_artifact_identity(canonical);
@@ -244,7 +246,7 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
                     .indexed,
             );
             let syntactic_export_set =
-                crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+                verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                     ctx,
                     canonical,
                     overlay_hash,

@@ -7,7 +7,7 @@ use verter_session_query::facts::{
 };
 
 #[allow(unused_imports)]
-use crate::fact_signature_helpers::*;
+use verter_type_engine::fact_signature_helpers::*;
 
 mod file_source_env_observation_tests {
     use super::*;
@@ -130,7 +130,7 @@ mod tracer_cacheability_tests {
         // The raw 3-tuple entry: overflow lands in `finalise`, and the
         // non-cacheable-read bit stays FALSE (no fenced serve / lease miss ran).
         let (value, finalise) = install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
             || 7u32,
         );
         let non_cacheable_read_observed = matches!(&finalise, FactReadSetFinalise::NonCacheable(_));
@@ -147,7 +147,7 @@ mod tracer_cacheability_tests {
 
         // The cacheability entry folds the overflow in — one verdict, two conditions.
         let (value, non_cacheable) = install_fact_tracer_cacheability(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
             || 7u32,
         );
         assert_eq!(value, 7, "the traced value flows to the caller verbatim");
@@ -171,7 +171,7 @@ mod tracer_cacheability_tests {
     fn cacheability_verdict_is_false_for_an_ordinary_compute() {
         let host = VerterHost::new_standalone(HostConfig::default());
         let (value, non_cacheable) = install_fact_tracer_cacheability(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
             || 7u32,
         );
         assert_eq!(value, 7);
@@ -214,13 +214,15 @@ mod tracer_cacheability_tests {
         // finalised set) with TWO nested cacheability scopes inside it — the shape
         // the producer rewiring creates.
         let (_v, finalise) = install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
             || {
                 let (inner, inner_non_cacheable) = install_fact_tracer_cacheability(
-                    &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+                    &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                        &host,
+                    ),
                     || {
                         let (deepest, deepest_non_cacheable) = install_fact_tracer_cacheability(
-                            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+                            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
                             || 1u32,
                         );
                         assert!(

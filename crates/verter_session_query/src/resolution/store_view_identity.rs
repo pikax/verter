@@ -31,7 +31,7 @@ pub struct StoreViewProjectIdentity(pub Hash16);
 /// shapes differ. Request-completion identity lives on the fact-signature
 /// population rail, not here.
 ///
-/// Named distinctly from `verter_session::cache_runtime::world_snapshot::
+/// Named distinctly from `verter_type_engine::cache_runtime::world_snapshot::
 /// OverlayIdentity` (an unrelated type); `verter_session::resolver_store`
 /// re-exports this as `OverlayIdentity` within its own module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -2,9 +2,7 @@
 //! crate-private. External consumers can carry an operand but cannot forge or
 //! evaluate one.
 
-use verter_session::semantic_query::operand::{
-    OperandLexicalScope, OperandSplitEnv, SemanticOperand, SemanticOperandForceRequest,
-};
+use verter_type_engine::semantic_query::operand::{OperandLexicalScope, OperandSplitEnv, SemanticOperand, SemanticOperandForceRequest};
 
 fn main() {
     let _ = OperandLexicalScope::for_locator(todo!());
@@ -14,7 +12,7 @@ fn main() {
     let _ = SemanticOperandForceRequest::projecting(todo!(), todo!());
     let _ = SemanticOperandForceRequest::key_domain(todo!());
 
-    use verter_session::project_semantic_dispatch::semantic_operand as _;
+    use verter_type_engine::project_semantic_dispatch::semantic_operand as _;
 
     let operand: SemanticOperand = todo!();
     let _ = operand;
@@ -25,7 +23,7 @@ fn main() {
     // the type at all is what must fail: the owning module is
     // `pub(crate)`, so no external crate can reach the authority methods
     // regardless of argument shape.
-    let dispatch: verter_session::project_semantic_dispatch::ProjectSemanticDispatch<_> = todo!();
+    let dispatch: verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<_> = todo!();
     let _ = dispatch.force_semantic_operand(todo!(), todo!());
     let _ = dispatch.mint_authored_semantic_operand(todo!(), todo!());
     let _ = dispatch.mint_node_semantic_operand(todo!());

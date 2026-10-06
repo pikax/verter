@@ -1,7 +1,7 @@
 //! `SchedulerAudit::queue_dwell_ms` discriminating coverage.
 //!
 //! Drives 16 concurrent submissions through the real scheduler with
-//! a session-side [`verter_session::request_context::RequestContext`]
+//! a session-side [`verter_type_engine::request_context::RequestContext`]
 //! attached to each. The rendezvous lives at the scheduler DISPATCH
 //! site, so the assertion reflects real SCHEDULER-PRIORITY-QUEUE dwell
 //! — not pool-channel time:
@@ -51,7 +51,7 @@ use verter_scheduler::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot}
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
 use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
 use verter_scheduler::stage::{Priority, TargetStage};
-use verter_session::request_context::RequestContext;
+use verter_type_engine::request_context::RequestContext;
 
 const REQUESTS: usize = 16;
 /// Both scheduler pools are sized to this in the test, so at most this

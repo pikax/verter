@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use verter_execution::request_context::RequestContextLike;
-use verter_session::request_context::{
+use verter_type_engine::request_context::{
     current_request_budget, RequestContext, RequestContextGuard,
 };
 

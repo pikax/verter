@@ -13,19 +13,19 @@ use std::sync::Arc;
 
 use verter_type_expr::TypeExpr;
 
-use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
-use crate::structural_carrier_producer::{
+use crate::types::HostConfig;
+use crate::{FileLanguage, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
+use verter_type_engine::structural_carrier_producer::{
     build_script_setup_seed_frames_for_tests, lower_type_expr_structural_for_tests, BinderScope,
     StructuralLowerContext,
 };
-use crate::types::HostConfig;
-use crate::{FileLanguage, UpsertRequest, VerterHost};
 
 /// The binder seed for an indexed SFC: its `<script setup generic="…">` clause
 /// re-sourced from the route-free local data, then built into seed frames.
 fn seed_frames_for_indexed(
     indexed: &crate::project_type_store::IndexedReady,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     scope: &NodeScopeId,
 ) -> Vec<BinderScope> {
     let params = crate::host_resolve::sfc_script_setup_type_params(

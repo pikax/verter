@@ -12,11 +12,11 @@
 //! but for the `| null` the `return null` adds under `strictNullChecks`.
 
 use super::flow_return_class_tests::{assert_probes, flow_key, with_dispatch};
-use crate::semantic_query::{
+use verter_session_query::flow::policy::FlowGap;
+use verter_type_engine::semantic_query::{
     FlowReturnDegradation, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     SemanticQueryValue,
 };
-use verter_session_query::flow::policy::FlowGap;
 use verter_type_expr::facts::FunctionPartIdentity;
 
 const FIXTURE: &str = "\
@@ -141,7 +141,7 @@ fn an_equality_the_relation_cannot_decide_keeps_the_guard_gap() {
     assert_probes(FIXTURE, &[("eqLit", "\"a\" | null")]);
     with_dispatch(FIXTURE, |dispatch| {
         let key = flow_key(dispatch, "eqFnObj", FunctionPartIdentity::DeclarationBody);
-        let crate::semantic_query::QueryResult::Value(SemanticQueryOutput {
+        let verter_type_engine::semantic_query::QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::FlowReturn(result),
             ..
         }) = dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
@@ -189,8 +189,10 @@ fn comparability_reads_required_properties_and_array_elements() {
                 COMPARABLE,
                 &format!("[{a}, {b}]"),
                 |dispatch, node| {
-                    let Some(crate::semantic_query::SemanticNodeData::Tuple { elements, .. }) =
-                        dispatch.graph().node_data(node).as_deref().cloned()
+                    let Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                        elements,
+                        ..
+                    }) = dispatch.graph().node_data(node).as_deref().cloned()
                     else {
                         panic!("`[{a}, {b}]` settles to a tuple");
                     };

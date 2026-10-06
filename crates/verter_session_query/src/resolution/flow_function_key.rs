@@ -1,7 +1,7 @@
 //! `verter_resolution::ResolverObservation::function_body_skeleton`'s
 //! query key.
 //!
-//! Dependency-neutral, narrowed mirror of `verter_session::cache_runtime::
+//! Dependency-neutral, narrowed mirror of `verter_type_engine::cache_runtime::
 //! flow_slice_node::FlowSliceFunctionKey`: same content-pinned function
 //! identity (canonical, five-axis function program identity,
 //! `flow_body_stable_hash`, `flow_body_exact_hash`, `parse_env_hash`), but

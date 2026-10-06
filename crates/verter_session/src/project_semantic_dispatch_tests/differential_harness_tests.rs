@@ -23,12 +23,12 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::types::HostConfig;
+use crate::VerterHost;
+use verter_type_engine::semantic_query::{
     LiteralValue, ProjectionMode, ProjectionReductionContext, ReturnProjectionDemand,
     SemanticNodeData, SemanticNodeId, SignatureKind,
 };
-use crate::types::HostConfig;
-use crate::VerterHost;
 
 /// One project of the matrix: its root and its `compilerOptions`.
 #[derive(Clone, Copy)]
@@ -316,7 +316,7 @@ impl<'a> Matrix<'a> {
                 let host_ctx =
                     crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-                let key = crate::semantic_query::FlowReturnKey {
+                let key = verter_type_engine::semantic_query::FlowReturnKey {
                     function: dispatch.flow_function_slot_for(
                         Arc::from(canonical.as_str()),
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -327,11 +327,11 @@ impl<'a> Matrix<'a> {
                     normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
                     context: dispatch.flow_return_context_for(&canonical),
                     demand: ReturnProjectionDemand::whole_return(),
-                    input: crate::semantic_query::FlowInputContext::empty(),
+                    input: verter_type_engine::semantic_query::FlowInputContext::empty(),
                     result_contract: super::flow_solve::flow_return_result_contract_id(),
                 };
                 let read = dispatch.execute_read(
-                    crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+                    verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
                 );
                 if read.result_is_partial {
                     unproven.push(format!(
@@ -706,7 +706,7 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
         .collect();
     // The probe's type is read as a consumer reads it: under a request for
     // the probe file, so every judgement takes that project's options.
-    let _request = crate::request_context::install_test_request_for(canonical);
+    let _request = verter_type_engine::request_context::install_test_request_for(canonical);
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
@@ -752,10 +752,10 @@ fn print(
             ProjectionReductionContext::published(ProjectionMode::Expanded),
         ) {
             let object = graph.intern_node(SemanticNodeData::Object(
-                crate::semantic_query::SurfaceView::from_entries(
+                verter_type_engine::semantic_query::SurfaceView::from_entries(
                     members
                         .into_iter()
-                        .map(crate::semantic_query::SurfaceEntry::Member)
+                        .map(verter_type_engine::semantic_query::SurfaceEntry::Member)
                         .collect(),
                     None,
                     false,
@@ -767,7 +767,7 @@ fn print(
     let at = |node: SemanticNodeId| print(dispatch, node, depth + 1);
     match data.as_ref() {
         SemanticNodeData::Primitive(kind) => match kind {
-            crate::semantic_query::PrimitiveKind::BigInt => "bigint".to_owned(),
+            verter_type_engine::semantic_query::PrimitiveKind::BigInt => "bigint".to_owned(),
             other => format!("{other:?}").to_ascii_lowercase(),
         },
         SemanticNodeData::Literal(LiteralValue::String(value)) => checker_string_literal(value),
@@ -777,13 +777,13 @@ fn print(
         SemanticNodeData::EnumLiteral(literal) => literal.printed_name(),
         SemanticNodeData::Alias(inner) => at(*inner),
         SemanticNodeData::Union(members) => {
-            crate::semantic_query::printed_union_arms(graph, members)
+            verter_type_engine::semantic_query::printed_union_arms(graph, members)
                 .into_iter()
                 .map(|arm| match arm {
-                    crate::semantic_query::PrintedUnionArm::Node(member) => {
+                    verter_type_engine::semantic_query::PrintedUnionArm::Node(member) => {
                         operand(dispatch, member, depth, true)
                     }
-                    crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                    verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl) => {
                         decl.decl_name.to_string()
                     }
                 })
@@ -1009,7 +1009,9 @@ fn operand(
         // A union the checker prints as one enum name needs none.
         Some(SemanticNodeData::Union(members)) => {
             !in_union
-                && crate::semantic_query::printed_union_arms(dispatch.graph(), members).len() > 1
+                && verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members)
+                    .len()
+                    > 1
         }
         Some(SemanticNodeData::Intersection(_)) => !in_union,
         Some(SemanticNodeData::KeyOf { .. }) => !in_union,
@@ -1106,8 +1108,8 @@ fn signature_text(
     let result = match predicate {
         Some(predicate) => {
             let subject = match predicate.subject {
-                crate::semantic_query::PredicateSubject::This => "this".to_owned(),
-                crate::semantic_query::PredicateSubject::Parameter(_) => predicate
+                verter_type_engine::semantic_query::PredicateSubject::This => "this".to_owned(),
+                verter_type_engine::semantic_query::PredicateSubject::Parameter(_) => predicate
                     .subject_parameter(params)
                     .and_then(|param| param.name.as_deref())
                     .unwrap_or("?")

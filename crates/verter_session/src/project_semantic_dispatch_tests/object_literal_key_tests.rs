@@ -16,8 +16,8 @@
 //! this lane answers for any declaration).
 
 use super::checker_probe_lane_tests::{mismatches, with_probe};
-use crate::semantic_query::SemanticNodeData;
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+use verter_type_engine::semantic_query::SemanticNodeData;
 
 const FIXTURE: &str = "\
 declare const s: string;

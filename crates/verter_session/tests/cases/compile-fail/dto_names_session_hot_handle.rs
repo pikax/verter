@@ -5,7 +5,7 @@
 //! compile. This is the structural proof that a session-only handle cannot leak
 //! into a keyable/lower-crate DTO's identity.
 
-use verter_session::semantic_query::HotTypeRef;
+use verter_type_engine::semantic_query::HotTypeRef;
 
 #[derive(PartialEq, Eq, Hash)]
 struct Dto {

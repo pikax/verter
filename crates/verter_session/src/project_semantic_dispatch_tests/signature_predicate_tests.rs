@@ -11,13 +11,13 @@ use std::sync::Arc;
 
 use super::call_resolve_tests::occurrence;
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     FunctionParam, LiteralValue, PredicateSubject, PrimitiveKind, ProjectionMode,
     ProjectionReductionContext, QueryOutcome, Ready, SemanticContextId, SemanticNodeData,
     SemanticNodeId, SignatureKind, SignaturePredicate, SignatureReturnCarrier, TypeParamDecl,
     CONTEXT_FREE_EVALUATION,
 };
-use crate::signature_kernel::{
+use verter_type_engine::signature_kernel::{
     BorrowedSet, CallSubstitution, PredicateEffect, ResultDemand, SemanticReadView,
     SignatureCandidate, SignatureStore,
 };
@@ -62,7 +62,7 @@ fn with_probe<R>(
     };
     let carrier = host.get_flow_return_type_with_audit(
         &identity,
-        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
     );
     let result = carrier
         .as_result()
@@ -142,7 +142,7 @@ fn only_call_signature(
 
 fn candidates(
     store: &SignatureStore,
-    set: crate::signature_kernel::SignatureSetRef,
+    set: verter_type_engine::signature_kernel::SignatureSetRef,
 ) -> Vec<SignatureCandidate> {
     match SemanticReadView::pin(store)
         .read_set(set)
@@ -158,7 +158,7 @@ fn candidates(
 fn read_effects(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     candidate: SignatureCandidate,
-    call: crate::signature_kernel::CallSubstitutionId,
+    call: verter_type_engine::signature_kernel::CallSubstitutionId,
 ) -> Option<PredicateEffect> {
     let store = dispatch.graph().signature_store();
     match dispatch.read_signature_result(
@@ -179,7 +179,7 @@ fn read_effects(
 fn identity_call(
     store: &SignatureStore,
     candidate: SignatureCandidate,
-) -> crate::signature_kernel::CallSubstitutionId {
+) -> verter_type_engine::signature_kernel::CallSubstitutionId {
     let space = SemanticReadView::pin(store)
         .descriptor(candidate.signature)
         .expect("live descriptor")
@@ -254,10 +254,10 @@ fn an_instantiated_generic_predicate_narrows_to_its_argument() {
             "the effect target is the instantiated `string`"
         );
 
-        let shown = crate::semantic_query::display::display(
+        let shown = verter_type_engine::semantic_query::display::display(
             graph,
-            &crate::semantic_query::SemanticQueryValue::TypeNode(signature),
-            crate::semantic_query::demand::DisplayNeeds::empty(),
+            &verter_type_engine::semantic_query::SemanticQueryValue::TypeNode(signature),
+            verter_type_engine::semantic_query::demand::DisplayNeeds::empty(),
         );
         assert_eq!(shown.to_string(), "(x: unknown) => x is string");
     });
@@ -284,7 +284,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         prim(PrimitiveKind::Void),
     );
     let t = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: crate::semantic_query::DeclIdentity::synthetic("isT"),
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("isT"),
         param_index: 0,
         constraint: None,
         default: None,
@@ -351,7 +351,9 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                crate::semantic_query::CanonicalTypeSubstitution::new(vec![(token, number)]),
+                verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
+                    token, number,
+                )]),
             ),
             None,
         )
@@ -594,17 +596,17 @@ fn predicates_participate_in_identity_ordering_and_display() {
         ),
     ];
     for (index, (node, printed)) in cases.iter().enumerate() {
-        let shown = crate::semantic_query::display::display(
+        let shown = verter_type_engine::semantic_query::display::display(
             graph,
-            &crate::semantic_query::SemanticQueryValue::TypeNode(*node),
-            crate::semantic_query::demand::DisplayNeeds::empty(),
+            &verter_type_engine::semantic_query::SemanticQueryValue::TypeNode(*node),
+            verter_type_engine::semantic_query::demand::DisplayNeeds::empty(),
         );
         assert_eq!(shown.to_string(), *printed);
         for (other, _) in &cases[index + 1..] {
             assert_ne!(node, other, "`{printed}` interns apart");
             assert_ne!(
-                crate::semantic_query::stable_key::stable_key_for_node(graph, *node),
-                crate::semantic_query::stable_key::stable_key_for_node(graph, *other),
+                verter_type_engine::semantic_query::stable_key::stable_key_for_node(graph, *node),
+                verter_type_engine::semantic_query::stable_key::stable_key_for_node(graph, *other),
                 "`{printed}` keys apart under VerterStableV1"
             );
         }
@@ -697,10 +699,10 @@ fn shown(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> String {
-    crate::semantic_query::display::display(
+    verter_type_engine::semantic_query::display::display(
         dispatch.graph(),
-        &crate::semantic_query::SemanticQueryValue::TypeNode(node),
-        crate::semantic_query::demand::DisplayNeeds::empty(),
+        &verter_type_engine::semantic_query::SemanticQueryValue::TypeNode(node),
+        verter_type_engine::semantic_query::demand::DisplayNeeds::empty(),
     )
     .to_string()
 }
@@ -889,7 +891,7 @@ export function multi(x: unknown) { if (x) return typeof x === \"string\"; retur
                 let template = view.template(descriptor.template).expect("live template");
                 matches!(
                     view.recipe(template.result_recipe).expect("live recipe"),
-                    crate::signature_kernel::SignatureResultRecipe::Body { .. }
+                    verter_type_engine::signature_kernel::SignatureResultRecipe::Body { .. }
                 )
             };
             assert!(is_body, "`{probe}` publishes a body recipe");

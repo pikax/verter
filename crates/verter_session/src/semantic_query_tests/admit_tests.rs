@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::admit::{admit_decision, Admission};
-use crate::semantic_query::{BrokenInputClass, ResultTaint};
 use verter_session_query::facts::fact_cache::{
     FactVersionRef, ReadSetSignature, ResolveImportsFactRef,
 };
 use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, SymbolSpace};
+use verter_type_engine::semantic_query::admit::{admit_decision, Admission};
+use verter_type_engine::semantic_query::{BrokenInputClass, ResultTaint};
 
 fn sig_from(facts: Vec<FactVersionRef>) -> ReadSetSignature {
     ReadSetSignature::new(Arc::from(facts.into_boxed_slice()))

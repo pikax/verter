@@ -247,7 +247,7 @@ defineProps<{ greeting: string }>()
 // - `cancellation_does_not_poison_cache`: the scheduler's
 //   cancellation primitive is not exposed at a useful level via
 //   the host API. Authoring a discriminating test would require
-//   either touching `crates/verter_session/src/capture_token.rs`
+//   either touching `crates/verter_type_engine/src/capture_token.rs`
 //   (B-A0 territory, forbidden by the sidecar's "DO NOT" list)
 //   or adding a public cancellation API (forbidden by §17.7
 //   deviation triggers).

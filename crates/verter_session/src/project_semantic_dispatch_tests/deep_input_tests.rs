@@ -16,7 +16,7 @@
 
 use super::checker_probe_lane_tests::{flow_return_outcome_in, mismatches};
 use crate::host_flow_return_audit::FlowReturnError;
-use crate::semantic_query::FlowReturnFailure;
+use verter_type_engine::semantic_query::FlowReturnFailure;
 use verter_type_expr::facts::InferenceUnavailableReason;
 
 /// The depth every form is checked at.
@@ -55,7 +55,7 @@ fn mismatches_on_a_small_stack(
 /// apart from a budget. It returns either way, never aborting the host.
 fn return_on_a_small_stack(
     source: String,
-) -> Result<Option<crate::semantic_query::FlowReturnDegradation>, FlowReturnError> {
+) -> Result<Option<verter_type_engine::semantic_query::FlowReturnDegradation>, FlowReturnError> {
     std::thread::Builder::new()
         .stack_size(1 << 20)
         .spawn(move || flow_return_outcome_in(Default::default(), &source, "pf"))
@@ -67,7 +67,7 @@ fn return_on_a_small_stack(
 /// The typed outcome of a return whose evaluation outgrew the demand's
 /// connected work: no value, and the work budget named.
 const WORK_BUDGET_EXCEEDED: Result<
-    Option<crate::semantic_query::FlowReturnDegradation>,
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
     FlowReturnError,
 > = Err(FlowReturnError::Failure(FlowReturnFailure::Budget(
     InferenceUnavailableReason::WorkBudgetExceeded,
@@ -310,7 +310,7 @@ fn array_nest_of_on_a_small_stack(source: String, probe: &'static str) -> (usize
                 let graph = dispatch.graph();
                 let mut node = node;
                 let mut depth = 0;
-                while let Some(crate::semantic_query::SemanticNodeData::Array {
+                while let Some(verter_type_engine::semantic_query::SemanticNodeData::Array {
                     element,
                     readonly: false,
                 }) = graph.node_data(node).as_deref()
@@ -320,9 +320,11 @@ fn array_nest_of_on_a_small_stack(source: String, probe: &'static str) -> (usize
                 }
                 let number = matches!(
                     graph.node_data(node).as_deref(),
-                    Some(crate::semantic_query::SemanticNodeData::Primitive(
-                        crate::semantic_query::PrimitiveKind::Number
-                    ))
+                    Some(
+                        verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                            verter_type_engine::semantic_query::PrimitiveKind::Number
+                        )
+                    )
                 );
                 (depth, number)
             })
@@ -1074,14 +1076,14 @@ fn code_past_exhaustive_switches_nested_10000_deep_returns_on_production_stacks(
 #[test]
 fn a_mapped_type_nest_lowers_in_linear_work() {
     let work = |depth: usize| {
-        let walked = crate::mapper_binder_registry::type_expr_visits_for_tests();
+        let walked = verter_type_engine::mapper_binder_registry::type_expr_visits_for_tests();
         let copied = super::locator_shape::binder_frame_clones_for_tests();
         assert_eq!(
             mismatches(&mapped_types(depth), &[("keyof D", "\"a\"")]),
             Vec::<String>::new()
         );
         (
-            crate::mapper_binder_registry::type_expr_visits_for_tests() - walked,
+            verter_type_engine::mapper_binder_registry::type_expr_visits_for_tests() - walked,
             super::locator_shape::binder_frame_clones_for_tests() - copied,
         )
     };

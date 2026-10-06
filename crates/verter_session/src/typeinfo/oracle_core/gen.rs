@@ -1260,8 +1260,10 @@ fn preflight_reduces_clean(spec: &QuerySpec) -> Result<(), GenError> {
 /// Map the registry's `ProjectionModeSpec` onto the resolver's `ProjectionMode`
 /// (the mode the preflight resolves the query in — the same mapping the
 /// consumption driver's `map_resolver_mode` uses).
-fn resolver_mode_of(mode: ProjectionModeSpec) -> crate::semantic_query::ProjectionMode {
-    use crate::semantic_query::ProjectionMode;
+fn resolver_mode_of(
+    mode: ProjectionModeSpec,
+) -> verter_type_engine::semantic_query::ProjectionMode {
+    use verter_type_engine::semantic_query::ProjectionMode;
     match mode {
         ProjectionModeSpec::Shallow => ProjectionMode::Shallow,
         ProjectionModeSpec::Navigate => ProjectionMode::Navigate,

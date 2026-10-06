@@ -3,7 +3,7 @@
 //! These are the host-side counters, rendezvous and fence / refusal toggles the
 //! in-process tests arm; grouping them into one sub-struct keeps the root
 //! `VerterHost` struct thin. The engine's own forcing state is the
-//! engine-owned [`TestKnobs`](crate::engine_test_knobs::TestKnobs) record this
+//! engine-owned [`TestKnobs`](verter_type_engine::engine_test_knobs::TestKnobs) record this
 //! struct holds and the host hands to every engine binding.
 //!
 //! Each knob is per-host (no process-global concurrency hazard) and defaults to
@@ -14,14 +14,14 @@
 //! carries none of it.
 
 #[cfg(test)]
-use crate::engine_test_knobs::SeamHook;
+use verter_type_engine::engine_test_knobs::SeamHook;
 
 /// Per-host test force-injection knobs. See the module docs.
 #[derive(Debug, Default)]
 pub(crate) struct TestForceKnobs {
     /// The engine-owned forcing record, shared with every engine binding and
     /// macro-mirror selector this host attaches.
-    pub(crate) engine: std::sync::Arc<crate::engine_test_knobs::TestKnobs>,
+    pub(crate) engine: std::sync::Arc<verter_type_engine::engine_test_knobs::TestKnobs>,
     /// Cumulative host-level audit state exposed only to in-process tests.
     #[cfg(test)]
     pub(crate) audit: std::sync::Arc<crate::host_test_audit::HostTestAuditState>,

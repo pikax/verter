@@ -42,10 +42,10 @@ use std::sync::Arc;
 
 use verter_session_query::facts::registry::{FactKey, SymbolSpace};
 
-use crate::resolver_core::ResolverContext;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::source::artifact_key::FileArtifactKey;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Doctored content hash no real content ever produces. A planted
 /// stale artifact carries this so a content-pinned read is trivially
@@ -121,7 +121,7 @@ fn observed_parse_fact_lookup_is_content_addressed_not_get_any() {
     {
         let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
         assert!(
-            crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+            verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
                 ctx,
                 canonical,
                 real_hash,
@@ -176,7 +176,7 @@ fn observed_parse_fact_lookup_is_content_addressed_not_get_any() {
     // `None`. A `get_artifacts_any`-based read returns `Some`.
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
-        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+        verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
             ctx,
             canonical,
             real_hash,
@@ -233,7 +233,7 @@ fn exported_type_signature_is_provenance_pure() {
     // the provenance-pure parse-fact lookups resolve — `ensure_indexed_ready`
     // (idempotent) keeps the observed-version artifact reachable.
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
-    let signature = crate::fact_signature_helpers::fact_signature_for_exported_type(
+    let signature = verter_type_engine::fact_signature_helpers::fact_signature_for_exported_type(
         ctx,
         canonical,
         "Surface",
@@ -272,7 +272,7 @@ fn exported_type_signature_is_provenance_pure() {
     let fabricated = STALE_HASH;
     assert_ne!(fabricated, observed_hash, "fixture invariant");
     assert!(
-        crate::fact_signature_helpers::fact_signature_for_exported_type(
+        verter_type_engine::fact_signature_helpers::fact_signature_for_exported_type(
             ctx,
             canonical,
             "Surface",
@@ -307,17 +307,18 @@ fn canonical_member_signature_is_provenance_pure() {
     );
 
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
-    let signature = crate::fact_signature_helpers::fact_signature_for_canonical_member(
-        ctx,
-        canonical,
-        "Holder",
-        "picked",
-        SymbolSpace::Type,
-        observed_hash,
-    )
-    .into_cacheable()
-    .expect("the observed version's artifact is recoverable")
-    .facts;
+    let signature =
+        verter_type_engine::fact_signature_helpers::fact_signature_for_canonical_member(
+            ctx,
+            canonical,
+            "Holder",
+            "picked",
+            SymbolSpace::Type,
+            observed_hash,
+        )
+        .into_cacheable()
+        .expect("the observed version's artifact is recoverable")
+        .facts;
 
     assert!(
         has_self_root(&signature, canonical, observed_hash),
@@ -341,7 +342,7 @@ fn canonical_member_signature_is_provenance_pure() {
     let fabricated = STALE_HASH;
     assert_ne!(fabricated, observed_hash, "fixture invariant");
     assert!(
-        crate::fact_signature_helpers::fact_signature_for_canonical_member(
+        verter_type_engine::fact_signature_helpers::fact_signature_for_canonical_member(
             ctx,
             canonical,
             "Holder",
@@ -377,14 +378,15 @@ fn canonical_surface_signature_is_provenance_pure() {
     );
 
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
-    let signature = crate::fact_signature_helpers::fact_signature_for_canonical_surface(
-        ctx,
-        canonical,
-        observed_hash,
-    )
-    .into_cacheable()
-    .expect("the observed version's artifact is recoverable")
-    .facts;
+    let signature =
+        verter_type_engine::fact_signature_helpers::fact_signature_for_canonical_surface(
+            ctx,
+            canonical,
+            observed_hash,
+        )
+        .into_cacheable()
+        .expect("the observed version's artifact is recoverable")
+        .facts;
 
     assert!(
         has_self_root(&signature, canonical, observed_hash),
@@ -407,7 +409,7 @@ fn canonical_surface_signature_is_provenance_pure() {
     let fabricated = STALE_HASH;
     assert_ne!(fabricated, observed_hash, "fixture invariant");
     assert!(
-        crate::fact_signature_helpers::fact_signature_for_canonical_surface(
+        verter_type_engine::fact_signature_helpers::fact_signature_for_canonical_surface(
             ctx, canonical, fabricated,
         )
         .into_cacheable()
@@ -451,7 +453,8 @@ fn strict_self_root_validation_rejects_untracked_whole_hash() {
     let never_loaded = "/self_root/strict_never_loaded.ts";
 
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
-    let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
+    let view =
+        verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         !verter_session_query::facts::store_view::StoreView::tracks_file(&view, never_loaded),
         "fixture invariant: the probe canonical must be untracked by the live \
@@ -468,7 +471,7 @@ fn strict_self_root_validation_rejects_untracked_whole_hash() {
     // Lazy validation: the untracked FileWholeHash is optimistically
     // accepted.
     assert!(
-        crate::fact_signature_helpers::validate_fact_signature(ctx, &signature),
+        verter_type_engine::fact_signature_helpers::validate_fact_signature(ctx, &signature),
         "fixture invariant: the lazy validate_fact_signature must ACCEPT an \
          untracked FileWholeHash — that is the permissive behavior the strict \
          path must override for self-roots",
@@ -477,7 +480,7 @@ fn strict_self_root_validation_rejects_untracked_whole_hash() {
     // Strict validation, with the probe canonical named as a self-root:
     // the untracked FileWholeHash fails.
     assert!(
-        !crate::fact_signature_helpers::validate_fact_signature_with_self_roots(
+        !verter_type_engine::fact_signature_helpers::validate_fact_signature_with_self_roots(
             ctx,
             &signature,
             &[never_loaded],
@@ -502,7 +505,8 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
     let (host, real_hash) = host_with_ts(canonical, "export const tracked = 1;\n");
 
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
-    let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
+    let view =
+        verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         verter_session_query::facts::store_view::StoreView::tracks_file(&view, canonical),
         "fixture invariant: the loaded canonical must be tracked by the live \
@@ -515,7 +519,7 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
     }];
 
     assert!(
-        crate::fact_signature_helpers::validate_fact_signature_with_self_roots(
+        verter_type_engine::fact_signature_helpers::validate_fact_signature_with_self_roots(
             ctx,
             &signature,
             &[canonical],
@@ -532,7 +536,7 @@ fn strict_self_root_validation_accepts_tracked_matching_whole_hash() {
         hash: STALE_HASH,
     }];
     assert!(
-        !crate::fact_signature_helpers::validate_fact_signature_with_self_roots(
+        !verter_type_engine::fact_signature_helpers::validate_fact_signature_with_self_roots(
             ctx,
             &stale_signature,
             &[canonical],

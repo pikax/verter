@@ -20,17 +20,18 @@ use verter_type_expr::facts::SemanticTypeSource;
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
-use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
+use verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext;
 
-use crate::project_semantic_dispatch::reference_carriers::reference_carrier_head;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
 use crate::resolver_core::component_meta_registry::source_bare_ref_name;
-use crate::resolver_core::{ComponentMetaQueryEngine, ResolverContext};
-use crate::semantic_query::{
+use crate::resolver_core::ComponentMetaQueryEngine;
+use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{
     DeclIdentity, HotTypeRef, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
     SemanticNodeId,
 };
-use crate::VerterHost;
 
 use super::cycle_guard::NormalizedTypeArgs;
 
@@ -189,7 +190,10 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
 
     /// Node data reader (the shared dispatch-owned arena read).
     pub(super) fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        crate::project_semantic_dispatch::node_data_for(self.engine.dispatch.graph(), node)
+        verter_type_engine::project_semantic_dispatch::node_data_for(
+            self.engine.dispatch.graph(),
+            node,
+        )
     }
 
     /// The node's reference HEAD: `(name, type-argument nodes)` for the
@@ -442,7 +446,7 @@ fn rewrite_ref_node(
     if (ctx.active_refs.len() as u64) > ctx.active_refs_max_depth {
         ctx.active_refs_max_depth = ctx.active_refs.len() as u64;
         #[cfg(any(test, feature = "test-support"))]
-        crate::capture_token::with_active_capture(|t| {
+        verter_type_engine::capture_token::with_active_capture(|t| {
             t.record_counter("policy_active_refs_max_depth", 1)
         });
     }

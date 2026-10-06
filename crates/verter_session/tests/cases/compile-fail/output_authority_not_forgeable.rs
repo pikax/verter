@@ -3,7 +3,7 @@
 //! that exists is the one minted with an engine's stores — not even another
 //! authority's engine identity can be re-wrapped into a new one.
 
-use verter_session::for_tests::OutputAuthority;
+use verter_type_engine::project_semantic_dispatch::engine_resources::OutputAuthority;
 
 fn forge(other: &OutputAuthority) -> OutputAuthority {
     OutputAuthority {

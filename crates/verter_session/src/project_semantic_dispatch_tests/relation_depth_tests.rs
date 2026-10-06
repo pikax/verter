@@ -503,7 +503,7 @@ fn relating_wide_object_types_costs_the_same_per_member() {
             members(width, "1"),
             members(width, "number")
         );
-        let scans = crate::semantic_query::key_scan_comparisons_for_tests();
+        let scans = verter_type_engine::semantic_query::key_scan_comparisons_for_tests();
         let (checks, answer) =
             super::checker_probe_lane_tests::with_probe("", &probe, |dispatch, node| {
                 (
@@ -516,7 +516,7 @@ fn relating_wide_object_types_costs_the_same_per_member() {
         assert_eq!(answer, "1", "the {width}-member relation holds");
         (
             checks,
-            crate::semantic_query::key_scan_comparisons_for_tests() - scans,
+            verter_type_engine::semantic_query::key_scan_comparisons_for_tests() - scans,
         )
     };
     let (at_500, at_1000, at_2000) = (work(500), work(1000), work(2000));
@@ -676,7 +676,7 @@ fn a_union_over_aliases_of_unions_relates_as_one_union() {
 /// [`a_union_over_aliases_of_unions_relates_as_one_union`]). The lane
 /// reads each alias of the chain with one `Instantiate` query, and the
 /// request's projection-operation fuse (`HostConfig::projection_op_budget`,
-/// 2,000 by default, `crate::request_budget::RequestBudget`) counts every
+/// 2,000 by default, `verter_type_engine::request_budget::RequestBudget`) counts every
 /// one: from 1,995 aliases the probe ends in `Budget(WorkBudgetExceeded)`
 /// and gives no answer. The work is linear (seven connected-work units
 /// an alias at 250 to 1,900 aliases); the fuse, not the relation, stops it.

@@ -265,7 +265,7 @@ impl RequestBundleMemo {
     /// already materialised it under exactly this view identity.
     ///
     /// Returns the bundle together with its [`ReuseClass`]; the caller
-    /// must replay its refusal ([`crate::fact_tracing::replay_reuse_refusal`])
+    /// must replay its refusal ([`verter_type_engine::fact_tracing::replay_reuse_refusal`])
     /// before returning the value, or the reuse launders the taint the cold
     /// return carried.
     pub(crate) fn get(
@@ -888,7 +888,7 @@ impl CanonicalCompletionOverlay {
 /// The wrapper owns the overlay via `Arc` and borrows the base view.
 /// Constructed once at request entry; the
 /// `HostResolverContext` / `SessionResolverContext` owns the wrapper as
-/// a private field. The [`super::fact_validation_port::FactValidation`] adapter
+/// a private field. The [`verter_type_engine::resolver_core::fact_validation_port::FactValidation`] adapter
 /// validates against that field without building a temporary view per call.
 ///
 /// ### Shadowing semantics

@@ -41,15 +41,15 @@ use super::{
     OriginEdgeMetaDto, ProjectPathSegment, ProjectionRecord, RequestFootprintAudit,
     SemanticNodeKind, StructuredAuditEvent, SubstitutionRecord,
 };
-use crate::request_context::RequestContext;
-use crate::request_footprint::AccumulatorState;
-use crate::semantic_query::{
+use verter_audit::AuditCaps;
+use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::request_context::RequestContext;
+use verter_type_engine::request_footprint::AccumulatorState;
+use verter_type_engine::semantic_query::{
     BranchSelection, IndexKey, OriginEdgeKind as CoreOriginEdgeKind, OriginMeta, PathSegment,
     PropertyKey, SemanticNodeData, SemanticNodeId,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
-use verter_audit::AuditCaps;
-use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 use super::footprint_structural_hash::structural_hash_of;
 
@@ -705,7 +705,7 @@ fn edge_kind_discriminant(kind: OriginEdgeKind) -> u32 {
 // ──────────────────────────────────────────────────────────────────────
 
 fn translate_edge(
-    raw: &crate::request_footprint::DerivationEdgeRaw,
+    raw: &verter_type_engine::request_footprint::DerivationEdgeRaw,
     id_map: &FxHashMap<SemanticNodeId, NodeId>,
 ) -> DerivationEdgeRecord {
     let result = id_map.get(&raw.result).copied().unwrap_or(NodeId(u32::MAX));
@@ -777,7 +777,7 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
         // Exhaustive bridge for ProjectMember: producers MUST emit
         // `OriginMeta::ProjectedMember { name, provenance }` (see the
         // four production emit sites in
-        // `crates/verter_session/src/project_semantic_dispatch/build.rs`
+        // `crates/verter_type_engine/src/project_semantic_dispatch/build.rs`
         // and `…/walk.rs`). A future producer that emits ProjectMember
         // through any other OriginMeta variant is a structural bug and
         // panics here — the Rule-5 validator depends on the provenance

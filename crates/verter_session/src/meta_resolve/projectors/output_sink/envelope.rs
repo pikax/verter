@@ -17,8 +17,8 @@ use verter_type_expr::TypeExpr;
 use super::{
     materialize_output_source, missing_source_output_type_expr, MetaResolveProjectorsOutputCap,
 };
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Request-local output-materialization memo: `(effective scope, source
 /// identity)` → materialized value, shared across ALL lanes of one output
@@ -635,7 +635,7 @@ fn finalize_resolved_type_registry_overlay(
 /// [`ComponentMetaOutput`]: crate::meta_resolve::ComponentMetaOutput
 pub(crate) fn build_component_meta_output(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,

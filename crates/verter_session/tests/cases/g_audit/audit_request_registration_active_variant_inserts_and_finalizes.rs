@@ -2,7 +2,7 @@
 //! [`verter_session::host_audit_runtime::AuditRequestRegistration`].
 //!
 //! The first test probes the registration's lifecycle with a
-//! synthetic [`verter_session::request_context::RequestContext`] so
+//! synthetic [`verter_type_engine::request_context::RequestContext`] so
 //! the state machine itself stays unit-testable. The second test
 //! drives a real component-meta request through
 //! [`verter_session::VerterHost::get_component_meta_with_resolution`]
@@ -17,7 +17,7 @@ use verter_audit::{
 };
 use verter_session::audited_request::AuditedRequest;
 use verter_session::host_audit_runtime::AuditRequestRegistration;
-use verter_session::request_context::RequestContext;
+use verter_type_engine::request_context::RequestContext;
 
 const SFC: &str = r#"<script setup lang="ts">
 defineProps<{ message: string }>()

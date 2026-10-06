@@ -2341,7 +2341,7 @@ fn content_generation_dimension_does_not_self_fence_reads() {
 /// on that reset path is harmless.
 #[test]
 fn schema_mismatch_sweep_advances_artifact_generation_token() {
-    use crate::cache_schema::CacheSchemaVersioned;
+    use verter_type_engine::cache_schema::CacheSchemaVersioned;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let canonical = "/schema_sweep/file.ts";

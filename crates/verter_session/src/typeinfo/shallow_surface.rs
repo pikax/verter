@@ -15,15 +15,15 @@
 
 use std::sync::Arc;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::request_ports::IndexedInputs;
-use crate::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-};
 use crate::typeinfo::surface::TypeInfoSurface;
 use crate::typeinfo::types::{ShallowSurfaceRequest, TypeInfoQueryLevel};
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
+use verter_type_engine::semantic_query::{
+    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
+    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+};
 
 impl VerterHost {
     /// Resolve `name` in `canonical_id` to its span-rich one-level
@@ -107,7 +107,9 @@ impl VerterHost {
                 canonical_id: Arc::clone(&request.canonical_id),
                 owner: default_owner,
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(default_owner),
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                    default_owner,
+                ),
             },
             name: Arc::clone(&request.name),
         })) {
@@ -168,32 +170,39 @@ impl VerterHost {
     /// JSDoc hydration, display rendering, or member-body expansion.
     pub(crate) fn project_shallow_surface_graph_only(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         base: SemanticNodeId,
         path: Arc<[PathSegment]>,
         context: ProjectionReductionContext,
         walker_diagnostics: Option<
-            &mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
+            &mut Vec<verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic>,
         >,
-    ) -> crate::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+    ) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface>
+    {
         project_shallow_surface_graph_only(ctx, dispatch, base, path, context, walker_diagnostics)
     }
 }
 
 /// Project `base` to its span-rich one-level [`TypeInfoSurface`] without
 /// JSDoc hydration: the shared graph-only projection
-/// ([`crate::project_semantic_dispatch::one_level_surface::project_one_level_surface`])
+/// ([`verter_type_engine::project_semantic_dispatch::one_level_surface::project_one_level_surface`])
 /// paired with each member's / signature's declaration file.
-pub(crate) fn project_shallow_surface_graph_only<C: crate::resolver_core::ResolverCapabilities>(
-    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+pub(crate) fn project_shallow_surface_graph_only<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
     path: Arc<[PathSegment]>,
     context: ProjectionReductionContext,
-    walker_diagnostics: Option<&mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>>,
-) -> crate::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
-    crate::project_semantic_dispatch::one_level_surface::project_one_level_surface(
+    walker_diagnostics: Option<
+        &mut Vec<verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic>,
+    >,
+) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+    verter_type_engine::project_semantic_dispatch::one_level_surface::project_one_level_surface(
         ctx,
         dispatch,
         base,
@@ -204,14 +213,18 @@ pub(crate) fn project_shallow_surface_graph_only<C: crate::resolver_core::Resolv
     .map(|surface| TypeInfoSurface::from_one_level(dispatch.graph(), &surface))
 }
 
-pub(crate) fn project_shallow_surface_from_base<C: crate::resolver_core::ResolverCapabilities>(
-    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+pub(crate) fn project_shallow_surface_from_base<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
     path: Arc<[PathSegment]>,
     context: ProjectionReductionContext,
-    walker_diagnostics: Option<&mut Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>>,
-) -> crate::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
+    walker_diagnostics: Option<
+        &mut Vec<verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic>,
+    >,
+) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<TypeInfoSurface> {
     let resolution =
         project_shallow_surface_graph_only(ctx, dispatch, base, path, context, walker_diagnostics);
 
@@ -232,8 +245,10 @@ pub(crate) fn project_shallow_surface_from_base<C: crate::resolver_core::Resolve
 /// Enrich a span-rich surface with each member's / signature's leading-JSDoc
 /// spans, sliced from the DECLARATION file's cache-owned raw source read
 /// through `ctx` (an overlay session reads its overlay raw source).
-pub(crate) fn with_member_jsdoc_spans_from_ctx<C: crate::resolver_core::ResolverCapabilities>(
-    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+pub(crate) fn with_member_jsdoc_spans_from_ctx<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     surface: TypeInfoSurface,
 ) -> TypeInfoSurface {
     // Nothing to hydrate: an empty surface (the `defineModel` macro surface)
@@ -269,21 +284,24 @@ pub(crate) fn with_member_jsdoc_spans_from_ctx<C: crate::resolver_core::Resolver
 // Verified-unconsumed completeness projection — no normalizer currently
 // demands it; pending a delete-or-wire decision.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn callable_first_param_object_surface<C: crate::resolver_core::ResolverCapabilities>(
+pub(crate) fn callable_first_param_object_surface<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
-    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     callable: SemanticNodeId,
     context: ProjectionReductionContext,
 ) -> Option<TypeInfoSurface> {
-    let view =
-        crate::project_semantic_dispatch::callable_view::CallableNodeView::new(dispatch, callable);
+    let view = verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
+        dispatch, callable,
+    );
     let signature = view.signature(context)?;
     let first_param = signature.first_param()?;
     // Open-generic gate: a symbolic-only param root must NOT be materialised
     // into a committed object surface — the SAME gate
     // `navigate_param_to_object_surface` applies, keeping both binding paths
     // in agreement.
-    if crate::project_semantic_dispatch::symbolic_root::slot_param_root_is_symbolic_only(
+    if verter_type_engine::project_semantic_dispatch::symbolic_root::slot_param_root_is_symbolic_only(
         dispatch,
         first_param,
     ) {

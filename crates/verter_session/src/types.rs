@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use verter_execution::pool_size::PoolSize;
 use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 use rustc_hash::FxHashMap;
 
@@ -1191,7 +1192,7 @@ impl Default for HostConfig {
             audit_timing_capture: false,
             max_derivation_edges: 10_000,
             audit_caps: verter_audit::AuditCaps::default(),
-            depth_budget: crate::project_semantic_dispatch::MAX_DEPTH,
+            depth_budget: verter_type_engine::project_semantic_dispatch::MAX_DEPTH,
             projection_op_budget: 2000,
             eviction_policy: EvictionPolicyConfig::default(),
             lsp_method_timeouts: LspMethodTimeoutsConfig::default(),
@@ -1235,12 +1236,6 @@ impl HostConfig {
         Ok(())
     }
 }
-
-/// Re-export `ProjectionMode` as the public resolver-mode API. Three of
-/// the four variants cross the FFI boundary: `Identity`, `Shallow`,
-/// `Expanded`. `Navigate` is dispatch-internal and must not be used at
-/// the consumer/FFI surface.
-pub use crate::semantic_query::ProjectionMode;
 
 bitflags::bitflags! {
     /// Controls which compilation steps [`CompileProfile::target`] requests.
@@ -2600,12 +2595,12 @@ impl CompileFailure {
     }
 }
 
-impl From<crate::semantic_query::ExecutionAbort> for HostError {
-    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+impl From<verter_type_engine::semantic_query::ExecutionAbort> for HostError {
+    fn from(abort: verter_type_engine::semantic_query::ExecutionAbort) -> Self {
         match abort {
-            crate::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
-            crate::semantic_query::ExecutionAbort::Superseded => Self::Superseded,
-            crate::semantic_query::ExecutionAbort::Shutdown => Self::Shutdown,
+            verter_type_engine::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
+            verter_type_engine::semantic_query::ExecutionAbort::Superseded => Self::Superseded,
+            verter_type_engine::semantic_query::ExecutionAbort::Shutdown => Self::Shutdown,
         }
     }
 }
@@ -3020,7 +3015,7 @@ pub enum PublicApiProjectionError {
     /// projection.
     TscGeneration(verter_compiler::tsc::TscGenerationError),
     /// The projection's semantic inputs were aborted: nothing is published.
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
 impl PublicApiProjectionError {
@@ -3033,7 +3028,10 @@ impl PublicApiProjectionError {
             // A superseded view is transient; a cancelled request or a shut
             // down host is the caller's decision, not a retry.
             Self::Aborted(abort) => {
-                matches!(abort, crate::semantic_query::ExecutionAbort::Superseded)
+                matches!(
+                    abort,
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
             }
         }
     }
@@ -3052,9 +3050,15 @@ impl PublicApiProjectionError {
     pub const fn detail_code(&self) -> &'static str {
         match self {
             Self::TscGeneration(error) => error.code(),
-            Self::Aborted(crate::semantic_query::ExecutionAbort::Cancelled) => "cancelled",
-            Self::Aborted(crate::semantic_query::ExecutionAbort::Superseded) => "superseded",
-            Self::Aborted(crate::semantic_query::ExecutionAbort::Shutdown) => "shutdown",
+            Self::Aborted(verter_type_engine::semantic_query::ExecutionAbort::Cancelled) => {
+                "cancelled"
+            }
+            Self::Aborted(verter_type_engine::semantic_query::ExecutionAbort::Superseded) => {
+                "superseded"
+            }
+            Self::Aborted(verter_type_engine::semantic_query::ExecutionAbort::Shutdown) => {
+                "shutdown"
+            }
         }
     }
 

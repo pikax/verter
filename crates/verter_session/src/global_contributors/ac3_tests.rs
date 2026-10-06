@@ -23,13 +23,15 @@ fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
 
 #[test]
 fn lookup_path_source_has_no_known_canonicals_scan() {
-    let build = include_str!("../project_semantic_dispatch/build.rs");
+    let build = include_str!("../../../verter_type_engine/src/project_semantic_dispatch/build.rs");
     let external = build
         .split("fn resolve_external_module_augmentation(")
         .nth(1)
         .and_then(|rest| rest.split("\n    pub(super) fn ").next())
         .expect("resolve_external_module_augmentation body");
-    let discovery = include_str!("../project_semantic_dispatch/signature_discovery.rs");
+    let discovery = include_str!(
+        "../../../verter_type_engine/src/project_semantic_dispatch/signature_discovery.rs"
+    );
     let nominal = discovery
         .split("fn runtime_nominal(")
         .nth(1)
@@ -134,7 +136,7 @@ fn lookup_does_not_call_known_canonicals() {
     let _ = host.resolve_named_symbol(
         "/use.ts",
         "fa",
-        Some(crate::semantic_query::ProjectionMode::Expanded),
+        Some(verter_type_engine::semantic_query::ProjectionMode::Expanded),
     );
     assert_eq!(
         verter_workspace::known_canonicals_calls(),

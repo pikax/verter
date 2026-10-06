@@ -34,12 +34,12 @@ use std::sync::Arc;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::types::HostConfig;
+use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     PrimitiveKind, ProjectionMode, ProjectionReductionContext, ScopeId, SemanticNodeData,
     SemanticNodeId, ValueRootKey,
 };
-use crate::types::HostConfig;
-use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -78,7 +78,7 @@ fn typeof_carrier_node(
             canonical_id: Arc::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -213,7 +213,7 @@ fn evaluate_typeof_carrier_applies_instantiation_args() {
 // fails.
 #[test]
 fn walk_typeof_carrier_applies_instantiation_args() {
-    use crate::semantic_query::PathSegment;
+    use verter_type_engine::semantic_query::PathSegment;
     let host = host();
     upsert_ts(&host, "/m.ts", GENERIC_FN_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -222,12 +222,12 @@ fn walk_typeof_carrier_applies_instantiation_args() {
     // Carrier as the base + a non-empty path drives the per-segment loop and
     // hits the `TypeOf` arm at index 0 (an empty path skips the loop entirely
     // and would NOT exercise this arm).
-    let resolved = crate::project_semantic_dispatch::walk::probe_walk_typeof_resolved(
+    let resolved = verter_type_engine::project_semantic_dispatch::walk::probe_walk_typeof_resolved(
         &dispatch,
         carrier,
         Arc::from(
             vec![PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("__probe__"),
+                verter_type_engine::semantic_query::PropertyKey::identifier("__probe__"),
             )]
             .into_boxed_slice(),
         ),
@@ -280,7 +280,7 @@ const GENERIC_FN_HOLDER_TS: &str =
 
 #[test]
 fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
-    use crate::semantic_query::PathSegment;
+    use verter_type_engine::semantic_query::PathSegment;
     let host = host();
     upsert_ts(&host, "/holder.ts", GENERIC_FN_HOLDER_TS);
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -293,7 +293,7 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
             canonical_id: Arc::from("/holder.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -309,12 +309,12 @@ fn walk_typeof_internal_path_projects_in_navigate_not_caller_mode() {
     // per-segment `TypeOf` arm fires) under an EXPANDED outer demand; capture
     // the mode the arm used for its INTERNAL `typeof C.make` projection.
     let internal_mode =
-        crate::project_semantic_dispatch::walk::probe_walk_typeof_internal_path_mode(
+        verter_type_engine::project_semantic_dispatch::walk::probe_walk_typeof_internal_path_mode(
             &dispatch,
             carrier,
             Arc::from(
                 vec![PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier("__probe__"),
+                    verter_type_engine::semantic_query::PropertyKey::identifier("__probe__"),
                 )]
                 .into_boxed_slice(),
             ),
@@ -506,7 +506,7 @@ fn typeof_carrier_arity_overflow_is_honest_miss_after_projection() {
             canonical_id: Arc::from("/one.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -672,7 +672,7 @@ fn typeof_carrier_substitution_cycle_terminates_through_arm() {
 // carriers, exercised through the real instantiate-body window.
 #[test]
 fn typeof_resolution_stays_within_instantiate_window() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         InstantiateContext, QueryResult, ResolvedDeclSlotIdentity, SemanticQueryApi,
         SemanticQueryKey, SemanticQueryOutput,
     };
@@ -699,15 +699,15 @@ fn typeof_resolution_stays_within_instantiate_window() {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 std::sync::Arc::from("SelfT"),
             );
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 self_t,
                 std::sync::Arc::from(
-                    Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
                 ),
                 InstantiateContext::non_file(
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                     Default::default(),
-                    crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                    verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
                 ),
             ));
             match dispatch.execute_type_node(key) {

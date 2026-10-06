@@ -18,7 +18,7 @@
       "nativeAssumption": "std::time::Instant",
       "wasmRoute": "web_time::Instant",
       "boundaryOwner": "BWH2",
-      "evidence": ["crates/verter_session/src/instant.rs"]
+      "evidence": ["crates/verter_type_engine/src/instant.rs"]
     },
     {
       "id": "scheduling",

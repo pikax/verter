@@ -9,19 +9,19 @@
 //! no head resolution) — otherwise a `<T>`-bearing carrier arg leaves `T`
 //! unspecialised at instantiation time.
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::DeclIdentity;
-use crate::semantic_query::NodeScopeId;
-use crate::semantic_query::ScopeId;
-use crate::semantic_query::SemanticNodeData;
-use crate::semantic_query::SemanticNodeId;
-use crate::semantic_query::ValueRootKey;
 use crate::types::HostConfig;
 use crate::VerterHost;
 use std::sync::Arc;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::DeclIdentity;
+use verter_type_engine::semantic_query::NodeScopeId;
+use verter_type_engine::semantic_query::ScopeId;
+use verter_type_engine::semantic_query::SemanticNodeData;
+use verter_type_engine::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query::ValueRootKey;
 
 fn carrier_wrapping(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     arg: SemanticNodeId,
     kind: u8,
 ) -> SemanticNodeId {
@@ -38,7 +38,7 @@ fn carrier_wrapping(
                     canonical_id: Arc::from("/v.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
-                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },
@@ -82,7 +82,7 @@ fn collect_type_param_nodes_descends_carrier_args() {
             carrier,
             "X",
             false,
-            crate::semantic_query::ClauseSpelling::Bound,
+            verter_type_engine::semantic_query::ClauseSpelling::Bound,
         );
         assert!(
             found.contains(&binder),
@@ -100,7 +100,7 @@ fn collect_type_param_nodes_descends_carrier_args() {
             carrier,
             "Y",
             false,
-            crate::semantic_query::ClauseSpelling::Bound,
+            verter_type_engine::semantic_query::ClauseSpelling::Bound,
         );
         assert!(
             !found.contains(&binder),

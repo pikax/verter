@@ -143,7 +143,7 @@ test("ARH0-god-evidence dirty twin: touches-only coupling evidence is rejected (
 test("ARH0-god-evidence dirty twin: zero coupling count is not coupling evidence (AC2)", () => {
   const dirty = cloneProducts();
   const row = dirty["responsibility-map"].godModuleCandidates.find(
-    (r) => r.path === "crates/verter_session/src/semantic_query.rs",
+    (r) => r.path === "crates/verter_type_engine/src/semantic_query.rs",
   );
   // Measured evidence of NO coupling must not qualify as a god module.
   row.couplingEvidence = { fanIn: 0, touchesSinceJune: row.couplingEvidence.touchesSinceJune };

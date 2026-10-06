@@ -18,9 +18,9 @@
       ],
       "documentsHotspots": [
         "crates/verter_scheduler/src/scheduler.rs",
-        "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
-        "crates/verter_session/src/project_semantic_dispatch/build.rs",
-        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs",
+        "crates/verter_type_engine/src/project_semantic_dispatch/build.rs",
+        "crates/verter_type_engine/src/semantic_query.rs",
         "crates/verter_semantic_source/src/flow_slice_content.rs"
       ]
     },
@@ -37,15 +37,15 @@
       "id": "query-lifetimes",
       "path": "docs/contributing/query-lifetimes.md",
       "requiredCitations": [
-        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_type_engine/src/semantic_query.rs",
         "crates/verter_scheduler/src/scheduler.rs",
         "crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs"
       ],
       "documentsHotspots": [
         "crates/verter_scheduler/src/scheduler.rs",
-        "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
-        "crates/verter_session/src/project_semantic_dispatch/build.rs",
-        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs",
+        "crates/verter_type_engine/src/project_semantic_dispatch/build.rs",
+        "crates/verter_type_engine/src/semantic_query.rs",
         "crates/verter_semantic_source/src/flow_slice_content.rs"
       ]
     },
@@ -116,13 +116,13 @@
     },
     {
       "capability": "semantic-query-envelope",
-      "path": "crates/verter_session/src/semantic_query.rs",
+      "path": "crates/verter_type_engine/src/semantic_query.rs",
       "symbol": "SemanticQueryKey",
       "taughtIn": "docs/contributing/query-lifetimes.md"
     },
     {
       "capability": "semantic-query-memo",
-      "path": "crates/verter_session/src/semantic_query_memo/mod.rs",
+      "path": "crates/verter_type_engine/src/semantic_query_memo/mod.rs",
       "symbol": "SemanticGraphStore",
       "taughtIn": "docs/contributing/query-lifetimes.md"
     },
@@ -160,11 +160,11 @@
     },
     {
       "capability": "semantic-query-envelope",
-      "path": "crates/verter_session/src/semantic_query.rs"
+      "path": "crates/verter_type_engine/src/semantic_query.rs"
     },
     {
       "capability": "semantic-query-memo",
-      "path": "crates/verter_session/src/semantic_query_memo/mod.rs"
+      "path": "crates/verter_type_engine/src/semantic_query_memo/mod.rs"
     },
     {
       "capability": "scheduler-submission",
@@ -191,7 +191,7 @@
       ]
     },
     {
-      "hotspot": "crates/verter_session/src/semantic_query.rs",
+      "hotspot": "crates/verter_type_engine/src/semantic_query.rs",
       "item": "*",
       "catalogIds": [
         "vue.language_service.typing",
@@ -201,7 +201,7 @@
       ]
     },
     {
-      "hotspot": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+      "hotspot": "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs",
       "item": "*",
       "catalogIds": [
         "vue.language_service.typing",
@@ -211,7 +211,7 @@
       ]
     },
     {
-      "hotspot": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+      "hotspot": "crates/verter_type_engine/src/project_semantic_dispatch/build.rs",
       "item": "*",
       "catalogIds": [
         "vue.language_service.typing",

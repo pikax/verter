@@ -15,11 +15,11 @@
 use std::sync::Arc;
 
 use super::{resolve_decl_key, ProjectSemanticDispatch};
-use crate::semantic_query::{
+use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticQueryApi,
     SemanticQueryKey, SemanticQueryOutput,
 };
-use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::{LiteralValue, ObjectMember, TypeExpr};
 
 const CANONICAL: &str = "/w/base_signature.ts";

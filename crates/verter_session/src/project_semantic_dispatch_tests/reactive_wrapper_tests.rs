@@ -1,9 +1,9 @@
-use crate::project_semantic_dispatch::reactive_wrapper::*;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::types::HostConfig;
 use crate::types::UpsertRequest;
 use crate::VerterHost;
 use std::sync::Arc;
+use verter_type_engine::project_semantic_dispatch::reactive_wrapper::*;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_expr::ReactiveWrapperRole;
 use verter_type_expr::ReactiveWrapperUnresolvedReason;
 use verter_type_expr::TopLevelOwnerId;

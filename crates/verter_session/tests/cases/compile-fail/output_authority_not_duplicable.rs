@@ -2,7 +2,7 @@
 //! default-constructed. A borrower can never turn a borrow into an owned
 //! authority of its own.
 
-use verter_session::for_tests::OutputAuthority;
+use verter_type_engine::project_semantic_dispatch::engine_resources::OutputAuthority;
 
 fn default_construct() -> OutputAuthority {
     OutputAuthority::default()

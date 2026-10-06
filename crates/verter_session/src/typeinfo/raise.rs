@@ -22,17 +22,17 @@
 //!
 //! The raw `SemanticNodeId -> TypeExpr` raise primitive
 //! `raise_node_to_type_expr` stays module-private to
-//! [`crate::project_semantic_dispatch::raise`]; this facade reaches it only
+//! [`verter_type_engine::project_semantic_dispatch::raise`]; this facade reaches it only
 //! through the sealed output capability, never directly.
 
 use crate::output_sinks::OutputProjector;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::SemanticNodeId;
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 /// Terminal display text for one graph node, plus whether the underlying
 /// materialization carried any typed resolver-degradation leaf (see
-/// [`crate::project_semantic_dispatch::output_materialization::OutputTypeExpr::has_degradation`]).
+/// [`verter_type_engine::project_semantic_dispatch::output_materialization::OutputTypeExpr::has_degradation`]).
 ///
 /// `degraded` is set when a NESTED resolver miss (a genuine unmaterialized
 /// sentinel — `QueryError::Miss`, `UnmodeledPosition`, `BudgetExceeded`, …,
@@ -55,7 +55,7 @@ pub(crate) struct RenderedNodeDisplay {
 /// boundary, so graph-oriented consumers cannot branch on a
 /// reverse-materialized shape.
 pub(crate) fn render_node_display_with_ctx(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -163,11 +163,11 @@ impl VerterHost {
         let hot = dispatch
             .raise_semantic_type_source_to_hot(
                 &source,
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id,
                     scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
+                    context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Expanded,
                     ),
                     interior_failures: None,
                 },

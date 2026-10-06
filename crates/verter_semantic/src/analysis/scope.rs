@@ -103,7 +103,7 @@ impl AnalysisScope {
     /// — for every carrier file this scope ever analyses. Root reachability (the
     /// one fact the attribute-fallthrough surface needs) is obtained instead as
     /// a REQUEST-SCOPED demand on the public-API generation path alone; see
-    /// `verter_session::request_context::RootTemplateDemandScope`. Carrier bytes
+    /// `verter_type_engine::request_context::RootTemplateDemandScope`. Carrier bytes
     /// therefore still do not vary with the analysis scope
     /// (`full_vs_batch_carrier_and_stub_byte_parity`) without every BUILD-scope
     /// consumer paying for a template walk it never reads.

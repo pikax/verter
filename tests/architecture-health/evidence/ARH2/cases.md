@@ -34,7 +34,7 @@ File size and item counts are not architecture evidence: no line count, size thr
 
 ## ARH2-characterization (reject) — AC2 discriminating pins
 
-- `hotspot-missing` / `hotspot-crate-unknown` / `hotspot-without-pins`: every characterized hotspot exists, names a live workspace member crate (glob members expanded against `Cargo.toml`-carrying directories) and carries at least one pin.
+- `hotspot-missing` / `hotspot-crate-unknown` / `hotspot-without-pins`: every characterized hotspot exists, names a live workspace member crate (glob members expanded against `Cargo.toml`-carrying directories) and carries at least one pin; a pin whose witnesses compile in another package names that package as its own `crate`, which must be a live member too.
 - `pin-command-not-canonical` / `pin-filter-malformed` / `pin-without-witnesses`: a pin's command is exactly `cargo nextest run -p <crate> <filter>` with a non-flag filter (dirty twin drops `run`).
 - `witness-file-missing` / `witness-test-missing` / `witness-not-a-test`: a witness file exists, declares the named function, and a `#[test]`/`#[tokio::test]` attribute sits within the few lines above the declaration (dirty twins name a phantom test and a non-test function).
 - `witness-ignored` / `witness-cfg-disabled`: a pinned witness must be eligible to execute under the retained nextest recipe. Same-line `#[ignore]` and `#[cfg(any())]` overlays on `vue_script_setup_functions_serve_under_the_instance_owner_only` are the discriminating twins; the canonical recipe has no `--run-ignored`.

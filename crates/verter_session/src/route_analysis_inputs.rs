@@ -45,7 +45,7 @@ pub fn build_route_analysis_inputs(
     workspace: &dyn verter_workspace::WorkspaceRead,
     project_root: &str,
 ) -> RouteAnalysisInputs {
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
         if let Some(bound) = ctx.committed_input() {
             return project_admitted_route_analysis_inputs(bound);
         }
@@ -63,7 +63,7 @@ pub fn build_route_analysis_inputs(
 /// it is the request's snapshot authority even when the workspace moved
 /// between the two captures.
 fn bind_and_project_route_analysis_inputs(
-    ctx: &crate::request_context::RequestContext,
+    ctx: &verter_type_engine::request_context::RequestContext,
     basis: InputBasis,
 ) -> RouteAnalysisInputs {
     match ctx.bind_committed_input(basis) {

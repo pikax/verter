@@ -42,7 +42,7 @@ use verter_execution::request_context::{
 };
 use verter_scheduler::execution::owner_command::OwnerCommand;
 use verter_scheduler::execution::pool::SchedulerIoPool;
-use verter_session::request_context::{
+use verter_type_engine::request_context::{
     current_request_context, RequestContext, RequestContextGuard,
 };
 
@@ -78,7 +78,7 @@ fn run_on_io_worker_with_context(
 /// Run a closure on the IO worker (mirroring the production IO dispatch
 /// closure's `install_tls` step) wrapping a session-side
 /// `RequestContext` as an `OpaqueRequestContext`. Inside the worker,
-/// assert that `verter_session::request_context::current_request_context()`
+/// assert that `verter_type_engine::request_context::current_request_context()`
 /// returns `Some` carrying the same `request_id`.
 ///
 /// The worker calls `Arc::clone(&opaque.0).install_tls()`; for the session
@@ -199,7 +199,7 @@ fn opaque_context_guard_install_does_not_recurse() {
 /// thread runs the dispatch closure's `install_tls` call, which routes
 /// through the session trait impl and populates BOTH TLS slots.
 ///
-/// A custom `StageExecutor` probes `verter_session::request_context::
+/// A custom `StageExecutor` probes `verter_type_engine::request_context::
 /// current_request_context()` inside each stage and records the
 /// observed `request_id` into shared atomics. The test thread then
 /// asserts every stage observed the expected id (non-zero) — they would

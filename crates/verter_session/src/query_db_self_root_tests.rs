@@ -6,7 +6,7 @@
 //! *keyed canonical*). The warm-read validator must validate the
 //! entry's self-root `FileWholeHash` for that keyed canonical
 //! **strictly** — through
-//! [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`]
+//! [`verter_type_engine::fact_signature_helpers::validate_fact_signature_with_self_roots`]
 //! — so a keyed canonical that is untracked by the live store view
 //! rejects the entry instead of riding the lazy
 //! [`verter_session_query::facts::store_view::StoreView::validates`] "untracked file →
@@ -63,17 +63,17 @@ use std::sync::Arc;
 
 use verter_type_expr::{TypeExpr, UnknownValue};
 
-use crate::component_meta_caches::ComputedEntry;
-use crate::fact_signature_helpers::empty_fact_signature;
-use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
-use crate::resolver_core::{MaterializeScopeObservation, ResolverContext};
-use crate::semantic_query::ProjectionMode;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
 use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::component_meta_caches::ComputedEntry;
+use verter_type_engine::fact_signature_helpers::empty_fact_signature;
+use verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
+use verter_type_engine::resolver_core::{MaterializeScopeObservation, ResolverContext};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// A self-root `FileWholeHash` byte pattern for a planted (untracked)
 /// entry. Distinct from any real content hash.
@@ -126,7 +126,8 @@ fn planted_self_root(canonical: &str) -> Arc<[FactVersionRef]> {
 /// indistinguishable and the test would not discriminate.
 fn assert_untracked(host: &VerterHost, canonical: &str) {
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host;
-    let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
+    let view =
+        verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         !StoreView::tracks_file(&view, canonical),
         "fixture invariant: probe canonical {canonical} must be UNTRACKED by the live \
@@ -255,8 +256,8 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
     let _ = db
         .fixture(ctx)
         .get_or_compute_admit_traced_for_test(&key, || {
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
+            verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "stale"))),
                     fact_dep_signature: planted_self_root(c),
                     validated_at_generation: ctx.current_project_generation(),
@@ -269,8 +270,8 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
         .fixture(ctx)
         .get_or_compute_admit_traced_for_test(&key, || {
             cold_ran = true;
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
+            verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
                     validated_at_generation: ctx.current_project_generation(),
@@ -425,7 +426,7 @@ fn owner_collection_db_untracked_self_root_rejects_warm_entry() {
 
 fn materialized(
     marker: &str,
-    dep_signature: crate::semantic_query::DepSignature,
+    dep_signature: verter_type_engine::semantic_query::DepSignature,
 ) -> MaterializedOutputTypeExpr {
     MaterializedOutputTypeExpr::from_type_expr_for_test(
         None,
@@ -435,8 +436,11 @@ fn materialized(
     )
 }
 
-fn empty_dep_signature() -> crate::semantic_query::DepSignature {
-    Arc::from(Vec::<(Arc<str>, crate::semantic_query::DepVersion)>::new())
+fn empty_dep_signature() -> verter_type_engine::semantic_query::DepSignature {
+    Arc::from(Vec::<(
+        Arc<str>,
+        verter_type_engine::semantic_query::DepVersion,
+    )>::new())
 }
 
 /// Observe `canonical`'s `ShallowFileState::whole_hash` — the
@@ -470,7 +474,7 @@ fn observed_scope_export_set(
     scope: &str,
     observed_whole_hash: [u8; 16],
 ) -> verter_session_query::facts::fact_cache::ParseFactRef {
-    crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+    verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
         ctx,
         scope,
         observed_whole_hash,
@@ -514,7 +518,7 @@ fn observe_scope(
 /// rejects admission.
 #[test]
 fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
-    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/memo_never_loaded.ts";
@@ -524,11 +528,12 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
     // member-value subject class production keys.
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(c),
-        SemanticNodeId(7101),
-        ProjectionMode::Expanded,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(c),
+            SemanticNodeId(7101),
+            ProjectionMode::Expanded,
+        );
 
     let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         Some((
@@ -575,7 +580,7 @@ fn materialize_memo_db_untracked_self_root_rejects_warm_entry() {
 /// self-root contract.
 #[test]
 fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
-    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = host_with_unrelated_file();
     let c = "/self_root_qdb/member_shape_never_loaded.ts";
@@ -585,11 +590,12 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
     // Use a synthetic SemanticNodeId — the test exercises the cache's
     // self-root validation contract, not the production graph (the
     // arbitrary-node test-only constructor, not the member-value path).
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(c),
-        SemanticNodeId(7),
-        ProjectionMode::Expanded,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(c),
+            SemanticNodeId(7),
+            ProjectionMode::Expanded,
+        );
 
     let _ = db.fixture(ctx).get_or_compute_traced_for_test(&key, || {
         Some((
@@ -626,7 +632,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
 /// fact-signature rail as the `TypeExpr` and `SemanticNode` subjects.
 ///
 /// The synthetic-binding subject is the content-free
-/// [`crate::semantic_query::SyntheticBindingId`] identity — the cache key
+/// [`verter_type_engine::semantic_query::SyntheticBindingId`] identity — the cache key
 /// carries no `value_node` ordinal. Correctness of a single-entry cache
 /// under a content-free key holds ONLY through the rail: a warm entry
 /// whose self-root names an untracked / changed keyed canonical must be
@@ -645,7 +651,7 @@ fn member_value_node_cache_db_untracked_self_root_rejects_warm_entry() {
 /// self-root contract.
 #[test]
 fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
-    use crate::semantic_query::{ProjectionMode, SyntheticBindingId};
+    use verter_type_engine::semantic_query::{ProjectionMode, SyntheticBindingId};
     use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
 
     let host = host_with_unrelated_file();
@@ -665,7 +671,7 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
         binding_name: Arc::from("items"),
         value_node: 7,
     };
-    let key = crate::component_meta_caches::ShapeCacheKey::synthetic_binding_whole(
+    let key = verter_type_engine::component_meta_caches::ShapeCacheKey::synthetic_binding_whole(
         SyntheticBindingId::from_carrier_key(&carrier),
         ProjectionMode::Expanded,
     );
@@ -706,10 +712,11 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
         value_node: 99,
         ..carrier.clone()
     };
-    let key_other_node = crate::component_meta_caches::ShapeCacheKey::synthetic_binding_whole(
-        SyntheticBindingId::from_carrier_key(&carrier_other_node),
-        ProjectionMode::Expanded,
-    );
+    let key_other_node =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::synthetic_binding_whole(
+            SyntheticBindingId::from_carrier_key(&carrier_other_node),
+            ProjectionMode::Expanded,
+        );
     assert_eq!(
         key, key_other_node,
         "two carriers differing only in `value_node` must produce the SAME \
@@ -743,8 +750,8 @@ fn shape_cache_db_synthetic_binding_untracked_self_root_rejects_warm_entry() {
 /// rejection is driven purely by the observed-dep `FileWholeHash` fact.
 #[test]
 fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_qdb/memo_scope.ts";
@@ -763,16 +770,17 @@ fn materialize_memo_db_observed_dependency_edit_rejects_warm_entry() {
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
     // member-value subject class production keys.
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(scope),
-        SemanticNodeId(7102),
-        ProjectionMode::Expanded,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(scope),
+            SemanticNodeId(7102),
+            ProjectionMode::Expanded,
+        );
 
     // The materialized value observed `dep` during materialization —
     // recorded on its `dep_signature`. The producer helper merges that
     // into the fact signature.
-    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
         Arc::<str>::from(dep),
         DepVersion::WholeHash(dep_indexed.whole_hash),
     )]);
@@ -923,7 +931,8 @@ fn load_tracked_keyed(host: &VerterHost, canonical: &str) {
         "IndexedReady must materialise for {canonical}",
     );
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host;
-    let view = crate::resolver_core::fact_validation_port::FactValidationView::new(ctx);
+    let view =
+        verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx);
     assert!(
         StoreView::tracks_file(&view, canonical),
         "fixture invariant: {canonical} must be TRACKED so the unrelated-sibling-body \
@@ -1062,8 +1071,8 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
             .into_cacheable()
             .expect("provenance-pure signature builds — observed artifact present")
             .facts;
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
+            verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "stale"))),
                     fact_dep_signature: sig,
                     validated_at_generation: ctx.current_project_generation(),
@@ -1080,8 +1089,8 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
         .fixture(ctx2)
         .get_or_compute_admit_traced_for_test(&key, || {
             cold_ran = true;
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
+            verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
                     validated_at_generation: ctx2.current_project_generation(),
@@ -1410,8 +1419,8 @@ fn owner_collection_db_reuses_warm_then_invalidate_canonical_drops_and_recompute
 /// valid and serve stale.
 #[test]
 fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/self_root_e2e/memo.ts";
@@ -1424,11 +1433,12 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
     // member-value subject class production keys.
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(c),
-        SemanticNodeId(7103),
-        ProjectionMode::Expanded,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(c),
+            SemanticNodeId(7103),
+            ProjectionMode::Expanded,
+        );
 
     let observed_scope = observe_scope(ctx, c);
     let _ = db
@@ -1517,8 +1527,8 @@ fn materialize_memo_db_self_root_sibling_edit_rejects_warm_entry() {
 /// PASSES.
 #[test]
 fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_e2e/memo_rg_scope.ts";
@@ -1539,15 +1549,16 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
     // member-value subject class production keys.
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(scope),
-        SemanticNodeId(7104),
-        ProjectionMode::Expanded,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(scope),
+            SemanticNodeId(7104),
+            ProjectionMode::Expanded,
+        );
 
     // The materialisation walk observed `dep` via a `RouteGeneration`
     // dependency — route generation has no validating source.
-    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
         Arc::<str>::from(dep),
         DepVersion::RouteGeneration(1),
     )]);
@@ -1671,8 +1682,8 @@ fn materialize_memo_db_route_generation_observed_dependency_refuses_admission() 
 ///    would leave the entry valid and serve it stale.
 #[test]
 fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_generation() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::semantic_query::{DepVersion, ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_e2e/memo_pg_scope.ts";
@@ -1693,16 +1704,17 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
     // member-value subject class production keys.
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(scope),
-        SemanticNodeId(7105),
-        ProjectionMode::Expanded,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(scope),
+            SemanticNodeId(7105),
+            ProjectionMode::Expanded,
+        );
 
     // The materialiser observed `dep` against the project-wide
     // generation `g_observed` — the host's current project generation.
     let g_observed = host.project_type_store().project_generation();
-    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
         Arc::<str>::from(dep),
         DepVersion::ProjectGeneration(g_observed),
     )]);
@@ -1811,7 +1823,7 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
 
 /// `MaterializeMemoDb`'s producer preserves the OBSERVED `WholeHash`
 /// for a dependency the materialiser recorded as
-/// [`crate::semantic_query::DepVersion::WholeHash`] — it must NOT
+/// [`verter_type_engine::semantic_query::DepVersion::WholeHash`] — it must NOT
 /// re-read the dependency's current content hash.
 ///
 /// Discriminating property — the materialise → write-through race
@@ -1843,8 +1855,8 @@ fn materialize_memo_db_project_generation_observed_dependency_roots_on_observed_
 /// that preserves the observed hash.
 #[test]
 fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::DepVersion;
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::semantic_query::DepVersion;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_scope.ts";
@@ -1862,7 +1874,7 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
     // The materialiser observed `dep` at content hash H1 and recorded a
     // `DepVersion::WholeHash(H1)` entry on the materialised value's
     // `dep_signature`.
-    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
         Arc::<str>::from(dep),
         DepVersion::WholeHash(observed_hash_h1),
     )]);
@@ -1972,7 +1984,7 @@ fn materialize_memo_db_observed_whole_hash_dependency_preserves_observed_hash() 
 /// be unrecoverable; the production ordering observes it first.
 #[test]
 fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_scope_observed.ts";
@@ -2083,8 +2095,8 @@ fn materialize_memo_db_scope_self_root_carries_observed_hash_not_current() {
 /// provenance-pure builder.
 #[test]
 fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_scope_e2e.ts";
@@ -2101,11 +2113,12 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
     // member-value subject class production keys.
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(scope),
-        SemanticNodeId(7106),
-        ProjectionMode::Expanded,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(scope),
+            SemanticNodeId(7106),
+            ProjectionMode::Expanded,
+        );
 
     // The publish site calls `observe_materialize_scope` once,
     // synchronously, at materialisation time — BEFORE any racing edit.
@@ -2208,8 +2221,8 @@ fn materialize_memo_db_scope_edit_in_race_window_rejects_stale_entry_end_to_end(
 /// post-fix body that performs the equality check.
 #[test]
 fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::DepVersion;
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::semantic_query::DepVersion;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_mixed_scope.ts";
@@ -2235,7 +2248,7 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
 
     // The materialisation walk recorded the scope itself with a
     // WholeHash that disagrees with the observed scope hash.
-    let dep_sig: crate::semantic_query::DepSignature = Arc::from(vec![(
+    let dep_sig: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
         Arc::<str>::from(scope),
         DepVersion::WholeHash(h_disagree),
     )]);
@@ -2273,7 +2286,7 @@ fn materialize_memo_db_mixed_scope_observation_refuses_admission() {
 /// post-fix body that performs the canonical-equality guard.
 #[test]
 fn materialize_memo_db_scope_export_set_canonical_mismatch_refuses_admission() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_race/memo_canon_scope.ts";
@@ -2699,7 +2712,7 @@ fn resolvability_db_producer_overlay_discrimination() {
     );
 
     let fixture_dispatch_0 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&overlay_ctx);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&overlay_ctx);
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx, &fixture_dispatch_0);
     let overlay_resolvable = overlay_engine.can_resolve_registry_symbol(
         canonical,
@@ -2716,7 +2729,7 @@ fn resolvability_db_producer_overlay_discrimination() {
     let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
 
     let fixture_dispatch_1 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(base_ctx);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(base_ctx);
     let mut base_engine = ComponentMetaQueryEngine::new(base_ctx, &fixture_dispatch_1);
     let base_resolvable = base_engine.can_resolve_registry_symbol(
         canonical,
@@ -2774,7 +2787,7 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
     );
 
     let fixture_dispatch_2 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&overlay_ctx);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&overlay_ctx);
     let mut overlay_engine = ComponentMetaQueryEngine::new(&overlay_ctx, &fixture_dispatch_2);
     let observed = overlay_engine
         .observed_prepared_type_decl(
@@ -2791,10 +2804,9 @@ fn observed_prepared_type_decl_is_single_artifact_and_view_aware() {
         .as_ref()
         .expect("the overlay bundle declares Probe");
     assert!(
-        decl.member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier(
-                "overlayMember"
-            )),
+        decl.member_index.contains_key(
+            &verter_type_engine::semantic_query::PropertyKey::identifier("overlayMember")
+        ),
         "fixture invariant: the overlay-aware prepared-decl bundle must yield the \
          overlay `Probe` (member `overlayMember`)",
     );
@@ -2868,7 +2880,7 @@ fn observe_materialize_scope_is_overlay_view_correct() {
         std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
     );
     let overlay_observation =
-        crate::resolver_core::request_ports::IndexedInputs::observe_materialize_scope(
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::observe_materialize_scope(
             &overlay_ctx,
             canonical,
         )
@@ -2926,8 +2938,8 @@ fn observe_materialize_scope_is_overlay_view_correct() {
 /// eviction-aware authority returns `None` and this test PASSES.
 #[test]
 fn observe_materialize_scope_refuses_evicted_stale_artifact() {
-    use crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
-    use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+    use verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let scope = "/self_root_obs/evicted_scope.ts";
@@ -2971,11 +2983,12 @@ fn observe_materialize_scope_refuses_evicted_stale_artifact() {
     // The TypeExpr-start route keys its LOWERED settled node; this
     // cache-rail fixture mints an arbitrary test node in the same
     // member-value subject class production keys.
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(scope),
-        SemanticNodeId(7107),
-        ProjectionMode::Expanded,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(scope),
+            SemanticNodeId(7107),
+            ProjectionMode::Expanded,
+        );
     let scope_owned = scope.to_string();
     let cold_value = db
         .fixture(ctx)
@@ -3216,7 +3229,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
         .expect("base IndexedReady materialises")
         .whole_hash;
     let host = Arc::new(host);
-    let key: crate::component_meta_caches::ImportedRegistryKey = (
+    let key: verter_type_engine::component_meta_caches::ImportedRegistryKey = (
         Arc::<str>::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::<str>::from("Probe"),
@@ -3235,8 +3248,8 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
             .fixture(ctx)
             .get_or_compute_admit_traced_for_test(&key, || {
                 base_cold_ran.set(true);
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    crate::component_meta_caches::ImportedRegistryEntry {
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                         value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
                         fact_dep_signature: Arc::clone(&base_self_root),
                         validated_at_generation: ctx.current_project_generation(),
@@ -3285,8 +3298,8 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
             .fixture(&session_ctx)
             .get_or_compute_admit_traced_for_test(&key, || {
                 overlay_cold_ran.set(true);
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    crate::component_meta_caches::ImportedRegistryEntry {
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                         value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
                         fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
                             canonical_id: canonical.to_string(),
@@ -3361,7 +3374,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         .expect("base IndexedReady materialises")
         .whole_hash;
     let host = Arc::new(host);
-    let key: crate::component_meta_caches::ImportedRegistryKey = (
+    let key: verter_type_engine::component_meta_caches::ImportedRegistryKey = (
         Arc::<str>::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::<str>::from("Probe"),
@@ -3385,8 +3398,8 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         let _ = db
             .fixture(ctx)
             .get_or_compute_admit_traced_for_test(&key, || {
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    crate::component_meta_caches::ImportedRegistryEntry {
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                         value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
                         fact_dep_signature: Arc::clone(&base_self_root),
                         validated_at_generation: ctx.current_project_generation(),
@@ -3420,8 +3433,8 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         let _ = db
             .fixture(&session_ctx)
             .get_or_compute_admit_traced_for_test(&key, || {
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                    crate::component_meta_caches::ImportedRegistryEntry {
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                    verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                         value: Some(Arc::new(imported_symbol(canonical, "follower-overlay"))),
                         fact_dep_signature: Arc::from(vec![FactVersionRef::FileWholeHash {
                             canonical_id: canonical.to_string(),
@@ -3694,7 +3707,7 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
 
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
-    let key: crate::component_meta_caches::ImportedRegistryKey = (
+    let key: verter_type_engine::component_meta_caches::ImportedRegistryKey = (
         Arc::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Probe"),
@@ -3710,8 +3723,8 @@ fn imported_registry_peek_rejects_entry_from_superseded_generation() {
         .fixture(ctx)
         .get_or_compute_admit_traced_for_test(&key, || {
             let validated_at_generation = host.project_type_store().current_project_generation();
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
+            verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: None,
                     fact_dep_signature: empty_fact_signature(),
                     validated_at_generation,
@@ -3802,7 +3815,7 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
 
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().imported_registry_db();
-    let key: crate::component_meta_caches::ImportedRegistryKey = (
+    let key: verter_type_engine::component_meta_caches::ImportedRegistryKey = (
         Arc::from(canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
         Arc::from("Probe"),
@@ -3815,8 +3828,8 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
         .fixture(ctx)
         .get_or_compute_admit_traced_for_test(&key, || {
             let validated_at_generation = host.project_type_store().current_project_generation();
-            crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
-                crate::component_meta_caches::ImportedRegistryEntry {
+            verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: None,
                     fact_dep_signature: empty_fact_signature(),
                     validated_at_generation,
@@ -3852,9 +3865,9 @@ fn imported_registry_cooperative_generation_reject_cleans_reverse_index() {
         .fixture(ctx)
         .get_or_compute_admit_traced_for_test(&key, || {
             cold_ran = true;
-            crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+            verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
                 value: None,
-                reason: crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+                reason: verter_audit::NonAdmissionReason::GenerationSuperseded,
             }
         });
     assert!(
@@ -4071,16 +4084,17 @@ fn owner_collection_failed_revalidation_does_not_leak_live_counter() {
 /// [`declaration_lookup_failed_revalidation_does_not_leak_live_counter`].
 #[test]
 fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
-    use crate::semantic_query::SemanticNodeId;
+    use verter_type_engine::semantic_query::SemanticNodeId;
     let host = host_with_unrelated_file();
     let c = "/live_counter_qdb/materialize_memo.ts";
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let db = host.project_type_store().shape_cache_db();
-    let key = crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-        Arc::<str>::from(c),
-        SemanticNodeId(7301),
-        ProjectionMode::Shallow,
-    );
+    let key =
+        verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from(c),
+            SemanticNodeId(7301),
+            ProjectionMode::Shallow,
+        );
 
     let counter_before = component_meta_cache_live(&host);
     let map_before = db.live_count();
@@ -4091,7 +4105,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
             MaterializedOutputTypeExpr::from_type_expr_for_test(
                 None,
                 TypeExpr::Unknown(UnknownValue::missing_output()),
-                Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+                Arc::from([] as [(Arc<str>, verter_type_engine::semantic_query::DepVersion); 0]),
                 false,
             ),
             empty_fact_signature(),
@@ -4129,7 +4143,7 @@ fn materialize_memo_failed_revalidation_does_not_leak_live_counter() {
 /// equals the true total (GREEN).
 #[test]
 fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
-    use crate::semantic_query::SemanticNodeId;
+    use verter_type_engine::semantic_query::SemanticNodeId;
 
     let host = host_with_unrelated_file();
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
@@ -4197,24 +4211,26 @@ fn cooperative_get_or_insert_dbs_keep_live_counter_equal_to_map_total() {
         .shape_cache_db()
         .fixture(ctx)
         .get_or_compute_traced_for_test(
-            &crate::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
-                Arc::<str>::from("/lc_total/memo.ts"),
-                SemanticNodeId(7302),
-                ProjectionMode::Shallow,
-            ),
-            || {
-                bump();
-                Some((
-                    MaterializedOutputTypeExpr::from_type_expr_for_test(
-                        None,
-                        TypeExpr::Unknown(UnknownValue::missing_output()),
-                        Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                        false,
+        &verter_type_engine::component_meta_caches::ShapeCacheKey::member_value_node_whole_for_test(
+            Arc::<str>::from("/lc_total/memo.ts"),
+            SemanticNodeId(7302),
+            ProjectionMode::Shallow,
+        ),
+        || {
+            bump();
+            Some((
+                MaterializedOutputTypeExpr::from_type_expr_for_test(
+                    None,
+                    TypeExpr::Unknown(UnknownValue::missing_output()),
+                    Arc::from(
+                        [] as [(Arc<str>, verter_type_engine::semantic_query::DepVersion); 0],
                     ),
-                    empty_fact_signature(),
-                ))
-            },
-        );
+                    false,
+                ),
+                empty_fact_signature(),
+            ))
+        },
+    );
 
     assert_eq!(
         component_meta_cache_live(&host) as usize,
@@ -4309,7 +4325,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
     let cached = CachedComponentMetaResult {
         analysis,
         resolution_template: ResolutionTemplate {
-            mode: crate::types::ProjectionMode::Expanded,
+            mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
             whole_hash: owner_whole_hash,
             resolved_macros: Vec::new(),
             resolved_type_registry: Vec::new(),
@@ -4318,7 +4334,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
             fact_versions: Vec::new(),
             surface_identities: None,
             origin_graph: None,
-            completeness: crate::semantic_query::ResultCompleteness::Complete,
+            completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
         },
         canonical_id: Arc::from(owner),
         whole_hash: owner_whole_hash,
@@ -4347,7 +4363,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
             let ctx =
                 crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
             crate::component_meta_result_admission::ComponentMetaResultRead::new(
-                &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
                 db,
                 host.provenance(),
             )
@@ -4390,7 +4406,7 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
                 overlay,
             );
             crate::component_meta_result_admission::ComponentMetaResultRead::new(
-                &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx),
                 db,
                 host.provenance(),
             )
@@ -4413,11 +4429,11 @@ fn component_meta_result_db_get_with_view_rejects_entry_from_superseded_generati
 /// oracle.
 #[test]
 fn relation_memo_get_relation_payload_rejects_entry_from_superseded_generation() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         PrimitiveKind, RelateMemoKey, RelationContext, RelationOutcome, SemanticNodeData,
         SemanticNodeId,
     };
-    use crate::semantic_query_memo::SemanticGraphStore;
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
@@ -4566,24 +4582,24 @@ fn owner_import_surface_get_with_view_rejects_surface_from_superseded_generation
 //        a read from the other view recomputes cold.
 // ===========================================================================
 
-/// Build a [`crate::semantic_query::SurfaceMember`] with an explicit name and
+/// Build a [`verter_type_engine::semantic_query::SurfaceMember`] with an explicit name and
 /// value node. Mirrors the production `required_member` shape: a `Public`,
 /// non-optional, non-method, own-body authored member.
 fn shape_member(
     name: &str,
-    value: crate::semantic_query::SemanticNodeId,
-) -> crate::semantic_query::SurfaceMember {
-    crate::semantic_query::SurfaceMember {
+    value: verter_type_engine::semantic_query::SemanticNodeId,
+) -> verter_type_engine::semantic_query::SurfaceMember {
+    verter_type_engine::semantic_query::SurfaceMember {
         excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
         visibility: verter_type_expr::MemberVisibility::Public,
-        key: crate::semantic_query::AuthoredPropertyKey::string(name),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
         value,
         optional: false,
         readonly: false,
         method_kind: None,
         has_implementation_body: false,
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
         spans: Default::default(),
         declaration_origin: None,
     }
@@ -4632,8 +4648,10 @@ fn self_root_at(canonical: &str, hash: [u8; 16]) -> Arc<[FactVersionRef]> {
 /// collapsed every member onto one slot regardless of value node.
 #[test]
 fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
-    use crate::component_meta_caches::ShapeCacheKey;
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SemanticNodeId};
+    use verter_type_engine::component_meta_caches::ShapeCacheKey;
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SemanticNodeId,
+    };
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let c = "/member_value_eq/scope.ts";
@@ -4770,12 +4788,12 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // sibling-collapse is asserted through the production seam, not only the
     // directly-built key. A fresh scope keeps the seam's own admitted entries
     // disjoint from the directly-keyed entries above.
-    use crate::component_meta_caches::PublishedSurfaceKind;
     use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::output_sink::surface_member_to_expanded_field;
     use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
     use crate::resolver_core::ComponentMetaQueryEngine;
-    use crate::semantic_query::DeclIdentity;
+    use verter_type_engine::component_meta_caches::PublishedSurfaceKind;
+    use verter_type_engine::semantic_query::DeclIdentity;
 
     let seam_scope = "/member_value_eq/seam_scope.ts";
     upsert(&host, seam_scope, "export type SeamProbe = number;\n");
@@ -4795,13 +4813,16 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // `OutputMaterializationLoss` non-cacheable channel refuses it; the cache
     // subject identity the seam exercise needs is a genuinely raisable node).
     let seam_graph = host.project_type_store().semantic_graph();
-    let seam_shared = seam_graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
-    ));
-    let seam_other_node =
-        seam_graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
+    let seam_shared = seam_graph.intern_node(
+        verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+            verter_type_engine::semantic_query::PrimitiveKind::String,
+        ),
+    );
+    let seam_other_node = seam_graph.intern_node(
+        verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+            verter_type_engine::semantic_query::PrimitiveKind::Number,
+        ),
+    );
     let seam_member_a = shape_member("seamAlpha", seam_shared);
     let mut seam_member_b = shape_member("seamBeta", seam_shared);
     seam_member_b.optional = true;
@@ -4813,7 +4834,8 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
         decl_name: std::sync::Arc::from("<sfc-script-setup>"),
     };
 
-    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_3);
 
     // First member admits one entry through the production seam.
@@ -4923,16 +4945,18 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
 /// `reduce_non_cacheable` refusal) the fenced shape LANDS in `ShapeCacheDb`.
 #[test]
 fn fenced_serve_surface_member_shape_is_not_admitted() {
-    use crate::component_meta_caches::PublishedSurfaceKind;
     use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::output_sink::{
         surface_member_to_expanded_field, MemberValuePosition,
     };
     use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
-    use crate::request_context::{RequestContext, RequestContextGuard};
     use crate::resolver_core::ComponentMetaQueryEngine;
-    use crate::semantic_query::{DeclIdentity, ScopeId, SemanticNodeData, ValueRootKey};
     use std::sync::atomic::Ordering;
+    use verter_type_engine::component_meta_caches::PublishedSurfaceKind;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, ScopeId, SemanticNodeData, ValueRootKey,
+    };
 
     // Drive the REAL surface-member seam for a `typeof <missing>` member value
     // interned in `scope`'s graph: its reduce drives an `ensure_indexed_ready_serve`
@@ -4949,9 +4973,10 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
                             canonical_id: Arc::from(scope),
                             owner: verter_type_expr::TopLevelOwnerId::instance(0),
                             local_scope: None,
-                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                                verter_type_expr::TopLevelOwnerId::instance(0),
-                            ),
+                            binder_scope_id:
+                                verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                                    verter_type_expr::TopLevelOwnerId::instance(0),
+                                ),
                         },
                         name: Arc::from("definitelyMissingSeamValue"),
                     },
@@ -4975,7 +5000,7 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
         );
 
         let fixture_dispatch_4 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
         let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_4);
         let _ = surface_member_to_expanded_field(
             &mut engine,
@@ -5036,7 +5061,7 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
         // HARD FLOOR: a fenced serve is non-cacheable, NOT partial — the shape stays
         // Complete; non-cacheability routes through the fact tracer, never the sticky.
         assert!(
-            !crate::request_context::current_request_result_is_partial(),
+            !verter_type_engine::request_context::current_request_result_is_partial(),
             "a fenced surface-member serve is non-cacheable, NOT partial — the shape stays \
              Complete; non-cacheability routes through the fact tracer, never the partial sticky",
         );
@@ -5067,16 +5092,18 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
 /// overflowed compute must NOT.
 #[test]
 fn tracer_overflow_refuses_surface_member_shape_admission() {
-    use crate::component_meta_caches::PublishedSurfaceKind;
     use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::output_sink::{
         surface_member_to_expanded_field, MemberValuePosition,
     };
     use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
-    use crate::request_context::{RequestContext, RequestContextGuard};
     use crate::resolver_core::ComponentMetaQueryEngine;
-    use crate::semantic_query::{DeclIdentity, ScopeId, SemanticNodeData, ValueRootKey};
     use std::sync::atomic::Ordering;
+    use verter_type_engine::component_meta_caches::PublishedSurfaceKind;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, ScopeId, SemanticNodeData, ValueRootKey,
+    };
 
     fn drive(host: &VerterHost, scope: &str) -> usize {
         let value_node =
@@ -5088,9 +5115,10 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
                             canonical_id: Arc::from(scope),
                             owner: verter_type_expr::TopLevelOwnerId::instance(0),
                             local_scope: None,
-                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                                verter_type_expr::TopLevelOwnerId::instance(0),
-                            ),
+                            binder_scope_id:
+                                verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                                    verter_type_expr::TopLevelOwnerId::instance(0),
+                                ),
                         },
                         name: Arc::from("definitelyMissingOverflowValue"),
                     },
@@ -5114,7 +5142,7 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
         );
 
         let fixture_dispatch_5 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
         let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_5);
         let _ = surface_member_to_expanded_field(
             &mut engine,
@@ -5174,7 +5202,7 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
             .store(0, Ordering::Relaxed);
         // Orthogonality: overflow is non-cacheable, NOT partial.
         assert!(
-            !crate::request_context::current_request_result_is_partial(),
+            !verter_type_engine::request_context::current_request_result_is_partial(),
             "a tracer overflow is non-cacheable, NOT partial — it must never raise the \
              request partial sticky",
         );
@@ -5224,9 +5252,11 @@ fn tracer_overflow_refuses_surface_member_shape_admission() {
 /// assertion trips RED if the slot stale-served across views.
 #[test]
 fn member_value_node_cross_view_fail_closed_recomputes() {
-    use crate::component_meta_caches::ShapeCacheKey;
     use crate::resolver_core::SessionResolverContext;
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext, SemanticNodeId};
+    use verter_type_engine::component_meta_caches::ShapeCacheKey;
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, SemanticNodeId,
+    };
 
     let c = "/member_value_eq/cross_view.ts";
     let (host, view, base_hash, overlay_hash) = overlay_disc_fixture(c);
@@ -5394,7 +5424,7 @@ fn member_value_node_cross_view_fail_closed_recomputes() {
 
 /// The `member_shape_peek_or_compute` GATE-SHORT-CIRCUIT arms (package-backed
 /// root / transitive-cycle root / non-reducible shape) must REFUSE
-/// [`crate::component_meta_caches::ShapeCacheDb`] admission when the arm's own
+/// [`verter_type_engine::component_meta_caches::ShapeCacheDb`] admission when the arm's own
 /// compute — the node-domain gates AND the terminal carrier raise — consumed a
 /// FENCED (ReturnOnly, `store_published == false`) `IndexedReady` serve.
 ///
@@ -5422,20 +5452,20 @@ mod fenced_gate_arm_admission_tests {
     use verter_type_expr::{PrimitiveName, TypeExpr};
 
     use super::shape_member;
-    use crate::component_meta_caches::PublishedSurfaceKind;
     use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::output_sink::{
         surface_member_to_expanded_field, MemberValuePosition,
     };
     use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::request_context::{RequestContext, RequestContextGuard};
     use crate::resolver_core::ComponentMetaQueryEngine;
-    use crate::semantic_query::{
-        DeclIdentity, NodeScopeId, ProjectionMode, SemanticNodeData, SemanticNodeId,
-    };
     use crate::types::{AnalysisLevel, HostConfig};
     use crate::{DependencyResolution, VerterHost};
+    use verter_type_engine::component_meta_caches::PublishedSurfaceKind;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, NodeScopeId, ProjectionMode, SemanticNodeData, SemanticNodeId,
+    };
 
     /// Lower `expr` in `scope` to the settled graph node the per-member
     /// publication seam takes as `SurfaceMember.value`.
@@ -5466,7 +5496,7 @@ mod fenced_gate_arm_admission_tests {
         );
 
         let fixture_dispatch_6 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
         let mut engine = ComponentMetaQueryEngine::new(host, &fixture_dispatch_6);
         let _ = surface_member_to_expanded_field(
             &mut engine,
@@ -5536,7 +5566,7 @@ mod fenced_gate_arm_admission_tests {
         );
         // HARD FLOOR: a fenced serve is non-cacheable, NOT partial.
         assert!(
-            !crate::request_context::current_request_result_is_partial(),
+            !verter_type_engine::request_context::current_request_result_is_partial(),
             "({arm}) a fenced serve is non-cacheable, NOT partial — the shape stays \
              Complete; non-cacheability routes through the fact tracer, never the sticky",
         );
@@ -5821,8 +5851,8 @@ fn declaration_lookup_straddling_compute_is_not_served_to_the_winner() {
 /// no-side-effect-mint assertion stays green.
 #[test]
 fn owner_resolution_set_published_only_by_owner_import_surface_db() {
-    use crate::cache_runtime::singleflight::ComputeAdmission;
     use crate::owner_import_surface::build_owner_import_surface;
+    use verter_type_engine::cache_runtime::singleflight::ComputeAdmission;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let owner = "/owner_set_authority/owner.ts";

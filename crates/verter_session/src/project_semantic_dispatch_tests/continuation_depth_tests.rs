@@ -14,7 +14,7 @@
 //! capped `tsc` with `--ignoreConfig`.
 
 use super::checker_probe_lane_tests::{evaluated_mismatches, with_probe_in, ProbeProject};
-use crate::semantic_query::{CheckerDiagnosticCode, QueryError, SemanticNodeData};
+use verter_type_engine::semantic_query::{CheckerDiagnosticCode, QueryError, SemanticNodeData};
 
 /// A chain of `length` aliases down to `T | undefined`, a generic function
 /// declared to return its end, and the call's result kept as a `const` and
@@ -120,12 +120,12 @@ fn evaluated_in<R: Send + 'static>(
     probe: String,
     read: impl FnOnce(
             &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-            crate::semantic_query::SemanticNodeId,
+            verter_type_engine::semantic_query::SemanticNodeId,
         ) -> R
         + Send
         + 'static,
 ) -> R {
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+    use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
     on_a_small_stack(move || {
         let _budget = budget.map(super::connected_demand::InstantiationBudgetForTests::install);
         with_probe_in(
@@ -182,7 +182,7 @@ fn recovery_in(
     options: &'static str,
     source: String,
     probe: &str,
-) -> Option<crate::semantic_query::CheckerDiagnostic> {
+) -> Option<verter_type_engine::semantic_query::CheckerDiagnostic> {
     evaluated_in(
         budget,
         options,
@@ -268,7 +268,7 @@ fn conditional_arguments_nested_1000_deep_answer() {
 /// "Type instantiation is excessively deep and possibly infinite."
 #[test]
 fn verters_instantiation_budget_reports_the_checkers_ts2589() {
-    use crate::semantic_query::CheckerDiagnosticOperation;
+    use verter_type_engine::semantic_query::CheckerDiagnosticOperation;
     const BUDGET: u32 = 150;
     const TS2589: &str = "Type instantiation is excessively deep and possibly infinite.";
     let answers = |options: &'static str, length: usize| {
@@ -369,8 +369,8 @@ fn an_unbounded_instantiation_stops_at_verters_budget_with_ts2589() {
 #[test]
 fn an_edit_below_a_chain_of_frames_reaches_every_instantiation_above_it() {
     use super::checker_probe_lane_tests::{default_probe_host, with_probe_on_host};
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+    use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
 
     let mut source = String::from("import type { A0 } from \"./base\";\n");
     for level in 1..=30 {
@@ -517,7 +517,7 @@ fn a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread() {
 /// answer is `"ok"`.
 #[test]
 fn a_budget_recovery_is_never_kept_in_the_memo() {
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+    use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
     let recovered_then_answered = on_a_small_stack(|| {
         let host = super::checker_probe_lane_tests::default_probe_host();
         let source = conditional_argument_chain(151);
@@ -690,7 +690,7 @@ fn diagnostic_of_g_string(
     source: &'static str,
     tail: Option<u32>,
 ) -> Option<u32> {
-    use crate::semantic_query::{ProjectionMode, ProjectionReductionContext};
+    use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
     on_a_small_stack(move || {
         let _tail = tail.map(super::connected_demand::TailBudgetForTests::install);
         with_probe_in(

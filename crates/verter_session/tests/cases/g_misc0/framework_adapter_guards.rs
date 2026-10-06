@@ -453,7 +453,8 @@ fn vue_shared_slot_normalizer_uses_first_param_only() {
     // `params.first()`, NOT every positional param. If a future edit made the
     // SHARED combiner iterate all params (the Svelte all-positional behavior),
     // Vue slot bindings would regress; this pins it to first-param-only.
-    let view_src = read_src("crates/verter_session/src/project_semantic_dispatch/callable_view.rs");
+    let view_src =
+        read_src("crates/verter_type_engine/src/project_semantic_dispatch/callable_view.rs");
     let body = strip_comments(&extract_fn_body(&view_src, "combine_slot_arms"));
     assert!(
         body.contains("params.first()"),

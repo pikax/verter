@@ -1,6 +1,6 @@
-use crate::project_semantic_dispatch::raise::shape_engine::node_domain::summary;
-use crate::project_semantic_dispatch::raise::shape_engine::FactShapeTag;
-use crate::semantic_query::QueryError;
+use verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::summary;
+use verter_type_engine::project_semantic_dispatch::raise::shape_engine::FactShapeTag;
+use verter_type_engine::semantic_query::QueryError;
 
 /// The TYPED node-domain summary constructor (`summary::opaque_sentinel`)
 /// classifies on the typed [`QueryError`] ONLY — there is no raw-string
@@ -39,8 +39,8 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
             ),
         },
         QueryError::ValueDomainMismatch {
-            expected: crate::semantic_query::SemanticQueryValueTag::TypeNode,
-            actual: crate::semantic_query::SemanticQueryValueTag::Relation,
+            expected: verter_type_engine::semantic_query::SemanticQueryValueTag::TypeNode,
+            actual: verter_type_engine::semantic_query::SemanticQueryValueTag::Relation,
         },
         QueryError::RaiseAliasCycle,
         QueryError::TypeParamCycle,
@@ -120,9 +120,9 @@ fn opaque_sentinel_summary_pins_exact_materialized_and_tag() {
     assert_eq!(tp_cycle.tag, FactShapeTag::Other);
 }
 
-/// PARITY PIN: the root-only projection ([`crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary`]) yields
-/// the IDENTICAL `root_kind` the full fold ([`fold_node`](crate::project_semantic_dispatch::raise::shape_engine::fold_node)
-/// under [`RaisedFactsAlg`](crate::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg)) does, for every shape the
+/// PARITY PIN: the root-only projection ([`verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary`]) yields
+/// the IDENTICAL `root_kind` the full fold ([`fold_node`](verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node)
+/// under [`RaisedFactsAlg`](verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg)) does, for every shape the
 /// raised-root mirror parity test covers PLUS the collapsed-intersection cases —
 /// proving the short-circuit never diverges from the authority it replaces.
 ///
@@ -139,19 +139,19 @@ fn root_only_projection_root_kind_matches_full_fold() {
 
     use rustc_hash::FxHashSet;
 
-    use crate::project_semantic_dispatch::raise::shape_engine::RaisedRootKind;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use crate::VerterHost;
+    use verter_type_engine::project_semantic_dispatch::raise::shape_engine::RaisedRootKind;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         IndexKey, PrimitiveKind, QueryError, ScopeId, SemanticNodeData, ValueRootKey,
     };
-    use crate::VerterHost;
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     let empty_surface = || {
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: StdArc::from(Vec::new().into_boxed_slice()),
             call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
             construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
@@ -179,7 +179,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
                 canonical_id: StdArc::from("/p.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -193,11 +193,13 @@ fn root_only_projection_root_kind_matches_full_fold() {
     // Function root), NOT an Object — the case the raised-root mirror parity test
     // does not cover and the root-only `Object` arm must reproduce.
     let func = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: StdArc::from(Vec::new().into_boxed_slice()),
         return_type: string,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            string,
+        ),
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -211,30 +213,30 @@ fn root_only_projection_root_kind_matches_full_fold() {
     // Collapsed-intersection cases (directly interned so lowering does NOT
     // pre-collapse them): the fold DROPS the `{}` arm and classifies the survivor.
     let int_obj = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
             vec![empty_obj, open_obj].into_boxed_slice(),
         )),
     ));
     let int_indexed = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
             vec![empty_obj, indexed].into_boxed_slice(),
         )),
     ));
     let int_typeof = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
             vec![empty_obj, typeof_node].into_boxed_slice(),
         )),
     ));
     // A single-arm Union is NOT collapsed → a Union (`Other`) root.
     let union_int_obj = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
             vec![int_obj].into_boxed_slice(),
         )),
     ));
     // An Intersection collapsing to a single-call-signature object → the Function
     // (`Other`) root, NOT `Object`.
     let int_callsig = graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
             vec![empty_obj, call_sig_obj].into_boxed_slice(),
         )),
     ));
@@ -258,9 +260,9 @@ fn root_only_projection_root_kind_matches_full_fold() {
     for (label, node) in cases {
         let full = {
             let mut alg =
-                crate::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
             let mut active = FxHashSet::default();
-            crate::project_semantic_dispatch::raise::shape_engine::fold_node(
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
                 &dispatch,
                 node,
@@ -270,7 +272,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
         };
         let root_only = {
             let mut active = FxHashSet::default();
-            crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(&dispatch, node, &mut active).map(|s| s.root_kind)
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(&dispatch, node, &mut active).map(|s| s.root_kind)
         };
         assert_eq!(
             root_only, full,
@@ -288,7 +290,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
     // `Object`.
     let root_kind = |node| {
         let mut active = FxHashSet::default();
-        crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
+        verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
             &dispatch,
             node,
             &mut active,
@@ -307,9 +309,9 @@ fn root_only_projection_root_kind_matches_full_fold() {
     assert_eq!(root_kind(int_callsig), Some(RaisedRootKind::Other));
 }
 
-/// ARM-COVERAGE PARITY: the root-only projection ([`crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary`])
-/// yields the IDENTICAL `root_kind` the full fold ([`fold_node`](crate::project_semantic_dispatch::raise::shape_engine::fold_node)
-/// under [`RaisedFactsAlg`](crate::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg)) does, enumerating EVERY
+/// ARM-COVERAGE PARITY: the root-only projection ([`verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary`])
+/// yields the IDENTICAL `root_kind` the full fold ([`fold_node`](verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node)
+/// under [`RaisedFactsAlg`](verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg)) does, enumerating EVERY
 /// `SemanticNodeData` arm with a non-trivial root mapping the earlier
 /// collapsed-intersection test does not — Reference, Conditional, both Mapped
 /// sub-cases, ConstructorType, Array, Alias, MergedDecl, RawFallback, Opaque (both
@@ -333,20 +335,20 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
 
     use rustc_hash::FxHashSet;
 
-    use crate::project_semantic_dispatch::raise::shape_engine::RaisedRootKind;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use crate::VerterHost;
+    use verter_type_engine::project_semantic_dispatch::raise::shape_engine::RaisedRootKind;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         DeclIdentity, HashValue, MapperKey, MapperKind, NodeScopeId, OptionalityMod, PrimitiveKind,
         QueryError, ReadonlyMod, SemanticNodeData, SyntheticBindingId, TupleElement,
     };
-    use crate::VerterHost;
 
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     let empty_surface = || {
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: StdArc::from(Vec::new().into_boxed_slice()),
             call_signatures: StdArc::from(Vec::new().into_boxed_slice()),
             construct_signatures: StdArc::from(Vec::new().into_boxed_slice()),
@@ -362,11 +364,13 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         empty_surface().with_known_index_signature(true),
     ));
     let func = graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: StdArc::from(Vec::new().into_boxed_slice()),
         return_type: string,
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(string),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            string,
+        ),
         type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
         signature_span: None,
         return_type_span: None,
@@ -510,9 +514,9 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let assert_parity = |label: &str, node| {
         let full = {
             let mut alg =
-                crate::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
             let mut active = FxHashSet::default();
-            crate::project_semantic_dispatch::raise::shape_engine::fold_node(
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
                 &dispatch,
                 node,
@@ -522,7 +526,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         };
         let root_only = {
             let mut active = FxHashSet::default();
-            crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(&dispatch, node, &mut active).map(|s| s.root_kind)
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(&dispatch, node, &mut active).map(|s| s.root_kind)
         };
         assert_eq!(
             root_only, full,
@@ -565,7 +569,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     // constant), and the two Mapped sub-cases differ in `value_is_semantic_miss`.
     let root_kind = |node| {
         let mut active = FxHashSet::default();
-        crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
+        verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
             &dispatch,
             node,
             &mut active,
@@ -637,13 +641,13 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
 
     use rustc_hash::FxHashSet;
 
-    use crate::project_semantic_dispatch::raise::shape_engine::RaisedRootKind;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use crate::VerterHost;
+    use verter_type_engine::project_semantic_dispatch::raise::shape_engine::RaisedRootKind;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         IndexKey, MapperKey, MapperKind, OptionalityMod, PrimitiveKind, ReadonlyMod,
         SemanticNodeData, SemanticNodeId, SurfaceMember,
     };
-    use crate::VerterHost;
     use verter_type_expr::MemberVisibility;
 
     let host = VerterHost::new_standalone(Default::default());
@@ -775,9 +779,9 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     for (label, node) in malformed {
         let full = {
             let mut alg =
-                crate::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
             let mut active = FxHashSet::default();
-            crate::project_semantic_dispatch::raise::shape_engine::fold_node(
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
                 &dispatch,
                 node,
@@ -786,7 +790,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
         };
         let root_only = {
             let mut active = FxHashSet::default();
-            crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
                 &dispatch,
                 node,
                 &mut active,
@@ -811,16 +815,18 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     // facts — it is NOT a raisability oracle). Each fixture asserts
     // `full.is_none() && root_only.is_some()` so a future "fix" that silently
     // re-aligns either side FAILS.
-    let fn_with = |return_type, params: Vec<crate::semantic_query::FunctionParam>| {
+    let fn_with = |return_type, params: Vec<verter_type_engine::semantic_query::FunctionParam>| {
         SemanticNodeData::Signature {
-            kind: crate::semantic_query::SignatureKind::Call,
+            kind: verter_type_engine::semantic_query::SignatureKind::Call,
             params: StdArc::from(params.into_boxed_slice()),
             return_type,
             type_parameters: StdArc::from(
-                Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
+                Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
             ),
             occurrence: None,
-            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+            return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+                return_type,
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -831,24 +837,24 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
         (
             "union.member",
             graph.intern_node(SemanticNodeData::Union(
-                crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
-                    vec![present, dangling].into_boxed_slice(),
-                )),
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    StdArc::from(vec![present, dangling].into_boxed_slice()),
+                ),
             )),
         ),
         (
             "intersection.member",
             graph.intern_node(SemanticNodeData::Intersection(
-                crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
-                    vec![present, dangling].into_boxed_slice(),
-                )),
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    StdArc::from(vec![present, dangling].into_boxed_slice()),
+                ),
             )),
         ),
         (
             "tuple.element",
             graph.intern_node(SemanticNodeData::Tuple {
                 elements: StdArc::from(
-                    vec![crate::semantic_query::TupleElement {
+                    vec![verter_type_engine::semantic_query::TupleElement {
                         label: None,
                         value: dangling,
                         optional: false,
@@ -874,18 +880,20 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             "function.param",
             graph.intern_node(fn_with(
                 present,
-                vec![crate::semantic_query::FunctionParam::synthetic(
-                    Some(StdArc::from("a")),
-                    dangling,
-                    false,
-                    false,
-                )],
+                vec![
+                    verter_type_engine::semantic_query::FunctionParam::synthetic(
+                        Some(StdArc::from("a")),
+                        dangling,
+                        false,
+                        false,
+                    ),
+                ],
             )),
         ),
         (
             "typeparam.constraint",
             graph.intern_node(SemanticNodeData::TypeParam {
-                decl: crate::semantic_query::DeclIdentity {
+                decl: verter_type_engine::semantic_query::DeclIdentity {
                     canonical_id: StdArc::from("/w/tp.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: [0u8; 16],
@@ -900,7 +908,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
         (
             "typeparam.default",
             graph.intern_node(SemanticNodeData::TypeParam {
-                decl: crate::semantic_query::DeclIdentity {
+                decl: verter_type_engine::semantic_query::DeclIdentity {
                     canonical_id: StdArc::from("/w/tp.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: [0u8; 16],
@@ -916,9 +924,9 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     for (label, node) in asymmetric {
         let full = {
             let mut alg =
-                crate::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
             let mut active = FxHashSet::default();
-            crate::project_semantic_dispatch::raise::shape_engine::fold_node(
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
                 &dispatch,
                 node,
@@ -927,7 +935,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
         };
         let root_only = {
             let mut active = FxHashSet::default();
-            crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
                 &dispatch,
                 node,
                 &mut active,
@@ -949,19 +957,19 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     // as a sentinel (member present), so BOTH sides return Some with an Object root.
     // A root-only member deep-walk would FALSELY propagate None here.
     let dangling_member_obj = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: StdArc::from(
                 vec![SurfaceMember {
                     excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                     visibility: MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
             value: dangling,
                     optional: false,
                     readonly: false,
                     method_kind: None,
                     has_implementation_body: false,
-                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                    declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                    merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                     spans: Default::default(),
                     declaration_origin: None,
                 }]
@@ -976,9 +984,9 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     ));
     let full_obj = {
         let mut alg =
-            crate::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
         let mut active = FxHashSet::default();
-        crate::project_semantic_dispatch::raise::shape_engine::fold_node(
+        verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
             &mut alg,
             &dispatch,
             dangling_member_obj,
@@ -988,7 +996,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     };
     let root_only_obj = {
         let mut active = FxHashSet::default();
-        crate::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
+        verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::project_root_summary(
             &dispatch,
             dangling_member_obj,
             &mut active,

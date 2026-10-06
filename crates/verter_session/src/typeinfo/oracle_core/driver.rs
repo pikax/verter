@@ -189,8 +189,10 @@ fn map_mode_kind(mode: ProjectionModeSpec) -> ProjectionModeKind {
     }
 }
 
-fn map_resolver_mode(mode: ProjectionModeSpec) -> crate::semantic_query::ProjectionMode {
-    use crate::semantic_query::ProjectionMode;
+fn map_resolver_mode(
+    mode: ProjectionModeSpec,
+) -> verter_type_engine::semantic_query::ProjectionMode {
+    use verter_type_engine::semantic_query::ProjectionMode;
     match mode {
         ProjectionModeSpec::Shallow => ProjectionMode::Shallow,
         ProjectionModeSpec::Navigate => ProjectionMode::Navigate,

@@ -6,13 +6,13 @@
 //! see structured reasons (cycles, open conditionals, pathological
 //! inputs) without re-walking the graph.
 
-use crate::project_semantic_dispatch::walk::ShallowDiagnostic;
 use verter_session_query::analysis::component_meta::{
     MacroExpansionDiagnostics, MacroExpansionKind,
 };
 use verter_session_query::analysis::type_expand::{
     ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
 };
+use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
 
 /// Project a single `ShallowDiagnostic` to an `ExpansionDiagnostic`.
 ///
@@ -172,8 +172,8 @@ pub(crate) fn shallow_diagnostics_to_macro_expansion(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::semantic_query::DeclIdentity;
-    use crate::semantic_query::SemanticNodeId;
+    use verter_type_engine::semantic_query::DeclIdentity;
+    use verter_type_engine::semantic_query::SemanticNodeId;
 
     fn dummy_decl() -> DeclIdentity {
         DeclIdentity::synthetic("Dummy")
@@ -249,7 +249,9 @@ mod tests {
     fn shallow_to_expansion_maps_instantiation_error_to_dedicated_variant() {
         let diag = ShallowDiagnostic::InstantiationError {
             decl: dummy_decl(),
-            error: crate::semantic_query::QueryError::Other(std::sync::Arc::from("synthetic")),
+            error: verter_type_engine::semantic_query::QueryError::Other(std::sync::Arc::from(
+                "synthetic",
+            )),
         };
         let proj = shallow_to_expansion(&diag);
         assert_eq!(proj.reason, ExpansionStopReason::InstantiationError);

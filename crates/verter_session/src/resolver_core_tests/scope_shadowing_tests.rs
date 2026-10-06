@@ -1,9 +1,9 @@
-use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
-use crate::resolver_core::scope_shadowing::*;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use verter_session_query::inputs::prepared::TypeParamBinding;
+use verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload;
+use verter_type_engine::resolver_core::scope_shadowing::*;
 
 fn make_binding(name: &str, ordinal: u16) -> TypeParamBinding {
     TypeParamBinding {
@@ -52,8 +52,9 @@ fn bundle_with_imports(
     // build a minimal bundle and stamp the fixture's surfaces onto
     // its (pub) scope fields.
     let state = crate::resolver_core::ShallowFileState::service_backed_for_test("");
-    let interner =
-        Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account());
+    let interner = Arc::new(
+        verter_type_engine::identity_interner::IdentityInterner::with_process_local_account(),
+    );
     let mut bundle = build_prepared_decl_bundle(
         "/shadow-fixture.ts",
         state,

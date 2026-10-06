@@ -117,7 +117,7 @@ fn try_produce_runtime(
     host: &VerterHost,
 ) -> Result<
     crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
-    crate::semantic_query::ExecutionAbort,
+    verter_type_engine::semantic_query::ExecutionAbort,
 > {
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         host.produce_vue_macro_codegen_with_ctx(ctx, OWNER, VueMacroCodegenDemand::Runtime)
@@ -453,8 +453,12 @@ fn cancelled_producer_handoff_refuses_the_consumer_rooting() {
     let host = make_host();
     seed(&host, INNER_STRING, PROPS_SOURCE);
 
-    let cancelled =
-        crate::request_context::RequestContext::new(9101, Arc::from(OWNER), false, None);
+    let cancelled = verter_type_engine::request_context::RequestContext::new(
+        9101,
+        Arc::from(OWNER),
+        false,
+        None,
+    );
     cancelled.cancel();
 
     let ((output, uncancelled_refused), read_set) = host.with_fact_tracer(
@@ -472,7 +476,8 @@ fn cancelled_producer_handoff_refuses_the_consumer_rooting() {
                 );
                 probe.non_cacheable_read_observed()
             };
-            let _guard = crate::request_context::RequestContextGuard::install(cancelled);
+            let _guard =
+                verter_type_engine::request_context::RequestContextGuard::install(cancelled);
             (try_produce_runtime(&host), uncancelled_refused)
         },
     );
@@ -483,7 +488,7 @@ fn cancelled_producer_handoff_refuses_the_consumer_rooting() {
     );
     assert_eq!(
         output.err(),
-        Some(crate::semantic_query::ExecutionAbort::Cancelled),
+        Some(verter_type_engine::semantic_query::ExecutionAbort::Cancelled),
         "the fixture must actually drive a cancelled production, which publishes \
          no bundle"
     );

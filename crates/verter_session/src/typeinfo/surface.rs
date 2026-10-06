@@ -30,11 +30,11 @@ use std::sync::Arc;
 
 use verter_span::Span;
 
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     IndexSignature, MemberMergeRole, NodeScopeId, SemanticNodeData, SemanticNodeId, SurfaceMember,
     SurfaceView,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 /// A byte-offset span anchored to a canonical file.
 ///
@@ -115,7 +115,7 @@ pub struct JsdocTagSpan {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeInfoSurfaceMember {
     /// Exact authored key, retaining computed semantic children.
-    pub key: crate::semantic_query::AuthoredPropertyKey,
+    pub key: verter_type_engine::semantic_query::AuthoredPropertyKey,
     /// Span of the member's NAME at its declaration site (in the origin file's
     /// coordinates). `None` when the member is synthesized (a union
     /// common-member, a mapped-produced member) and has no single source site.
@@ -299,16 +299,16 @@ impl TypeInfoSurface {
             .iter()
             .cloned()
             .map(|entry| match entry {
-                crate::semantic_query::SurfaceEntry::Member(member) => {
+                verter_type_engine::semantic_query::SurfaceEntry::Member(member) => {
                     TypeInfoSurfaceEntry::Member(build_member(graph, &member))
                 }
-                crate::semantic_query::SurfaceEntry::CallSignature(node) => {
+                verter_type_engine::semantic_query::SurfaceEntry::CallSignature(node) => {
                     TypeInfoSurfaceEntry::CallSignature(build_signature(graph, node))
                 }
-                crate::semantic_query::SurfaceEntry::ConstructSignature(node) => {
+                verter_type_engine::semantic_query::SurfaceEntry::ConstructSignature(node) => {
                     TypeInfoSurfaceEntry::ConstructSignature(build_signature(graph, node))
                 }
-                crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                verter_type_engine::semantic_query::SurfaceEntry::IndexSignature(signature) => {
                     TypeInfoSurfaceEntry::IndexSignature(build_index_signature(graph, &signature))
                 }
             })
@@ -358,22 +358,22 @@ impl TypeInfoSurface {
     #[must_use]
     pub(crate) fn from_one_level(
         graph: &SemanticGraphStore,
-        surface: &crate::project_semantic_dispatch::one_level_surface::OneLevelSurface,
+        surface: &verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface,
     ) -> Self {
         let entries = surface
             .entries()
             .iter()
             .map(|entry| match entry {
-                crate::semantic_query::SurfaceEntry::Member(member) => {
+                verter_type_engine::semantic_query::SurfaceEntry::Member(member) => {
                     TypeInfoSurfaceEntry::Member(build_member(graph, member))
                 }
-                crate::semantic_query::SurfaceEntry::CallSignature(node) => {
+                verter_type_engine::semantic_query::SurfaceEntry::CallSignature(node) => {
                     TypeInfoSurfaceEntry::CallSignature(build_signature(graph, *node))
                 }
-                crate::semantic_query::SurfaceEntry::ConstructSignature(node) => {
+                verter_type_engine::semantic_query::SurfaceEntry::ConstructSignature(node) => {
                     TypeInfoSurfaceEntry::ConstructSignature(build_signature(graph, *node))
                 }
-                crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                verter_type_engine::semantic_query::SurfaceEntry::IndexSignature(signature) => {
                     TypeInfoSurfaceEntry::IndexSignature(build_index_signature(graph, signature))
                 }
             })

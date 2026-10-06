@@ -456,12 +456,12 @@ impl LazyBodyFactSource {
             // and never a re-lowering.
             SymbolSpace::Type => {
                 if decl_key.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
-                    crate::fact_tracing::consume_source_read(
+                    verter_type_engine::fact_tracing::consume_source_read(
                         self.memo
                             .compat_type_body_hash_input(decl_key.name.as_ref()),
                     )?
                 } else {
-                    crate::fact_tracing::consume_source_read(
+                    verter_type_engine::fact_tracing::consume_source_read(
                         self.memo
                             .compat_type_body_hash_input_in(decl_key.owner, decl_key.name.as_ref()),
                     )?
@@ -479,11 +479,11 @@ impl LazyBodyFactSource {
                     None if decl_key.owner
                         == verter_type_expr::TopLevelOwnerId::ordinary_file() =>
                     {
-                        crate::fact_tracing::consume_source_read(
+                        verter_type_engine::fact_tracing::consume_source_read(
                             self.memo.value_decl(decl_key.name.as_ref()),
                         )?
                     }
-                    None => crate::fact_tracing::consume_source_read(
+                    None => verter_type_engine::fact_tracing::consume_source_read(
                         self.memo
                             .value_decl_in(decl_key.owner, decl_key.name.as_ref()),
                     )?,

@@ -12,8 +12,8 @@
 //! `component_meta_resolution_policy.rs` are preserved by a `pub(crate)
 //! use` re-export block in the parent shell — see §11c.5.
 
-use crate::instant::Instant;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::instant::Instant;
 
 use crate::resolver_core::{
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
@@ -21,9 +21,8 @@ use crate::resolver_core::{
 };
 use crate::VerterHost;
 
-use crate::request_observers::{
-    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-};
+use verter_type_engine::component_meta_trace_custom;
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
 
 // Legacy TypeExpr walkers (collect_required_owner_import_names, collect_slot_eval_import_names_*,
 // collect_surface_eval_import_names_*, collect_runtime_value_names_*, etc.) were deleted.
@@ -140,10 +139,10 @@ fn extract_component_meta_from_inputs(
     resolved_macros: &[verter_semantic::analysis::component_meta::ResolvedMacroInput],
     resolved_type_registry: &[verter_session_query::analysis::component_meta::ResolvedTypeAnalysis],
     evaluated_types: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -210,7 +209,7 @@ fn extract_component_meta_from_inputs(
 /// could not decide.
 ///
 /// This is the component-meta consumer of the shared whole-return demand entry
-/// [`crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return`].
+/// [`verter_type_engine::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return`].
 /// It runs at the ONE demand point where the fixed mechanism already holds: the
 /// caller's `ctx` is request-bound (`is_request_bound() == true`, so the demand
 /// reads the request's own view — a session overlay included — rather than the
@@ -243,10 +242,10 @@ fn extract_component_meta_from_inputs(
 /// never as a fatal that drops the row: the degraded role is still published on
 /// its binding, per-row and fail-closed.
 pub(crate) fn resolved_binding_reactivity(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -314,16 +313,16 @@ pub(crate) fn resolved_binding_reactivity(
         // authored `TypeArgLocator`s and stays session-internal. Only the closed
         // role vocabulary is published, so nothing locator-bearing can cross FFI.
         let (role, _provenance) =
-            crate::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(
+            verter_type_engine::project_semantic_dispatch::reactive_wrapper::wrapper_role_for_sole_value_signature_return(
                 dispatch,
                 root.canonical_id.as_ref(),
                 root.owner,
                 root.symbol_name.as_ref(),
             );
         if let verter_type_expr::ReactiveWrapperRole::Unresolved { .. } = role {
-            crate::request_context::fold_result_completeness(
-                crate::semantic_query::ResultCompleteness::partial(
-                    crate::semantic_query::PartialReasonSet::PROPAGATED,
+            verter_type_engine::request_context::fold_result_completeness(
+                verter_type_engine::semantic_query::ResultCompleteness::partial(
+                    verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
                 ),
             );
         }
@@ -350,8 +349,10 @@ pub(crate) fn resolved_binding_reactivity(
 /// Cross-file resolution goes through `host.resolve_local_import_symbol_target`
 /// (cache-backed). No fresh resolver; no duplicate route discovery.
 pub(crate) fn resolve_ref_to_root_identity(
-    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -359,7 +360,7 @@ pub(crate) fn resolve_ref_to_root_identity(
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
 ) -> Option<verter_session_query::type_solver::host::ResolvedRootIdentity> {
-    crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+    verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
         ctx,
         dispatch,
         owner_canonical,
@@ -443,7 +444,7 @@ pub(crate) fn populate_public_instance_sidecar(
 /// observed COMPUTE completeness.
 ///
 /// `completeness` is the completeness accumulated by ONE full-extract
-/// [`ColdComputeCompletenessScope`](crate::request_context::ColdComputeCompletenessScope)
+/// [`ColdComputeCompletenessScope`](verter_type_engine::request_context::ColdComputeCompletenessScope)
 /// that spans the WHOLE extract body — the pre-choke macro-DTO read INCLUDED
 /// and the fallthrough compute folded in — so every partiality source inside
 /// extraction reaches one signal. The publishing surfaces merge it with the
@@ -469,7 +470,7 @@ pub(crate) struct ComponentMetaExtractOutcome {
     /// This is COMPUTE completeness, NOT the surface-shape
     /// `accepted_surface_completeness` (a representable `LowerBound` surface
     /// with a complete compute stays cacheable).
-    pub(crate) completeness: crate::semantic_query::ResultCompleteness,
+    pub(crate) completeness: verter_type_engine::semantic_query::ResultCompleteness,
 }
 
 pub(crate) fn extract_component_meta_from_resolved(
@@ -478,7 +479,7 @@ pub(crate) fn extract_component_meta_from_resolved(
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
     ctx: &dyn crate::resolver_core::HostRequestContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -495,9 +496,9 @@ pub(crate) fn extract_component_meta_from_resolved(
     // `resolved.completeness`. The scope is DISCARDED (not bubbled) once its
     // completeness is read — the signal travels with the outcome carrier, never
     // via a scope bubble that could over-suppress an enclosing compute.
-    let extract_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let extract_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     // The macro-DTO surface read (`vue_macro_dtos_with_ctx` ->
-    // `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)`) MUST run under the request-bound `ctx`, not the
+    // `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)`) MUST run under the request-bound `ctx`, not the
     // bare `&VerterHost` rail (whose `store_view()` panics in a
     // `debug_assertions`-off build). See
     // `tests/cases/g_session/session_meta_store_view_regression.rs`.
@@ -542,7 +543,7 @@ pub(crate) fn extract_component_meta_from_resolved(
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
             meta.fallthrough_surface = resolution.fallthrough_surface;
         }
-        crate::request_context::fold_result_completeness(outcome.completeness);
+        verter_type_engine::request_context::fold_result_completeness(outcome.completeness);
     }
     // apply the publication policy over (resolved_type_registry,
     // resolved_type_registry_meta) + snapshot.macros (§3.4 structural
@@ -564,7 +565,7 @@ pub(crate) fn extract_component_meta_from_resolved(
         meta.macro_expansion_diagnostics
             .extend(resolved.synthesis_diagnostics.iter().cloned());
     }
-    let completeness = crate::request_context::current_cold_compute_completeness();
+    let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
     extract_scope.discard();
     // `accepted_surface_completeness` is an EXHAUSTIVENESS claim over the
     // accepted surface. The fallthrough resolver computes it from root
@@ -593,7 +594,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     ctx: &dyn crate::resolver_core::HostRequestContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -604,7 +605,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
     // `extract_component_meta_from_resolved` for the rationale and
     // `tests/cases/g_session/session_meta_store_view_regression.rs` for the
     // request-bound `ctx` requirement.
-    let extract_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let extract_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let resolved_macros = resolver_component_meta_resolved_macros(
         ctx,
         dispatch,
@@ -651,7 +652,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         } else {
             None
         };
-        crate::request_context::fold_result_completeness(outcome.completeness);
+        verter_type_engine::request_context::fold_result_completeness(outcome.completeness);
         facts
     };
     // apply the publication policy AFTER fallthrough merge so the
@@ -669,7 +670,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts(
         ctx,
         dispatch,
     );
-    let completeness = crate::request_context::current_cold_compute_completeness();
+    let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
     extract_scope.discard();
     // Same exhaustiveness demotion as `extract_component_meta_from_resolved`:
     // a PARTIAL compute cannot support the `Exact` accepted-surface claim.
@@ -695,7 +696,7 @@ pub(in crate::host_manage) fn resolve_ref_to_root_identity_for_test(
 ) -> Option<verter_session_query::type_solver::host::ResolvedRootIdentity> {
     resolve_ref_to_root_identity(
         host,
-        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host),
+        &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host),
         owner_canonical,
         owner,
         name,

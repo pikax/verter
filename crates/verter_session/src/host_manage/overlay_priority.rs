@@ -159,7 +159,7 @@ pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
         overlay,
     );
     for canonical in view.overlay_canonicals() {
-        let _ = crate::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
+        let _ = verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
             &session_ctx,
             canonical.as_str(),
         );

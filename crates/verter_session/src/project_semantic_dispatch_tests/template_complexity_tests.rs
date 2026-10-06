@@ -11,7 +11,7 @@
 //! × `noImplicitAny` settings agree on every probe.
 
 use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_recovered_probe};
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
     SemanticNodeData,
 };
@@ -168,7 +168,7 @@ fn the_ts2590_recovery_is_a_partial_holding_the_authored_template() {
         let data = dispatch.graph().node_data(node);
         let Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
             diagnostic,
-            basis: crate::semantic_query::RecoveryBasis::Budget,
+            basis: verter_type_engine::semantic_query::RecoveryBasis::Budget,
             origin: Some(origin),
         })) = data.as_deref()
         else {
@@ -291,24 +291,26 @@ fn a_union_drops_the_literals_its_patterns_match() {
 /// rail as a typed partial, never a truncated union.
 #[test]
 fn a_template_past_its_byte_allowance_is_a_memory_partial() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         PartialReasonSet, ProjectionMode, ProjectionReductionContext, ResultCompleteness,
     };
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = super::ProjectSemanticDispatch::new(&host);
     let graph = dispatch.graph();
     let union = |prefix: &str| {
-        let members: Vec<crate::semantic_query::SemanticNodeId> = (0..40)
+        let members: Vec<verter_type_engine::semantic_query::SemanticNodeId> = (0..40)
             .map(|i| {
                 graph.intern_node(SemanticNodeData::Literal(
-                    crate::semantic_query::LiteralValue::String(format!("{prefix}{i}")),
+                    verter_type_engine::semantic_query::LiteralValue::String(format!(
+                        "{prefix}{i}"
+                    )),
                 ))
             })
             .collect();
         graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(std::sync::Arc::from(
-                members.into_boxed_slice(),
-            )),
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                std::sync::Arc::from(members.into_boxed_slice()),
+            ),
         ))
     };
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
@@ -361,12 +363,12 @@ fn a_ts2590_recovery_is_never_kept() {
     let warm = read();
     assert_eq!(
         cold,
-        Some(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET),
+        Some(verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET),
         "cold"
     );
     assert_eq!(
         warm,
-        Some(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET),
+        Some(verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET),
         "warm"
     );
 }
@@ -393,18 +395,21 @@ fn a_relation_refused_inside_a_span_is_not_the_templates_ts2590() {
         arms(&|_| "number".to_owned(), true)
     );
     let span = "`${[S] extends [T] ? \"a\" : \"b\"}-x`";
-    crate::semantic_query::checker_policy::with_relation_comparisons_for_tests(600, || {
-        with_recovered_probe(&source, span, |dispatch, node| {
-            let data = dispatch.graph().node_data(node);
-            assert!(
-                matches!(
-                    data.as_deref(),
-                    Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text)))
-                        if text == "b-x"
-                ),
-                "the span reads the relation's false and the template is `\"b-x\"`, \
+    verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests(
+        600,
+        || {
+            with_recovered_probe(&source, span, |dispatch, node| {
+                let data = dispatch.graph().node_data(node);
+                assert!(
+                    matches!(
+                        data.as_deref(),
+                        Some(SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(text)))
+                            if text == "b-x"
+                    ),
+                    "the span reads the relation's false and the template is `\"b-x\"`, \
                  measured {data:?}"
-            );
-        });
-    });
+                );
+            });
+        },
+    );
 }

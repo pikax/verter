@@ -16,12 +16,12 @@
 use std::sync::Arc;
 
 use super::{resolve_decl_key, ProjectSemanticDispatch};
-use crate::semantic_query::{
+use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     LiteralValue, PathSegment, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
     PropertyKey, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
     SemanticQueryOutput,
 };
-use crate::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 
 const CANONICAL: &str = "/w/projected_terminal.ts";
 

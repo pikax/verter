@@ -21,8 +21,8 @@
 //! surface→shape raises. Dispatch is the sole resolution authority on these
 //! paths.
 
-use crate::resolver_core::ResolverContext;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Extract the OUTER utility/identifier name from a route-bearing
 /// `TypeExpr` and return `true` iff the owner scope shadows that name
@@ -49,7 +49,7 @@ use std::sync::Arc;
 ///
 /// Returns `true` iff the extracted outer name appears in the
 /// owner-scope shadow set per
-/// [`ScopeShadowing::is_shadowing_lib`](crate::resolver_core::scope_shadowing::ScopeShadowing::is_shadowing_lib).
+/// [`ScopeShadowing::is_shadowing_lib`](verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::is_shadowing_lib).
 ///
 /// `Parenthesized` wrappers are stripped at every layer. Refs whose
 /// shape does not match a known route pattern return `false`
@@ -59,7 +59,7 @@ use std::sync::Arc;
 /// registry-recognised shape set).
 fn route_outer_utility_is_shadowed(
     expr: &verter_type_expr::TypeExpr,
-    shadowing: &crate::resolver_core::scope_shadowing::ScopeShadowing,
+    shadowing: &verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing,
 ) -> bool {
     use verter_type_expr::TypeExpr;
 
@@ -104,7 +104,7 @@ fn route_outer_utility_is_shadowed(
 /// `Mapped` / `TypeOf` / `Conditional` shells).
 pub(crate) fn project_expr_class_a_via_dispatch(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -132,7 +132,7 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// off the projected node WITHOUT re-lowering a materialised leaf.
 pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
     ctx: &'ctx dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &'ctx crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &'ctx verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         'ctx,
         crate::resolver_core::HostCapabilities,
     >,
@@ -155,7 +155,7 @@ pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
     let shadowing = match engine.as_deref_mut() {
         Some(e) => e.scope_shadowing_for_scope(scope_canonical_id, scope_owner),
         None => std::sync::Arc::new(
-            crate::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
+            verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::from_host_scope(
                 ctx,
                 scope_canonical_id,
                 scope_owner,
@@ -223,9 +223,9 @@ pub(crate) fn decompose_indexed_access_chain(
     expr: &verter_type_expr::TypeExpr,
 ) -> (
     &verter_type_expr::TypeExpr,
-    Arc<[crate::semantic_query::PathSegment]>,
+    Arc<[verter_type_engine::semantic_query::PathSegment]>,
 ) {
-    use crate::semantic_query::{IndexKey, PathSegment};
+    use verter_type_engine::semantic_query::{IndexKey, PathSegment};
     use verter_type_expr::{LiteralValue, TypeExpr};
 
     fn descend<'a>(expr: &'a TypeExpr, path: &mut Vec<PathSegment>) -> &'a TypeExpr {
@@ -344,16 +344,18 @@ pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
 /// - the honesty verification passes: the slot raises (memoized
 ///   `Navigate` structural transit — one member annotation, never a body
 ///   expansion) to the SAME resolved instantiation head — equal base
-///   [`DeclIdentity`](crate::semantic_query::DeclIdentity) AND equal
+///   [`DeclIdentity`](verter_type_engine::semantic_query::DeclIdentity) AND equal
 ///   interned argument nodes — as the observed `value_node`. This closes
 ///   the inline-shadow class (an inline-authored member colliding with a
 ///   same-named declared member in the same file can never adopt the wrong
 ///   slot).
-pub(crate) fn arg_preserving_member_use_site_slot<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-    member_key: &crate::semantic_query::PropertyKey,
+pub(crate) fn arg_preserving_member_use_site_slot<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+    member_key: &verter_type_engine::semantic_query::PropertyKey,
     declaration_origin: Option<&str>,
-    value_node: crate::semantic_query::SemanticNodeId,
+    value_node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Option<verter_type_expr::locators::TypeBodySlot> {
     // Gate: the observed value head must be an argument-bearing named
     // reference (the class the argument-less `Ref` publication is lossy
@@ -404,8 +406,8 @@ pub(crate) fn arg_preserving_member_use_site_slot<C: crate::resolver_core::Resol
     let raised = dispatch
         .raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
+            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),
         )
         .at_optional_boundary()?;
@@ -419,20 +421,23 @@ pub(crate) fn arg_preserving_member_use_site_slot<C: crate::resolver_core::Resol
 /// authored type arguments that head-resolves to one through the shared
 /// carrier-preserving normalization — name-to-declaration routing only,
 /// never body expansion). `None` for every other shape.
-fn resolved_instantiation_head<C: crate::resolver_core::ResolverCapabilities>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
-    node: crate::semantic_query::SemanticNodeId,
+fn resolved_instantiation_head<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Option<(
-    crate::semantic_query::DeclIdentity,
-    std::sync::Arc<[crate::semantic_query::SemanticNodeId]>,
+    verter_type_engine::semantic_query::DeclIdentity,
+    std::sync::Arc<[verter_type_engine::semantic_query::SemanticNodeId]>,
 )> {
-    use crate::semantic_query::SemanticNodeData;
+    use verter_type_engine::semantic_query::SemanticNodeData;
 
     let mut current = node;
     // Bounded: alias chains are short; the cap only guards pathological
     // graph shapes.
     for _ in 0..16 {
-        let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), current)?;
+        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
+            dispatch.graph(),
+            current,
+        )?;
         match &*data {
             SemanticNodeData::Alias(inner) => current = *inner,
             SemanticNodeData::InstantiationRef { base, args } => {
@@ -444,8 +449,8 @@ fn resolved_instantiation_head<C: crate::resolver_core::ResolverCapabilities>(
                 drop(data);
                 let resolved = dispatch.resolve_carrier_subject_node(
                     current,
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Navigate,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
                 );
                 if resolved == current {

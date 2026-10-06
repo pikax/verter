@@ -7,8 +7,8 @@
 //! passive-observer pipeline the component-meta entry uses
 //! (`install_component_meta_audit_scope` → accumulator → `SessionVfsSink` →
 //! drain → `build_file_audit_vec` → `mine_footprint`): one per-request
-//! [`crate::request_footprint::RequestFootprintAccumulator`] is planted on
-//! the [`crate::request_context::RequestContext`], the workspace VFS audit
+//! [`verter_type_engine::request_footprint::RequestFootprintAccumulator`] is planted on
+//! the [`verter_type_engine::request_context::RequestContext`], the workspace VFS audit
 //! sink attributes this request's reads to it, and after the request body
 //! completes the drained state is mined into the footprint + per-file
 //! attribution vector.
@@ -22,8 +22,8 @@
 
 use std::sync::Arc;
 
-use crate::request_context::RequestContext;
 use crate::VerterHost;
+use verter_type_engine::request_context::RequestContext;
 
 /// RAII bundle for one audited typeinfo request's footprint capture: the
 /// per-request accumulator (also planted on the [`RequestContext`]) plus the
@@ -31,7 +31,7 @@ use crate::VerterHost;
 /// The sink holds a `Weak` to the accumulator, so late fan-out events no-op
 /// once this scope (and the context's accumulator `Arc`) drops.
 pub(crate) struct TypeinfoFootprintScope {
-    accumulator: Option<Arc<crate::request_footprint::RequestFootprintAccumulator>>,
+    accumulator: Option<Arc<verter_type_engine::request_footprint::RequestFootprintAccumulator>>,
     _sink_handle: Option<verter_workspace::audit_sink::SinkHandle>,
 }
 
@@ -43,7 +43,7 @@ impl TypeinfoFootprintScope {
     pub(crate) fn install(host: &VerterHost, request_id: u64, footprint_capture: bool) -> Self {
         let accumulator = if footprint_capture {
             Some(Arc::new(
-                crate::request_footprint::RequestFootprintAccumulator::with_caps(
+                verter_type_engine::request_footprint::RequestFootprintAccumulator::with_caps(
                     host.config.audit_caps.clone(),
                 ),
             ))
@@ -64,7 +64,7 @@ impl TypeinfoFootprintScope {
     /// (`None` when capture is off).
     pub(crate) fn accumulator(
         &self,
-    ) -> Option<Arc<crate::request_footprint::RequestFootprintAccumulator>> {
+    ) -> Option<Arc<verter_type_engine::request_footprint::RequestFootprintAccumulator>> {
         self.accumulator.clone()
     }
 }

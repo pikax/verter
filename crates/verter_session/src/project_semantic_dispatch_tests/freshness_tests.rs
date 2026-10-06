@@ -3,17 +3,17 @@
 //! authority — a spread-tainted or non-literal member revokes
 //! freshness; only an all-`FreshOwn` object surface is `Fresh`.
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::AuthoredPropertyKey;
-use crate::semantic_query::FreshnessKey;
-use crate::semantic_query::MacroOwnBodyStamp;
-use crate::semantic_query::MergeRoleStamp;
-use crate::semantic_query::SemanticNodeData;
-use crate::semantic_query::SemanticNodeId;
-use crate::semantic_query::SurfaceMember;
 use crate::HostConfig;
 use crate::VerterHost;
 use std::sync::Arc;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::AuthoredPropertyKey;
+use verter_type_engine::semantic_query::FreshnessKey;
+use verter_type_engine::semantic_query::MacroOwnBodyStamp;
+use verter_type_engine::semantic_query::MergeRoleStamp;
+use verter_type_engine::semantic_query::SemanticNodeData;
+use verter_type_engine::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query::SurfaceMember;
 use verter_type_expr::ExcessPropertyOrigin;
 
 fn host() -> VerterHost {
@@ -38,11 +38,11 @@ fn member(origin: ExcessPropertyOrigin, value: SemanticNodeId) -> SurfaceMember 
 }
 
 fn object_with(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     members: Vec<SurfaceMember>,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -59,7 +59,7 @@ fn all_fresh_own_members_derive_fresh() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let node = object_with(
         graph,
@@ -96,7 +96,7 @@ fn spread_tainted_member_revokes_freshness() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let node = object_with(
         graph,
@@ -118,7 +118,7 @@ fn non_literal_member_revokes_freshness() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let node = object_with(
         graph,
@@ -137,7 +137,7 @@ fn alias_chains_derive_through() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let object = object_with(graph, vec![member(ExcessPropertyOrigin::FreshOwn, string)]);
     let alias = graph.intern_node(SemanticNodeData::Alias(object));
@@ -154,7 +154,7 @@ fn non_object_nodes_are_regular() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     assert_eq!(
         dispatch.freshness_for_source_node(string),

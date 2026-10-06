@@ -31,8 +31,10 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{FlowReturnResult, ReturnProjectionDemand, SemanticNodeData};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
+    FlowReturnResult, ReturnProjectionDemand, SemanticNodeData,
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -291,12 +293,12 @@ fn assert_same_two_basis(
 /// order so authored order stays visible; leaves print kinds, names
 /// and literal values.
 fn render_node(
-    graph: &Arc<verter_session::for_tests::SemanticGraphStore>,
-    node: verter_session::semantic_query::SemanticNodeId,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     depth: usize,
     out: &mut String,
 ) {
-    use verter_session::semantic_query::SemanticNodeData as D;
+    use verter_type_engine::semantic_query::SemanticNodeData as D;
     if depth > 8 {
         out.push('…');
         return;
@@ -347,7 +349,7 @@ fn render_node(
                     out.push(',');
                 }
                 match entry {
-                    verter_session::semantic_query::SurfaceEntry::Member(member) => {
+                    verter_type_engine::semantic_query::SurfaceEntry::Member(member) => {
                         match &member.key {
                             verter_type_expr::AuthoredPropertyKey::String(name) => {
                                 out.push_str(name);
@@ -1553,8 +1555,8 @@ export function witness(v: "a" | "ab" | "abc" | "b") { return v; }
 fn det_08_contextual_body_demands() {
     assert_ready("DET-08", "det_08_contextual_body_demands");
     use verter_session::host_flow_return_audit::FlowReturnError;
-    use verter_session::semantic_query::demand::{Demand, ProjectionPath};
-    use verter_session::semantic_query::{FlowReturnFailure, PathSegment, PropertyKey};
+    use verter_type_engine::semantic_query::demand::{Demand, ProjectionPath};
+    use verter_type_engine::semantic_query::{FlowReturnFailure, PathSegment, PropertyKey};
 
     const CONTEXT_TS: &str =
         "export function contextual(v: number | string) { return { a: v, b: 1 as const }; }";
@@ -1810,7 +1812,9 @@ fn det_09_policy_change_with_resident_parents() {
 fn signature_kernel_interned_identities_are_schedule_independent() {
     // bounded-loop: one race per worker-count in the AC3 matrix.
     for workers in [1usize, 2, 4, 8] {
-        let ids = verter_session::for_tests::duplicate_publisher_one_sets(workers);
+        let ids = verter_type_engine::signature_kernel::test_support::duplicate_publisher_one_sets(
+            workers,
+        );
         assert_eq!(ids.len(), workers, "publisher count {workers}");
         let first = &ids[0];
         for id in &ids {
@@ -1820,7 +1824,8 @@ fn signature_kernel_interned_identities_are_schedule_independent() {
             );
         }
     }
-    let (fwd, rev) = verter_session::for_tests::opposite_order_one_call_binder_tokens();
+    let (fwd, rev) =
+        verter_type_engine::signature_kernel::test_support::opposite_order_one_call_binder_tokens();
     assert_eq!(
         fwd, rev,
         "opposite intern order changed logical binder identity"

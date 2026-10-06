@@ -6,8 +6,8 @@
 //! readable.
 
 use super::*;
-use crate::request_footprint::{DerivationEdgeRaw, RequestFootprintAccumulator};
-use crate::semantic_query::{NodeScopeId, OriginEdge};
+use verter_type_engine::request_footprint::{DerivationEdgeRaw, RequestFootprintAccumulator};
+use verter_type_engine::semantic_query::{NodeScopeId, OriginEdge};
 
 fn make_ctx(id: u64) -> Arc<RequestContext> {
     let acc = Arc::new(RequestFootprintAccumulator::new());
@@ -26,13 +26,12 @@ fn synth_edge(
         edge: OriginEdge {
             sources: sources.iter().copied().map(SemanticNodeId).collect(),
             meta,
-            edge_dep_signature: Arc::new(
-                Arc::<[(Arc<str>, crate::semantic_query::DepVersion)]>::from(Vec::<(
-                    Arc<str>,
-                    crate::semantic_query::DepVersion,
-                )>::new(
-                )),
-            ),
+            edge_dep_signature: Arc::new(Arc::<
+                [(Arc<str>, verter_type_engine::semantic_query::DepVersion)],
+            >::from(Vec::<(
+                Arc<str>,
+                verter_type_engine::semantic_query::DepVersion,
+            )>::new())),
         },
     }
 }
@@ -110,7 +109,7 @@ fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
             &[i + 100],
             CoreOriginEdgeKind::ProjectMember,
             OriginMeta::ProjectedMember {
-                key: crate::semantic_query::PropertyKey::identifier(format!("m{i}")),
+                key: verter_type_engine::semantic_query::PropertyKey::identifier(format!("m{i}")),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
         ));
@@ -119,7 +118,7 @@ fn mine_footprint_identical_inputs_produce_byte_identical_outputs() {
             &[i + 100],
             CoreOriginEdgeKind::ProjectMember,
             OriginMeta::ProjectedMember {
-                key: crate::semantic_query::PropertyKey::identifier(format!("m{i}")),
+                key: verter_type_engine::semantic_query::PropertyKey::identifier(format!("m{i}")),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
         ));
@@ -191,10 +190,13 @@ fn mine_footprint_path_segments_preserve_member_index_distinction() {
     let ctx = make_ctx(6);
     let mut state = AccumulatorState::default();
     let path = [
-        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
+        PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+            "a",
+        )),
         PathSegment::Index(IndexKey::String(Arc::from("b"))),
         PathSegment::Index(IndexKey::Number(
-            crate::semantic_query::CanonicalIndexInt::from_canonical_i64(7).expect("canonical"),
+            verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(7)
+                .expect("canonical"),
         )),
     ];
     state.derivation_edges_raw.push(synth_edge(
@@ -262,7 +264,7 @@ fn mine_footprint_multiple_derivations_for_same_result_produce_multiple_edges() 
     );
 }
 
-use crate::semantic_query::PrimitiveKind;
+use verter_type_engine::semantic_query::PrimitiveKind;
 
 /// Build a `Foo<arg_child>` bare-ref carrier node (head `Foo` in
 /// `NodeScopeId::Global`, a single structural type argument). The carrier's
@@ -368,13 +370,13 @@ fn structural_hash_discriminates_exact_infer_binder_identity() {
 
 #[test]
 fn structural_hash_discriminates_spread_operand_identity() {
-    use crate::semantic_query::{MacroOwnBodyStamp, MergeRoleStamp, SurfaceMember};
+    use verter_type_engine::semantic_query::{MacroOwnBodyStamp, MergeRoleStamp, SurfaceMember};
 
     let graph = empty_graph();
     let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let operand = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
     let member = SurfaceMember {
-        key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
         value,
         optional: true,
         readonly: false,
@@ -389,25 +391,27 @@ fn structural_hash_discriminates_spread_operand_identity() {
     };
     let other_operand = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let data = |operand| {
-        SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from([
-                crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                    crate::semantic_query::AuthoredPropertyEffect {
-                        key: member.key.clone(),
-                        value: member.value,
-                        optional: member.optional,
-                        readonly: member.readonly,
-                        visibility: member.visibility,
-                        spans: member.spans,
-                        declaration_origin: None,
-                        declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: MergeRoleStamp::NEUTRAL,
-                        excess_origin: member.excess_origin,
-                    },
-                ),
-                crate::semantic_query::ObjectConstructionEffect::Spread(operand),
-            ]),
-        })
+        SemanticNodeData::ObjectSpreadProgram(
+            verter_type_engine::semantic_query::ObjectSpreadProgram {
+                effects: Arc::from([
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                        verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                            key: member.key.clone(),
+                            value: member.value,
+                            optional: member.optional,
+                            readonly: member.readonly,
+                            visibility: member.visibility,
+                            spans: member.spans,
+                            declaration_origin: None,
+                            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                            merge_role: MergeRoleStamp::NEUTRAL,
+                            excess_origin: member.excess_origin,
+                        },
+                    ),
+                    verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(operand),
+                ]),
+            },
+        )
     };
     assert_ne!(
         structural_hash_of(&graph, &data(operand)),
@@ -641,13 +645,12 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
             edge: OriginEdge {
                 sources: Arc::from(vec![child].into_boxed_slice()),
                 meta: OriginMeta::AliasName(Arc::from("Foo")),
-                edge_dep_signature: Arc::new(
-                    Arc::<[(Arc<str>, crate::semantic_query::DepVersion)]>::from(Vec::<(
-                        Arc<str>,
-                        crate::semantic_query::DepVersion,
-                    )>::new(
-                    )),
-                ),
+                edge_dep_signature: Arc::new(Arc::<
+                    [(Arc<str>, verter_type_engine::semantic_query::DepVersion)],
+                >::from(Vec::<(
+                    Arc<str>,
+                    verter_type_engine::semantic_query::DepVersion,
+                )>::new())),
             },
         });
         state
@@ -703,7 +706,7 @@ fn mine_footprint_byte_identical_over_interned_carrier_nodes() {
     );
 }
 
-use crate::semantic_query::SyntheticBindingId;
+use verter_type_engine::semantic_query::SyntheticBindingId;
 use verter_type_expr::SyntheticCarrierSurfaceKind;
 
 /// Build a content-free [`SyntheticBindingId`] — the four scalar/string fields,

@@ -65,7 +65,7 @@ impl<T> RouteShallowStateCache<T> {
             // that opened AFTER the original serve was recorded would
             // otherwise miss the chokepoint flag — re-flag on every
             // memo read so the by-value rail cannot under-report.
-            crate::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
         }

@@ -23,13 +23,14 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::CaptureToken;
 use crate::resolver_core::component_meta_registry::{
     RegistryProducerScope, ROUTE_DEMAND_EMITTED_MEMBER_PATH_COUNTER,
     ROUTE_DEMAND_EMITTED_PICK_COUNTER, ROUTE_DEMAND_EMITTED_WHOLE_COUNTER,
 };
-use crate::types::{HostConfig, ProjectionMode};
+use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::capture_token::CaptureToken;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 fn build_workspace_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
     #[allow(deprecated)]
@@ -98,7 +99,7 @@ fn macro_root_refs_for(
     let mut output = std::collections::VecDeque::new();
 
     let fixture_dispatch_0 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     crate::resolver_core::component_meta_registry::collect_component_meta_registry_public_macro_root_refs(
         host.as_ref(),&fixture_dispatch_0,
         canonical,
@@ -117,12 +118,13 @@ fn first_macro_utility_route_for(
     let _ = host
         .get_raw_analysis_snapshot(canonical)
         .expect("component analysis snapshot");
-    let product = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref())
-        .macro_type_arg_hot_ref(canonical, 0)
-        .expect("first macro structural type argument");
+    let product =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref())
+            .macro_type_arg_hot_ref(canonical, 0)
+            .expect("first macro structural type argument");
 
     let fixture_dispatch_1 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     crate::resolver_core::component_meta_registry::component_meta_registry_node_utility_route(
         &fixture_dispatch_1,
         product.hot.node(),
@@ -345,7 +347,7 @@ fn public_field_refs_keep_external_indexed_access_routes() {
     // by the pipeline is preserved unchanged because the predicate
     // declines.
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
-    use crate::resolver_core::ResolverContext;
+    use verter_type_engine::resolver_core::ResolverContext;
     let analysis: verter_session_query::analysis::file_analysis::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
@@ -354,9 +356,10 @@ fn public_field_refs_keep_external_indexed_access_routes() {
         verter_type_expr::TopLevelOwnerId::instance(0),
     );
 
-    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    );
+    let fixture_dispatch_2 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+            host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>
+        );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         &fixture_dispatch_2,
@@ -434,7 +437,7 @@ fn owner_local_alias_of_alias_external_import_declines() {
     // type`, the predicate must NOT rewrite to Whole — the imported
     // root preserves its existing routing.
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
-    use crate::resolver_core::ResolverContext;
+    use verter_type_engine::resolver_core::ResolverContext;
     let analysis: verter_session_query::analysis::file_analysis::FileAnalysisSnapshot = host
         .get_raw_analysis_snapshot("/workspace/src/Comp.vue")
         .expect("Comp.vue analysis snapshot");
@@ -443,9 +446,10 @@ fn owner_local_alias_of_alias_external_import_declines() {
         verter_type_expr::TopLevelOwnerId::instance(0),
     );
 
-    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    );
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+            host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>
+        );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         &fixture_dispatch_3,
@@ -483,7 +487,7 @@ fn owner_local_generic_typeparameter_body_declines() {
     let _ = host.get_component_meta("/workspace/src/Comp.vue");
 
     use crate::resolver_core::component_meta_registry::component_meta_registry_public_route_owner_local_root;
-    use crate::resolver_core::ResolverContext;
+    use verter_type_engine::resolver_core::ResolverContext;
     // A bare type parameter's name (`T`) — the predicate must decline
     // since there is no declaration to enqueue (no owner-local alias
     // named `T` resolves to a `ComponentConfig` body).
@@ -495,9 +499,10 @@ fn owner_local_generic_typeparameter_body_declines() {
         verter_type_expr::TopLevelOwnerId::instance(0),
     );
 
-    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-        host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    );
+    let fixture_dispatch_4 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+            host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>
+        );
     let owner_local = component_meta_registry_public_route_owner_local_root(
         host.as_ref() as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         &fixture_dispatch_4,

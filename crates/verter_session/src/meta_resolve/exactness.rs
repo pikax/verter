@@ -2,8 +2,8 @@
 
 use verter_session_query::analysis::type_expand::ExpansionExactness;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
 /// Classify a synthesized value node as concrete or symbolic.
 pub(crate) fn classify_node(
@@ -11,11 +11,15 @@ pub(crate) fn classify_node(
     node: SemanticNodeId,
 ) -> ExpansionExactness {
     let unwrapped =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).as_deref() {
+        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+            .as_deref()
+        {
             Some(SemanticNodeData::Alias(target)) => *target,
             _ => node,
         };
-    match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), unwrapped).as_deref() {
+    match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), unwrapped)
+        .as_deref()
+    {
         Some(SemanticNodeData::Primitive(_)) | Some(SemanticNodeData::Literal(_)) => {
             ExpansionExactness::ExactConcrete
         }
@@ -31,19 +35,22 @@ pub(crate) fn classify_node(
 
 /// Whether a registry-symbol body's root must remain symbolic.
 pub(crate) fn node_root_should_stay_symbolic(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
     node: SemanticNodeId,
 ) -> bool {
     let unwrapped =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).as_deref() {
+        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+            .as_deref()
+        {
             Some(SemanticNodeData::Alias(target)) => *target,
             _ => node,
         };
     matches!(
-        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), unwrapped).as_deref(),
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), unwrapped)
+            .as_deref(),
         Some(
             SemanticNodeData::Mapped { .. }
                 | SemanticNodeData::Conditional { .. }
@@ -61,15 +68,17 @@ fn object_is_closed_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> bool {
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) else {
+    let Some(data) =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+    else {
         return false;
     };
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return false;
     };
     view.positive_members().iter().all(|member| {
-        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), member.value).is_some_and(
-            |data| {
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), member.value)
+            .is_some_and(|data| {
                 !matches!(
                     data.as_ref(),
                     SemanticNodeData::InstantiationRef { .. }
@@ -81,7 +90,6 @@ fn object_is_closed_node(
                         | SemanticNodeData::TypeOfNominal(_)
                         | SemanticNodeData::ImportType(_)
                 )
-            },
-        )
+            })
     })
 }

@@ -430,7 +430,7 @@ pub(super) fn component_meta_parts_to_ffi(
                 diagnostics: std::sync::Arc::from([]),
             },
         ),
-        verter_session::semantic_query::ResultCompleteness::Complete,
+        verter_type_engine::semantic_query::ResultCompleteness::Complete,
     )
 }
 
@@ -439,7 +439,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
     resolution: Option<verter_session::meta_resolve::ComponentMetaResolutionOutput>,
     lanes: verter_session::meta_resolve::MaterializedComponentMetaTypeLanes,
     contract: verter_session::framework::ComponentContractAvailability,
-    completeness: verter_session::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 ) -> FfiComponentMeta {
     let root_info = root_info_to_ffi(&analysis.root_reachability);
     // Sealed-identity wire tokens for style rows: each style's sealed ref is
@@ -1098,11 +1098,11 @@ fn contract_exactness_to_ffi(
 /// to anyone inspecting the reasons, which is the very outcome this state
 /// exists to prevent.
 ///
-/// [`PartialReason`]: verter_session::semantic_query::PartialReason
+/// [`PartialReason`]: verter_type_engine::semantic_query::PartialReason
 fn result_completeness_to_ffi(
-    completeness: verter_session::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 ) -> FfiResultCompleteness {
-    use verter_session::semantic_query::{PartialReason, PartialReasonSet, ResultCompleteness};
+    use verter_type_engine::semantic_query::{PartialReason, PartialReasonSet, ResultCompleteness};
     match completeness {
         ResultCompleteness::Complete => FfiResultCompleteness::Complete,
         ResultCompleteness::Partial(reasons) => FfiResultCompleteness::Partial {

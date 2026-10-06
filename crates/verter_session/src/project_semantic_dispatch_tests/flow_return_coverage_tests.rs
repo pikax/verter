@@ -41,12 +41,12 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_session_query::flow::policy::FlowGap;
+use verter_type_engine::semantic_query::{
+    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{
     CompilerIntrinsicTypeOp, LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr, UnknownValue,
@@ -856,8 +856,8 @@ fn key_full(
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     }
 }
@@ -1398,13 +1398,15 @@ fn member_projection_demand_over_an_object_return_serves_the_demanded_member() {
     with_dispatch(&host, |dispatch| {
         let whole = key_of(dispatch, TL, "tlObjReturn");
         let mut member = whole.clone();
-        member.demand = crate::semantic_query::ReturnProjectionDemand {
+        member.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
             point: {
-                let mut point = crate::semantic_query::demand::Demand::identity();
+                let mut point = verter_type_engine::semantic_query::demand::Demand::identity();
                 point.projection.path =
-                    crate::semantic_query::demand::ProjectionPath::from_segments([
-                        crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(Arc::from("m")),
+                    verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                        verter_type_engine::semantic_query::PathSegment::Member(
+                            verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                                "m",
+                            )),
                         ),
                     ]);
                 point
@@ -1432,13 +1434,15 @@ fn member_projection_demand_for_an_absent_member_fails_closed() {
     let host = ts_host();
     with_dispatch(&host, |dispatch| {
         let mut key = key_of(dispatch, TL, "tlObjReturn");
-        key.demand = crate::semantic_query::ReturnProjectionDemand {
+        key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
             point: {
-                let mut point = crate::semantic_query::demand::Demand::identity();
+                let mut point = verter_type_engine::semantic_query::demand::Demand::identity();
                 point.projection.path =
-                    crate::semantic_query::demand::ProjectionPath::from_segments([
-                        crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(Arc::from("absent")),
+                    verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                        verter_type_engine::semantic_query::PathSegment::Member(
+                            verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                                "absent",
+                            )),
                         ),
                     ]);
                 point
@@ -1469,13 +1473,12 @@ fn non_empty_contextual_input_point_fails_closed() {
     let host = ts_host();
     with_dispatch(&host, |dispatch| {
         let mut key = key_of(dispatch, TL, "tlObjReturn");
-        let contextual =
-            dispatch
-                .graph()
-                .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-                    crate::semantic_query::PrimitiveKind::Number,
-                ));
-        key.input = crate::semantic_query::FlowInputContext {
+        let contextual = dispatch.graph().intern_node(
+            verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ),
+        );
+        key.input = verter_type_engine::semantic_query::FlowInputContext {
             contextual_parameters: Arc::from(vec![contextual].into_boxed_slice()),
         };
         assert_eq!(eval_key_on(&host, dispatch, key.clone()), Outcome::Miss);
@@ -1519,16 +1522,20 @@ fn multi_segment_path_demand_projects_path_precisely() {
     let host = ts_host();
     with_dispatch(&host, |dispatch| {
         let mut key = key_of(dispatch, TL, "tlObjReturn");
-        key.demand = crate::semantic_query::ReturnProjectionDemand {
+        key.demand = verter_type_engine::semantic_query::ReturnProjectionDemand {
             point: {
-                let mut point = crate::semantic_query::demand::Demand::identity();
+                let mut point = verter_type_engine::semantic_query::demand::Demand::identity();
                 point.projection.path =
-                    crate::semantic_query::demand::ProjectionPath::from_segments([
-                        crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(Arc::from("n")),
+                    verter_type_engine::semantic_query::demand::ProjectionPath::from_segments([
+                        verter_type_engine::semantic_query::PathSegment::Member(
+                            verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                                "n",
+                            )),
                         ),
-                        crate::semantic_query::PathSegment::Member(
-                            crate::semantic_query::PropertyKey::identifier(Arc::from("deep")),
+                        verter_type_engine::semantic_query::PathSegment::Member(
+                            verter_type_engine::semantic_query::PropertyKey::identifier(Arc::from(
+                                "deep",
+                            )),
                         ),
                     ]);
                 point
@@ -5717,7 +5724,7 @@ export async function awaitRecInArray(r: Rec) { return [await r]; }
 fn checker_recovery_of(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
-) -> Option<crate::semantic_query::CheckerDiagnostic> {
+) -> Option<verter_type_engine::semantic_query::CheckerDiagnostic> {
     match dispatch.graph().node_data(node).as_deref() {
         Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })) => {
             Some(*diagnostic)
@@ -5728,10 +5735,11 @@ fn checker_recovery_of(
 
 /// The TS1062 diagnostic `operation` raises on a recursive thenable.
 fn recursive_fulfillment(
-    operation: crate::semantic_query::CheckerDiagnosticOperation,
-) -> crate::semantic_query::CheckerDiagnostic {
-    crate::semantic_query::CheckerDiagnostic {
-        code: crate::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
+    operation: verter_type_engine::semantic_query::CheckerDiagnosticOperation,
+) -> verter_type_engine::semantic_query::CheckerDiagnostic {
+    verter_type_engine::semantic_query::CheckerDiagnostic {
+        code:
+            verter_type_engine::semantic_query::CheckerDiagnosticCode::RecursiveFulfillmentCallback,
         operation,
     }
 }
@@ -5817,8 +5825,8 @@ fn reduced_annotation_in(
         let node = dispatch
             .normalize_node_keeping_declaration_refs_for_tests(
                 result.return_type(),
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Expanded,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 ),
             )
             .into_usable_node()
@@ -5851,7 +5859,7 @@ fn reduced_annotation_in(
 /// never warms.
 #[test]
 fn awaiting_a_recursive_thenable_recovers_with_any_under_ts1062() {
-    use crate::semantic_query::CheckerDiagnosticOperation;
+    use verter_type_engine::semantic_query::CheckerDiagnosticOperation;
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
     for name in ["awaitRec", "awaitPromiseRec", "awaitPing"] {
         assert_eq!(
@@ -5882,7 +5890,7 @@ fn awaiting_a_recursive_thenable_recovers_with_any_under_ts1062() {
 /// async return's awaited type).
 #[test]
 fn returning_a_recursive_thenable_recovers_with_promise_any_under_ts1062() {
-    use crate::semantic_query::CheckerDiagnosticOperation;
+    use verter_type_engine::semantic_query::CheckerDiagnosticOperation;
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
     for name in ["returnRec", "returnPromiseRec", "returnPing"] {
         assert_eq!(
@@ -5947,7 +5955,7 @@ fn a_recursive_arm_is_dropped_from_an_awaited_union() {
 /// error type absorbs the union arm the runtime relation would drop.
 #[test]
 fn the_authored_awaited_of_a_recursive_thenable_is_the_ts2589_recovery() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
     };
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
@@ -5967,7 +5975,7 @@ fn the_authored_awaited_of_a_recursive_thenable_is_the_ts2589_recovery() {
             data,
             SemanticNodeData::Opaque(QueryError::CheckerRecovery {
                 diagnostic: ts2589,
-                basis: crate::semantic_query::RecoveryBasis::Certified,
+                basis: verter_type_engine::semantic_query::RecoveryBasis::Certified,
                 origin: None
             }),
             "{name}"
@@ -6232,7 +6240,7 @@ fn a_failing_yield_beside_another_yield_drops_out_of_the_join() {
 /// awaited, `GenericTree<string>` through `Awaited`.
 #[test]
 fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
     };
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
@@ -6263,7 +6271,7 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
                 code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
                 operation: CheckerDiagnosticOperation::LibAwaited,
             },
-            basis: crate::semantic_query::RecoveryBasis::Certified,
+            basis: verter_type_engine::semantic_query::RecoveryBasis::Certified,
             origin: None,
         })
     );
@@ -6312,7 +6320,7 @@ fn a_generic_self_referencing_thenable_follows_its_recorded_instantiation() {
 /// the production budget's cost is recorded in the ledger.)
 #[test]
 fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
     };
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
@@ -6324,7 +6332,7 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
                 code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
                 operation: CheckerDiagnosticOperation::LibAwaited,
             },
-            basis: crate::semantic_query::RecoveryBasis::Budget,
+            basis: verter_type_engine::semantic_query::RecoveryBasis::Budget,
             origin: None,
         })
     );
@@ -6531,7 +6539,7 @@ fn is_ts2589(data: &SemanticNodeData) -> bool {
         data,
         SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. })
             if diagnostic.code
-                == crate::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                == verter_type_engine::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
     )
 }
 
@@ -6735,8 +6743,8 @@ fn with_class_probe<R>(
         let normalized = dispatch
             .normalize_node_keeping_declaration_refs_for_tests(
                 result.return_type(),
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Expanded,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 ),
             )
             .into_complete_node()
@@ -6951,7 +6959,7 @@ fn class_expression_static_block_assertion_is_not_dropped() {
 /// carrier; like every answer built over a TS1062 failure it never warms.
 #[test]
 fn an_awaited_recursive_thenable_in_an_array_literal_is_the_recovery_element() {
-    use crate::semantic_query::CheckerDiagnosticOperation;
+    use verter_type_engine::semantic_query::CheckerDiagnosticOperation;
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
     assert_eq!(
         eval(&host, RECURSIVE_THENABLE, "awaitRecInArray"),
@@ -7053,22 +7061,22 @@ fn a_member_read_through_a_self_reference_walks_on_through_the_declaration() {
         let surface = dispatch
             .normalize_node_keeping_declaration_refs_for_tests(
                 result.return_type(),
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Expanded,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 ),
             )
             .into_complete_node()
             .expect("`Chain['next']` reduces");
         let member = |name: &str| {
-            crate::semantic_query::PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier(name),
+            verter_type_engine::semantic_query::PathSegment::Member(
+                verter_type_engine::semantic_query::PropertyKey::identifier(name),
             )
         };
         let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: surface,
             path: Arc::from(vec![member("next"), member("next"), member("v")].into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Navigate,
+            context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),
         }) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
@@ -7119,8 +7127,8 @@ fn an_indexed_access_of_a_self_reference_is_the_declaration() {
         let node = dispatch
             .normalize_node_for_structural_fact_demand(
                 result.return_type(),
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Expanded,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 ),
             )
             .into_complete_node()

@@ -11,14 +11,14 @@
 
 use std::sync::Arc;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    FlowReturnDegradation, PredicateSubject, PrimitiveKind, ReturnProjectionDemand,
-    SemanticNodeData, SemanticNodeId,
-};
 use crate::types::HostConfig;
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    FlowReturnDegradation, PredicateSubject, PrimitiveKind, ReturnProjectionDemand,
+    SemanticNodeData, SemanticNodeId,
+};
 
 pub(super) const STRICT_ROOT: &str = "/strict";
 pub(super) const LOOSE_ROOT: &str = "/loose";
@@ -157,7 +157,7 @@ pub(super) fn checker_diagnostics(
     host: &VerterHost,
     root: &str,
     symbol: &str,
-) -> Vec<crate::semantic_query::CheckerDiagnostic> {
+) -> Vec<verter_type_engine::semantic_query::CheckerDiagnostic> {
     let carrier = host.get_flow_return_type_with_audit(
         &identity(&format!("{root}/main.ts"), symbol),
         ReturnProjectionDemand::whole_return(),

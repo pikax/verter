@@ -20,7 +20,7 @@
 //!    the active request id via [`current_request_id`] without needing a
 //!    session-crate dependency.
 //! 4. Session-side code receives the context directly via
-//!    `verter_session::request_context::current_request_context()` (a
+//!    `verter_type_engine::request_context::current_request_context()` (a
 //!    separate accessor that downcasts to the concrete session type).
 
 use std::cell::RefCell;
@@ -108,7 +108,7 @@ pub(crate) fn invoke_clear_tls_hook() -> Box<dyn TlsUninstall + Send> {
 
 /// Session-owned request context surfaced to the scheduler as an opaque
 /// trait object. The concrete `Arc<RequestContext>` (in
-/// `verter_session::request_context`) implements this.
+/// `verter_type_engine::request_context`) implements this.
 pub trait RequestContextLike: Send + Sync + 'static {
     /// Monotonic request identifier — stable across the request's
     /// lifetime. Zero is reserved for "no request".
@@ -307,7 +307,7 @@ impl Drop for OpaqueContextGuard {
 ///   2. `opaque.drop()`      — restores scheduler opaque slot.
 ///
 /// This is the reverse of
-/// `verter_session::request_context::RequestContextGuard::install`
+/// `verter_type_engine::request_context::RequestContextGuard::install`
 /// (which plants `opaque` first then `audit_observer`), so the
 /// install/clear pair un-stacks in matching directions.
 pub struct AllSlotsClearGuard {

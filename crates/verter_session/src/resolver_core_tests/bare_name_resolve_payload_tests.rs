@@ -1,10 +1,10 @@
-use crate::resolver_core::bare_name_resolve::*;
 use crate::resolver_core::prepared_decl::build_prepared_decl_bundle;
 use crate::resolver_core::prepared_decl::ImportCanonicalization;
 use crate::resolver_core::ShallowFileState;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use verter_session_query::inputs::prepared::TypeParamBinding;
+use verter_type_engine::resolver_core::bare_name_resolve::*;
 
 /// `DeclarationScopePayload` is a VIEW over the prepared-decl
 /// bundle: construction shares the bundle's maps through the
@@ -19,8 +19,9 @@ export interface Props { label: string }
 export const defaults = { label: 'ok' }
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
-    let interner =
-        Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account());
+    let interner = Arc::new(
+        verter_type_engine::identity_interner::IdentityInterner::with_process_local_account(),
+    );
     let mut script_setup: FxHashMap<String, TypeParamBinding> = FxHashMap::default();
     script_setup.insert(
         "T".to_string(),

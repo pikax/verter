@@ -46,18 +46,18 @@ use verter_type_expr::{TypeExpr, UnknownValue};
 
 use crate::meta_resolve::exactness::classify_node;
 use crate::output_sinks::OutputProjector;
-use crate::project_semantic_dispatch::output_materialization::{
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::project_semantic_dispatch::output_materialization::{
     wrap_degraded_output, wrap_output_type_expr, MaterializedOutputTypeExpr,
 };
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{
     DeclIdentity, ProjectionMode, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
     SemanticOutcome, SemanticQueryKey, SurfaceMember,
 };
-use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
-use crate::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
+use verter_type_engine::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts;
 
 pub(crate) use super::published_source::MemberValuePosition;
 use super::published_source::{
@@ -99,13 +99,15 @@ crate::output_sinks::define_output_capability! {
 fn raise_node_to_sealed_carrier(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
-    dep_signature: crate::semantic_query::DepSignature,
+    dep_signature: verter_type_engine::semantic_query::DepSignature,
 ) -> MaterializedOutputTypeExpr {
     let cap = MetaResolveProjectorsOutputCap::new(dispatch);
     let sealed = match cap.materialize_output_type_expr(node) {
         Some(sealed) => sealed,
         None => {
-            if crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).is_none() {
+            if verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+                .is_none()
+            {
                 // GENUINE absence (no typed payload minted for this id): the
                 // exact `missing_output` — NON-partial.
                 wrap_output_type_expr(
@@ -116,7 +118,10 @@ fn raise_node_to_sealed_carrier(
                 // PRESENT-BUT-UNRAISABLE (the node minted but a required child
                 // failed): degrade as the typed unmaterialized `Miss` carrier —
                 // PARTIAL at the choke point, never admitted complete.
-                wrap_degraded_output(cap.authority(), crate::semantic_query::QueryError::Miss)
+                wrap_degraded_output(
+                    cap.authority(),
+                    verter_type_engine::semantic_query::QueryError::Miss,
+                )
             }
         }
     };
@@ -139,16 +144,20 @@ fn raise_node_to_sealed_carrier(
 /// Typed-domain only: the owner's analyzed import bindings + the shared
 /// shallow export-target resolver — no raw-text recovery.
 fn authored_package_alias_for_carrier(
-    ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
     owner_canonical: &str,
     node: SemanticNodeId,
 ) -> Option<String> {
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
-    let crate::semantic_query::SemanticNodeData::DeclRef { identity } = data.as_ref() else {
+    let data =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity } = data.as_ref()
+    else {
         return None;
     };
     if !ctx.workspace_is_package_backed(identity.canonical_id.as_ref()) {
@@ -236,12 +245,12 @@ fn reduce_field_value_node(
     );
 
     let root_is_sentinel = reduced.node_id().is_some_and(|node| {
-        crate::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
+        verter_type_engine::project_semantic_dispatch::raise::node_root_is_unmaterialized_sentinel_with_dispatch(
             dispatch, node,
         )
     });
     if root_is_sentinel
-        && crate::project_semantic_dispatch::raise::node_contains_semantic_miss_with_dispatch(
+        && verter_type_engine::project_semantic_dispatch::raise::node_contains_semantic_miss_with_dispatch(
             dispatch, input_node,
         ) == Some(false)
     {
@@ -258,12 +267,12 @@ const DEFAULT_MODEL_NAME: &str = "modelValue";
 ///
 /// Wraps the cold compute path for one `(scope, member, mode)`
 /// triple around the host-owned per-member slot of
-/// [`crate::component_meta_caches::ShapeCacheDb`] (indexed by
-/// [`crate::component_meta_caches::ShapeSubject::MemberValueNode`] via
+/// [`verter_type_engine::component_meta_caches::ShapeCacheDb`] (indexed by
+/// [`verter_type_engine::component_meta_caches::ShapeSubject::MemberValueNode`] via
 /// `ShapeCacheKey::surface_member_value_whole_with_context`). The contract:
 ///
 ///  1. **Peek first.** Warm hits return the cached
-///     [`crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr`]
+///     [`verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr`]
 ///     WITHOUT paying any raise or gate cost — the goal of the cache
 ///     is that the per-member hot path returns in `peek` time.
 ///  2. **Cold path runs NODE-domain gates, then seals once.** A cold miss
@@ -293,7 +302,7 @@ fn member_shape_peek_or_compute(
     scope_canonical_id: &str,
     admitted: &super::publication_authority::AdmittedPublishedMember<'_>,
     mode: ProjectionMode,
-) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
+) -> verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     // ONE cacheability tracer scope around the WHOLE compute — the reduction-context
     // classification that builds the cache KEY, the node-domain gates, the peek, and
     // the cold reduce. Every admission below consults its `CacheabilityProbe`, which
@@ -333,7 +342,7 @@ fn member_shape_peek_or_compute(
         // for the admitted member only.
         let cap = MetaResolveProjectorsOutputCap::new(dispatch);
         let key =
-            crate::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context(
+            verter_type_engine::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context(
                 cap.authority(),
                 Arc::<str>::from(scope_canonical_id),
                 admitted.member(),
@@ -405,7 +414,7 @@ fn member_shape_peek_or_compute(
         // a shallow carrier (the cycle prevents finite reduction); admit so subsequent
         // peeks skip the gate. The gate resolves carrier heads through the same shared
         // resolver; the enclosing cacheability scope observes those serves.
-        let cycle_fence: crate::semantic_query::DepSignature = if gates.generic_instantiation_ref {
+        let cycle_fence: verter_type_engine::semantic_query::DepSignature = if gates.generic_instantiation_ref {
             let (reaches_cycle, fence) =
                 crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
                     dispatch,
@@ -512,7 +521,7 @@ fn member_shape_peek_or_compute(
         // returning here keeps the per-member producer from depending on the
         // cache layer remembering the rule and skips the futile admission
         // plumbing.
-        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
+        if verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
             materialized_with_gate_fence.result_is_partial(),
         ) || scope.non_cacheable()
         {
@@ -528,7 +537,7 @@ fn member_shape_peek_or_compute(
         let admitted = scope.get_or_compute(&key, move || {
             let scope_obs = observed_scope?;
             let parse_fact = scope_obs.syntactic_export_set.clone()?;
-            match crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+            match verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
                 &scope_obs,
                 parse_fact,
                 materialized_for_closure.dep_signature(),
@@ -553,14 +562,16 @@ fn member_shape_peek_or_compute(
 /// Order is preserved (first occurrence wins) so the resulting
 /// signature is deterministic given deterministic inputs.
 fn combine_dep_signatures(
-    a: &crate::semantic_query::DepSignature,
-    b: &crate::semantic_query::DepSignature,
+    a: &verter_type_engine::semantic_query::DepSignature,
+    b: &verter_type_engine::semantic_query::DepSignature,
     scope_canonical_id: &str,
-) -> crate::semantic_query::DepSignature {
-    let mut out: Vec<(Arc<str>, crate::semantic_query::DepVersion)> =
+) -> verter_type_engine::semantic_query::DepSignature {
+    let mut out: Vec<(Arc<str>, verter_type_engine::semantic_query::DepVersion)> =
         Vec::with_capacity(a.len() + b.len());
-    let mut seen: rustc_hash::FxHashSet<(Arc<str>, crate::semantic_query::DepVersion)> =
-        rustc_hash::FxHashSet::default();
+    let mut seen: rustc_hash::FxHashSet<(
+        Arc<str>,
+        verter_type_engine::semantic_query::DepVersion,
+    )> = rustc_hash::FxHashSet::default();
     for entry in a.iter().chain(b.iter()) {
         if entry.0.as_ref() == scope_canonical_id || entry.0.as_ref().is_empty() {
             continue;
@@ -579,10 +590,10 @@ fn combine_dep_signatures(
 /// the entry's fact signature captures BOTH the reducer's observed
 /// deps AND the gate-observed deps.
 fn merge_gate_fence_into_materialized(
-    mut materialized: crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
-    gate_fence: &crate::semantic_query::DepSignature,
+    mut materialized: verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
+    gate_fence: &verter_type_engine::semantic_query::DepSignature,
     scope_canonical_id: &str,
-) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
+) -> verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     if gate_fence.is_empty() {
         return materialized;
     }
@@ -593,7 +604,7 @@ fn merge_gate_fence_into_materialized(
 }
 
 /// Admit a freshly-computed SemanticNode-subject shape into the
-/// universal [`crate::component_meta_caches::ShapeCacheDb`] when the
+/// universal [`verter_type_engine::component_meta_caches::ShapeCacheDb`] when the
 /// scope has a tear-free `observe_materialize_scope` observation.
 ///
 /// Universal-caching invariant: every successful `(node, scope, mode)`
@@ -609,7 +620,7 @@ fn merge_gate_fence_into_materialized(
 /// Universal-caching admission for the projector pipeline. Computes
 /// the `fact_dep_signature` from the value's `dep_signature` + scope
 /// observation, then delegates to
-/// [`crate::component_meta_caches::ShapeCacheDb::admit_computed`] —
+/// [`verter_type_engine::component_meta_caches::ShapeCacheDb::admit_computed`] —
 /// the single centralised admission point that handles the
 /// `get_or_compute` invocation and the verbatim fallback when
 /// admission is refused.
@@ -633,14 +644,14 @@ fn merge_gate_fence_into_materialized(
 /// is CACHE-ONLY: the shape stays `Complete` and is never marked `Partial`.
 fn admit_member_shape_if_possible(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    key: &crate::component_meta_caches::ShapeCacheKey,
-    value: crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
-    owner_scope: &crate::project_semantic_dispatch::memo::ShapeCacheOwnerScope<
+    key: &verter_type_engine::component_meta_caches::ShapeCacheKey,
+    value: verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
+    owner_scope: &verter_type_engine::project_semantic_dispatch::memo::ShapeCacheOwnerScope<
         '_,
         '_,
         crate::resolver_store::WorkspaceSlotClocks,
     >,
-) -> crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
+) -> verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr {
     // The producing compute consumed a non-cacheable read (or overflowed its
     // signature): serve the value, publish nothing. `package_backed_fence_opt` —
     // the arms' pre-existing gate — is only hash AVAILABILITY, so a fenced serve
@@ -655,7 +666,9 @@ fn admit_member_shape_if_possible(
     // gate also refuses, but the early return keeps this single
     // centralised admission point from depending on the cache layer
     // remembering the rule. The value is returned verbatim.
-    if crate::cache_runtime::refuse_result_cache_admission_if_partial(value.result_is_partial()) {
+    if verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
+        value.result_is_partial(),
+    ) {
         return value;
     }
     let scope = key.scope_canonical().clone();
@@ -665,16 +678,19 @@ fn admit_member_shape_if_possible(
     let Some(parse_fact) = observed_scope.syntactic_export_set.clone() else {
         return value;
     };
-    let fact_sig = match crate::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
-        &observed_scope,
-        parse_fact,
-        value.dep_signature(),
-    ) {
-        verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => sig.facts,
-        verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => {
-            return value
-        }
-    };
+    let fact_sig =
+        match verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+            &observed_scope,
+            parse_fact,
+            value.dep_signature(),
+        ) {
+            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                sig.facts
+            }
+            verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(_) => {
+                return value
+            }
+        };
     owner_scope.admit_computed(key, value, fact_sig)
 }
 
@@ -896,7 +912,7 @@ pub(crate) fn surface_member_to_expanded_field(
     // `source_field.unwrap_or(false)`: that would also strip own-body members
     // (the cross-file-simple discriminating positive test rejects that accident).
     let declared_in_macro_type_arg = member.declared_in_macro_type_arg.get()
-        && member.merge_role != crate::semantic_query::MemberMergeRole::Heritage;
+        && member.merge_role != verter_type_engine::semantic_query::MemberMergeRole::Heritage;
     let authored_evidence =
         shallow_source
             .as_ref()
@@ -957,11 +973,13 @@ fn resolve_member_value_for_classification(
     // entry run. Done in `Navigate` (carrier-preserving for deeper structure);
     // the alias unwrap below then proceeds on the resolved `DeclRef`.
     let value =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), value).as_deref() {
+        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value)
+            .as_deref()
+        {
             Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
                 dispatch.resolve_carrier_subject_node(
                     value,
-                    crate::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 )
@@ -969,7 +987,9 @@ fn resolve_member_value_for_classification(
             _ => value,
         };
     let should_expand =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), value).as_deref() {
+        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value)
+            .as_deref()
+        {
             Some(SemanticNodeData::DeclRef { .. }) => true,
             // Carrier-mode: do NOT expand a generic instantiation to
             // its shallow object surface — that would breadth-
@@ -986,11 +1006,11 @@ fn resolve_member_value_for_classification(
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: value,
         path: super::empty_path(),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Shallow,
         ),
     });
-    crate::request_context::observe_component_meta_read_suppress(&read);
+    verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
     emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
     match read.value {
         QueryResult::Value(id) => id,
@@ -1021,7 +1041,7 @@ pub(crate) fn project_model(
     // surface. The sole production caller passes `Model`.
     if !matches!(
         cursor.surface,
-        crate::component_meta_caches::PublishedSurfaceKind::Model
+        verter_type_engine::component_meta_caches::PublishedSurfaceKind::Model
     ) {
         return None;
     }
@@ -1038,7 +1058,8 @@ pub(crate) fn project_model(
     // terminal carrier cursor. `project_model` raises a single payload
     // (no surface walk) so the carrier mode does not gate a per-member
     // breadth loop here — the descend gate IS the load-bearing use.
-    let model_key = crate::semantic_query::PropertyKey::identifier(model_name.as_str());
+    let model_key =
+        verter_type_engine::semantic_query::PropertyKey::identifier(model_name.as_str());
     let _member_cursor = cursor.descend_published_member(&model_key)?;
 
     let (payload_node, presence_outcome, exactness, contains_reducible) = {
@@ -1074,7 +1095,10 @@ pub(crate) fn project_model(
         // branches on that typed state, never on a fabricated sentinel
         // string. No `TypeExpr` is materialised for the decision.
         let presence_outcome: SemanticOutcome<()> =
-            match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), payload_node) {
+            match verter_type_engine::project_semantic_dispatch::node_data_for(
+                dispatch.graph(),
+                payload_node,
+            ) {
                 Some(_) => SemanticOutcome::Value(()),
                 None => SemanticOutcome::Degraded(QueryError::RaiseMiss),
             };
@@ -1216,17 +1240,17 @@ fn materialize_output_source(
     use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
     match source {
         SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)) => {
-            Ok(crate::project_semantic_dispatch::lower::leaf_type_fact_expr(leaf))
+            Ok(verter_type_engine::project_semantic_dispatch::lower::leaf_type_fact_expr(leaf))
         }
         SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(leaves)) => Ok(TypeExpr::Union(
             leaves
                 .iter()
-                .map(crate::project_semantic_dispatch::lower::leaf_type_fact_expr)
+                .map(verter_type_engine::project_semantic_dispatch::lower::leaf_type_fact_expr)
                 .collect(),
         )),
         other => {
             let transit_ctx =
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 );
             let hot = dispatch
@@ -1237,10 +1261,10 @@ fn materialize_output_source(
                     transit_ctx,
                 )
                 .map_err(|failure| match failure {
-                    crate::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::InteriorMiss(path) => {
+                    verter_type_engine::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::InteriorMiss(path) => {
                         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path }
                     }
-                    crate::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::UnknownMaterializing(path) => {
+                    verter_type_engine::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::UnknownMaterializing(path) => {
                         crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior { path }
                     }
                     // A ROOT-level typed query failure. Previously EVERY
@@ -1248,10 +1272,8 @@ fn materialize_output_source(
                     // surfaced as `UnraisableSource` — indistinguishable from
                     // a genuine absence. The typed error now decides, through
                     // the single disposition authority.
-                    crate::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::QueryFailure(err) => {
-                        use crate::project_semantic_dispatch::query_error_disposition::{
-                            query_error_disposition, QueryErrorDisposition,
-                        };
+                    verter_type_engine::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::QueryFailure(err) => {
+                        use verter_type_engine::project_semantic_dispatch::query_error_disposition::{query_error_disposition, QueryErrorDisposition};
                         match query_error_disposition(&err) {
                             // A publishable control carrier reaches the failure
                             // arm ONLY when its carrier could not be interned —

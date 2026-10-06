@@ -523,8 +523,10 @@ fn run_component_meta_request(
 
     let (resolve_imported_elapsed, resolved_imported_types) = if include_resolve_imported {
         let resolve_started = Instant::now();
-        let resolved =
-            host.resolve_component_meta(target_id, verter_session::ProjectionMode::Expanded);
+        let resolved = host.resolve_component_meta(
+            target_id,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        );
         let resolved_count = resolved
             .map(|state| state.resolved_macros.len())
             .unwrap_or(0);

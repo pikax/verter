@@ -30,16 +30,18 @@ use verter_type_expr::{
     TupleElement, TypeExpr, TypeParam,
 };
 
-use crate::project_semantic_dispatch::locator_shape::{LocatorBinderFrame, LocatorShapeCtx};
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::scope_shadowing::ScopeShadowing;
-use crate::semantic_query::{
-    DeclIdentity, MemberMergeRole, NodeScopeId, ObjectConstructionEffect, ProjectionMode,
-    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{CompileErrorPolicy, FileLanguage, VerterHost};
 use verter_session_query::source::deref::{DerefedBodyShape, LocatorBodyDerefError};
+use verter_type_engine::project_semantic_dispatch::locator_shape::{
+    LocatorBinderFrame, LocatorShapeCtx,
+};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+use verter_type_engine::semantic_query::{
+    DeclIdentity, MemberMergeRole, NodeScopeId, ObjectConstructionEffect, ProjectionMode,
+    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
+};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -207,7 +209,10 @@ fn type_param_bound_locator(
     })
 }
 
-fn object_surface(host: &VerterHost, node: SemanticNodeId) -> crate::semantic_query::SurfaceView {
+fn object_surface(
+    host: &VerterHost,
+    node: SemanticNodeId,
+) -> verter_type_engine::semantic_query::SurfaceView {
     let graph = host.project_type_store().semantic_graph();
     match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Object(surface)) => surface.clone(),
@@ -215,7 +220,10 @@ fn object_surface(host: &VerterHost, node: SemanticNodeId) -> crate::semantic_qu
     }
 }
 
-fn member_value(surface: &crate::semantic_query::SurfaceView, name: &str) -> SemanticNodeId {
+fn member_value(
+    surface: &verter_type_engine::semantic_query::SurfaceView,
+    name: &str,
+) -> SemanticNodeId {
     surface
         .positive_members()
         .iter()
@@ -232,7 +240,7 @@ fn member_value(surface: &crate::semantic_query::SurfaceView, name: &str) -> Sem
 /// reduced result.
 #[test]
 fn cold_lower_locator_dispatches_zero_reduction_queries() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
@@ -381,7 +389,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
     // OLD reducing path, macro-own-body caller context: stamps the members.
     let env = rustc_hash::FxHashMap::default();
     let name_resolution = rustc_hash::FxHashMap::default();
-    let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
+    let shadowing = verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::empty();
     let mut substitutions = Vec::new();
     let stamped = dispatch.shallow_lower_type_expr_with_context(
         &expr,
@@ -1041,7 +1049,7 @@ fn lower_locator_rejects_macro_type_argument_payload() {
     assert!(
         matches!(
             dispatch.lower_locator(locator),
-            QueryResult::Error(crate::semantic_query::QueryError::Miss)
+            QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
         ),
         "the provider must surface the typed rejection as an honest Miss"
     );
@@ -1259,11 +1267,11 @@ fn jsdoc_typedef_body_locator_lowers_through_the_shape_query() {
 /// sets `cache_suppress == true`.
 #[test]
 fn broken_lease_lower_locator_suppresses_parent_admission() {
-    use crate::locator_identity::{
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_type_engine::locator_identity::{
         semantic_space_for_locator_space, LocatorLoweringKey, ResolveEnvHash,
     };
-    use crate::semantic_query::{QueryError, SemanticQueryKey};
-    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_type_engine::semantic_query::{QueryError, SemanticQueryKey};
 
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
@@ -1481,7 +1489,7 @@ fn lower_locator_derefs_a_member_value_sub_position() {
         matches!(
             graph.node_data(node).as_deref(),
             Some(SemanticNodeData::Primitive(
-                crate::semantic_query::PrimitiveKind::String
+                verter_type_engine::semantic_query::PrimitiveKind::String
             ))
         ),
         "the `Base` member-0 value position is the authored `string`"

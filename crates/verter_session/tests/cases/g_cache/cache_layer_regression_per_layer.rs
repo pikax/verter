@@ -18,7 +18,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use verter_session::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 fn script_parse_identity() -> (verter_language::ParseKey, verter_session::FileLanguage) {
     let language = verter_session::FileLanguage::script_ts();

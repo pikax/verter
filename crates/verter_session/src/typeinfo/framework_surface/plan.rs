@@ -16,9 +16,9 @@ use std::sync::Arc;
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 use verter_session_query::analysis::types::AnalyzedMacroKind;
 
-use crate::semantic_query::{PathSegment, ProjectionMode};
 use crate::typeinfo::framework_surface::results::{ResolvedMacroPayload, ResolvedOutcome};
 use crate::typeinfo::surface::TypeInfoSurface;
+use verter_type_engine::semantic_query::{PathSegment, ProjectionMode};
 
 /// A stable handle to a typed-IR node a plan demand operates on.
 ///

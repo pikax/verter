@@ -49,11 +49,11 @@ pub enum MetaError {
     /// The computation was aborted (a cancelled request, a superseded view,
     /// a shut down host): it published nothing.
     #[error("request aborted: {0:?}")]
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
-impl From<crate::semantic_query::ExecutionAbort> for MetaError {
-    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+impl From<verter_type_engine::semantic_query::ExecutionAbort> for MetaError {
+    fn from(abort: verter_type_engine::semantic_query::ExecutionAbort) -> Self {
         Self::Aborted(abort)
     }
 }

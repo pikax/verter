@@ -14,10 +14,10 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::request_ports::IndexedInputs;
 use crate::session_view::OverlaidView;
 use crate::VerterHost;
 use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 /// Observable facts about an overlay-bearing prepared-decl bundle —
 /// returned by [`overlay_prepared_decl_bundle_probe`].
@@ -82,13 +82,14 @@ pub fn overlay_prepared_decl_bundle_probe(
     );
 
     let bundle = IndexedInputs::prepared_decl_bundle(&session_ctx, raw_canonical)?;
-    let prepared = crate::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
-        &session_ctx,
-        &bundle,
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        symbol_name,
-    )
-    .ok()??;
+    let prepared =
+        verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
+            &session_ctx,
+            &bundle,
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol_name,
+        )
+        .ok()??;
     let root_canonical_id = prepared.root_identity.canonical_id.to_string();
 
     Some(OverlayPreparedDeclProbe {

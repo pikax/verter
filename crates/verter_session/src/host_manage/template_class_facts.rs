@@ -16,22 +16,24 @@ use verter_type_expr::{
     ReactiveWrapperUnresolvedReason, ResolutionExactness, TopLevelOwnerId,
 };
 
-use crate::project_semantic_dispatch::evaluate::StructuralFactDemandOutcome;
-use crate::project_semantic_dispatch::query_error_disposition::classify_query_error;
-use crate::project_semantic_dispatch::reactive_wrapper::{
+use crate::resolver_store::ColdSeedHostStoreView;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+use verter_type_engine::project_semantic_dispatch::evaluate::StructuralFactDemandOutcome;
+use verter_type_engine::project_semantic_dispatch::query_error_disposition::classify_query_error;
+use verter_type_engine::project_semantic_dispatch::reactive_wrapper::{
     unresolved_reasons_from_identity, wrapper_candidate_for_route, WrapperCandidate,
 };
-use crate::project_semantic_dispatch::semantic_source::{SourceRaiseContext, SourceRaiseOutcome};
-use crate::project_semantic_dispatch::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::{RequestBoundResolverContext, ResolverContext};
-use crate::resolver_store::ColdSeedHostStoreView;
-use crate::semantic_query::{
+use verter_type_engine::project_semantic_dispatch::semantic_source::{
+    SourceRaiseContext, SourceRaiseOutcome,
+};
+use verter_type_engine::project_semantic_dispatch::symbol_identity::TerminalSymbolInstantiationDemandOutcome;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::{RequestBoundResolverContext, ResolverContext};
+use verter_type_engine::semantic_query::{
     LiteralValue, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ScopeId,
     SemanticNodeData, SemanticNodeId, ValueRootKey,
 };
-use verter_session_query::facts::fact_cache::ReadSetSignature;
-use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
 pub(crate) type SessionTemplateClassSemanticFacts = TemplateClassSemanticFacts<ReadSetSignature>;
 
@@ -144,8 +146,8 @@ pub(crate) fn build_template_class_semantic_facts(
         .shallow_file_state(canonical)
         .map_or(whole_hash, |state| state.whole_hash);
     let ((subjects, rows, mut completeness), finalise) =
-        crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        verter_type_engine::fact_signature_helpers::install_fact_tracer(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             || {
                 let requested = select_requested_subjects(raw, script);
                 let dispatch = ProjectSemanticDispatch::new(ctx);
@@ -473,8 +475,11 @@ fn classify_binding(
         context,
     );
     let read = dispatch.execute_read(key);
-    crate::meta_resolve::emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
-    crate::request_context::observe_component_meta_read_suppress(&read);
+    verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts(
+        dispatch,
+        &read.dep_signature,
+    );
+    verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
     match read.value {
         QueryResult::Value(node) if !read.result_is_partial => {
             classify_node(dispatch, node, subject, route_candidate.as_ref())
@@ -860,30 +865,38 @@ fn closed_domain_source(domain: &ClosedLiteralDomain) -> Option<SemanticTypeSour
 }
 
 fn unresolved_reasons_from_partial(
-    reasons: crate::semantic_query::PartialReasonSet,
+    reasons: verter_type_engine::semantic_query::PartialReasonSet,
 ) -> (
     ClosedLiteralDomainUnresolvedReason,
     ReactiveWrapperUnresolvedReason,
 ) {
-    if reasons.contains(crate::semantic_query::PartialReasonSet::BUDGET_EXCEEDED) {
+    if reasons.contains(verter_type_engine::semantic_query::PartialReasonSet::BUDGET_EXCEEDED) {
         (
             ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
             ReactiveWrapperUnresolvedReason::BudgetExceeded,
         )
-    } else if reasons.contains(crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION) {
+    } else if reasons
+        .contains(verter_type_engine::semantic_query::PartialReasonSet::SAME_PATH_RECURSION)
+    {
         (
             ClosedLiteralDomainUnresolvedReason::Cycle,
             ReactiveWrapperUnresolvedReason::Cycle,
         )
-    } else if reasons.contains(crate::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT)
-        || reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT)
-        || reasons.contains(crate::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT)
+    } else if reasons
+        .contains(verter_type_engine::semantic_query::PartialReasonSet::PROJECTION_WORK_LIMIT)
+        || reasons.contains(
+            verter_type_engine::semantic_query::PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT,
+        )
+        || reasons
+            .contains(verter_type_engine::semantic_query::PartialReasonSet::CONNECTED_MEMORY_LIMIT)
     {
         (
             ClosedLiteralDomainUnresolvedReason::WorkLimitExceeded,
             ReactiveWrapperUnresolvedReason::WorkLimitExceeded,
         )
-    } else if reasons.contains(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY) {
+    } else if reasons
+        .contains(verter_type_engine::semantic_query::PartialReasonSet::MISSING_DEPENDENCY)
+    {
         (
             ClosedLiteralDomainUnresolvedReason::MissingDependency,
             ReactiveWrapperUnresolvedReason::MissingDependency,

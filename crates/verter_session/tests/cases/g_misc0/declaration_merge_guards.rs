@@ -134,8 +134,8 @@ fn no_intersection_merge_synthesis_in_verter_session() {
 fn merged_decl_lowers_to_distinct_carrier_not_intersection() {
     use std::sync::Arc;
 
-    use verter_session::semantic_query::{ProjectionMode, SemanticNodeData};
     use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = host

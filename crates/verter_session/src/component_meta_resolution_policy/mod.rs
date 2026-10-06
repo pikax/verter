@@ -42,9 +42,9 @@ use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use crate::host_manage::component_meta_extract::resolve_ref_to_root_identity;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
 use crate::resolver_core::ComponentMetaQueryEngine;
-use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
 use crate::VerterHost;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
 
 mod core;
 mod cycle_guard;
@@ -101,10 +101,10 @@ pub(crate) fn apply_component_meta_resolution_policy(
     host: &VerterHost,
     owner_canonical: &str,
     snapshot: Option<&FileAnalysisSnapshot>,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -146,10 +146,10 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
     host: &VerterHost,
     owner_canonical: &str,
     macro_participating_idents: &FxHashSet<ResolvedRootIdentity>,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -268,10 +268,10 @@ pub(crate) fn apply_component_meta_resolution_policy_with_participation(
 ///   → `{ ButtonProps, AvatarProps }` (named alias body contributes
 ///   its full reference closure)
 fn build_policy_macro_role_identities(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -299,8 +299,8 @@ fn build_policy_macro_role_identities(
     // One dispatch for every payload / shape raise below.
 
     let transit_ctx =
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-            crate::semantic_query::ProjectionMode::Navigate,
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            verter_type_engine::semantic_query::ProjectionMode::Navigate,
         );
 
     for mac in snapshot.macros.iter() {
@@ -318,7 +318,7 @@ fn build_policy_macro_role_identities(
                             locator.clone(),
                         ),
                     ),
-                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: owner_canonical,
                         scope_owner: mac.owner,
                         context: transit_ctx,
@@ -349,7 +349,7 @@ fn build_policy_macro_role_identities(
                     &verter_type_expr::facts::SemanticTypeSource::Synthesized(
                         resolved_local.shape.clone(),
                     ),
-                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: owner_canonical,
                         scope_owner: mac.owner,
                         context: transit_ctx,
@@ -399,7 +399,7 @@ fn build_policy_macro_role_identities(
         let Some(hot) = dispatch
             .raise_semantic_type_source_to_hot(
                 &body_source,
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: owner_canonical,
                     scope_owner: identity.owner,
                     context: transit_ctx,
@@ -443,7 +443,7 @@ fn build_policy_macro_role_identities(
 /// Iterative (worklist + visited node-set) for stack safety on deeply
 /// nested or shared shapes.
 fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -458,7 +458,7 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
             continue;
         }
         if let Some((name, args)) =
-            crate::project_semantic_dispatch::reference_carriers::reference_carrier_head(
+            verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(
                 dispatch, node,
             )
         {
@@ -469,7 +469,8 @@ fn harvest_role_bearing_refs_node<F: FnMut(&str)>(
             worklist.extend(args);
             continue;
         }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        let Some(data) =
+            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
         else {
             continue;
         };

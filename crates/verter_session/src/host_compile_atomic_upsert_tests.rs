@@ -19,9 +19,9 @@ use std::sync::Arc;
 use verter_scheduler::stage::Priority;
 
 use crate::host_compile::{CompileBatchInput, CompileBatchOptions, CompileManyTarget};
-use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::types::{FileLanguage, HostConfig, HostError, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -211,7 +211,8 @@ fn compile_many_upsert_batch_captures_calling_thread_request_context() {
     let host = new_host();
     let canonical = "/ctx-capture.vue";
 
-    let accumulator = Arc::new(crate::request_footprint::RequestFootprintAccumulator::new());
+    let accumulator =
+        Arc::new(verter_type_engine::request_footprint::RequestFootprintAccumulator::new());
     let ctx = RequestContext::with_kind_and_timing(
         4242,
         Arc::from(canonical),

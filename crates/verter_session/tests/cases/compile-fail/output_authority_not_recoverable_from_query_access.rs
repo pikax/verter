@@ -5,7 +5,8 @@
 //! for the concrete host, holds only an inert lease that opens inside the
 //! host's sink module. The project store keeps its lease private as well.
 
-use verter_session::for_tests::{ExecutionSubmission, HostAttachmentPort, OutputAuthority};
+use verter_type_engine::resolver_core::request_ports::{ExecutionSubmission, HostAttachmentPort};
+use verter_type_engine::project_semantic_dispatch::engine_resources::OutputAuthority;
 
 fn from_engine_binding<P: ExecutionSubmission + ?Sized>(port: &P) -> OutputAuthority {
     port.attach_engine().output_authority()

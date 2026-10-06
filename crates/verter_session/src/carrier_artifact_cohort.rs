@@ -222,7 +222,7 @@ mod tests {
             verter_protocol::consumer_compatibility_manifest::current_consumer_compatibility_manifest();
         assert_eq!(
             manifest.cache_cluster_schema_version.get(),
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
         );
     }
 }

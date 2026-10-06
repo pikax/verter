@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 // The runtime-render half of this module is native-only: the bound
 // framework backends, their refusal mappers and `Main` assembly all live
@@ -481,7 +481,7 @@ pub(crate) enum CompileEntryOutcome {
     /// The compile's semantic inputs were aborted (a cancelled request, a
     /// shut down host, a superseded view): the transaction publishes
     /// nothing, not even diagnostics.
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
 /// The products of a successful compile transaction.
@@ -1919,7 +1919,7 @@ impl VerterHost {
         // is preserved on the event for telemetry even though the public
         // single-reason projection keeps only the first.
         if actual_mode != classification.requested_mode {
-            crate::request_observers::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::CompileModeDowngrade {
                     requested: classification.requested_mode.into(),
                     actual: actual_mode.into(),
@@ -1977,7 +1977,7 @@ impl VerterHost {
                     // serve would — one admission rail
                     // (`non_cacheable_read_observed`), consulted below.
                     if prefetch_observation.fenced_serve_observed {
-                        crate::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
                     );
                     }
@@ -1999,7 +1999,7 @@ impl VerterHost {
                         .load(std::sync::atomic::Ordering::Relaxed);
                     if force_n > 0 {
                         for n in 0..force_n {
-                            crate::resolver_core::resolver_context::observe_fan_out(
+                            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                                     canonical_id: format!("__compile_force_overflow_{n}.ts"),
                                     hash: [(n & 0xff) as u8; 16],
@@ -2027,7 +2027,7 @@ impl VerterHost {
             let non_cacheable_read_observed = fact_read_set.non_cacheable_read_observed();
             let admission = if non_cacheable_read_observed {
                 verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
-                    crate::cache_runtime::NonAdmissionReason::GenerationSuperseded,
+                    verter_audit::NonAdmissionReason::GenerationSuperseded,
                 )
             } else {
                 verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise(
@@ -2712,7 +2712,7 @@ impl VerterHost {
             crate::framework::ComponentContractAvailability,
             Option<crate::framework::api_projector::ComponentApiProjectionWitness>,
         ),
-        crate::semantic_query::ExecutionAbort,
+        verter_type_engine::semantic_query::ExecutionAbort,
     > {
         Ok(match self.get_component_meta_output_via_view_with_publication_evidence(
             canonical, view, fixed, false,

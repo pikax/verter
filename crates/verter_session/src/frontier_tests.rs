@@ -400,8 +400,10 @@ defineProps<Props>()
     set_dep(&host, "/src/Consumer.vue", "./types", "/src/types.ts");
 
     // `ProjectionMode::Identity`: should resolve identity without full expansion
-    let meta_type =
-        host.resolve_component_meta("/src/Consumer.vue", crate::types::ProjectionMode::Identity);
+    let meta_type = host.resolve_component_meta(
+        "/src/Consumer.vue",
+        verter_type_engine::semantic_query::ProjectionMode::Identity,
+    );
     assert!(
         meta_type.is_some(),
         "Type-mode component-meta should resolve"
@@ -413,8 +415,10 @@ defineProps<Props>()
     );
 
     // `ProjectionMode::Expanded`: full materialization
-    let meta_expanded =
-        host.resolve_component_meta("/src/Consumer.vue", crate::types::ProjectionMode::Expanded);
+    let meta_expanded = host.resolve_component_meta(
+        "/src/Consumer.vue",
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
+    );
     assert!(
         meta_expanded.is_some(),
         "Expanded-mode component-meta should resolve"
@@ -551,8 +555,10 @@ defineEmits<AccordionRootEmits>()
         "/node_modules/runtime/types.d.ts",
     );
 
-    let meta =
-        host.resolve_component_meta("/src/Accordion.vue", crate::types::ProjectionMode::Expanded);
+    let meta = host.resolve_component_meta(
+        "/src/Accordion.vue",
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
+    );
     assert!(
         meta.is_some(),
         "large cross-file component-meta should resolve"
@@ -682,8 +688,10 @@ defineProps<AccordionRootProps>()
         "/node_modules/vue-runtime/types.d.ts",
     );
 
-    let meta =
-        host.resolve_component_meta("/src/Accordion.vue", crate::types::ProjectionMode::Expanded);
+    let meta = host.resolve_component_meta(
+        "/src/Accordion.vue",
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
+    );
     assert!(meta.is_some(), "deeply generic Accordion should resolve");
 }
 
@@ -750,8 +758,10 @@ defineEmits<AccordionRootEmits>()
     // does NOT hang. Whether evaluated_types are fully populated depends on
     // cross-file import resolution which may be incomplete without a live
     // workspace resolver.
-    let meta =
-        host.resolve_component_meta("/src/Accordion.vue", crate::types::ProjectionMode::Expanded);
+    let meta = host.resolve_component_meta(
+        "/src/Accordion.vue",
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
+    );
     assert!(
         meta.is_some(),
         "Accordion component-meta should resolve without hanging"

@@ -5,20 +5,22 @@ use std::time::{Duration, Instant};
 
 use super::family::family_and_slot;
 use super::SemanticGraphStore;
-use crate::semantic_query::object_spread_projection::test_support;
-use crate::semantic_query::{
+use crate::{HostConfig, VerterHost};
+use verter_type_engine::semantic_query::object_spread_projection::test_support;
+use verter_type_engine::semantic_query::{
     DepSignature, DepVersion, ExactOptionalPropertyPolicy, MemberMergeRole,
     ObjectProjectionSelector, ProjectionMode, ProjectionReductionContext, PropertyKey, QueryError,
     QueryResult, SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SemanticQueryValueTag,
     SubstitutionCanonicalHash, SurfaceProvenanceContext,
 };
-use crate::{HostConfig, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
 }
 
-fn context(mode: ProjectionMode) -> crate::semantic_query::ObjectSpreadProjectionContext {
+fn context(
+    mode: ProjectionMode,
+) -> verter_type_engine::semantic_query::ObjectSpreadProjectionContext {
     test_support::context(
         ProjectionReductionContext::published(mode),
         [1; 16],
@@ -32,7 +34,7 @@ fn context(mode: ProjectionMode) -> crate::semantic_query::ObjectSpreadProjectio
 
 fn query(
     selector: ObjectProjectionSelector,
-    context: crate::semantic_query::ObjectSpreadProjectionContext,
+    context: verter_type_engine::semantic_query::ObjectSpreadProjectionContext,
 ) -> SemanticQueryKey {
     SemanticQueryKey::ProjectObjectSpread {
         program: SemanticNodeId(41),
@@ -41,7 +43,7 @@ fn query(
     }
 }
 
-fn formula() -> crate::semantic_query::ObjectProjectionFormula {
+fn formula() -> verter_type_engine::semantic_query::ObjectProjectionFormula {
     test_support::closed_formula([test_support::closed_alternative([])])
 }
 
@@ -394,12 +396,14 @@ fn projection_family_rejects_and_does_not_publish_a_type_node_payload() {
     assert_eq!(store.memo_entry_count(), 0);
 }
 
-fn formula_with_key(value: SemanticNodeId) -> crate::semantic_query::ObjectProjectionFormula {
+fn formula_with_key(
+    value: SemanticNodeId,
+) -> verter_type_engine::semantic_query::ObjectProjectionFormula {
     test_support::closed_formula([test_support::closed_alternative([
         test_support::positive_key(
             PropertyKey::identifier("x"),
-            crate::semantic_query::PositiveKeyPresence::Required,
-            crate::semantic_query::ProjectionEvidence::Proven(value),
+            verter_type_engine::semantic_query::PositiveKeyPresence::Required,
+            verter_type_engine::semantic_query::ProjectionEvidence::Proven(value),
         ),
     ])])
 }
@@ -443,12 +447,16 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
         canonical_id: keyed_canonical.to_string(),
         hash: base_hash,
     };
-    let base_value = store.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
-    ));
-    let overlay_value = store.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
-    ));
+    let base_value = store.intern_node(
+        verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+            verter_type_engine::semantic_query::PrimitiveKind::Number,
+        ),
+    );
+    let overlay_value = store.intern_node(
+        verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+            verter_type_engine::semantic_query::PrimitiveKind::String,
+        ),
+    );
 
     let (tx_winner_in_build, rx_winner_in_build) = mpsc::channel::<()>();
     let (tx_release_winner, rx_release_winner) = mpsc::channel::<()>();
@@ -457,7 +465,7 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
     let winner_host = Arc::clone(&host);
     let winner_key = key.clone();
     let winner = thread::spawn(move || {
-        let host: &dyn crate::resolver_core::ResolverContext<
+        let host: &dyn verter_type_engine::resolver_core::ResolverContext<
             crate::resolver_core::HostCapabilities,
         > = winner_host.as_ref();
         winner_store.execute_cooperative_value(
@@ -470,7 +478,7 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
                     .expect("winner: signal in-build");
                 rx_release_winner.recv().expect("winner: released");
                 let carrier = ReadSetSignature::new(Arc::from(vec![winner_fact.clone()]));
-                crate::project_semantic_dispatch::walk::QueryBuildOutput {
+                verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput {
                     result: QueryResult::Value(SemanticQueryValue::ObjectProjection(
                         formula_with_key(base_value),
                     )),
@@ -478,13 +486,14 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
                     walker_diagnostics: Vec::new(),
                     cache_suppress: false,
                     result_is_partial: false,
-                    partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
-                    taint: crate::semantic_query::ResultTaint::Clean,
+                    partial_reasons: verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                    taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                     observed_self_roots: Vec::new(),
                     graph_carrier: Some(Box::new(carrier)),
                     self_root_canonicals: Arc::from([Arc::<str>::from(keyed_canonical)]),
                     pending_prefix_backfills: Vec::new(),
-                    satisfied_projection: crate::semantic_query::demand::MaterializedSet::empty(),
+                    satisfied_projection:
+                        verter_type_engine::semantic_query::demand::MaterializedSet::empty(),
                     flow_completion: None,
                 }
             },
@@ -564,7 +573,9 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
     let key_fact = |value: &QueryResult<SemanticQueryValue>| match value {
         QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
             match formula.alternatives()[0].selected_key(&PropertyKey::identifier("x")) {
-                crate::semantic_query::OpenSafeKeyEvidence::Positive(fact) => fact.value().clone(),
+                verter_type_engine::semantic_query::OpenSafeKeyEvidence::Positive(fact) => {
+                    fact.value().clone()
+                }
                 other => panic!("expected positive x, got {other:?}"),
             }
         }
@@ -572,10 +583,10 @@ fn cross_view_projection_joiner_forks_when_winner_carrier_fails_follower_validat
     };
     assert!(matches!(
         key_fact(&winner_read.value),
-        crate::semantic_query::ProjectionEvidence::Proven(node) if node == base_value
+        verter_type_engine::semantic_query::ProjectionEvidence::Proven(node) if node == base_value
     ));
     assert!(matches!(
         key_fact(&follower_value),
-        crate::semantic_query::ProjectionEvidence::Proven(node) if node == overlay_value
+        verter_type_engine::semantic_query::ProjectionEvidence::Proven(node) if node == overlay_value
     ));
 }

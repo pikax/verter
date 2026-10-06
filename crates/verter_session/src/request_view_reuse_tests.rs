@@ -32,9 +32,9 @@
 //! currentness, and overlay re-rooting errors.
 
 use crate::file_artifact_store::FileArtifactKeySource;
-use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use crate::resolver_core::{
     CanonicalCompletionOverlay, HostResolverContext, SessionResolverContext,
@@ -444,7 +444,8 @@ fn complete_canonical_writes_session_overlay_hash_not_base_hash() {
     // OVERLAY hash succeeds (the overlay matches), and validation
     // against the BASE hash fails (the overlay shadows with the
     // overlay hash, mismatching the base hash).
-    let store_view = &crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx);
+    let store_view =
+        &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx);
     assert!(
         store_view.validates_self_root_whole_hash(&canonical, &overlay_hash),
         "self-root validation against the overlay hash MUST succeed"
@@ -834,12 +835,12 @@ fn a_request_validates_a_shared_receipt_once() {
     );
 }
 
-use crate::resolver_core::request_ports::OwnedLowering as _;
+use verter_type_engine::resolver_core::request_ports::OwnedLowering as _;
 
 #[test]
 fn terminal_macro_inventory_preserves_indexed_absence_and_paired_base_fallback() {
-    use crate::resolver_core::request_ports::OwnedLowering;
     use crate::session_view::SessionView;
+    use verter_type_engine::resolver_core::request_ports::OwnedLowering;
 
     let (host, canonical) = small_host_with_one_component();
     let scheduler_source = host.scheduler_source(&canonical).expect("parsed source");

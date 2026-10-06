@@ -55,9 +55,9 @@ use verter_audit::{
 
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::project_type_store::{AnalysisArtifactKey, AnalysisReady};
-use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::VerterHost;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 impl VerterHost {
     /// Run a semantic-analysis request through the host's shared
@@ -127,7 +127,7 @@ impl VerterHost {
         // correctly when a closure issues both a component-meta and
         // analyze call inside the same `run` window.
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         // Build the per-request context. Footprint capture follows
         // the host config; semantic-analysis requests do NOT install

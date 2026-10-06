@@ -1413,7 +1413,7 @@ export type NormalizeKind = "Union" | "Intersection" | "Simplify";
 
 /**
  * Audit-side origin edge kind. Mirrors the semantic graph's
- * `verter_session::semantic_query::OriginEdgeKind` (nine kinds) and
+ * `verter_type_engine::semantic_query::OriginEdgeKind` (nine kinds) and
  * adds `SharedLoadReuse` — an audit-only edge emitted when a joiner
  * attaches to a winner's in-flight artifact.
  */
@@ -1549,7 +1549,7 @@ key: AuditPropertyKey, } } | { "Index": {
 key: string, } } | "KeyOf";
 
 /**
- * PUB mirror of `verter_session::semantic_query::ProjectionMode`.
+ * PUB mirror of `verter_type_engine::semantic_query::ProjectionMode`.
  * Same rationale as [`MaterializationScopeAudit`] — keeps audit
  * consumers independent of the dispatch types.
  */
@@ -1557,7 +1557,7 @@ export type ProjectionModeAudit = "Identity" | "Navigate" | "Shallow" | "Expande
 
 /**
  * Projection mode — mirror of
- * `verter_session::semantic_query::ProjectionMode`.
+ * `verter_type_engine::semantic_query::ProjectionMode`.
  */
 export type ProjectionModeTag = "Identity" | "Navigate" | "Shallow" | "Expanded" | "Skeleton";
 

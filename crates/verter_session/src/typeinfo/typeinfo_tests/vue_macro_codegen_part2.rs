@@ -29,7 +29,7 @@ defineProps<Props>()
     let filtered = produce(&host, canonical, VueMacroCodegenDemand::RuntimeAndTsc);
     assert_eq!(
         filtered.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
     );
     assert!(filtered.facts_cacheable());
     let filtered_hash = filtered.origin_whole_hash.expect("first content hash");
@@ -79,7 +79,7 @@ defineProps<Props>()
     );
     assert_eq!(
         unfiltered.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
     );
     assert!(unfiltered.facts_cacheable());
     let unfiltered_runtime = unfiltered.runtime.as_ref().expect("runtime bundle");
@@ -125,7 +125,7 @@ defineProps<Props>()
     );
     assert_eq!(
         output.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
     );
     let runtime = output.runtime.expect("runtime bundle");
     let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
@@ -177,7 +177,7 @@ defineProps<Copy<ImportedProps>>()
     );
     assert_eq!(
         output.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
     );
     let runtime = output.runtime.expect("runtime bundle");
     let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
@@ -958,7 +958,7 @@ fn assert_complete_macro_output(
 ) {
     assert_eq!(
         output.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
     );
     assert!(output.facts_cacheable());
     assert!(matches!(
@@ -984,15 +984,20 @@ fn a_cancelled_request_publishes_nothing_and_an_uncancelled_retry_completes() {
         r#"<script setup lang="ts">defineProps<{ value: string }>()</script>"#,
     );
 
-    let cancelled = crate::request_context::RequestContext::new(7001, Arc::from(FILE), false, None);
+    let cancelled = verter_type_engine::request_context::RequestContext::new(
+        7001,
+        Arc::from(FILE),
+        false,
+        None,
+    );
     cancelled.cancel();
     let cancelled_output = {
-        let _guard = crate::request_context::RequestContextGuard::install(cancelled);
+        let _guard = verter_type_engine::request_context::RequestContextGuard::install(cancelled);
         try_produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc)
     };
     assert_eq!(
         cancelled_output.err(),
-        Some(crate::semantic_query::ExecutionAbort::Cancelled)
+        Some(verter_type_engine::semantic_query::ExecutionAbort::Cancelled)
     );
 
     assert_complete_macro_output(&produce(&host, FILE, VueMacroCodegenDemand::RuntimeAndTsc));
@@ -1014,12 +1019,17 @@ fn a_production_cancelled_mid_flight_is_discarded_without_poisoning_the_retry() 
     let rendezvous = Arc::new((std::sync::Barrier::new(2), std::sync::Barrier::new(2)));
     *host.test_force.vue_macro_codegen_build_rendezvous.lock() = Some(Arc::clone(&rendezvous));
 
-    let context = crate::request_context::RequestContext::new(7004, Arc::from(FILE), false, None);
+    let context = verter_type_engine::request_context::RequestContext::new(
+        7004,
+        Arc::from(FILE),
+        false,
+        None,
+    );
     let attempt = {
         let host = Arc::clone(&host);
         let context = Arc::clone(&context);
         std::thread::spawn(move || {
-            let _guard = crate::request_context::RequestContextGuard::install(context);
+            let _guard = verter_type_engine::request_context::RequestContextGuard::install(context);
             try_produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
         })
     };
@@ -1032,7 +1042,7 @@ fn a_production_cancelled_mid_flight_is_discarded_without_poisoning_the_retry() 
 
     assert_eq!(
         aborted.err(),
-        Some(crate::semantic_query::ExecutionAbort::Cancelled)
+        Some(verter_type_engine::semantic_query::ExecutionAbort::Cancelled)
     );
     assert_complete_macro_output(&produce(
         host.as_ref(),
@@ -1062,13 +1072,18 @@ fn a_cancelled_requester_does_not_poison_a_live_one_on_the_same_production() {
         .submit_count
         .load(std::sync::atomic::Ordering::Acquire);
 
-    let winner_context =
-        crate::request_context::RequestContext::new(7002, Arc::from(FILE), false, None);
+    let winner_context = verter_type_engine::request_context::RequestContext::new(
+        7002,
+        Arc::from(FILE),
+        false,
+        None,
+    );
     let winner = {
         let host = Arc::clone(&host);
         let winner_context = Arc::clone(&winner_context);
         std::thread::spawn(move || {
-            let _guard = crate::request_context::RequestContextGuard::install(winner_context);
+            let _guard =
+                verter_type_engine::request_context::RequestContextGuard::install(winner_context);
             try_produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
         })
     };
@@ -1077,9 +1092,13 @@ fn a_cancelled_requester_does_not_poison_a_live_one_on_the_same_production() {
     let sibling = {
         let host = Arc::clone(&host);
         std::thread::spawn(move || {
-            let context =
-                crate::request_context::RequestContext::new(7003, Arc::from(FILE), false, None);
-            let _guard = crate::request_context::RequestContextGuard::install(context);
+            let context = verter_type_engine::request_context::RequestContext::new(
+                7003,
+                Arc::from(FILE),
+                false,
+                None,
+            );
+            let _guard = verter_type_engine::request_context::RequestContextGuard::install(context);
             try_produce(host.as_ref(), FILE, VueMacroCodegenDemand::RuntimeAndTsc)
         })
     };
@@ -1112,7 +1131,7 @@ fn a_cancelled_requester_does_not_poison_a_live_one_on_the_same_production() {
 
     assert_eq!(
         winner_output.err(),
-        Some(crate::semantic_query::ExecutionAbort::Cancelled)
+        Some(verter_type_engine::semantic_query::ExecutionAbort::Cancelled)
     );
     assert_complete_macro_output(&sibling_output.expect("the live requester is answered"));
 }

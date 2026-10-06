@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
 };
-use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
 
 /// The project a probe module is checked in: its sibling files, when set
 /// the `compilerOptions` of the tsconfig that owns them (TypeScript's
@@ -107,7 +107,7 @@ pub(super) fn with_recovered_probe<R>(
             super::evaluate::StructuralFactDemandOutcome::Recovered { node, reasons } => {
                 assert_eq!(
                     reasons,
-                    crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+                    verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET,
                     "`{probe}` is a resource partial of the operation budget alone"
                 );
                 read(dispatch, node)
@@ -162,10 +162,10 @@ pub(super) fn with_probe_outcome_on_host<R>(
     let outcome = match (outcome, result.degradation()) {
         (
             super::evaluate::StructuralFactDemandOutcome::Complete(node),
-            Some(crate::semantic_query::FlowReturnDegradation::OperationBudget),
+            Some(verter_type_engine::semantic_query::FlowReturnDegradation::OperationBudget),
         ) => super::evaluate::StructuralFactDemandOutcome::Recovered {
             node,
-            reasons: crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
+            reasons: verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET,
         },
         (outcome, _) => outcome,
     };
@@ -179,7 +179,7 @@ pub(super) fn degradation_in(
     project: ProbeProject<'_>,
     source: &str,
     function: &str,
-) -> Result<Option<crate::semantic_query::FlowReturnDegradation>, ()> {
+) -> Result<Option<verter_type_engine::semantic_query::FlowReturnDegradation>, ()> {
     let host = probe_host(project);
     crate::u6_flow_shape_corpus_tests::upsert(
         &host,
@@ -202,7 +202,7 @@ pub(super) fn flow_return_outcome_in(
     source: &str,
     function: &str,
 ) -> Result<
-    Option<crate::semantic_query::FlowReturnDegradation>,
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
     crate::host_flow_return_audit::FlowReturnError,
 > {
     let host = probe_host(project);
@@ -224,7 +224,7 @@ pub(super) fn flow_return_outcome_in(
     };
     host.get_flow_return_type_with_audit(
         &identity,
-        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
     )
     .into_result()
     .map(|result| result.degradation())
@@ -234,7 +234,7 @@ pub(super) fn flow_return_outcome_in(
 fn flow_return_of(
     host: &Arc<crate::VerterHost>,
     function: &str,
-) -> Option<Arc<crate::semantic_query::FlowReturnResult>> {
+) -> Option<Arc<verter_type_engine::semantic_query::FlowReturnResult>> {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: Arc::from(PROBE_FILE),
@@ -247,7 +247,7 @@ fn flow_return_of(
     };
     host.get_flow_return_type_with_audit(
         &identity,
-        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
     )
     .as_result()
     .ok()

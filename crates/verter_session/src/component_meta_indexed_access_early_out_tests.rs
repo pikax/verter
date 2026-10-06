@@ -28,8 +28,9 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::types::{HostConfig, ProjectionMode};
+use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// Build a hermetic [`VerterHost`] backed by a [`MemoryWorkspace`]
 /// pre-populated with the supplied files. The workspace is configured
@@ -218,16 +219,17 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
     // Re-resolvability witness: the carrier is not a dead end — the
     // shared dispatch resolves the ButtonSlots declaration to its
     // closed object surface (default + prepend) on demand.
-    use crate::semantic_query::SemanticQueryApi;
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    use verter_type_engine::semantic_query::SemanticQueryApi;
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let resolved = match dispatch.execute_type_node(
-        crate::semantic_query::SemanticQueryKey::ResolveDecl(
-            crate::semantic_query::ResolveDeclKey {
-                scope: crate::semantic_query::ScopeId {
+        verter_type_engine::semantic_query::SemanticQueryKey::ResolveDecl(
+            verter_type_engine::semantic_query::ResolveDeclKey {
+                scope: verter_type_engine::semantic_query::ScopeId {
                     canonical_id: Arc::from("/workspace/src/button-types.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
-                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },
@@ -235,28 +237,30 @@ fn concrete_slots_object_props_skip_define_props_member_route_projection() {
             },
         ),
     ) {
-        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-            value,
-            ..
-        }) => value,
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value, .. },
+        ) => value,
         other => panic!("ButtonSlots must re-resolve through the shared dispatch, got {other:?}"),
     };
-    let surface =
-        match dispatch.execute_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+    let surface = match dispatch.execute_type_node(
+        verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base: resolved,
-            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Shallow,
+            path: Arc::from(
+                Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
             ),
-        }) {
-            crate::semantic_query::QueryResult::Value(
-                crate::semantic_query::SemanticQueryOutput { value, .. },
-            ) => value,
-            other => panic!("ButtonSlots surface read must succeed, got {other:?}"),
-        };
+            context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Shallow,
+            ),
+        },
+    ) {
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value, .. },
+        ) => value,
+        other => panic!("ButtonSlots surface read must succeed, got {other:?}"),
+    };
     let graph = host.project_type_store().semantic_graph();
     match graph.node_data(surface).as_deref() {
-        Some(crate::semantic_query::SemanticNodeData::Object(view)) => {
+        Some(verter_type_engine::semantic_query::SemanticNodeData::Object(view)) => {
             let names: Vec<&str> = view
                 .positive_members()
                 .iter()

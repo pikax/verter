@@ -12,15 +12,16 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::cache_runtime::{CacheAdmission, NonAdmissionReason};
 use crate::resolved_import_facts::{ResolvedImportFacts, ResolvedImportFactsKey};
 use crate::resolver_core::ValidatedFactCache;
+use verter_audit::NonAdmissionReason;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
 use verter_session_query::facts::{
     fact_cache::{FactVersionRef, ResolveImportsFactRef},
     fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
 };
+use verter_type_engine::cache_runtime::CacheAdmission;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct CanonicalId(&'static str);

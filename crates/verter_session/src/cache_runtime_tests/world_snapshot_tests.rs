@@ -2,18 +2,19 @@
 //! constructor reads the store-view compat token through the resolver
 //! context.
 
-use crate::cache_runtime::world_snapshot::*;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::cache_runtime::world_snapshot::*;
 
 #[test]
 fn from_request_threads_dims_and_reads_compat_token_through_store_view() {
     // `from_request` takes `&dyn ResolverContext` and reads
-    // `compat_token` through `(&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()`.
+    // `compat_token` through `(&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()`.
     // The inline test uses the compile-fenced direct-host fixture context.
     let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
-        &host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = &host;
 
     let dims = WorldSnapshotDims {
         project_identity: [1u8; 16],
@@ -46,14 +47,14 @@ fn from_request_threads_dims_and_reads_compat_token_through_store_view() {
     assert_eq!(snap.source_map_policy_hash, [0xBBu8; 16]);
     assert_eq!(snap.overlay_identity, Some(OverlayIdentity(7)));
 
-    // `compat_token` reads through `(&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()`
+    // `compat_token` reads through `(&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()`
     // — verify by re-reading directly and comparing.
     let expected_token = verter_session_query::facts::store_view::StoreView::compat_token(
-        &crate::resolver_core::fact_validation_port::FactValidationView::new(ctx),
+        &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx),
     );
     assert_eq!(
         snap.compat_token, expected_token,
-        "from_request must read compat_token through (&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()",
+        "from_request must read compat_token through (&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)).compat_token()",
     );
 }
 
@@ -63,8 +64,9 @@ fn dims_accessors_project_to_scoped_dimensions_through_from_request() {
     // production callers (B2+) cannot drop one and have the
     // missing accessor silently compile.
     let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities> =
-        &host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = &host;
     let dims = WorldSnapshotDims {
         project_identity: [1u8; 16],
         parse_env_hash: [2u8; 16],

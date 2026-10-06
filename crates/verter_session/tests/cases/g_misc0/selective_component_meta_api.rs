@@ -13,7 +13,9 @@ use verter_session::component_meta_payload::{
     LiteralShape, NamedTypeHandle, PrimitiveKind, ShapeOutline, StaleHandleReason, TypeExpansion,
     TypeHandle, TypeHandleError, TypeQueryPath, MAX_BRIDGE_DEPTH,
 };
-use verter_session::for_tests::{BatchExpandError as MemoBatchExpandError, SemanticGraphStore};
+use verter_type_engine::semantic_query_memo::{
+    BatchExpandError as MemoBatchExpandError, SemanticGraphStore,
+};
 
 fn handle(canonical: &str, name: &str) -> TypeHandle {
     let mut fp = [0u8; 16];

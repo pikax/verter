@@ -18,7 +18,7 @@
 //! settings agree on every probe.
 
 use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host, with_recovered_probe};
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
     RecoveryBasis, SemanticNodeData,
 };

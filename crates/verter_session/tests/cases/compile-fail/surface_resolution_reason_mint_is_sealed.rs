@@ -14,8 +14,8 @@
 //! the finalizer-only mint of the success arms) would be convention rather
 //! than type; trybuild would turn red on this fixture.
 
-use verter_session::semantic_query::PartialReasonSet;
-use verter_session::semantic_query::surface_resolution::{NonEmptyReasons, SurfaceProof};
+use verter_type_engine::semantic_query::PartialReasonSet;
+use verter_type_engine::semantic_query::surface_resolution::{NonEmptyReasons, SurfaceProof};
 
 fn main() {
     let _empty_reason: Option<NonEmptyReasons> = NonEmptyReasons::new(PartialReasonSet::empty());

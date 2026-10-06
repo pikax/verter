@@ -31,9 +31,10 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::{CaptureToken, KeyFamily};
-use crate::types::{HostConfig, ProjectionMode};
+use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::capture_token::{CaptureToken, KeyFamily};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// Build a hermetic [`VerterHost`] backed by a [`MemoryWorkspace`]
 /// pre-populated with the supplied files. The workspace is configured
@@ -165,7 +166,7 @@ fn workspace_local_interface_canonical_cache_reuse_across_components() {
         .filter(|entry| {
             matches!(
                 &entry.key,
-                crate::semantic_query::SemanticQueryKey::ResolveDecl(key)
+                verter_type_engine::semantic_query::SemanticQueryKey::ResolveDecl(key)
                     if key.name.as_ref() == "WorkspaceLocalInterface"
             )
         })
@@ -177,7 +178,7 @@ fn workspace_local_interface_canonical_cache_reuse_across_components() {
             !entry.hit
                 && matches!(
                     &entry.key,
-                    crate::semantic_query::SemanticQueryKey::ResolveDecl(key)
+                    verter_type_engine::semantic_query::SemanticQueryKey::ResolveDecl(key)
                         if key.name.as_ref() == "WorkspaceLocalInterface"
                 )
         })

@@ -10,9 +10,9 @@ use std::thread;
 use std::time::Duration;
 
 use super::*;
-use crate::semantic_query::{ResolveDeclKey, ScopeId};
 use crate::{HostConfig, VerterHost};
 use verter_execution::tasks::{TaskRegistry, WaitCycle};
+use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId};
 use verter_type_expr::TopLevelOwnerId;
 
 fn ctx_host() -> VerterHost {
@@ -24,7 +24,7 @@ fn scope(canonical: &str) -> ScopeId {
         canonical_id: Arc::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
-        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+        binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
             TopLevelOwnerId::ordinary_file(),
         ),
     }
@@ -198,7 +198,7 @@ fn run_real_singleflight_cycle(task_count: usize) {
                             },
                         );
                         saw_return_only.fetch_or(nested.cache_suppress, Ordering::SeqCst);
-                        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
+                        let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<
                             _,
                         > = (nested.value, nested.dep_signature).into();
                         output.cache_suppress = nested.cache_suppress;

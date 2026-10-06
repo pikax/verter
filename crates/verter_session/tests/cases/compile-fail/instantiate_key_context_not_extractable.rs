@@ -12,10 +12,7 @@
 //! onto a foreign base.
 
 use std::sync::Arc;
-use verter_session::semantic_query::{
-    InstantiateContext, InstantiateKey, ProjectionMode, ProjectionReductionContext,
-    ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
-};
+use verter_type_engine::semantic_query::{InstantiateContext, InstantiateKey, ProjectionMode, ProjectionReductionContext, ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey};
 use verter_session::{HostConfig, VerterHost};
 
 fn main() {

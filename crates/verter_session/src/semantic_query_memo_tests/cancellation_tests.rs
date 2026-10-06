@@ -1,11 +1,11 @@
 //! Cancellation discriminators for semantic-query singleflight.
 
 use super::*;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::{PrimitiveKind, ResolveDeclKey, ScopeId};
 use crate::{HostConfig, VerterHost};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::{PrimitiveKind, ResolveDeclKey, ScopeId};
 use verter_type_expr::TopLevelOwnerId;
 
 fn host() -> VerterHost {
@@ -18,7 +18,7 @@ fn key(name: &'static str) -> SemanticQueryKey {
             canonical_id: Arc::from("/w/cancel.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -30,7 +30,7 @@ fn dep_signature(canonical: &'static str, hash: u8) -> DepSignature {
     Arc::from(
         vec![(
             Arc::<str>::from(canonical),
-            crate::semantic_query::DepVersion::WholeHash([hash; 16]),
+            verter_type_engine::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),
     )
@@ -358,7 +358,7 @@ fn post_admission_cancellation_preserves_aba_replacement_and_success_capture() {
 
 #[test]
 fn post_admission_cancellation_keeps_same_discriminant_replacement_successful() {
-    use crate::semantic_query::demand::MaterializedSet;
+    use verter_type_engine::semantic_query::demand::MaterializedSet;
 
     let store = Arc::new(SemanticGraphStore::new());
     let query = key("SameDiscriminantAdmissionWins");
@@ -436,7 +436,7 @@ fn post_admission_cancellation_keeps_same_discriminant_replacement_successful() 
 
 #[test]
 fn post_admission_cancellation_keeps_cap_lru_eviction_committed() {
-    use crate::semantic_query::demand::MaterializedSet;
+    use verter_type_engine::semantic_query::demand::MaterializedSet;
 
     let store = Arc::new(SemanticGraphStore::new());
     let query = key("CapLruAdmissionWins");
@@ -581,8 +581,8 @@ fn post_admission_cancellation_keeps_global_fifo_eviction_committed() {
 
 #[test]
 fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
-    use crate::project_semantic_dispatch::walk::{PrefixBackfill, QueryBuildOutput};
-    use crate::semantic_query::demand::MaterializedSet;
+    use verter_type_engine::project_semantic_dispatch::walk::{PrefixBackfill, QueryBuildOutput};
+    use verter_type_engine::semantic_query::demand::MaterializedSet;
 
     let store = Arc::new(SemanticGraphStore::new());
     let parent = key("PrefixParentAdmissionWins");
@@ -614,8 +614,9 @@ fn post_admission_cancellation_keeps_parent_and_prefix_backfill() {
                         walker_diagnostics: Vec::new(),
                         cache_suppress: false,
                         result_is_partial: false,
-                        partial_reasons: crate::semantic_query::PartialReasonSet::empty(),
-                        taint: crate::semantic_query::ResultTaint::Clean,
+                        partial_reasons:
+                            verter_type_engine::semantic_query::PartialReasonSet::empty(),
+                        taint: verter_type_engine::semantic_query::ResultTaint::Clean,
                         observed_self_roots: Vec::new(),
                         graph_carrier: None,
                         self_root_canonicals: Arc::from([]),

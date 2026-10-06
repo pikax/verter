@@ -57,8 +57,8 @@ use rustc_hash::FxHashSet;
 use verter_parser::utils::oxc::script::raw_surface::SymbolSpace;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-use crate::resolver_core::ResolverContext;
 use verter_session_query::inputs::shallow::ExportTarget;
+use verter_type_engine::resolver_core::ResolverContext;
 
 use super::admission::{SourceContributor, SourceWalkResult};
 

@@ -557,7 +557,7 @@ mod tests {
     fn view_key(canonical: &str, view_fingerprint: u64) -> ResolutionNodeKey {
         crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
             canonical,
-            crate::types::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
             view_fingerprint,
         )
     }

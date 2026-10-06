@@ -26,11 +26,11 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 const SOURCE_TS: &str = r#"
@@ -83,7 +83,7 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
     match graph.node_data(carrier).as_deref() {
         Some(SemanticNodeData::Opaque(
-            verter_session::semantic_query::QueryError::DeclPlaceholder {
+            verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
                 owner,
                 name,
@@ -91,11 +91,12 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
             },
         )) => {
             let _ = whole_hash;
-            let base = verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                Arc::clone(canonical_id),
-                *owner,
-                Arc::clone(name),
-            );
+            let base =
+                verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                    Arc::clone(canonical_id),
+                    *owner,
+                    Arc::clone(name),
+                );
             let key = verter_session::for_tests::instantiate_key_for_tests(
                 host,
                 base,

@@ -5,7 +5,7 @@
 //! distributes over the union T and removes every member matching U.
 //!
 //! The `Extract` / `Exclude` arms of `build_builtin_utility`
-//! (`crates/verter_session/src/project_semantic_dispatch/build.rs`)
+//! (`crates/verter_type_engine/src/project_semantic_dispatch/build.rs`)
 //! distribute the source union, dispatch each member through
 //! `relate_nodes` against the filter argument, and reconstitute the
 //! survivors via `intern_normalized_union_or_intersection`. The

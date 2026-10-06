@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 /// Default cache capacity. Entries evict LRU above this bound.
 pub const DEFAULT_CAPACITY: usize = 64;

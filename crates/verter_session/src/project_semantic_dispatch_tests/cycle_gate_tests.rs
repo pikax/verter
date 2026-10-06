@@ -29,16 +29,16 @@
 use std::sync::Arc as StdArc;
 
 use crate::meta::MetaProject;
-use crate::project_semantic_dispatch::cycle_gate::{
+use crate::types::HostConfig;
+use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::cycle_gate::{
     cycle_gate_compute_counter_for_test, reset_cycle_gate_compute_counter_for_test,
 };
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
     CacheRead, DeclIdentity, MaterializationCycleGateFallbackReason,
     MaterializationCycleGateOutcome, MaterializationCycleGateVerdict, SemanticQueryKey,
 };
-use crate::types::HostConfig;
-use crate::VerterHost;
 
 fn make_project() -> StdArc<MetaProject> {
     let host = VerterHost::new_standalone(HostConfig {
@@ -417,21 +417,22 @@ fn classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes() {
     let canonical: StdArc<str> = StdArc::from("/cg_axes.ts");
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let name: StdArc<str> = StdArc::from("Probe");
-    let root =
-        |project: u32, t: crate::semantic_query::HashValue, l: crate::semantic_query::HashValue| {
-            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot(
-                StdArc::clone(&canonical),
-                owner,
-                StdArc::clone(&name),
-                project,
-                t,
-                l,
-            )
-        };
-    let key = |root: crate::semantic_query::ResolvedDeclSlotIdentity,
-               p: crate::semantic_query::HashValue,
-               r: crate::semantic_query::HashValue| {
-        crate::semantic_query::MaterializationCycleGateKey {
+    let root = |project: u32,
+                t: verter_type_engine::semantic_query::HashValue,
+                l: verter_type_engine::semantic_query::HashValue| {
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot(
+            StdArc::clone(&canonical),
+            owner,
+            StdArc::clone(&name),
+            project,
+            t,
+            l,
+        )
+    };
+    let key = |root: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity,
+               p: verter_type_engine::semantic_query::HashValue,
+               r: verter_type_engine::semantic_query::HashValue| {
+        verter_type_engine::semantic_query::MaterializationCycleGateKey {
             root,
             parse_env_hash: p,
             resolve_env_hash: r,
@@ -466,13 +467,13 @@ fn classify_materialization_cycle_gate_keys_do_not_warm_hit_across_env_axes() {
         panic!("key builder must produce the gate variant");
     };
     let shifted = SemanticQueryKey::ClassifyMaterializationCycleGate(
-        crate::semantic_query::MaterializationCycleGateKey {
+        verter_type_engine::semantic_query::MaterializationCycleGateKey {
             parse_env_hash: [0xAA; 16],
             ..live
         },
     );
     assert_eq!(
-        crate::semantic_query_memo::family_variant_label_for_tests(&live_key),
+        verter_type_engine::semantic_query_memo::family_variant_label_for_tests(&live_key),
         "ClassifyMaterializationCycleGate",
         "the gate key maps to its dedicated family"
     );
@@ -603,10 +604,16 @@ fn helper_pair_fixture(project: &StdArc<MetaProject>, root: &str, helper: &str) 
 
 /// Whether the dep signature carries a `WholeHash` entry for
 /// `canonical`.
-fn signature_covers(signature: &crate::semantic_query::DepSignature, canonical: &str) -> bool {
+fn signature_covers(
+    signature: &verter_type_engine::semantic_query::DepSignature,
+    canonical: &str,
+) -> bool {
     signature.iter().any(|(c, version)| {
         c.as_ref() == canonical
-            && matches!(version, crate::semantic_query::DepVersion::WholeHash(_))
+            && matches!(
+                version,
+                verter_type_engine::semantic_query::DepVersion::WholeHash(_)
+            )
     })
 }
 
@@ -841,8 +848,8 @@ fn cycle_gate_content_only_revision_admits_new_candidate_under_same_key() {
 /// corrupts a recursive relation outcome here.
 #[test]
 fn cycle_gate_classifier_invoked_around_relate_leaves_relation_frames_untouched() {
-    use crate::project_semantic_dispatch::dispatch_txn::RelationStep;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep;
+    use verter_type_engine::semantic_query::{
         InstantiateKey, ProjectionMode, ProjectionReductionContext, QueryResult,
     };
 
@@ -942,13 +949,13 @@ fn cycle_gate_classifier_invoked_around_relate_leaves_relation_frames_untouched(
 mod carrier_descent_tests {
     use std::sync::Arc;
 
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, NodeScopeId, QueryError, ScopeId, SemanticNodeData, SemanticNodeId,
         ValueRootKey,
     };
-    use crate::semantic_query_memo::SemanticGraphStore;
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
-    use crate::project_semantic_dispatch::cycle_gate::{
+    use verter_type_engine::project_semantic_dispatch::cycle_gate::{
         cycle_gate_body_contains_recursive_ref_for_test as cycle_gate_body_contains_recursive_ref,
         cycle_gate_collect_ref_identities_for_test as cycle_gate_collect_ref_identities,
     };
@@ -981,9 +988,10 @@ mod carrier_descent_tests {
                         canonical_id: Arc::from("/v.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
-                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        ),
+                        binder_scope_id:
+                            verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            ),
                     },
                     name: Arc::from("factory"),
                 },

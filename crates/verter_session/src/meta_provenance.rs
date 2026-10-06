@@ -179,7 +179,7 @@ pub struct MetaProvenance {
     /// executor, memo fact tracer). Owned by the engine and shared with every
     /// graph store and observer set this host builds; this facade only
     /// aggregates it.
-    pub engine: std::sync::Arc<crate::engine_provenance::EngineProvenance>,
+    pub engine: std::sync::Arc<verter_type_engine::engine_provenance::EngineProvenance>,
     /// Carrier parses performed through the single counted carrier
     /// store-leader frontend boundary — every framework
     /// carrier (`.vue`, `.svelte`, …) increments this exactly once per
@@ -839,7 +839,7 @@ pub struct MetaProvenanceSnapshot {
     pub scheduler_submit_count: u64,
     pub scheduler_inbox_depth_max: u64,
     /// Per-`SemanticNodeData` discriminant push count, indexed by
-    /// [`crate::semantic_query::SemanticNodeTag::bucket_index`]
+    /// [`verter_type_engine::semantic_query::SemanticNodeTag::bucket_index`]
     /// ([`SEMANTIC_NODE_DATA_DISCRIMINANT_COUNT`] entries).
     pub node_arena_pushes_per_discriminant: Vec<u64>,
 

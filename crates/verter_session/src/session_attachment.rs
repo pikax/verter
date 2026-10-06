@@ -7,7 +7,7 @@
 //! which the host builds once at construction from the SAME shared instances
 //! its framework registry and project store own. The engine names the
 //! attachment only as the opaque
-//! [`ResolverCapabilities::HostAttachment`](crate::resolver_core::ResolverCapabilities)
+//! [`ResolverCapabilities::HostAttachment`](verter_type_engine::resolver_core::ResolverCapabilities)
 //! of its capability family; it has no operation on it.
 
 use std::sync::Arc;
@@ -96,12 +96,12 @@ where
 
 /// A capability family whose requests carry the host's [`SessionAttachment`].
 pub(crate) trait SessionCapabilities:
-    crate::resolver_core::ResolverCapabilities<HostAttachment = SessionAttachment>
+    verter_type_engine::resolver_core::ResolverCapabilities<HostAttachment = SessionAttachment>
 {
 }
 
 impl<C> SessionCapabilities for C where
-    C: crate::resolver_core::ResolverCapabilities<HostAttachment = SessionAttachment>
+    C: verter_type_engine::resolver_core::ResolverCapabilities<HostAttachment = SessionAttachment>
 {
 }
 

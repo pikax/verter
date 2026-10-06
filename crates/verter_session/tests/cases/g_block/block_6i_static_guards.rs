@@ -364,7 +364,7 @@ fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
 /// structural evasions (hoisted casts, same-statement predicate
 /// laundering, textual identity-copies), so the invariant moved INTO
 /// the type system: `IndexKey::Number` carries the proof-carrying
-/// [`verter_session::semantic_query::CanonicalIndexInt`] newtype whose
+/// [`verter_type_engine::semantic_query::CanonicalIndexInt`] newtype whose
 /// field is PRIVATE to `semantic_query::index_key`. The only ways to
 /// construct one are the module's two blessed constructors — the
 /// f64-checked fold `integer_convention_index_key` and the

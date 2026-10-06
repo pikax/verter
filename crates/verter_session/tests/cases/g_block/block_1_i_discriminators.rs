@@ -44,12 +44,12 @@ fn execute_read_cold_build_persists_traced_facts() {
     // `RouteSurface(...)` observation.
     let mod_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/project_semantic_dispatch/mod.rs"),
+            .join("../verter_type_engine/src/project_semantic_dispatch/mod.rs"),
     )
     .expect("read mod.rs");
     let raise_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/project_semantic_dispatch/raise.rs"),
+            .join("../verter_type_engine/src/project_semantic_dispatch/raise.rs"),
     )
     .expect("read raise.rs");
 
@@ -65,7 +65,7 @@ fn execute_read_cold_build_persists_traced_facts() {
     );
     let frames_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/project_semantic_dispatch/query_frames.rs"),
+            .join("../verter_type_engine/src/project_semantic_dispatch/query_frames.rs"),
     )
     .expect("read query_frames.rs");
     assert!(
@@ -116,12 +116,12 @@ fn execute_read_cold_build_persists_traced_facts() {
 #[serial(fact_counter_provenance)]
 fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     use std::sync::Arc;
-    use verter_session::for_tests::SemanticGraphStore;
-    use verter_session::semantic_query::{
-        PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
-    };
     use verter_session_query::facts::fact_cache::ReadSetSignature;
     use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+    use verter_type_engine::semantic_query::{
+        PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
+    };
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let store = SemanticGraphStore::new();
 
@@ -133,7 +133,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
             canonical_id: Arc::from("/test/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -226,7 +226,7 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
 fn cooperative_return_only_not_shared_to_joiners() {
     let ca_src = std::fs::read_to_string(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/cache_runtime/singleflight.rs"),
+            .join("../verter_type_engine/src/cache_runtime/singleflight.rs"),
     )
     .expect("read cache_runtime/singleflight.rs");
     assert!(

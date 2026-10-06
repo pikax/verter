@@ -36,6 +36,7 @@ verter_compiler = { path = "../verter_compiler", features = ["bench"] }
 verter_css_syntax = { path = "../verter_css_syntax" }
 verter_parser = { path = "../verter_parser" }
 verter_session = { path = "../verter_session" }
+verter_type_engine = { path = "../verter_type_engine" }
 verter_workspace = { path = "../verter_workspace" }
 verter_audit = { path = "../verter_audit" }
 verter_diagnostics = { path = "../verter_diagnostics" }

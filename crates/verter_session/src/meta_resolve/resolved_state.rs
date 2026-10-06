@@ -5,9 +5,9 @@
 //! type aliases, and a handful of standalone scope-selection and
 //! transitive-cycle-reachability helpers.
 
-use crate::types::ProjectionMode;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 // `ResolvedDeclarationKind`, `ResolvedTypeDeclaration`,
 // `ResolvedTypeRegistryMeta`, `ResolvedMacroMeta`, `ResolvedNativeProp`,
@@ -38,15 +38,15 @@ use super::{ResolvedComponentMetaComputeAudit, ResolvedMacroMeta, ResolvedTypeRe
 #[derive(Debug, Clone, Default)]
 pub struct SurfaceNodeIdentities {
     /// Index-aligned with `ExpandedComponentTypes.props`.
-    pub prop_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub prop_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
     /// Index-aligned with `ExpandedComponentTypes.emits`.
-    pub emit_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub emit_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
     /// Index-aligned with `ExpandedComponentTypes.slot_bindings`.
-    pub slot_binding_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub slot_binding_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
     /// Index-aligned with `ExpandedComponentTypes.bindings`.
-    pub binding_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub binding_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
     /// Index-aligned with `ResolvedComponentMetaState.resolved_type_registry`.
-    pub registry_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub registry_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +106,7 @@ pub struct ResolvedComponentMetaState {
     /// is RETURNED to the caller but is refused warm admission to the
     /// `ComponentMetaResultDb` / resolved-meta caches (the no-poison
     /// invariant).
-    pub completeness: crate::semantic_query::ResultCompleteness,
+    pub completeness: verter_type_engine::semantic_query::ResultCompleteness,
     /// `true` when graph-native slot-binding synthesis observed a fatal
     /// `QueryError` (`BudgetExceeded`, `UnstableState`, walker
     /// `cache_suppress`) during the cold compute. Gates

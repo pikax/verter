@@ -100,7 +100,8 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineProps<Props>() must resolve a macro surface");
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let props = props_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_0,
@@ -201,7 +202,8 @@ fn define_emits_normalizer_extracts_call_signature_events_and_strips_event_param
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits must resolve a macro surface");
-    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_1 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let emits = emits_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_1,
@@ -287,7 +289,8 @@ fn define_emits_callsig_rich_params_mint_the_callable_occurrence_replay_source()
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits must resolve a macro surface");
-    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_2 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let emits = emits_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_2,
@@ -384,7 +387,8 @@ fn define_emits_normalizer_property_style_fallback() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("property-style defineEmits must resolve a surface");
-    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let emits = emits_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_3,
@@ -434,7 +438,8 @@ fn define_emits_normalizer_mixed_callsig_unions_property_members() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("mixed defineEmits resolves a surface");
-    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_4 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let emits = emits_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_4,
@@ -544,7 +549,8 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("imported emit interface resolves a surface");
-    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_5 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let emits = emits_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_5,
@@ -596,7 +602,7 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
 
         let fixture_dispatch_6 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
         emits_from_typeinfo_surface(
             &*host,
             &fixture_dispatch_6,
@@ -633,7 +639,7 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
         let request = props_request(&host, CROSS, AnalyzedMacroKind::DefineEmits);
         let surface = host.resolve_vue_macro_surface(&request).expect("surface");
         let fixture_dispatch_6 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
         emits_from_typeinfo_surface(
             &*host,
             &fixture_dispatch_6,
@@ -691,7 +697,8 @@ fn define_emits_callsig_carrier_event_name_union_resolves_both_names() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits with an aliased event-name union resolves a surface");
-    let fixture_dispatch_7 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_7 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let emits = emits_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_7,
@@ -755,7 +762,8 @@ fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts()
         "defineModel macro surface carries no object members"
     );
 
-    let fixture_dispatch_8 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_8 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let props = props_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_8,
@@ -826,7 +834,8 @@ fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
     let surface = host
         .resolve_vue_macro_surface(&request)
         .expect("withDefaults' inner defineProps resolves a surface");
-    let fixture_dispatch_9 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let fixture_dispatch_9 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let props = props_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_9,
@@ -953,7 +962,7 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
         .resolve_vue_macro_surface(&request)
         .expect("cross-file heritage defineProps resolves a surface");
     let fixture_dispatch_10 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let props = props_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_10,
@@ -1045,7 +1054,7 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
         .resolve_vue_macro_surface(&request)
         .expect("generic heritage defineProps resolves a surface");
     let fixture_dispatch_11 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let props = props_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_11,
@@ -1136,7 +1145,7 @@ fn define_emits_over_local_class_does_not_publish_non_public_members() {
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits<Class> resolves a surface");
     let fixture_dispatch_12 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let emits = emits_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_12,
@@ -1184,7 +1193,7 @@ fn define_emits_over_imported_class_does_not_publish_non_public_members() {
         .resolve_vue_macro_surface(&request)
         .expect("defineEmits<ImportedClass> resolves a surface");
     let fixture_dispatch_13 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let emits = emits_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_13,
@@ -1227,7 +1236,7 @@ fn define_slots_over_class_does_not_publish_non_public_members() {
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots<Class> resolves a surface");
     let fixture_dispatch_14 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_14,
@@ -1270,7 +1279,7 @@ fn define_slots_navigated_class_param_does_not_publish_non_public_bindings() {
         .resolve_vue_macro_surface(&request)
         .expect("defineSlots resolves a surface");
     let fixture_dispatch_15 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let slots = slots_from_typeinfo_surface(
         &*host,
         &fixture_dispatch_15,

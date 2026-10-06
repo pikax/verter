@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
-use crate::instant::Instant;
-use crate::request_observers::component_meta_trace_custom;
 use crate::VerterHost;
+use verter_type_engine::component_meta_trace_custom;
+use verter_type_engine::instant::Instant;
 
 impl VerterHost {
     /// Test-only bare wrapper. Production callers go through
@@ -70,7 +70,7 @@ impl VerterHost {
 
     /// Request-context-bound imported-root resolution.
     ///
-    /// The [`crate::resolver_core::ResolverContext`] is the authority for both
+    /// The [`verter_type_engine::resolver_core::ResolverContext`] is the authority for both
     /// the cache-validation view and every cold producer read. In particular,
     /// a session context must keep its overlay-aware prepared declaration and
     /// export-route reads all the way through the cold closure; reducing the
@@ -78,7 +78,9 @@ impl VerterHost {
     /// the overlay's semantic inputs.
     pub(crate) fn resolve_imported_type_root_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
@@ -96,7 +98,9 @@ impl VerterHost {
     /// [`Self::resolve_imported_type_root_with_context`].
     pub(crate) fn resolve_imported_type_root_with_facts_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
         imported_name: &str,
@@ -107,7 +111,7 @@ impl VerterHost {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
             ctx,
             session_view,
-            &crate::resolver_core::fact_validation_port::FactValidationView::new(ctx),
+            &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx),
             dep_canonical,
             imported_name,
         )
@@ -163,7 +167,9 @@ impl VerterHost {
     /// named hot-path site at `imported_type_root.rs:49`).
     pub(crate) fn resolve_imported_type_root_with_facts_with_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
@@ -183,7 +189,9 @@ impl VerterHost {
 
     pub(in crate::host_manage) fn resolve_imported_type_root_with_facts_with_context_and_store_view(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
@@ -282,7 +290,7 @@ impl VerterHost {
             None => (
                 None,
                 "miss",
-                crate::fact_signature_helpers::empty_fact_signature(),
+                verter_type_engine::fact_signature_helpers::empty_fact_signature(),
             ),
         };
 

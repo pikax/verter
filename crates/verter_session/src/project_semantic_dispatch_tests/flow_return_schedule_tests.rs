@@ -7,11 +7,11 @@
 //! and recorded on the test that asserts it.
 
 use super::*;
-use crate::project_semantic_dispatch::connected_demand::{
+use verter_type_engine::project_semantic_dispatch::connected_demand::{
     MAX_CONNECTED_PROJECTION_WORK, MAX_CONNECTED_QUERY_DEPTH,
 };
-use crate::project_semantic_dispatch::flow_return::schedule::disable_flow_return_schedule_for_tests;
-use crate::semantic_query::PartialReasonSet;
+use verter_type_engine::project_semantic_dispatch::flow_return::schedule::disable_flow_return_schedule_for_tests;
+use verter_type_engine::semantic_query::PartialReasonSet;
 use verter_type_expr::ObjectMember;
 
 const PATH: &str = "/ws/cov/schedule/chain.ts";
@@ -861,8 +861,8 @@ fn cold_read(
             let reduced = dispatch
                 .normalize_node_keeping_declaration_refs_for_tests(
                     result.return_type(),
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Expanded,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Expanded,
                     ),
                 )
                 .into_complete_node();
@@ -1931,14 +1931,14 @@ fn sibling_chains(siblings: usize, levels: usize) -> String {
 /// retry on it answers exactly what a fresh host answers.
 #[test]
 fn a_tripped_demand_discovers_no_further_callee() {
-    use crate::semantic_query::{FlowReturnFailure, FlowReturnStep};
+    use verter_type_engine::semantic_query::{FlowReturnFailure, FlowReturnStep};
     use verter_type_expr::facts::InferenceUnavailableReason;
 
     const SIBLINGS: usize = 4;
     const LEVELS: usize = 8;
     let source = sibling_chains(SIBLINGS, LEVELS);
     let discoveries =
-        crate::project_semantic_dispatch::flow_return::schedule::flow_return_discoveries_for_tests;
+        verter_type_engine::project_semantic_dispatch::flow_return::schedule::flow_return_discoveries_for_tests;
     let fresh = witness_outcome(&source);
     assert!(
         matches!(
@@ -1955,10 +1955,19 @@ fn a_tripped_demand_discovers_no_further_callee() {
     // as the `cancel_at`th query family opens: the step, the callees the
     // schedule discovered, and the witness's memo candidates.
     let run = |host: &Arc<VerterHost>, work: usize, cancel_at: Option<usize>| {
-        let context = crate::request_context::RequestContext::new(1, Arc::from(PATH), false, None);
-        let _installed = crate::request_context::RequestContextGuard::install(Arc::clone(&context));
+        let context = verter_type_engine::request_context::RequestContext::new(
+            1,
+            Arc::from(PATH),
+            false,
+            None,
+        );
+        let _installed =
+            verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&context));
         let _cancel = cancel_at.map(|nth| {
-            crate::cancel_trace::cancel_at_family_entry(context.cancellation_token(), nth)
+            verter_type_engine::cancel_trace::cancel_at_family_entry(
+                context.cancellation_token(),
+                nth,
+            )
         });
         with_dispatch(host, |dispatch| {
             dispatch.set_connected_limits_for_tests(work, MAX_CONNECTED_QUERY_DEPTH);
@@ -2070,7 +2079,7 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
     let answer = |host: &Arc<VerterHost>, token: CancellationToken| {
         let carrier = host.get_flow_return_type_with_audit_cancellable(
             &identity,
-            crate::semantic_query::ReturnProjectionDemand::whole_return(),
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             token,
         );
         match carrier.as_result() {
@@ -2110,7 +2119,8 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
         let host = host_with(&[(PATH, source.as_str())]);
         let token = CancellationToken::new();
         let got = {
-            let _cancel = crate::cancel_trace::cancel_at_family_entry(token.clone(), nth);
+            let _cancel =
+                verter_type_engine::cancel_trace::cancel_at_family_entry(token.clone(), nth);
             answer(&host, token)
         };
         cancelled += usize::from(check(&host, got, &format!("family {nth}")));
@@ -2184,8 +2194,8 @@ fn each_return_site_is_connected_work_the_demand_pays_for() {
         assert!(
             matches!(
                 step,
-                crate::semantic_query::FlowReturnStep::NoValue(
-                    crate::semantic_query::FlowReturnFailure::Budget(
+                verter_type_engine::semantic_query::FlowReturnStep::NoValue(
+                    verter_type_engine::semantic_query::FlowReturnFailure::Budget(
                         verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded
                     )
                 )
@@ -2259,7 +2269,7 @@ fn chain_evidence(
 ) -> (
     Outcome,
     verter_session_query::facts::fact_cache::ReadSetSignature,
-    Vec<crate::resolver_core::resolver_context::RecordedFactReads>,
+    Vec<verter_type_engine::resolver_core::resolver_context::RecordedFactReads>,
 ) {
     let host = host_with(&[(PATH, plain_chain(levels).as_str())]);
     with_dispatch(&host, |dispatch| {
@@ -2291,7 +2301,7 @@ fn chain_evidence(
 /// The receipt a completed callee's replay consists of.
 #[track_caller]
 fn replayed_receipt(
-    reads: &crate::resolver_core::resolver_context::RecordedFactReads,
+    reads: &verter_type_engine::resolver_core::resolver_context::RecordedFactReads,
 ) -> verter_session_query::facts::fact_cache::ResultReceipt {
     match reads.facts.as_ref() {
         [verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt)] => {

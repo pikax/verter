@@ -160,7 +160,7 @@ fn import_backed_surface_arm_is_missing(
             )
         }
         verter_workspace::ResolutionPublication::Refused(_) => {
-            crate::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
             );
             false
@@ -243,7 +243,7 @@ fn follow_export_surface_route(
             }
         }
         verter_workspace::ResolutionPublication::Refused(_) => {
-            crate::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
             );
             ExportSurfaceVerdict::Unknowable

@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use super::producer::{Claim, Joined, ReadCapture, Recursion};
 use super::*;
-use crate::semantic_query::{PrimitiveKind, ResolveDeclKey, ScopeId};
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_type_engine::semantic_query::{PrimitiveKind, ResolveDeclKey, ScopeId};
 use verter_type_expr::TopLevelOwnerId;
 
 const KEYED: &str = "/producer/keyed.ts";
@@ -39,7 +39,7 @@ fn key() -> SemanticQueryKey {
             canonical_id: Arc::from(KEYED),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -52,7 +52,7 @@ fn key() -> SemanticQueryKey {
 fn keyed_output(
     store: &SemanticGraphStore,
     hash: [u8; 16],
-) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
     let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         FactVersionRef::FileWholeHash {
@@ -60,8 +60,9 @@ fn keyed_output(
             hash,
         },
     ]));
-    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticNodeId> =
-        (QueryResult::Value(node), empty_signature()).into();
+    let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<
+        SemanticNodeId,
+    > = (QueryResult::Value(node), empty_signature()).into();
     output.graph_carrier = Some(Box::new(carrier));
     output.self_root_canonicals = Arc::from([Arc::<str>::from(KEYED)]);
     output.into()

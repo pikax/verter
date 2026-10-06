@@ -13,8 +13,8 @@
 
 use std::collections::BTreeSet;
 
-use crate::resolver_core::ResolverContext;
 use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Thin `Option<&str>` wrapper over [`is_package_canonical`]. Its only
 /// consumer is the workspace-classification guard test, so it is gated to

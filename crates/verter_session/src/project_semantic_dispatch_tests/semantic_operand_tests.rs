@@ -9,28 +9,28 @@ use verter_type_expr::locators::{
 };
 use verter_type_expr::TopLevelOwnerId;
 
-use crate::locator_identity::{
+use crate::types::{HostConfig, UpsertRequest};
+use crate::{CompileErrorPolicy, FileLanguage, VerterHost};
+use verter_session_query::facts::fact_cache::ParseEnvHash;
+use verter_type_engine::locator_identity::{
     semantic_space_for_locator_space, LibEnvHash, LocatorLoweringKey, ProjectIdentityDim,
     ResolveEnvHash, SlotEnvIdentity, TypeEnvHash,
 };
-use crate::project_semantic_dispatch::raise::{
+use verter_type_engine::project_semantic_dispatch::raise::{
     dispatch_cold_for, dispatch_warm_for, enable_dispatch_trace_for_test, DISPATCH_TRACE,
 };
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::operand::{
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::operand::{
     ForceProjectionSegment, ForcedSemanticOperand, OperandSplitEnv, SemanticOperand,
     SemanticOperandForceProjection, SemanticOperandForceRequest, SemanticOperandMintError,
     SemanticOperandParts,
 };
-use crate::semantic_query::{
+use verter_type_engine::semantic_query::{
     DeclarationSlotSeed, IndexKey, InstantiateContext, InstantiateKey, MemberMergeRole,
     PathSegment, PrimitiveKind, ProjectionMode, ProjectionPath, ProjectionReductionContext,
     PropertyKey, QueryError, QueryResult, ReductionDemand, SemanticNodeData, SemanticNodeId,
     SemanticQueryKey, SurfaceProvenanceContext, VueHeritagePolicy,
 };
-use crate::types::{HostConfig, UpsertRequest};
-use crate::{CompileErrorPolicy, FileLanguage, VerterHost};
-use verter_session_query::facts::fact_cache::ParseEnvHash;
 
 use super::{BuildLocalTaintGuard, ProjectSemanticDispatch, SemanticOperandAuthority};
 
@@ -254,7 +254,7 @@ pub(super) fn force_key_at(
     else {
         panic!("fixture must be authored")
     };
-    let anchor = crate::semantic_query::operand::authored_anchor(authored.locator());
+    let anchor = verter_type_engine::semantic_query::operand::authored_anchor(authored.locator());
     let (parse, resolve, type_env, lib_env, project) = authored.split_env().parts();
     let slot = DeclarationSlotSeed::new(
         Arc::clone(&anchor.canonical_id),
@@ -2335,8 +2335,8 @@ fn incomplete_operand_refusals_spell_their_reasons_by_name() {
     // reason classes. Rendering the reason set's `Debug` shape instead
     // would leak a bitflag newtype's numeric representation into a string
     // consumers read, and would churn whenever a bit is added or reordered.
-    use crate::semantic_query::compat_spelling::semantic_query_error_raw;
-    use crate::semantic_query::PartialReasonSet;
+    use verter_type_engine::semantic_query::compat_spelling::semantic_query_error_raw;
+    use verter_type_engine::semantic_query::PartialReasonSet;
 
     assert_eq!(
         semantic_query_error_raw(&QueryError::IncompleteSemanticOperand {
@@ -2946,9 +2946,9 @@ fn key_union_names(host: &VerterHost, node: SemanticNodeId) -> Vec<String> {
     let mut names: Vec<String> = arms
         .iter()
         .map(|arm| match graph.node_data(*arm).as_deref() {
-            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(name))) => {
-                name.to_string()
-            }
+            Some(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::String(name),
+            )) => name.to_string(),
             other => panic!("keyof arm must be a string literal, got {other:?}"),
         })
         .collect();
@@ -3121,12 +3121,14 @@ fn arm_resolve_key(host: &VerterHost, arm: SemanticNodeId) -> SemanticQueryKey {
     let Some(SemanticNodeData::DeclRef { identity }) = data.as_deref() else {
         panic!("an intersection arm must lower to a lazy declaration reference")
     };
-    SemanticQueryKey::ResolveDecl(crate::semantic_query::ResolveDeclKey {
-        scope: crate::semantic_query::ScopeId {
+    SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {
+        scope: verter_type_engine::semantic_query::ScopeId {
             canonical_id: Arc::clone(&identity.canonical_id),
             owner: identity.owner,
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                identity.owner,
+            ),
         },
         name: Arc::clone(&identity.decl_name),
     })
@@ -3748,9 +3750,9 @@ fn an_open_conditional_shell_keeps_the_residual_path_without_selecting_a_branch(
         other => panic!("an undecided conditional must stay a shell, got {other:?}"),
     };
     let literal = |node| match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(text))) => {
-            text.to_string()
-        }
+        Some(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::String(text),
+        )) => text.to_string(),
         other => panic!("the branch must carry the projected leaf, got {other:?}"),
     };
     assert_eq!(literal(true_branch), "yes");

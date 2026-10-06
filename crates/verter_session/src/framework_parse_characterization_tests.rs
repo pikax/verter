@@ -620,7 +620,7 @@ fn script_facts_reuse_indexed_ready_eval_source_without_recatalog() {
 #[test]
 fn eval_env_reuses_indexed_ready_eval_source_without_recatalog() {
     use crate::resolver_core::ComponentMetaResolutionPurpose;
-    use crate::resolver_core::ResolverContext;
+    use verter_type_engine::resolver_core::ResolverContext;
 
     let source = concat!(
         "<script setup lang=\"ts\">\n",
@@ -658,9 +658,10 @@ fn eval_env_reuses_indexed_ready_eval_source_without_recatalog() {
         "uncaptured eval-env compute must clone IndexedReady.eval_source, not recatalog or to_string"
     );
 
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-        &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    );
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+            &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        );
     let computed = host.compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
         &host as &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         &fixture_dispatch_0,

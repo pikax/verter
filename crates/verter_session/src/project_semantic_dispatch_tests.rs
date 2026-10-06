@@ -11,12 +11,12 @@ use std::sync::Arc;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
 #[allow(unused_imports)]
-use crate::project_semantic_dispatch::*;
-use crate::semantic_query::{
+use verter_type_engine::project_semantic_dispatch::*;
+use verter_type_engine::semantic_query::{
     DepVersion, IndexKey, OriginMeta, PrimitiveKind, QueryError, QueryResult, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 mod abstract_construct_tests;
 mod ambient_module_value_tests;

@@ -64,10 +64,10 @@ impl VerterHost {
         &self,
         owner_canonical_id: &str,
         tag: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         >,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -140,10 +140,10 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         type_name: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         >,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -167,10 +167,10 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         tag: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         >,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,

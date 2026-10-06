@@ -3,8 +3,8 @@
 //!
 //! When a sub-request is initiated while a parent context is on the
 //! current thread's TLS slot (set up via
-//! [`verter_session::request_context::RequestContextGuard::install`]),
-//! the new [`verter_session::request_context::RequestContext`] sniffs
+//! [`verter_type_engine::request_context::RequestContextGuard::install`]),
+//! the new [`verter_type_engine::request_context::RequestContext`] sniffs
 //! the scheduler's `current_request_id()` at construction and stores
 //! it as `parent_request_id`. `AuditBuilder::finish` reads that slot
 //! and stamps the record's envelope-level
@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use verter_audit::AuditObserver;
-use verter_session::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 /// Strict TLS-only test — exercises the `RequestContext` parent
 /// capture path without invoking the full scheduler / audit

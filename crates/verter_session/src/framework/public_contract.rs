@@ -281,7 +281,7 @@ pub(crate) fn project_component_public_contract(
     adapter_id: FrameworkAdapterId,
     analysis: &ComponentMetaAnalysis,
     lanes: &MaterializedComponentMetaTypeLanes,
-    completeness: crate::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 ) -> ComponentContractAvailability {
     match project_supported(adapter_id.clone(), analysis, lanes, completeness) {
         Ok(contract) => ComponentContractAvailability::Supported(Arc::new(contract)),
@@ -304,7 +304,7 @@ fn project_supported(
     adapter_id: FrameworkAdapterId,
     analysis: &ComponentMetaAnalysis,
     lanes: &MaterializedComponentMetaTypeLanes,
-    completeness: crate::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 ) -> Result<ComponentPublicContract, ProjectionFailure> {
     let mut degradation = Vec::new();
     let mut props = Vec::with_capacity(analysis.props.len());
@@ -494,7 +494,7 @@ fn exactness(degradation: &[ContractDegradation]) -> ContractExactness {
 /// from "we failed to find what is declared".
 fn aggregate_exactness(
     degradation: &[ContractDegradation],
-    completeness: crate::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
 ) -> ContractExactness {
     if completeness.is_partial() {
         ContractExactness::Degraded

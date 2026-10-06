@@ -3,7 +3,7 @@
 //! Extracts top-level declared/exported names from a `.d.ts` (or `.ts`)
 //! source. Used by `register_ambient_lib` to populate the per-project
 //! symbol_index. Full type lowering is deferred to the session-side
-//! scheduler (see `verter_session::resolver_core::ambient_resolve`).
+//! scheduler (see `verter_type_engine::resolver_core::ambient_resolve`).
 //!
 //! Recognised top-level forms:
 //!

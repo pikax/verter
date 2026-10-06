@@ -288,7 +288,7 @@ impl RouteDb {
         view: &V,
     ) -> Option<Arc<RouteResult>> {
         let result = self.routes.get_if_valid(key, view);
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -308,7 +308,7 @@ impl RouteDb {
     #[cfg(any(test, feature = "test-support"))]
     pub fn get_route_any(&self, key: &RouteNameKey) -> Option<Arc<RouteResult>> {
         let result = self.routes.get_if_valid(key, &PermissiveStoreView);
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -420,7 +420,7 @@ impl RouteDb {
     /// into any active tracer on the current thread.
     ///
     /// On a warm hit the cached fact-dep signature is fanned out via
-    /// [`crate::fact_signature_helpers::observe_fact_signature`] before
+    /// [`verter_type_engine::fact_signature_helpers::observe_fact_signature`] before
     /// returning. On a cold miss the inner `resolve` closure is invoked
     /// inside a singleflight group; after resolution the freshly-stored
     /// facts are read back and also fanned out. When a concurrent thread
@@ -565,8 +565,8 @@ impl RouteDb {
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(host),
             |probe| self.get_or_build_barrel_surface_in_scope(key, view, probe, build),
         )
         .0
@@ -581,7 +581,7 @@ impl RouteDb {
         &self,
         key: BarrelSurfaceKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_, W>,
+        probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         build: F,
     ) -> Option<Arc<BarrelRouteSurface>>
     where
@@ -727,7 +727,7 @@ pub(crate) fn emit_export_route_resolved_event(
         ..
     } = result
     {
-        crate::request_observers::push_structured_event(
+        verter_type_engine::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::ExportRouteResolved {
                 provider_canonical: Arc::<str>::from(provider_canonical),
                 exported_name: Arc::<str>::from(exported_name),
@@ -739,20 +739,20 @@ pub(crate) fn emit_export_route_resolved_event(
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for RouteDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for RouteDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ResolverState, ProjectGeneration]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
             self.clear();
         }
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for RouteDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for RouteDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         // Routes are keyed on (resolver_owner_canonical, specifier);
         // a content edit on a provider canonical evicts every route

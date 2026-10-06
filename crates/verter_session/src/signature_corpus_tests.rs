@@ -435,7 +435,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     };
     let carrier = host.get_flow_return_type_with_audit(
         &identity,
-        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
     );
     let Ok(result) = carrier.as_result() else {
         // The boundary produced NO result: the lane is broken, not the
@@ -456,7 +456,8 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
     // Publication KEEPS an alias/builtin instantiation carrier: the
     // checker keeps the alias label too, and the carrier is resolved when
     // a consumer DEMANDS the structural fact behind it. The recorded
@@ -487,8 +488,8 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     // answer as owed.
     let demand = dispatch.normalize_node_keeping_declaration_refs_for_tests(
         result.return_type(),
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     );
     // A `Partial` demand carries NO node: truncated or faulted, which is a
@@ -511,14 +512,14 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     let rendered = Some(render_node(&dispatch, node, 0));
     let (deferred_operator, refused) = match dispatch.graph().node_data(node) {
         Some(data) => match data.as_ref() {
-            crate::semantic_query::SemanticNodeData::InstantiationRef { base, .. } => {
-                (Some(std::sync::Arc::clone(&base.decl_name)), false)
-            }
+            verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
+                base, ..
+            } => (Some(std::sync::Arc::clone(&base.decl_name)), false),
             // Only a SEMANTIC non-answer counts as a refusal — see the
             // `refused` field. An identity carrier that still denotes a
             // type, or a resource/control sentinel, does not.
-            crate::semantic_query::SemanticNodeData::Opaque(error) => {
-                use crate::project_semantic_dispatch::query_error_disposition::{
+            verter_type_engine::semantic_query::SemanticNodeData::Opaque(error) => {
+                use verter_type_engine::project_semantic_dispatch::query_error_disposition::{
                     query_error_disposition, QueryErrorDisposition,
                 };
                 (
@@ -575,20 +576,19 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     // that diagnostic: the typed recovery carrier naming the recorded code
     // and message, whose recovery reads as the recorded recovery print.
     let live_diagnostic = match dispatch.graph().node_data(node).as_deref() {
-        Some(crate::semantic_query::SemanticNodeData::Opaque(
-            crate::semantic_query::QueryError::CheckerRecovery { diagnostic, .. },
+        Some(verter_type_engine::semantic_query::SemanticNodeData::Opaque(
+            verter_type_engine::semantic_query::QueryError::CheckerRecovery { diagnostic, .. },
         )) => Some(*diagnostic),
         _ => None,
     };
     let matched_diagnostic = match (row.diagnostic, live_diagnostic) {
         (Some(recorded), Some(live)) => {
-            let recovery =
-                dispatch
-                    .graph()
-                    .intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-                        live.recovery()
-                            .expect("an error-type diagnostic continues with its recovery"),
-                    ));
+            let recovery = dispatch.graph().intern_node(
+                verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+                    live.recovery()
+                        .expect("an error-type diagnostic continues with its recovery"),
+                ),
+            );
             let recorded_recovery =
                 checker_syntax::parse(recorded.recovery).unwrap_or_else(|err| {
                     panic!(

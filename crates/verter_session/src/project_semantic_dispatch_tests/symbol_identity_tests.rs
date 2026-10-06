@@ -3,16 +3,16 @@ use super::carrier_head_resolution_tests::file_scope;
 use super::carrier_head_resolution_tests::host;
 use super::carrier_head_resolution_tests::import_type_carrier;
 use super::carrier_head_resolution_tests::upsert_ts;
-use crate::project_semantic_dispatch::symbol_identity::*;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::request_context::RequestContext;
-use crate::request_context::RequestContextGuard;
-use crate::semantic_query::PartialReasonSet;
-use crate::semantic_query::QueryError;
-use crate::semantic_query::SemanticNodeData;
 use std::sync::Arc;
 use verter_session_query::inputs::budget::BudgetDomain;
 use verter_session_query::inputs::budget::BudgetExceededFailure;
+use verter_type_engine::project_semantic_dispatch::symbol_identity::*;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::request_context::RequestContext;
+use verter_type_engine::request_context::RequestContextGuard;
+use verter_type_engine::semantic_query::PartialReasonSet;
+use verter_type_engine::semantic_query::QueryError;
+use verter_type_engine::semantic_query::SemanticNodeData;
 use verter_type_expr::PropCallableRoleUnresolvedReason;
 use verter_type_expr::ResolvedSymbolIdentity;
 
@@ -96,22 +96,22 @@ fn unsupported_and_work_limited_identity_demands_fail_closed() {
     );
 
     let terminal = dispatch.graph().intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let alias = dispatch
         .graph()
         .intern_node(SemanticNodeData::Alias(terminal));
     dispatch.set_connected_limits_for_tests(
         0,
-        crate::project_semantic_dispatch::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
+        verter_type_engine::project_semantic_dispatch::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
     );
-    let _scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let _scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     assert_eq!(
         dispatch.demand_symbol_identity(alias, &[expected()]),
         SymbolIdentityDemandOutcome::Partial(PropCallableRoleUnresolvedReason::WorkLimitExceeded)
     );
     assert!(
-        crate::request_context::current_cold_compute_completeness().is_partial(),
+        verter_type_engine::request_context::current_cold_compute_completeness().is_partial(),
         "a partial identity demand must refuse warm admission"
     );
 }

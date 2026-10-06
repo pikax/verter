@@ -1,27 +1,3 @@
-use crate::project_semantic_dispatch::flow_products::DefiniteAssignmentProduct;
-use crate::project_semantic_dispatch::flow_products::FlowProductBudget;
-use crate::project_semantic_dispatch::flow_products::FlowProductExecution;
-use crate::project_semantic_dispatch::flow_products::FlowProductFailure;
-use crate::project_semantic_dispatch::flow_products::FlowProductInputs;
-use crate::project_semantic_dispatch::flow_products::FlowProductValue;
-use crate::project_semantic_dispatch::flow_products::GraphSemanticAlgebra;
-use crate::project_semantic_dispatch::flow_products::NarrowingProduct;
-use crate::project_semantic_dispatch::flow_products::ReachingTypeProduct;
-use crate::project_semantic_dispatch::flow_return_products::*;
-use crate::project_semantic_dispatch::flow_solve::build_flow_demand_plan;
-use crate::project_semantic_dispatch::flow_solve::FlowDemandRequest;
-use crate::project_semantic_dispatch::flow_solve::FlowDomain;
-use crate::project_semantic_dispatch::flow_solve::FlowResourcePolicy;
-use crate::semantic_query::CanonicalTypeSubstitution;
-use crate::semantic_query::FlowFunctionSlotIdentity;
-use crate::semantic_query::FlowInputContext;
-use crate::semantic_query::FlowReturnContext;
-use crate::semantic_query::FlowReturnKey;
-use crate::semantic_query::PrimitiveKind;
-use crate::semantic_query::ResolvedDeclSlotIdentity;
-use crate::semantic_query::ReturnProjectionDemand;
-use crate::semantic_query::SemanticNodeData;
-use crate::semantic_query::SemanticQueryKey;
 use std::sync::Arc;
 use verter_session_query::flow::binding::FlowBindingRef;
 use verter_session_query::flow::flow_graph::FlowNodeKind;
@@ -30,8 +6,32 @@ use verter_session_query::flow::peeker::ReturnPathPeeker;
 use verter_session_query::flow::peeker::SliceDemand;
 use verter_session_query::flow::policy::FlowReturnPolicy;
 use verter_session_query::flow::policy::NullabilityPolicy;
+use verter_type_engine::project_semantic_dispatch::flow_products::DefiniteAssignmentProduct;
+use verter_type_engine::project_semantic_dispatch::flow_products::FlowProductBudget;
+use verter_type_engine::project_semantic_dispatch::flow_products::FlowProductExecution;
+use verter_type_engine::project_semantic_dispatch::flow_products::FlowProductFailure;
+use verter_type_engine::project_semantic_dispatch::flow_products::FlowProductInputs;
+use verter_type_engine::project_semantic_dispatch::flow_products::FlowProductValue;
+use verter_type_engine::project_semantic_dispatch::flow_products::GraphSemanticAlgebra;
+use verter_type_engine::project_semantic_dispatch::flow_products::NarrowingProduct;
+use verter_type_engine::project_semantic_dispatch::flow_products::ReachingTypeProduct;
+use verter_type_engine::project_semantic_dispatch::flow_return_products::*;
+use verter_type_engine::project_semantic_dispatch::flow_solve::build_flow_demand_plan;
+use verter_type_engine::project_semantic_dispatch::flow_solve::FlowDemandRequest;
+use verter_type_engine::project_semantic_dispatch::flow_solve::FlowDomain;
+use verter_type_engine::project_semantic_dispatch::flow_solve::FlowResourcePolicy;
+use verter_type_engine::semantic_query::CanonicalTypeSubstitution;
+use verter_type_engine::semantic_query::FlowFunctionSlotIdentity;
+use verter_type_engine::semantic_query::FlowInputContext;
+use verter_type_engine::semantic_query::FlowReturnContext;
+use verter_type_engine::semantic_query::FlowReturnKey;
+use verter_type_engine::semantic_query::PrimitiveKind;
+use verter_type_engine::semantic_query::ResolvedDeclSlotIdentity;
+use verter_type_engine::semantic_query::ReturnProjectionDemand;
+use verter_type_engine::semantic_query::SemanticNodeData;
+use verter_type_engine::semantic_query::SemanticQueryKey;
 
-use crate::project_semantic_dispatch::flow_return_products::WRITE_KEY_COMPARISONS;
+use verter_type_engine::project_semantic_dispatch::flow_return_products::WRITE_KEY_COMPARISONS;
 
 fn fixture(
     source: &str,
@@ -39,7 +39,7 @@ fn fixture(
 ) -> (
     FlowFrameProducts,
     verter_session_query::flow::bundle::BoundFlowGraph,
-    crate::project_semantic_dispatch::flow_solve::FlowDemandPlan,
+    verter_type_engine::project_semantic_dispatch::flow_solve::FlowDemandPlan,
 ) {
     fixture_with_resources(source, nested, FlowResourcePolicy::default())
 }
@@ -51,7 +51,7 @@ fn fixture_with_resources(
 ) -> (
     FlowFrameProducts,
     verter_session_query::flow::bundle::BoundFlowGraph,
-    crate::project_semantic_dispatch::flow_solve::FlowDemandPlan,
+    verter_type_engine::project_semantic_dispatch::flow_solve::FlowDemandPlan,
 ) {
     let (state, _) =
         crate::resolver_core::ShallowFileState::service_backed_with_provenance_for_test(
@@ -69,7 +69,7 @@ fn fixture_with_resources(
     let bound = crate::host_source_demand::flow_bound_graph_for_tests(memo, entry);
     let bundle = bound.bundle();
     let request = FlowDemandRequest {
-        ancestry: crate::project_semantic_dispatch::flow_solve::FlowInputAncestry::default(),
+        ancestry: verter_type_engine::project_semantic_dispatch::flow_solve::FlowInputAncestry::default(),
         query: SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
             function: FlowFunctionSlotIdentity {
                 declaration_slot: ResolvedDeclSlotIdentity::value_slot(
@@ -90,7 +90,7 @@ fn fixture_with_resources(
                 type_env_hash: [0; 16],
                 lib_env_hash: [0; 16],
                 project_identity: [0; 16],
-                result_evaluation: crate::semantic_query::CONTEXT_FREE_EVALUATION,
+                result_evaluation: verter_type_engine::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
                 policy: FlowReturnPolicy {
                     nullability: NullabilityPolicy::Strict,
@@ -101,10 +101,10 @@ fn fixture_with_resources(
             },
             demand: ReturnProjectionDemand::whole_return(),
             input: FlowInputContext::empty(),
-            result_contract: crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+            result_contract: verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
         })),
         input_basis: verter_identity::identity::InputBasisId::from_canonical(
-            &crate::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
+            &verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance::new(
                 1, 1, 1, 0,
             ),
         ),
@@ -117,7 +117,7 @@ fn fixture_with_resources(
             &request.resources.slice_budget,
         )
         .unwrap();
-    let retained = crate::cache_runtime::flow_slice_node::PlannedFlowSlice::for_test(
+    let retained = verter_type_engine::cache_runtime::flow_slice_node::PlannedFlowSlice::for_test(
         compute_flow_slice_hash(&selection, bundle.graph(), bundle.skeleton()),
         selection,
     );
@@ -164,7 +164,7 @@ fn continuation_rewind_and_join_preserve_only_actual_reaching_definitions() {
         })
         .collect();
     assert_eq!(writes.len(), 3);
-    let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+    let graph = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     products.bind_at(
         &subject,
@@ -236,7 +236,7 @@ fn unchanged_write_receipts_skip_unrelated_history_and_follow_actual_continuatio
                 ..Default::default()
             },
         );
-        let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+        let graph = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let bindings: Vec<_> = bound
             .bundle()
@@ -392,7 +392,7 @@ fn clause_write_observations_reject_foreign_executions() {
         Some(FlowProductFailure::ScopeMismatch)
     );
     let (other, _, _) = fixture(source, false);
-    let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+    let graph = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
     let joined = FlowFrameProducts::join(&[&other], &observation, &GraphSemanticAlgebra(&graph));
     assert_eq!(
         joined.execution.borrow().failure,
@@ -419,7 +419,7 @@ fn clause_write_replay_moves_every_runtime_domain_and_kills_old_guards() {
         })
         .unwrap();
     let subject = FlowBindingRef::Local(binding);
-    let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+    let graph = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     entering.bind(
@@ -431,7 +431,7 @@ fn clause_write_replay_moves_every_runtime_domain_and_kills_old_guards() {
     entering.set_narrowing(
         &subject,
         NarrowingProduct::new([
-            crate::project_semantic_dispatch::flow_products::FlowNarrowingFact {
+            verter_type_engine::project_semantic_dispatch::flow_products::FlowNarrowingFact {
                 binding: entering.identity(&subject).unwrap(),
                 path: Arc::from([]),
                 narrowed_to: string,
@@ -492,7 +492,7 @@ fn declared_capture_input_records_its_hub_and_preserves_unassigned_state() {
             ))
         })
         .expect("real selected captured hub");
-    let graph = crate::semantic_query_memo::SemanticGraphStore::new();
+    let graph = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let unassigned = DefiniteAssignmentProduct::default();
     let subject = FlowBindingRef::Captured(identity);

@@ -3790,7 +3790,7 @@ impl NapiVerterHost {
         canonical_id: String,
         decl_name: String,
     ) -> Result<Option<Buffer>> {
-        use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
+        use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
             let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {

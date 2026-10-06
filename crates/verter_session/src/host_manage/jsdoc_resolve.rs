@@ -19,13 +19,13 @@
 //! `host_methods.rs` impl block keeps calling them via the
 //! shell's `pub(crate) use jsdoc_resolve::*;` re-export.
 
-use crate::request_observers::{component_meta_debug, component_meta_debug_enabled};
 use crate::resolver_core::ComponentMetaEvalOutputs;
-use crate::types::ProjectionMode;
 use crate::VerterHost;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
+use verter_type_engine::semantic_query::ProjectionMode;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 // file moved from `meta_resolve/jsdoc_resolve.rs` to
 // `host_manage/jsdoc_resolve.rs`. The original `super::dispatch_helpers`
@@ -42,17 +42,18 @@ use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 /// existing facade and captured private view at the type level.
 pub(crate) struct HostComponentMetaResolver<'a, E = ()> {
     pub(crate) host: &'a VerterHost,
-    pub(crate) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext<
+    pub(crate) ctx: &'a dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
     pub(crate) engine: E,
 }
 
 pub(crate) struct ComponentMetaSemanticServices<'dispatch, 'request> {
-    pub(crate) dispatch: &'dispatch crate::project_semantic_dispatch::ProjectSemanticDispatch<
-        'request,
-        crate::resolver_core::HostCapabilities,
-    >,
+    pub(crate) dispatch:
+        &'dispatch verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            'request,
+            crate::resolver_core::HostCapabilities,
+        >,
     pub(crate) session_view: Option<&'request dyn crate::session_view::SessionView>,
 }
 
@@ -240,14 +241,14 @@ impl HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>> {
             owner_canonical,
             owner,
             &root_ref,
-            crate::semantic_query::ProjectionMode::Navigate,
+            verter_type_engine::semantic_query::ProjectionMode::Navigate,
         ) else {
             return false;
         };
         let Some(view) = dispatch.resolve_typeinfo_surface_view(
             base,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Shallow,
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Shallow,
             ),
         ) else {
             return false;
@@ -413,8 +414,8 @@ impl crate::resolver_core::ComponentMetaResolverHost
                 &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
                     absolutize_macro_payload_locator(locator, owner_canonical),
                 ),
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    crate::semantic_query::ProjectionMode::Navigate,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
             )
             .at_optional_boundary()?;
@@ -663,15 +664,15 @@ fn absolutize_macro_payload_locator(
 /// Object MEMBERS, which encode "nested" deps. Visited-guarded (graph nodes
 /// may be shared or cyclic).
 fn node_has_direct_macro_reference(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     needle: &str,
 ) -> bool {
-    use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
+    use verter_type_engine::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
 
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
     let mut worklist: Vec<SemanticNodeId> = vec![node];
@@ -680,7 +681,7 @@ fn node_has_direct_macro_reference(
             continue;
         }
         if let Some((name, args)) =
-            crate::project_semantic_dispatch::reference_carriers::reference_carrier_head(
+            verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(
                 dispatch, node,
             )
         {
@@ -690,7 +691,8 @@ fn node_has_direct_macro_reference(
             worklist.extend(args);
             continue;
         }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(graph, node) else {
+        let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(graph, node)
+        else {
             continue;
         };
         match data.as_ref() {
@@ -774,7 +776,7 @@ pub(crate) fn resolve_type_declaration(
     dep_canonical: &str,
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
-    let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    let base_ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     > = host;
     resolve_type_declaration_with_context(
@@ -792,7 +794,7 @@ pub(crate) fn resolve_type_declaration(
 /// declaration walker dereferences cross-file types.
 pub(crate) fn resolve_type_declaration_with_context(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
     dep_canonical: &str,
@@ -813,7 +815,7 @@ pub(crate) fn resolve_type_declaration_with_context(
 }
 
 pub(crate) fn read_full_source(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
     canonical_source: &str,
@@ -835,10 +837,10 @@ pub(crate) fn read_full_source(
 
 pub(crate) fn resolve_jsdoc_block(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -879,10 +881,10 @@ pub(crate) fn resolve_jsdoc_block(
 
 pub(crate) fn map_jsdoc_tag(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,
@@ -995,15 +997,15 @@ fn sanitize_jsdoc_unknown_raw(raw_type: &str) -> String {
 /// legacy-family predicate owned by `semantic_query::compat_spelling` (one
 /// home, no inline duplicate list). Never consulted for control flow.
 fn jsdoc_payload_spells_legacy_sentinel(raw: &str) -> bool {
-    crate::semantic_query::compat_spelling::spells_legacy_sentinel_family(raw)
+    verter_type_engine::semantic_query::compat_spelling::spells_legacy_sentinel_family(raw)
 }
 
 pub(crate) fn resolve_jsdoc_tag_type(
     _host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
         crate::resolver_core::HostCapabilities,
     >,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     >,

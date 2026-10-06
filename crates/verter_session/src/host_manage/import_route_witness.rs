@@ -53,7 +53,7 @@
 //! imports / reexports / wildcard reexports from the shallow routing
 //! surface, plus the SFC `src=` external requests from the scheduler's
 //! parse snapshot. No resolved canonical is read from a parse artifact.
-use crate::request_route_memo::{
+use verter_type_engine::request_route_memo::{
     ImportRouteObservation, ImportRouteObservationKey, NormalizedCanonical, NormalizedCanonicalKey,
 };
 
@@ -150,7 +150,7 @@ impl VerterHost {
         canonical: &str,
         normalize: impl FnOnce() -> (Option<std::sync::Arc<str>>, bool),
     ) -> std::sync::Arc<NormalizedCanonical> {
-        let request = crate::request_context::current_request_context();
+        let request = verter_type_engine::request_context::current_request_context();
         let key = request.as_ref().map(|_| NormalizedCanonicalKey {
             host: self as *const Self as usize,
             canonical: std::sync::Arc::from(canonical),
@@ -162,7 +162,7 @@ impl VerterHost {
             if let Some(hit) = hit {
                 replay_resolution_witness(&hit.observed);
                 if hit.refused {
-                    crate::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                     );
                 }
@@ -350,7 +350,7 @@ impl VerterHost {
             Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
     ) -> std::sync::Arc<ImportRouteObservation> {
-        let request = crate::request_context::current_request_context();
+        let request = verter_type_engine::request_context::current_request_context();
         let key = request.as_ref().map(|_| ImportRouteObservationKey {
             host: self as *const Self as usize,
             canonical: std::sync::Arc::from(canonical_id),
@@ -407,7 +407,7 @@ impl VerterHost {
     /// Mark the enclosing compute non-cacheable and report an
     /// unrootable import-route witness.
     fn decline_import_route_witness(&self) -> Option<Vec<FactVersionRef>> {
-        crate::fact_tracing::note_non_cacheable_read_fan_out(
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
             verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
         );
         None
@@ -453,7 +453,9 @@ impl VerterHost {
     pub(crate) fn observe_owner_import_route_witness(&self, canonical_id: &str) -> bool {
         match self.owner_import_route_witness(canonical_id) {
             Some(witness) => {
-                crate::resolver_core::resolver_context::observe_fan_out_borrowed(&witness);
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(
+                    &witness,
+                );
                 true
             }
             None => false,

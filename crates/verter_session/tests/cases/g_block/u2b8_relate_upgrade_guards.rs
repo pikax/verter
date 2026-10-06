@@ -21,9 +21,10 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::{family_key_size_for_tests, family_variant_label_for_tests};
-use verter_session::semantic_query::query_key_spec::semantic_query_key_specs;
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::query_key_spec::semantic_query_key_specs;
+use verter_type_engine::semantic_query::{
     BudgetExceededKind, ConstParamPolicy, ContextualInferenceMode, DerivationTree, FreshnessKey,
     IndexKey, InferableParamSetId, InferenceCandidatePriority, InferenceContextKey,
     InferencePassKind, NoInferMask, OverloadSelectionPolicy, PrimitiveKind, ProjectionMode,
@@ -33,8 +34,9 @@ use verter_session::semantic_query::{
     SemanticQueryKey, SemanticQueryKeyTag, SemanticQueryValue, SemanticQueryValueTag,
     SubRelationPosition, SubRelationRef, SubstitutionCanonicalHash, VariancePhase, VariancePolicy,
 };
-use verter_session::{HostConfig, VerterHost};
-use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query_memo::{
+    family_key_size_for_tests, family_variant_label_for_tests,
+};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -241,7 +243,7 @@ pub(crate) fn relate_key_covers_relation_kind_policy_freshness_and_context() {
             None,
             RelationContext {
                 projection_reduction:
-                    verter_session::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Expanded,
                     ),
                 ..relation_context(0, 0, 0, 0)
@@ -680,7 +682,7 @@ fn inferable_param_set_id_is_order_insensitive_set() {
 
 #[test]
 pub(crate) fn relate_query_value_carries_relation_proof_and_budget_state() {
-    let binding = verter_session::semantic_query::InferBinding {
+    let binding = verter_type_engine::semantic_query::InferBinding {
         name: Arc::from("T"),
         param: SemanticNodeId(2),
         bound: SemanticNodeId(3),
@@ -800,7 +802,7 @@ fn relation_payload_uses_payload_side_relation_proofs_table() {
     let payload = RelationPayload {
         outcome: RelationOutcome::NotAssignable,
         bindings: Arc::from(
-            Vec::<verter_session::semantic_query::InferBinding>::new().into_boxed_slice(),
+            Vec::<verter_type_engine::semantic_query::InferBinding>::new().into_boxed_slice(),
         ),
         relation_proof: RelationProofId(1),
         recursion: Default::default(),
@@ -823,7 +825,7 @@ fn relation_payload_uses_payload_side_relation_proofs_table() {
     // NO reason. A static scan of the value-domain source pins this: the
     // superseded `primary_reason` / `secondary_reasons` outcome fields must
     // be absent from the source entirely (they are the enriched-outcome shape).
-    let qvd_src = include_str!("../../../src/semantic_query.rs");
+    let qvd_src = include_str!("../../../../verter_type_engine/src/semantic_query.rs");
     assert!(
         !qvd_src.contains("primary_reason") && !qvd_src.contains("secondary_reasons"),
         "RelationOutcome::NotAssignable must be field-less — the reason rides the \
@@ -868,7 +870,7 @@ fn relation_public_outcome_has_no_unknown_display() {
 
     // Static scan of the display renderer: it must NOT reference a public
     // `RelationOutcome::Unknown` arm, and MUST cover the three public arms.
-    let display_src = include_str!("../../../src/semantic_query/display.rs");
+    let display_src = include_str!("../../../../verter_type_engine/src/semantic_query/display.rs");
     assert!(
         !display_src.contains("RelationOutcome::Unknown"),
         "display_relation must not match a public `RelationOutcome::Unknown` arm"

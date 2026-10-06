@@ -78,11 +78,11 @@ const FORBIDDEN_SELECTOR_TYPES: &[&str] = &["SpecVariant", "TsCompat"];
 const TARGET_STRUCTS: &[(&str, &str)] = &[
     (
         "SemanticQueryKey",
-        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_type_engine/src/semantic_query.rs",
     ),
     (
         "FamilyKey",
-        "crates/verter_session/src/semantic_query_memo/family.rs",
+        "crates/verter_type_engine/src/semantic_query_memo/family.rs",
     ),
     (
         "ComponentMetaResultKey",
@@ -90,7 +90,7 @@ const TARGET_STRUCTS: &[(&str, &str)] = &[
     ),
     (
         "ShapeCacheKey",
-        "crates/verter_session/src/component_meta_caches.rs",
+        "crates/verter_type_engine/src/component_meta_caches.rs",
     ),
     (
         "SessionRequestLifecycle",
@@ -98,19 +98,19 @@ const TARGET_STRUCTS: &[(&str, &str)] = &[
     ),
     (
         "InstantiateContext",
-        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_type_engine/src/semantic_query.rs",
     ),
     (
         "MacroPayloadContext",
-        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_type_engine/src/semantic_query.rs",
     ),
     (
         "ProjectionReductionContext",
-        "crates/verter_session/src/semantic_query.rs",
+        "crates/verter_type_engine/src/semantic_query.rs",
     ),
     (
         "SemanticQueryKeySpec",
-        "crates/verter_session/src/semantic_query/query_key_spec.rs",
+        "crates/verter_type_engine/src/semantic_query/query_key_spec.rs",
     ),
 ];
 

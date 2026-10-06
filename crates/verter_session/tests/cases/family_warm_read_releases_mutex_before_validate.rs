@@ -27,12 +27,14 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
-use verter_session::for_tests::{SemanticGraphStore, VALIDATE_RUNNING_PROBE_TEST_LOCK};
-use verter_session::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
-};
 use verter_session::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::{
+    ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
+};
+use verter_type_engine::semantic_query_memo::{
+    SemanticGraphStore, VALIDATE_RUNNING_PROBE_TEST_LOCK,
+};
 
 /// The warm-read fast path snapshots candidates under `entries`,
 /// releases the lock, and ONLY THEN calls `MemoEntry::validate` on each
@@ -49,7 +51,7 @@ fn warm_read_validates_outside_entries_mutex() {
     let canonical = "/warm_read_lock_test/owner.ts";
     let key = verter_session::for_tests::instantiate_key_for_tests(
         &host,
-        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
@@ -58,7 +60,7 @@ fn warm_read_validates_outside_entries_mutex() {
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     );
     let value = graph.intern_node(SemanticNodeData::Primitive(
-        verter_session::semantic_query::PrimitiveKind::Boolean,
+        verter_type_engine::semantic_query::PrimitiveKind::Boolean,
     ));
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         key.clone(),

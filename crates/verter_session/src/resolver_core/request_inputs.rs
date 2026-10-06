@@ -71,9 +71,9 @@ mod tests {
 
     #[test]
     fn request_lowering_pins_fenced_source_after_current_content_changes() {
-        use super::super::request_ports::{IndexedInputs, OwnedLowering};
         use crate::types::{HostConfig, UpsertRequest};
         use std::sync::atomic::Ordering::Relaxed;
+        use verter_type_engine::resolver_core::request_ports::{IndexedInputs, OwnedLowering};
         let host = crate::VerterHost::new_standalone(HostConfig::default());
         let upsert = |source: &str| {
             host.upsert(UpsertRequest {
@@ -236,13 +236,13 @@ struct RetainedInputs {
 pub struct MacroMirrorSelector {
     retained: Arc<parking_lot::RwLock<RetainedInputs>>,
     #[cfg(any(test, feature = "test-support"))]
-    knobs: Arc<crate::engine_test_knobs::TestKnobs>,
+    knobs: Arc<verter_type_engine::engine_test_knobs::TestKnobs>,
 }
-impl super::request_ports::MacroMirrorSource for MacroMirrorSelector {
+impl verter_type_engine::resolver_core::request_ports::MacroMirrorSource for MacroMirrorSelector {
     fn attachment(
         &self,
         identity: &IndexedInputIdentity,
-    ) -> Option<crate::structural_carrier_producer::MacroMirrorAttachment> {
+    ) -> Option<verter_type_engine::structural_carrier_producer::MacroMirrorAttachment> {
         let indexed = self.retained.read().indexed.get(identity).cloned()?;
         Some(indexed.macro_hot_mirror.attach(
             #[cfg(any(test, feature = "test-support"))]
@@ -253,7 +253,9 @@ impl super::request_ports::MacroMirrorSource for MacroMirrorSelector {
 impl InputArtifactLeases {
     pub(crate) fn macro_selector(
         &self,
-        #[cfg(any(test, feature = "test-support"))] knobs: Arc<crate::engine_test_knobs::TestKnobs>,
+        #[cfg(any(test, feature = "test-support"))] knobs: Arc<
+            verter_type_engine::engine_test_knobs::TestKnobs,
+        >,
     ) -> MacroMirrorSelector {
         MacroMirrorSelector {
             retained: Arc::clone(&self.retained),
@@ -359,7 +361,9 @@ impl InputArtifactLeases {
     }
 }
 
-impl super::bare_name_resolve::PreparedInputSource for super::prepared_decl::PreparedDeclBundle {
+impl verter_type_engine::resolver_core::bare_name_resolve::PreparedInputSource
+    for super::prepared_decl::PreparedDeclBundle
+{
     fn scope_inputs(&self) -> Arc<PreparedInputRecord> {
         self.input_record()
     }

@@ -16,12 +16,12 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::ProjectionMode;
 use crate::VerterHost;
 use crate::{
     meta_provenance::MetaProvenanceSnapshot,
     types::{HostConfig, UpsertRequest},
 };
+use verter_type_engine::semantic_query::ProjectionMode;
 
 fn make_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -950,7 +950,8 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
             snapshot: Arc::clone(&built.snapshot),
             route_inventory: Arc::clone(&built.route_inventory),
             declares_interface_app_config: built.declares_interface_app_config,
-            macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
+            macro_hot_mirror:
+                verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
             source_parse_key: crate::project_type_store::SourceParseKey::default(),
             input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
         }
@@ -1143,7 +1144,9 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
             let follower = {
                 let host = Arc::clone(&host);
                 scope.spawn(move || {
-                    use crate::request_context::{RequestContext, RequestContextGuard};
+                    use verter_type_engine::request_context::{
+                        RequestContext, RequestContextGuard,
+                    };
                     let rctx = RequestContext::new(1, Arc::from(owner), false, None);
                     let _req_guard = RequestContextGuard::install(rctx);
                     let (result, read_set) = host.with_fact_tracer(
@@ -1152,7 +1155,7 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
                     );
                     let non_cacheable = read_set.non_cacheable_read_observed();
                     let result_is_partial =
-                        crate::request_context::current_request_result_is_partial();
+                        verter_type_engine::request_context::current_request_result_is_partial();
                     (result, non_cacheable, result_is_partial)
                 })
             };
@@ -2720,8 +2723,8 @@ fn park_nth_materialize_pre_fence(
 fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
     use std::sync::atomic::Ordering;
 
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
     };
 
@@ -2737,7 +2740,7 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
             canonical_id: Arc::from(owner),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -2830,8 +2833,8 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
 fn fenced_declaring_serve_class_surface_static_is_served_but_not_admitted() {
     use std::sync::atomic::Ordering;
 
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ClassSurfaceContext, ClassSurfaceSide, QueryResult, ResolvedDeclSlotIdentity,
         SemanticQueryApi, SemanticQueryKey,
     };
@@ -4085,8 +4088,8 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     // compute (semantic-memo builds, the owner-import-surface and
     // component-meta proof producers) installs around its cold body —
     // and read the chokepoint flag its admission gates consult.
-    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
+    let (entry, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.build_named_type_export_route_entry(barrel, "Shared"),
     );
     let suppression_raised = matches!(
@@ -4138,8 +4141,8 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
         "export * from './missing';\nexport * from './present';\n",
     );
 
-    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
+    let (entry, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.build_named_type_export_route_entry(barrel, "Shared"),
     );
     let suppression_raised = matches!(
@@ -4212,8 +4215,8 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     // producers) installs around its cold body — and read the
     // chokepoint flag its admission gates consult.
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
-    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
+    let (surface, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.owner_import_surface(owner),
     );
     let suppression_raised = matches!(
@@ -4270,8 +4273,8 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     );
 
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
-    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
+    let (surface, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.owner_import_surface(owner),
     );
     let suppression_raised = matches!(

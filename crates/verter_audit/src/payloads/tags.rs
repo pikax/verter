@@ -50,7 +50,7 @@ pub enum CompileBackendTag {
 }
 
 /// Projection mode — mirror of
-/// `verter_session::semantic_query::ProjectionMode`.
+/// `verter_type_engine::semantic_query::ProjectionMode`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "audit.generated.ts")]
 pub enum ProjectionModeTag {

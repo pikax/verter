@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
 // ---------------------------------------------------------------------------
 // Query level
@@ -29,7 +29,7 @@ use crate::semantic_query::{ProjectionMode, SemanticNodeId};
 /// `lib_env_hash` / `project_identity` stay split and unchanged). Two queries
 /// for the same declaration at different levels are DIFFERENT queries that
 /// produce DIFFERENT results and therefore must occupy DISTINCT cache slots —
-/// exactly like [`ProjectionMode`] / [`crate::semantic_query::SurfaceProvenanceContext`]
+/// exactly like [`ProjectionMode`] / [`verter_type_engine::semantic_query::SurfaceProvenanceContext`]
 /// are folded into the semantic query identity rather than into any env hash.
 /// The level is threaded into the request structs ([`ShallowSurfaceRequest`],
 /// [`VueMacroSurfaceRequest`]) and into the scratch / surface cache key where

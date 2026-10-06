@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 use crate::resolver_core::{
     component_meta_resolved_macros as resolver_component_meta_resolved_macros,
@@ -29,15 +29,14 @@ use super::component_meta_extract::{
     collect_required_template_runtime_value_names,
 };
 use super::{HostFallthroughResolver, HostRuntimeValueResolver, STORE_VIEW_STABILITY_MAX_ATTEMPTS};
-use crate::request_observers::{
-    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-};
+use verter_type_engine::component_meta_trace_custom;
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
 
 /// Internal carrier bundling a fallthrough cold compute's RESOLUTION with the
 /// COMPUTE completeness it produced.
 ///
 /// The completeness travels WITH the resolution it describes — captured
-/// per-call under a fresh [`crate::request_context::ColdComputeCompletenessScope`]
+/// per-call under a fresh [`verter_type_engine::request_context::ColdComputeCompletenessScope`]
 /// — rather than via a caller scope that could outlive a discarded
 /// completion-fence retry and taint a later complete attempt. The direct
 /// extract paths consume this; the singleflight path carries the same
@@ -50,7 +49,7 @@ pub(crate) struct FallthroughComputeOutcome {
     /// The COMPUTE completeness of this resolution — `Partial` when a budget
     /// trip / fatal read / same-path truncation folded into the per-call
     /// scope. The publish gate refuses to warm a `Partial`.
-    pub(crate) completeness: crate::semantic_query::ResultCompleteness,
+    pub(crate) completeness: verter_type_engine::semantic_query::ResultCompleteness,
 }
 
 /// Call-owned inputs for one fallthrough evaluation. The dependency lane is
@@ -125,8 +124,10 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         fixed_store_view: Option<(&crate::resolver_store::HostStoreView, u64, bool)>,
-    ) -> Result<Option<crate::types::FallthroughResolution>, crate::semantic_query::ExecutionAbort>
-    {
+    ) -> Result<
+        Option<crate::types::FallthroughResolution>,
+        verter_type_engine::semantic_query::ExecutionAbort,
+    > {
         let _ctx_guard = self.install_request_budget_context_if_none(
             self.next_request_id(),
             canonical_id,
@@ -136,15 +137,15 @@ impl VerterHost {
         // The resolve folds its completeness into the enclosing scope; this
         // scope reads it back (and bubbles it on) so an aborted resolve
         // publishes nothing.
-        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let resolution = self.resolve_fallthrough_surface_internal_pinned(
             canonical_id,
             fixed_store_view,
             &mut visiting,
         );
-        let observed = crate::request_context::current_cold_compute_completeness();
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
         drop(scope);
-        match crate::semantic_query::ExecutionAbort::observed_in(observed) {
+        match verter_type_engine::semantic_query::ExecutionAbort::observed_in(observed) {
             Some(abort) => Err(abort),
             None => Ok(resolution),
         }
@@ -301,7 +302,8 @@ impl VerterHost {
         // raw-template slot, so a later resolve of the same file version reuses
         // it instead of walking again. Re-entrant, and a no-op under a scope
         // that already asks for template analysis.
-        let _root_template_demand = crate::request_context::RootTemplateDemandScope::enter();
+        let _root_template_demand =
+            verter_type_engine::request_context::RootTemplateDemandScope::enter();
         let started = component_meta_debug_enabled().then(Instant::now);
         component_meta_trace_custom!(
             "resolve_fallthrough_surface",
@@ -452,7 +454,7 @@ impl VerterHost {
         // request suppress flag, so a parent fallthrough compute or the extract
         // helper observes this child's partiality without re-deriving it. A
         // `Complete` result is a no-op, so a complete surface still warms.
-        crate::request_context::fold_result_completeness(result.completeness);
+        verter_type_engine::request_context::fold_result_completeness(result.completeness);
         result.value
     }
 
@@ -462,7 +464,7 @@ impl VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::HostRequestContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -514,12 +516,13 @@ impl VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::HostRequestContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
     ) -> FallthroughComputeOutcome {
-        let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let _completeness_scope =
+            verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let resolution = self.compute_fallthrough_surface_from_resolved_state(
             canonical_id,
             resolved,
@@ -528,7 +531,7 @@ impl VerterHost {
             ctx,
             dispatch,
         );
-        let completeness = crate::request_context::current_cold_compute_completeness();
+        let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
         FallthroughComputeOutcome {
             resolution,
             completeness,
@@ -542,7 +545,7 @@ impl VerterHost {
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         visiting: &mut rustc_hash::FxHashSet<String>,
         ctx: &dyn crate::resolver_core::HostRequestContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -603,7 +606,7 @@ impl VerterHost {
             // and `intrinsic_members_for_tag` so they bind to the
             // overlay-aware view rather than rebuild a workspace
             // snapshot inside the cold-compute `with_fact_tracer` scope.
-            // `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` is ALSO the per-element / per-child /
+            // `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` is ALSO the per-element / per-child /
             // per-root fallthrough-node cache validation view — it is the
             // currentness-gated `RequestStoreView`, built once, so a
             // non-current cold-seed makes those node-cache validations fail
@@ -680,7 +683,9 @@ impl VerterHost {
             .filter(|fact| fact.canonical_id() != Some(canonical_id))
             .cloned()
             .collect();
-        crate::fact_signature_helpers::observe_fact_signature(&cross_file_fallthrough_facts);
+        verter_type_engine::fact_signature_helpers::observe_fact_signature(
+            &cross_file_fallthrough_facts,
+        );
 
         Some(crate::types::FallthroughResolution {
             accepted_props: resolved_surface.accepted_props,
@@ -926,10 +931,10 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         >,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -991,10 +996,10 @@ impl VerterHost {
         base: &verter_session_query::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         >,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -1112,10 +1117,10 @@ impl VerterHost {
         snapshot: &FileAnalysisSnapshot,
         usage_index: u32,
         eval_env: &mut Option<std::sync::Arc<verter_session_query::declarations::EvalEnv>>,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext<
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
             crate::resolver_core::HostCapabilities,
         >,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
             crate::resolver_core::HostCapabilities,
         >,
@@ -1216,8 +1221,8 @@ impl VerterHost {
         // on the same typed completeness signal — the single no-poison rail
         // shared with the materialiser — so this early return is a short-circuit,
         // not the only rail.
-        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-            crate::request_context::current_cold_compute_completeness().is_partial(),
+        if verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
+            verter_type_engine::request_context::current_cold_compute_completeness().is_partial(),
         ) {
             return;
         }
@@ -1535,8 +1540,8 @@ impl VerterHost {
         // PARTIAL: a budget / fuse / fatal read folded into the active
         // cold-compute completeness scope means this surface is incomplete;
         // mirroring it would warm a partial as complete.
-        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-            crate::request_context::current_cold_compute_completeness().is_partial(),
+        if verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
+            verter_type_engine::request_context::current_cold_compute_completeness().is_partial(),
         ) {
             return;
         }
@@ -1566,7 +1571,9 @@ impl VerterHost {
                         .filter(|fact| fact.canonical_id() != Some(canonical_id))
                         .cloned()
                         .collect();
-                crate::fact_signature_helpers::observe_fact_signature(&cross_file_facts);
+                verter_type_engine::fact_signature_helpers::observe_fact_signature(
+                    &cross_file_facts,
+                );
                 let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
                 derived_ref.value_mut().cached_fallthrough =
                     Some(crate::types::CachedFallthroughEntry {

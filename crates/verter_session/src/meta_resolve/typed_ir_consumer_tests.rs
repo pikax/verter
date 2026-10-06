@@ -109,30 +109,31 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
             aliases: Vec::new(),
         })
         .expect("upsert /c.vue");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
             &closed,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: "/c.vue",
                 scope_owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 context:
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        crate::semantic_query::ProjectionMode::Navigate,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
                 interior_failures: None,
             },
         )
         .at_optional_boundary()
         .expect("the closed Function fact must raise through the bridge");
-    let data = crate::project_semantic_dispatch::node_data_for(
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         raised.node(),
     );
     assert!(
         matches!(
             data.as_deref(),
-            Some(crate::semantic_query::SemanticNodeData::Signature { kind: _, params, .. }) if params.len() == 1
+            Some(verter_type_engine::semantic_query::SemanticNodeData::Signature { kind: _, params, .. }) if params.len() == 1
         ),
         "the raised closed Function fact must intern a Function carrier with the props param, got {data:?}"
     );
@@ -296,15 +297,16 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
         "a literal union must NOT collapse to a primitive leaf fact"
     );
 
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
             source,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: "/c.vue",
                 scope_owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                context: crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Expanded,
+                context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 ),
                 interior_failures: None,
             },
@@ -313,8 +315,8 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
         .expect("the variant source must raise through the bridge");
     let resolved = dispatch.resolve_hot_handle_with_context(
         raised,
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     );
     let materialized = dispatch

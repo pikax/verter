@@ -14,8 +14,8 @@ use super::*;
 static_assertions::assert_impl_all!(TypeParamBinding: verter_no_typeexpr::NoTypeExpr);
 
 /// Shared test pool: prepare fns intern identities through it.
-fn test_interner() -> Arc<crate::identity_interner::IdentityInterner> {
-    Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account())
+fn test_interner() -> Arc<verter_type_engine::identity_interner::IdentityInterner> {
+    Arc::new(verter_type_engine::identity_interner::IdentityInterner::with_process_local_account())
 }
 
 fn ordinary_import_canonicalization(entries: &[(&str, &str, &str)]) -> ImportCanonicalization {
@@ -54,7 +54,7 @@ fn prepares_local_exported_type_decl_from_shallow_file_state() {
     assert!(
         prepared
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("label")),
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("label")),
         "member index should contain 'label' property"
     );
 }
@@ -494,13 +494,13 @@ export interface Props { child: Inner; data: Local }
     assert!(
         prepared
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("child")),
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("child")),
         "member index should contain 'child'"
     );
     assert!(
         prepared
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("data")),
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("data")),
         "member index should contain 'data'"
     );
 }
@@ -1077,7 +1077,7 @@ fn unrelated_unresolved_import_does_not_block_strict_type_preparation() {
         .expect("SideMenuProps is an authored declaration");
     assert!(prepared
         .member_index
-        .contains_key(&crate::semantic_query::PropertyKey::identifier("visible")));
+        .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("visible")));
     assert!(
         cache.slot_committed_for_test("SideMenuProps"),
         "a complete exact declaration must be admitted to its write-once slot"
@@ -1089,7 +1089,7 @@ fn unrelated_unresolved_import_does_not_block_strict_type_preparation() {
         .expect("Menu.NamespacedProps is an authored declaration");
     assert!(namespaced
         .member_index
-        .contains_key(&crate::semantic_query::PropertyKey::identifier("open")));
+        .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("open")));
     assert!(cache.slot_committed_for_test("Menu.NamespacedProps"));
 }
 
@@ -1361,8 +1361,9 @@ export interface Props { label: string }
 export type Variant = 'solid' | 'outline'
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
-    let interner =
-        Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account());
+    let interner = Arc::new(
+        verter_type_engine::identity_interner::IdentityInterner::with_process_local_account(),
+    );
     let bundle = build_prepared_decl_bundle(
         "/src/types.ts",
         Arc::clone(&state),
@@ -1413,8 +1414,9 @@ export interface Props { label: string }
 export const defaults = { label: 'ok' }
 "#;
     let state = ShallowFileState::service_backed_for_test(source);
-    let interner =
-        Arc::new(crate::identity_interner::IdentityInterner::with_process_local_account());
+    let interner = Arc::new(
+        verter_type_engine::identity_interner::IdentityInterner::with_process_local_account(),
+    );
     let bundle = build_prepared_decl_bundle(
         "/src/types.ts",
         Arc::clone(&state),

@@ -14,11 +14,11 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{LiteralValue, PrimitiveName, TopLevelOwnerId, TypeExpr};
 
@@ -154,8 +154,8 @@ fn eval(host: &Arc<VerterHost>, canonical: &str, name: &str) -> Outcome {
         ),
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     };
     match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key.clone()))) {
@@ -434,9 +434,9 @@ fn a_module_const_bound_to_a_tagged_template_is_the_tag_return() {
     let env = host.host_view_env_hashes_for(TAGS);
     let project_identity = host.host_view_project_identity_for(TAGS).fold_u32();
     let node = match dispatch.execute_type_node(SemanticQueryKey::TypeOf {
-        value_root: crate::semantic_query::ValueRootSlotIdentity::new(
-            crate::semantic_query::ValueRootKey {
-                scope: crate::semantic_query::ScopeId::file(
+        value_root: verter_type_engine::semantic_query::ValueRootSlotIdentity::new(
+            verter_type_engine::semantic_query::ValueRootKey {
+                scope: verter_type_engine::semantic_query::ScopeId::file(
                     Arc::from(TAGS),
                     TopLevelOwnerId::ordinary_file(),
                 ),
@@ -447,9 +447,9 @@ fn a_module_const_bound_to_a_tagged_template_is_the_tag_return() {
             env.lib_env_hash,
         ),
         path: Arc::from([]),
-        context: crate::semantic_query::TypeOfContext::new(
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::TypeOfContext::new(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
             ),
             env.resolve_env_hash,
         ),

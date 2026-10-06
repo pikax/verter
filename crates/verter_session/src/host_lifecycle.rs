@@ -25,13 +25,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::id::canonicalize_id;
-use crate::instant::Instant;
 use crate::shared::{read_lock, write_lock};
 use crate::VerterHost;
 use crate::{
     meta_provenance::{MetaProvenance, MetaProvenanceSnapshot},
     types::{HostMetricsSnapshot, HostRetentionSnapshot},
 };
+use verter_type_engine::instant::Instant;
 
 impl VerterHost {
     /// Swap the workspace backing this host.
@@ -300,7 +300,7 @@ impl VerterHost {
         // Engine refuses publication.
         let importer =
             if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(parent_canonical_id) {
-                crate::request_context::current_request_context()
+                verter_type_engine::request_context::current_request_context()
                     .map(|request| Arc::clone(&request.canonical_id))
                     .unwrap_or_else(|| Arc::from(parent_canonical_id))
             } else {

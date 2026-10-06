@@ -337,8 +337,8 @@ fn exhausted_active_work_reports_the_active_resource_outcome() {
 /// poison an enclosing derivation that consumed it.
 #[test]
 fn every_refusal_maps_to_a_locally_confined_non_admission_reason() {
-    use crate::cache_runtime::admission::non_admission_propagation;
     use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
+    use verter_type_engine::cache_runtime::admission::non_admission_propagation;
     for refusal in [
         RetentionRefusal::Oversized {
             requested: 2,
@@ -706,7 +706,7 @@ fn a_result_cache_under_pressure_stores_nothing_and_disturbs_nothing() {
 fn no_reachable_candidate_store_retains_off_the_aggregate_account() {
     let process_local = SemanticRetentionAccount::process_local();
 
-    let memo = crate::semantic_query_memo::SemanticGraphStore::new();
+    let memo = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
     assert!(
         Arc::ptr_eq(memo.retention_account(), &process_local),
         "a memo store built without an explicit account must charge the one \

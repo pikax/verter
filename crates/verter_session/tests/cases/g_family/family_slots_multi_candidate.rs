@@ -21,13 +21,13 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
-    DepSignature, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::{
+    DepSignature, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -56,7 +56,7 @@ fn instantiate_identity_key(host: &VerterHost, canonical: &str, symbol: &str) ->
     // populates EXACTLY one slot and the assertions stay single-slot.
     verter_session::for_tests::instantiate_key_for_tests(
         host,
-        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from(symbol),

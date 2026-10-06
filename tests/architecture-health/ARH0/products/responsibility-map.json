@@ -154,11 +154,25 @@
         "kind": "train"
       },
       "responsibility": [
-        "host/session boundary, resolver_core orchestration, project semantic dispatch, component-meta host caches"
+        "host/session boundary, resolver_core orchestration, component-meta host caches"
       ],
       "evidence": [
         "charter-declared: 138 mentions",
         "coupling: top hub of shared-commit graph"
+      ]
+    },
+    {
+      "module": "crates/verter_type_engine",
+      "owner": {
+        "id": "rev11.flow",
+        "kind": "train"
+      },
+      "responsibility": [
+        "semantic query vocabulary and graph store, project semantic dispatch, signature kernel, cache runtime, request context and fact-tracing runtime"
+      ],
+      "evidence": [
+        "graph: fan-in 5 (verter_session, verter_bench, verter_ffi, verter_napi, verter_wasm)",
+        "documented: verter_type_engine Cargo.toml layering contract"
       ]
     },
     {
@@ -1221,7 +1235,7 @@
       "provenance": "hand-written"
     },
     {
-      "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+      "path": "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs",
       "loc": 15021,
       "classification": "god-module-candidate",
       "responsibilities": [
@@ -1240,7 +1254,7 @@
       "provenance": "hand-written"
     },
     {
-      "path": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+      "path": "crates/verter_type_engine/src/project_semantic_dispatch/build.rs",
       "loc": 12449,
       "classification": "god-module-candidate",
       "responsibilities": [
@@ -1260,7 +1274,7 @@
       "provenance": "hand-written"
     },
     {
-      "path": "crates/verter_session/src/semantic_query.rs",
+      "path": "crates/verter_type_engine/src/semantic_query.rs",
       "loc": 10634,
       "classification": "god-module-candidate",
       "responsibilities": [
@@ -1346,17 +1360,17 @@
         "generated": false
       },
       {
-        "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+        "path": "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs",
         "loc": 15021,
         "generated": false
       },
       {
-        "path": "crates/verter_session/src/project_semantic_dispatch/build.rs",
+        "path": "crates/verter_type_engine/src/project_semantic_dispatch/build.rs",
         "loc": 12449,
         "generated": false
       },
       {
-        "path": "crates/verter_session/src/semantic_query.rs",
+        "path": "crates/verter_type_engine/src/semantic_query.rs",
         "loc": 10634,
         "generated": false
       },
@@ -1371,12 +1385,12 @@
         "generated": false
       },
       {
-        "path": "crates/verter_session/src/project_semantic_dispatch/walk.rs",
+        "path": "crates/verter_type_engine/src/project_semantic_dispatch/walk.rs",
         "loc": 8569,
         "generated": false
       },
       {
-        "path": "crates/verter_session/src/project_semantic_dispatch/relation.rs",
+        "path": "crates/verter_type_engine/src/project_semantic_dispatch/relation.rs",
         "loc": 8096,
         "generated": false
       },
@@ -1406,7 +1420,7 @@
         "generated": false
       },
       {
-        "path": "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+        "path": "crates/verter_type_engine/src/project_semantic_dispatch/raise.rs",
         "loc": 5712,
         "generated": false
       },
@@ -1461,7 +1475,7 @@
         "generated": false
       },
       {
-        "path": "crates/verter_session/src/project_semantic_dispatch/mod.rs",
+        "path": "crates/verter_type_engine/src/project_semantic_dispatch/mod.rs",
         "loc": 4397,
         "generated": false
       },
@@ -1568,7 +1582,7 @@
         "touches": 52
       },
       {
-        "path": "crates/verter_session/src/project_semantic_dispatch/flow_return.rs",
+        "path": "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs",
         "touches": 48
       },
       {

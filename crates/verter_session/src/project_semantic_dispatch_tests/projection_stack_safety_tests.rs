@@ -5,14 +5,16 @@ use std::sync::Arc;
 use super::locator_view::{LocatorViewInputs, ViewMemo};
 use super::walk::ShallowDiagnostic;
 use super::ProjectSemanticDispatch;
-use crate::request_context::{current_cold_compute_completeness, ColdComputeCompletenessScope};
-use crate::resolver_core::scope_shadowing::ScopeShadowing;
-use crate::semantic_query::{
+use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::request_context::{
+    current_cold_compute_completeness, ColdComputeCompletenessScope,
+};
+use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+use verter_type_engine::semantic_query::{
     InstantiateContext, InstantiateKey, NodeScopeId, PartialReasonSet, PrimitiveKind,
     ProjectionMode, ProjectionReductionContext, QueryResult, ResultCompleteness, SemanticNodeData,
     SemanticQueryKey,
 };
-use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::locators::{
     AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot,
 };
@@ -100,7 +102,7 @@ fn run_deep_tuple_projection_child() {
             let _scope = ColdComputeCompletenessScope::enter();
             let dispatch = ProjectSemanticDispatch::new(worker_host.as_ref());
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
-                crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                     Arc::from("/deep.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     Arc::from("Deep"),
@@ -166,7 +168,7 @@ fn run_deep_conditional_projection_child() {
             let _scope = ColdComputeCompletenessScope::enter();
             let dispatch = ProjectSemanticDispatch::new(worker_host.as_ref());
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
-                crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                     Arc::from("/deep.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     Arc::from("Deep"),
@@ -220,7 +222,7 @@ fn run_deep_structural_validation_child() {
     // bounded-loop: fixed finite structural-validation fixture depth.
     for _ in 0..STRUCTURAL_VALIDATION_DEPTH {
         root = graph.intern_node(SemanticNodeData::Intersection(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 vec![leaf, root].into_boxed_slice(),
             )),
         ));
@@ -323,7 +325,7 @@ fn authored_200_deep_closed_conditionals_project_complete_on_2_mib_stack() {
 }
 
 fn projection_inputs<'a>(
-    env: &'a rustc_hash::FxHashMap<String, crate::semantic_query::SemanticNodeId>,
+    env: &'a rustc_hash::FxHashMap<String, verter_type_engine::semantic_query::SemanticNodeId>,
     scope: &'a NodeScopeId,
     names: &'a rustc_hash::FxHashMap<
         std::sync::Arc<str>,
@@ -352,8 +354,8 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
         element: number,
         readonly: false,
     });
-    let member = |value| crate::semantic_query::SurfaceMember {
-        key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+    let member = |value| verter_type_engine::semantic_query::SurfaceMember {
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
         value,
         optional: false,
         readonly: false,
@@ -362,16 +364,16 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
         visibility: verter_type_expr::MemberVisibility::Public,
         spans: Default::default(),
         declaration_origin: None,
-        declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+        declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+        merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
         excess_origin: verter_type_expr::ExcessPropertyOrigin::SpreadTainted,
     };
     let root = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-        crate::semantic_query::ObjectSpreadProgram {
+        verter_type_engine::semantic_query::ObjectSpreadProgram {
             effects: Arc::from([
-                crate::semantic_query::ObjectConstructionEffect::DirectProperty(
-                    crate::semantic_query::AuthoredPropertyEffect {
-                        key: crate::semantic_query::AuthoredPropertyKey::string("a"),
+                verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
+                    verter_type_engine::semantic_query::AuthoredPropertyEffect {
+                        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
                         value: number,
                         optional: false,
                         readonly: false,
@@ -379,12 +381,12 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
                         spans: Default::default(),
                         declaration_origin: None,
                         declared_in_macro_type_arg:
-                            crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                        merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                            verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                        merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                         excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                     },
                 ),
-                crate::semantic_query::ObjectConstructionEffect::Spread(array),
+                verter_type_engine::semantic_query::ObjectConstructionEffect::Spread(array),
             ]),
         },
     ));
@@ -419,7 +421,7 @@ fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing
     // array level above it (an array of primitives is its own projection
     // and would cost one step).
     let leaf = graph.intern_node(SemanticNodeData::Opaque(
-        crate::semantic_query::QueryError::Miss,
+        verter_type_engine::semantic_query::QueryError::Miss,
     ));
     let mut root = leaf;
     const ARRAY_DEPTH: usize = 4;
@@ -480,7 +482,7 @@ fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
     dispatch.set_connected_limits_for_tests(0, 24);
     let graph = host.project_type_store().semantic_graph();
     let recursive = graph.intern_node(SemanticNodeData::DeclRef {
-        identity: crate::semantic_query::DeclIdentity {
+        identity: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/recursive.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
@@ -523,7 +525,7 @@ fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
     assert!(matches!(
         graph.node_data(outcome.node).as_deref(),
         Some(SemanticNodeData::Opaque(
-            crate::semantic_query::QueryError::RecursiveRef { name, .. }
+            verter_type_engine::semantic_query::QueryError::RecursiveRef { name, .. }
         )) if name.as_ref() == "Recursive"
     ));
     assert_eq!(memo.get(&(recursive, context)), Some(&outcome.node));
@@ -536,7 +538,7 @@ fn exact_memo_identity_cycle_precedes_both_operational_limits() {
     dispatch.set_connected_limits_for_tests(0, 0);
     let graph = host.project_type_store().semantic_graph();
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/deep.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Deep"),
@@ -624,7 +626,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_recomputes() {
     // `Runaway<[...T]>` level has a fresh node identity and no exact in-flight
     // key cycle can turn it into the legitimate recursive sentinel case.
     let runaway_carrier = graph.intern_node(SemanticNodeData::InstantiationRef {
-        base: crate::semantic_query::DeclIdentity {
+        base: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/runaway.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
@@ -633,7 +635,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_recomputes() {
         args: Arc::from([string]),
     });
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/w/lib.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("ReturnType"),
@@ -704,7 +706,7 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_is_not_cached() {
     dispatch.set_connected_limits_for_tests(128, 1);
     let graph = host.project_type_store().semantic_graph();
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/deep.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Deep"),
@@ -769,7 +771,7 @@ fn legitimate_recursive_type_uses_recursive_carrier_without_limit_diagnostic() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let _scope = ColdComputeCompletenessScope::enter();
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/deep.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Deep"),
@@ -831,7 +833,7 @@ fn stable_unresolved_reference_is_complete_carrier_without_limit_diagnostic() {
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     let _scope = ColdComputeCompletenessScope::enter();
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from("/deep.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Deep"),
@@ -864,7 +866,7 @@ fn stable_unresolved_reference_is_complete_carrier_without_limit_diagnostic() {
                 .node_data(value)
                 .as_deref(),
             Some(SemanticNodeData::Opaque(
-                crate::semantic_query::QueryError::Miss
+                verter_type_engine::semantic_query::QueryError::Miss
             ))
         ),
         "the unresolved authored symbol must remain the stable Complete miss carrier"

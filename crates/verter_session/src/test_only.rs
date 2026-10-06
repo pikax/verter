@@ -69,7 +69,7 @@ pub mod mapper_fingerprint {
 
     use verter_type_expr::{MappedModifier, TypeExpr};
 
-    use crate::mapper_binder_registry::{MapperBinderRegistry, MapperFingerprint};
+    use verter_type_engine::mapper_binder_registry::{MapperBinderRegistry, MapperFingerprint};
 
     /// Public newtype around the internal `MapperFingerprint`.
     /// This is what `tests/cases/g_misc3/mapper_fingerprint_content_addressed.rs`
@@ -148,9 +148,9 @@ pub mod semantic_source_probe {
     use verter_type_expr::facts::SemanticTypeSource;
     use verter_type_expr::TypeExpr;
 
-    use crate::project_semantic_dispatch::semantic_source as probe;
     use crate::resolver_core::HostCapabilities;
     use crate::VerterHost;
+    use verter_type_engine::project_semantic_dispatch::semantic_source as probe;
 
     /// Whether a published source's DEMAND-walk (Published(Expanded)) payload
     /// carries ANY typed degradation — the masking probe over the full

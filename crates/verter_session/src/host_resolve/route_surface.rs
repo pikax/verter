@@ -14,9 +14,9 @@
 #[cfg(test)]
 use std::sync::Arc;
 
-#[cfg(test)]
-use crate::request_observers::component_meta_trace_custom;
 use crate::VerterHost;
+#[cfg(test)]
+use verter_type_engine::component_meta_trace_custom;
 
 impl VerterHost {
     /// The COMPLETE reuse gate for a published `IndexedReady` surface:
@@ -156,10 +156,10 @@ impl VerterHost {
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<crate::semantic_query::DeclIdentity> {
+    ) -> Option<verter_type_engine::semantic_query::DeclIdentity> {
         let scope_payload_arc = self.prepared_decl_bundle(scope_canonical_id).map(|bundle| {
             std::sync::Arc::new(
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
                     &*bundle,
                     scope_owner,
                 ),
@@ -167,15 +167,16 @@ impl VerterHost {
         });
 
         let fixture_dispatch_0 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self);
-        let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self,
-            &fixture_dispatch_0,
-            scope_canonical_id,
-            scope_owner,
-            scope_payload_arc.as_deref(),
-            symbol_name,
-        )?;
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(self);
+        let resolved_root =
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                self,
+                &fixture_dispatch_0,
+                scope_canonical_id,
+                scope_owner,
+                scope_payload_arc.as_deref(),
+                symbol_name,
+            )?;
         // Walk the re-export chain to land on the declaring file.
         let (declaring_canonical, declaring_symbol) = self.resolve_prepared_decl_target(
             resolved_root.canonical_id.as_ref(),
@@ -185,7 +186,7 @@ impl VerterHost {
             .shallow_file_state(declaring_canonical.as_str())
             .map(|s| s.whole_hash)
             .unwrap_or_default();
-        Some(crate::semantic_query::DeclIdentity {
+        Some(verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: std::sync::Arc::from(declaring_canonical.as_str()),
             owner: resolved_root.owner,
             whole_hash,

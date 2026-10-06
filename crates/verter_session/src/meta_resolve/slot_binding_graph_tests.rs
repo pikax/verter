@@ -584,7 +584,10 @@ defineSlots<Slots>()
     // flag via `resolve_component_meta(Expanded)`. A naive synthesis
     // that emits optional=true for the first arm fails this assertion.
     let resolved = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("resolved expanded");
     let key = "default.value".to_string();
     let expanded_field = resolved
@@ -1881,7 +1884,10 @@ defineProps<{ msg: MyStr }>()
     );
 
     let resolved = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("resolved expanded");
     let evaluated = resolved
         .evaluated_types

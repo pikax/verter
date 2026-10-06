@@ -23,7 +23,7 @@
 //! can honour an `Instant`-keyed `since` window without having to
 //! re-key records by wall-clock time.
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 use std::collections::BTreeMap;
 

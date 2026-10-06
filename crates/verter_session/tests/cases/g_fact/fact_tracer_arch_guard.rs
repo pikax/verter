@@ -35,7 +35,8 @@ fn read_workspace_file(rel: &str) -> String {
 
 #[test]
 fn r18_carve_out_documented_for_tls_installer() {
-    let src = read_workspace_file("crates/verter_session/src/resolver_core/resolver_context.rs");
+    let src =
+        read_workspace_file("crates/verter_type_engine/src/resolver_core/resolver_context.rs");
 
     // The documented carve-out is the rationale for why a
     // per-cold-compute thread-local does NOT violate R18. The

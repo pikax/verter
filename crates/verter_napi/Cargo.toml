@@ -45,6 +45,7 @@ verter_audit = { path = "../verter_audit" }
 verter_compiler = { path = "../verter_compiler", version = "0.0.1-beta.1" }
 verter_css_syntax = { workspace = true }
 verter_session = { path = "../verter_session", version = "0.0.1-beta.1" }
+verter_type_engine = { path = "../verter_type_engine", version = "0.0.1-beta.1" }
 verter_workspace = { path = "../verter_workspace", version = "0.0.1-beta.1" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-beta.1" }
 verter_actions = { path = "../verter_actions", version = "0.0.1-beta.1" }

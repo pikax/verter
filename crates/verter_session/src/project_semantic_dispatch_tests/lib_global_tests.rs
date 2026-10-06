@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
 use super::*;
-use crate::semantic_query::{
-    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
-};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{
+    FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
+};
 use verter_type_expr::facts::FunctionPartIdentity;
 use verter_type_expr::{PrimitiveName, TopLevelOwnerId, TypeExpr};
 
@@ -172,8 +172,8 @@ fn eval(
             ),
             normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
-            demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-            input: crate::semantic_query::FlowInputContext::empty(),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
         match dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key))) {
@@ -333,7 +333,7 @@ fn request_return(host: &Arc<VerterHost>, canonical: &str, name: &str) -> TypeEx
     };
     let carrier = host.get_flow_return_type_with_audit(
         &identity,
-        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
     );
     let result = carrier
         .as_result()
@@ -480,13 +480,15 @@ fn a_primitive_wrapper_read_is_the_demanding_projects() {
         "interface String { (): \"b\"; }\n",
     );
     let graph = host.project_type_store().semantic_graph();
-    let string = graph.intern_node(crate::semantic_query::SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
-    ));
+    let string = graph.intern_node(
+        verter_type_engine::semantic_query::SemanticNodeData::Primitive(
+            verter_type_engine::semantic_query::PrimitiveKind::String,
+        ),
+    );
     let key = |subject| SemanticQueryKey::SignaturesOfType {
         subject,
-        kind: crate::semantic_query::SignatureKind::Call,
-        context: crate::semantic_query::SemanticContextId::production(),
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
+        context: verter_type_engine::semantic_query::SemanticContextId::production(),
     };
     // One read under `canonical`'s demand: the rendered signatures and the
     // wrapper surface the demand's project declares.

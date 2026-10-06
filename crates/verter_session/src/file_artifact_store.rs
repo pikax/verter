@@ -994,7 +994,7 @@ impl FileArtifactStore {
         Self::with_counters_and_schema_version(
             live,
             stale,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
         )
     }
 
@@ -1173,7 +1173,7 @@ impl FileArtifactStore {
         root: &FileArtifactRoot,
         key: &FileArtifactKey,
     ) -> Option<Arc<FileArtifacts>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         if !self.owns_root(root) || root.is_exhausted() {
@@ -1210,7 +1210,7 @@ impl FileArtifactStore {
         canonical: &str,
     ) -> SmallVec<[FileArtifactKey; 2]> {
         let mut keys: SmallVec<[FileArtifactKey; 2]> = SmallVec::new();
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return keys;
         }
         if !self.owns_root(root) || root.is_exhausted() {
@@ -1455,7 +1455,7 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self.canonical_keys.get(canonical_id).and_then(|slot| {
@@ -1476,7 +1476,7 @@ impl FileArtifactStore {
                     Arc::clone(&stored.payload.indexed)
                 })
         });
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1532,7 +1532,7 @@ impl FileArtifactStore {
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self
@@ -1558,7 +1558,7 @@ impl FileArtifactStore {
                         Arc::clone(&stored.payload.indexed)
                     })
             });
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1609,7 +1609,7 @@ impl FileArtifactStore {
     /// artifact uses [`Self::get_overlay_scoped`] (exact key) instead.
     #[must_use]
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let mut result: Option<Arc<IndexedReady>> = None;
@@ -1631,7 +1631,7 @@ impl FileArtifactStore {
                 }
             }
         }
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -2427,7 +2427,7 @@ impl FileArtifactStore {
     /// Strict lookup by full content-addressed key.
     #[must_use]
     pub fn get_artifacts(&self, key: &FileArtifactKey) -> Option<Arc<FileArtifacts>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         self.artifacts.get(key).map(|entry| {
@@ -2530,7 +2530,7 @@ impl FileArtifactStore {
         parse_key: &verter_language::ParseKey,
         file_language_id: &FileLanguage,
     ) -> Option<Arc<FileArtifacts>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let mut matched: Option<Arc<FileArtifacts>> = None;
@@ -2650,7 +2650,7 @@ impl FileArtifactStore {
     /// (exact key) instead.
     #[must_use]
     pub fn get_artifacts_any(&self, canonical: &str) -> Option<Arc<FileArtifacts>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let mut matched: Option<Arc<FileArtifacts>> = None;
@@ -2756,7 +2756,7 @@ impl FileArtifactStore {
         // R23 typed event: a `FileArtifactStore` entry was admitted.
         // Best-effort emission — silent no-op when no observer
         // accumulator is installed on the current thread.
-        crate::request_observers::push_structured_event(
+        verter_type_engine::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                 canonical_id: Arc::clone(&canonical),
                 action: verter_audit::FileArtifactCacheAction::Admit,
@@ -2805,7 +2805,7 @@ impl FileArtifactStore {
             self.bump_artifact_generation();
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
-            crate::request_observers::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                     canonical_id: canonical,
                     action: verter_audit::FileArtifactCacheAction::Evict,
@@ -2845,7 +2845,7 @@ impl FileArtifactStore {
             // downstream telemetry can attribute drain footprint
             // per `FileArtifactKey` dimension.
             for (key, _payload) in &removed_pairs {
-                crate::request_observers::push_structured_event(
+                verter_type_engine::request_observers::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -2882,7 +2882,7 @@ impl FileArtifactStore {
                 .fetch_add(removed as u64, Ordering::Relaxed);
             self.bump_artifact_generation();
             for (key, _payload) in &removed_pairs {
-                crate::request_observers::push_structured_event(
+                verter_type_engine::request_observers::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -2926,7 +2926,7 @@ impl FileArtifactStore {
         content_hash: Hash16,
         mut visit: impl FnMut(&FileArtifactKey, &Arc<FileArtifacts>),
     ) {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return;
         }
         if let Some(slot) = self.canonical_keys.get(canonical) {
@@ -3402,7 +3402,7 @@ impl FileArtifactStore {
     }
 }
 
-impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
+impl verter_type_engine::cache_schema::CacheSchemaVersioned for FileArtifactStore {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -3439,19 +3439,19 @@ impl crate::cache_schema::CacheSchemaVersioned for FileArtifactStore {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for FileArtifactStore {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for FileArtifactStore {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent]
     }
-    fn invalidate(&self, _domain: crate::invalidation_domain::InvalidationDomain) {
+    fn invalidate(&self, _domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
         // FileArtifacts survives project-generation bumps (content_hash is
         // sufficient identity); per-canonical eviction is the only
         // invalidation mode.
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for FileArtifactStore {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for FileArtifactStore {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         let before = self.len();
         self.remove(canonical_id);
@@ -3577,7 +3577,7 @@ pub(crate) fn emit_module_augmentation_index_shape_event(
             None,
         ),
     };
-    crate::request_observers::push_structured_event(
+    verter_type_engine::request_observers::push_structured_event(
         crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationIndexShape {
             target_kind_tag: tag,
             external_specifier,
@@ -3642,7 +3642,7 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
 /// dimension); the parallel `semantic_hash` and `display_hash`
 /// fields carry both lane hashes simultaneously.
 fn emit_fact_registry_writes(canonical_id: &Arc<str>, fact: &fact_registry::Fact) {
-    crate::request_observers::push_structured_event(
+    verter_type_engine::request_observers::push_structured_event(
         crate::component_meta_audit::StructuredAuditEvent::FactRegistryWrite {
             canonical_id: Arc::clone(canonical_id),
             fact_key_kind: fact_key_kind_tag_for(&fact.key),

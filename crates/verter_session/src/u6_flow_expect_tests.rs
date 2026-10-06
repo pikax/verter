@@ -40,14 +40,14 @@ use std::sync::Arc;
 
 use super::{degr_of, upsert, Degr};
 use crate::host_flow_return_audit::FlowReturnError;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    FlowReturnFailure, FlowReturnUnsupported, LiteralValue, PrimitiveKind, QueryError,
-    ReturnProjectionDemand, SemanticNodeData, SemanticNodeId, SignatureKind,
-};
 use crate::types::HostConfig;
 use crate::{FileLanguage, VerterHost};
 use verter_session_query::flow::policy::FlowGap;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    FlowReturnFailure, FlowReturnUnsupported, LiteralValue, PrimitiveKind, QueryError,
+    ReturnProjectionDemand, SemanticNodeData, SemanticNodeId, SignatureKind,
+};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
@@ -364,12 +364,12 @@ pub(crate) fn node_matches(
         (ExpectedNode::SpreadObject(arms), SemanticNodeData::ObjectSpreadProgram(_)) => {
             match dispatch.project_object_spread_for_consumer(
                 node,
-                crate::semantic_query::ObjectProjectionSelector::Surface,
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Expanded,
+                verter_type_engine::semantic_query::ObjectProjectionSelector::Surface,
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 ),
             ) {
-                crate::semantic_query::QueryResult::Value(formula) => {
+                verter_type_engine::semantic_query::QueryResult::Value(formula) => {
                     spread_arms_match(dispatch, arms, formula.alternatives(), depth)
                 }
                 _ => false,
@@ -387,7 +387,7 @@ pub(crate) fn node_matches(
 fn spread_arms_match(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     arms: &[ExpectedSpreadArm],
-    alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
+    alternatives: &[verter_type_engine::semantic_query::ObjectProjectionAlternative],
     depth: usize,
 ) -> bool {
     if arms.len() != alternatives.len() {
@@ -395,21 +395,21 @@ fn spread_arms_match(
     }
     fn arm_matches(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-        alternative: &crate::semantic_query::ObjectProjectionAlternative,
+        alternative: &verter_type_engine::semantic_query::ObjectProjectionAlternative,
         expected: &ExpectedSpreadArm,
         depth: usize,
     ) -> bool {
         if alternative.closed().is_some() != expected.closed_domain {
             return false;
         }
-        let mut facts: Vec<&crate::semantic_query::PositiveKeyFact> = Vec::new();
+        let mut facts: Vec<&verter_type_engine::semantic_query::PositiveKeyFact> = Vec::new();
         alternative.positive().visit(|fact| facts.push(fact));
         if facts.len() != expected.members.len() {
             return false;
         }
         fn assign(
             dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-            facts: &[&crate::semantic_query::PositiveKeyFact],
+            facts: &[&verter_type_engine::semantic_query::PositiveKeyFact],
             members: &[ExpectedSpreadMember],
             used: &mut [bool],
             index: usize,
@@ -424,12 +424,12 @@ fn spread_arms_match(
                     match (fact.presence(), fact.facets(), fact.value()) {
                         (
                             presence,
-                            crate::semantic_query::ProjectionEvidence::Proven(facets),
-                            crate::semantic_query::ProjectionEvidence::Proven(value),
+                            verter_type_engine::semantic_query::ProjectionEvidence::Proven(facets),
+                            verter_type_engine::semantic_query::ProjectionEvidence::Proven(value),
                         ) => (
                             matches!(
                                 presence,
-                                crate::semantic_query::PositiveKeyPresence::Optional
+                                verter_type_engine::semantic_query::PositiveKeyPresence::Optional
                             ),
                             facets.readonly(),
                             facets.method_kind(),
@@ -460,7 +460,7 @@ fn spread_arms_match(
     }
     fn assign_arms(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-        alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
+        alternatives: &[verter_type_engine::semantic_query::ObjectProjectionAlternative],
         arms: &[ExpectedSpreadArm],
         used: &mut [bool],
         index: usize,
@@ -527,13 +527,13 @@ pub(crate) fn render_node(
         SemanticNodeData::ObjectSpreadProgram(_) => "ObjectSpreadProgram".to_owned(),
         SemanticNodeData::Union(members) => {
             let parts: Vec<String> =
-                crate::semantic_query::printed_union_arms(dispatch.graph(), members)
+                verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members)
                     .into_iter()
                     .map(|arm| match arm {
-                        crate::semantic_query::PrintedUnionArm::Node(member) => {
+                        verter_type_engine::semantic_query::PrintedUnionArm::Node(member) => {
                             render_node(dispatch, member, depth + 1)
                         }
-                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                        verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl) => {
                             format!("Enum({})", decl.decl_name)
                         }
                     })
@@ -595,11 +595,12 @@ pub(crate) fn render_node(
                     "{}{}{}",
                     if predicate.asserts { "asserts " } else { "" },
                     match predicate.subject {
-                        crate::semantic_query::PredicateSubject::This => "this",
-                        crate::semantic_query::PredicateSubject::Parameter(_) => predicate
-                            .subject_parameter(params)
-                            .and_then(|param| param.name.as_deref())
-                            .unwrap_or("?"),
+                        verter_type_engine::semantic_query::PredicateSubject::This => "this",
+                        verter_type_engine::semantic_query::PredicateSubject::Parameter(_) =>
+                            predicate
+                                .subject_parameter(params)
+                                .and_then(|param| param.name.as_deref())
+                                .unwrap_or("?"),
                     },
                     predicate
                         .ty
@@ -2045,7 +2046,9 @@ pub(crate) mod checker_syntax {
     }
 
     impl<'a> LiveMember<'a> {
-        fn from_surface_member(member: &'a crate::semantic_query::SurfaceMember) -> LiveMember<'a> {
+        fn from_surface_member(
+            member: &'a verter_type_engine::semantic_query::SurfaceMember,
+        ) -> LiveMember<'a> {
             LiveMember {
                 name: member.key.as_string(),
                 optional: member.optional,
@@ -2055,18 +2058,20 @@ pub(crate) mod checker_syntax {
             }
         }
 
-        fn from_fact(fact: &'a crate::semantic_query::PositiveKeyFact) -> LiveMember<'a> {
+        fn from_fact(
+            fact: &'a verter_type_engine::semantic_query::PositiveKeyFact,
+        ) -> LiveMember<'a> {
             let (optional, readonly, method_kind, value) =
                 match (fact.presence(), fact.facets(), fact.value()) {
                     (
-                        crate::semantic_query::PositiveKeyPresence::Optional,
-                        crate::semantic_query::ProjectionEvidence::Proven(facets),
-                        crate::semantic_query::ProjectionEvidence::Proven(value),
+                        verter_type_engine::semantic_query::PositiveKeyPresence::Optional,
+                        verter_type_engine::semantic_query::ProjectionEvidence::Proven(facets),
+                        verter_type_engine::semantic_query::ProjectionEvidence::Proven(value),
                     ) => (true, facets.readonly(), facets.method_kind(), Some(*value)),
                     (
-                        crate::semantic_query::PositiveKeyPresence::Required,
-                        crate::semantic_query::ProjectionEvidence::Proven(facets),
-                        crate::semantic_query::ProjectionEvidence::Proven(value),
+                        verter_type_engine::semantic_query::PositiveKeyPresence::Required,
+                        verter_type_engine::semantic_query::ProjectionEvidence::Proven(facets),
+                        verter_type_engine::semantic_query::ProjectionEvidence::Proven(value),
                     ) => (false, facets.readonly(), facets.method_kind(), Some(*value)),
                     _ => (false, false, None, None),
                 };
@@ -2110,10 +2115,12 @@ pub(crate) mod checker_syntax {
             // diagnostic it reports — as `any`.
             (
                 CheckerType::Primitive(PrimitiveKind::Any),
-                SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
-                    diagnostic,
-                    ..
-                }),
+                SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::CheckerRecovery {
+                        diagnostic,
+                        ..
+                    },
+                ),
             ) => diagnostic.recovery() == Some(PrimitiveKind::Any),
             (CheckerType::KeyOf(expected), SemanticNodeData::KeyOf { base }) => {
                 matches_node(dispatch, *base, expected, depth + 1)
@@ -2156,10 +2163,12 @@ pub(crate) mod checker_syntax {
             // declaration's name, a zero-argument reference only.
             (
                 CheckerType::Ref(name),
-                SemanticNodeData::Opaque(crate::semantic_query::QueryError::RecursiveRef {
-                    name: sentinel,
-                    args,
-                }),
+                SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::RecursiveRef {
+                        name: sentinel,
+                        args,
+                    },
+                ),
             ) => args.is_empty() && &**sentinel == name.as_str(),
             // A class-expression instance matches the name the checker
             // prints for a reference to it (`Mixin.(Anonymous class)`,
@@ -2227,36 +2236,39 @@ pub(crate) mod checker_syntax {
             }
             // A union holding every member of one enum prints as the enum.
             (CheckerType::Ref(name), SemanticNodeData::Union(members)) => matches!(
-                crate::semantic_query::printed_union_arms(dispatch.graph(), members).as_slice(),
-                [crate::semantic_query::PrintedUnionArm::Enum(decl)]
+                verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members).as_slice(),
+                [verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl)]
                     if &*decl.decl_name == name.as_str()
             ),
             (CheckerType::Union(exp), SemanticNodeData::Union(members)) => {
                 // Order-insensitive EXACT set equality over the union as the
                 // checker prints it, backtracking so duplicate constituents
                 // are handled exactly.
-                let members = crate::semantic_query::printed_union_arms(dispatch.graph(), members);
+                let members = verter_type_engine::semantic_query::printed_union_arms(
+                    dispatch.graph(),
+                    members,
+                );
                 if members.len() != exp.len() {
                     return false;
                 }
                 fn arm_matches(
                     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-                    arm: &crate::semantic_query::PrintedUnionArm,
+                    arm: &verter_type_engine::semantic_query::PrintedUnionArm,
                     expected: &CheckerType,
                     depth: usize,
                 ) -> bool {
                     match arm {
-                        crate::semantic_query::PrintedUnionArm::Node(node) => {
+                        verter_type_engine::semantic_query::PrintedUnionArm::Node(node) => {
                             matches_node(dispatch, *node, expected, depth)
                         }
-                        crate::semantic_query::PrintedUnionArm::Enum(decl) => {
+                        verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl) => {
                             matches!(expected, CheckerType::Ref(name) if &*decl.decl_name == name.as_str())
                         }
                     }
                 }
                 fn assign(
                     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-                    measured: &[crate::semantic_query::PrintedUnionArm],
+                    measured: &[verter_type_engine::semantic_query::PrintedUnionArm],
                     expected: &[CheckerType],
                     used: &mut [bool],
                     index: usize,
@@ -2378,11 +2390,11 @@ pub(crate) mod checker_syntax {
     /// POSITION with an equal target.
     fn predicate_matches(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-        live: Option<crate::semantic_query::SignaturePredicate>,
+        live: Option<verter_type_engine::semantic_query::SignaturePredicate>,
         expected: Option<&CheckerPredicate>,
         depth: usize,
     ) -> bool {
-        use crate::semantic_query::PredicateSubject;
+        use verter_type_engine::semantic_query::PredicateSubject;
         let (live, expected) = match (live, expected) {
             (None, None) => return true,
             (Some(live), Some(expected)) => (live, expected),
@@ -2456,7 +2468,7 @@ pub(crate) mod checker_syntax {
     /// exact; parameter types are ordered.
     fn function_matches(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-        got_params: &[crate::semantic_query::FunctionParam],
+        got_params: &[verter_type_engine::semantic_query::FunctionParam],
         return_type: SemanticNodeId,
         params: &[CheckerType],
         ret: &CheckerType,
@@ -2617,15 +2629,15 @@ pub(crate) mod checker_syntax {
         expected: &CheckerType,
         depth: usize,
     ) -> bool {
-        use crate::semantic_query::ObjectProjectionAlternative;
+        use verter_type_engine::semantic_query::ObjectProjectionAlternative;
         let formula = match dispatch.project_object_spread_for_consumer(
             node,
-            crate::semantic_query::ObjectProjectionSelector::Surface,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ObjectProjectionSelector::Surface,
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
             ),
         ) {
-            crate::semantic_query::QueryResult::Value(formula) => formula,
+            verter_type_engine::semantic_query::QueryResult::Value(formula) => formula,
             _ => return false,
         };
         let arms = formula.alternatives();
@@ -2684,7 +2696,7 @@ pub(crate) mod checker_syntax {
 
     /// The positive facts of one spread alternative as live members.
     fn arm_live_members(
-        arm: &crate::semantic_query::ObjectProjectionAlternative,
+        arm: &verter_type_engine::semantic_query::ObjectProjectionAlternative,
     ) -> Vec<LiveMember<'_>> {
         let mut members = Vec::new();
         arm.positive().visit(|fact| {
@@ -6285,7 +6297,7 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    let key = crate::semantic_query::FlowReturnKey {
+    let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(canonical.as_str()),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -6296,12 +6308,12 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
         normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(&canonical),
         demand: ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract:
-            crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+            verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
     };
     dispatch.graph().slot_candidate_count_for_tests(
-        &crate::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+        &verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
     )
 }
 

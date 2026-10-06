@@ -5,9 +5,7 @@
 //! whole crate on the pinned toolchain, so co-locating it with the
 //! struct-literal seal fixtures would mask their E0451 evidence.)
 
-use verter_session::semantic_query::operand::{
-    ForceProjectionSegment, SemanticOperandForceDemand, SemanticOperandForceProjection,
-};
+use verter_type_engine::semantic_query::operand::{ForceProjectionSegment, SemanticOperandForceDemand, SemanticOperandForceProjection};
 
 fn main() {
     let _ = SemanticOperandForceProjection::WholeSurface;

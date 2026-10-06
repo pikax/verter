@@ -6,10 +6,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
-use crate::semantic_query::ResultCompleteness;
+use verter_type_engine::semantic_query::ResultCompleteness;
 
-pub(crate) mod ambient_resolve;
-pub(crate) mod bare_name_resolve;
 pub(crate) mod bracketed_generation;
 pub(crate) mod component_meta;
 pub mod component_meta_query_engine;
@@ -35,17 +33,12 @@ pub mod svelte_default_synth;
 pub mod vue_default_synth;
 
 pub mod fact_read_set;
-pub(crate) mod fact_validation_port;
-pub mod fuses;
 pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
 mod owned_lowering_port;
 pub(crate) mod request_bound;
-pub(crate) mod request_ports;
 pub(crate) mod request_store_view;
-pub(crate) mod resolver_context;
 pub mod route_db;
-pub(crate) mod scope_shadowing;
 pub(crate) mod session_resolver_context;
 
 pub use verter_session_query::facts::fact_read_set::{
@@ -62,12 +55,8 @@ pub(crate) use owned_lowering_port::HostRequestContext;
 pub(crate) use request_bound::HostCapabilities;
 #[allow(unused_imports)]
 pub(crate) use request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-pub(crate) use resolver_context::{
-    MaterializeScopeObservation, RequestBoundResolverContext, ResolverCapabilities, ResolverContext,
-};
 pub(crate) use session_resolver_context::SessionResolverContext;
 
-pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use import_binding::ImportBindingKind;
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
 pub use route_db::{
@@ -354,7 +343,7 @@ pub(crate) struct StableExecutionValue<V> {
     /// generic driver, retained as a joinable rendezvous. It rides the
     /// VALUE rather than a side channel so a FOLLOWER that adopts a
     /// retained rendezvous observes the refusal atomically with the value
-    /// and can replay it ([`crate::fact_tracing::replay_reuse_refusal`])
+    /// and can replay it ([`verter_type_engine::fact_tracing::replay_reuse_refusal`])
     /// into its OWN tracer stack — the leader's original fan-out ran on
     /// the leader's thread and never touched the follower's.
     ///
@@ -564,7 +553,7 @@ where
                     executor.store_stable(&value, StableAdmission { _private: () });
                 }
                 if let Some(propagation) = cache_refusal {
-                    crate::fact_tracing::note_non_cacheable_propagation(propagation);
+                    verter_type_engine::fact_tracing::note_non_cacheable_propagation(propagation);
                 }
                 return Ok(RequestRunResult {
                     value,
@@ -583,7 +572,7 @@ where
             // result now.
             if executor.snapshot_is_immutable() {
                 if let Some(propagation) = executor.capture_cache_refusal() {
-                    crate::fact_tracing::note_non_cacheable_propagation(propagation);
+                    verter_type_engine::fact_tracing::note_non_cacheable_propagation(propagation);
                 }
                 return Ok(RequestRunResult {
                     value,
@@ -721,7 +710,7 @@ where
             if matches!(flight.role, SingleflightRole::Follower) {
                 executor.fold_follower_completeness(flight.value.completeness);
             }
-            crate::fact_tracing::replay_reuse_refusal(&flight.value.reuse);
+            verter_type_engine::fact_tracing::replay_reuse_refusal(&flight.value.reuse);
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source,
@@ -739,7 +728,7 @@ where
         // result now instead of recomputing it every remaining attempt plus
         // the fallback.
         if executor.snapshot_is_immutable() {
-            crate::fact_tracing::replay_reuse_refusal(&flight.value.reuse);
+            verter_type_engine::fact_tracing::replay_reuse_refusal(&flight.value.reuse);
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source: RequestSource::Fallback,
@@ -756,7 +745,7 @@ where
     let value = executor.compute(&store_view)?;
     let completeness = executor.capture_completeness();
     if let Some(propagation) = executor.capture_cache_refusal() {
-        crate::fact_tracing::note_non_cacheable_propagation(propagation);
+        verter_type_engine::fact_tracing::note_non_cacheable_propagation(propagation);
     }
     Ok(RequestRunResult {
         value,
@@ -1190,7 +1179,7 @@ where
             // observer / accumulator installed on the current
             // thread) are silent — the counter is the authoritative
             // signal.
-            crate::request_observers::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
                     candidate_size: facts.len() as u32,
                     cap: FACT_SIGNATURE_CAP as u32,
@@ -1205,7 +1194,7 @@ where
             if facts.is_empty() {
                 self.admission_refused
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                crate::request_observers::push_structured_event(
+                verter_type_engine::request_observers::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                         cache_kind: Arc::from(cache_kind),
                         reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1262,7 +1251,7 @@ where
         if facts.len() > FACT_SIGNATURE_CAP {
             self.signature_overflow
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::request_observers::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
                     candidate_size: facts.len() as u32,
                     cap: FACT_SIGNATURE_CAP as u32,
@@ -1273,7 +1262,7 @@ where
         if facts.is_empty() {
             self.admission_refused
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::request_observers::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                     cache_kind: Arc::from(cache_kind),
                     reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1563,7 +1552,7 @@ where
         let archive_checks = self
             .archive_checks
             .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
-        crate::request_observers::push_structured_event(
+        verter_type_engine::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::FactValidationSummary {
                 request_id,
                 cache_kind: Arc::from(cache_kind),
@@ -2883,7 +2872,8 @@ mod tests {
                         value: 7usize,
                         stable: true,
                         computed: true,
-                        completeness: crate::semantic_query::ResultCompleteness::Complete,
+                        completeness:
+                            verter_type_engine::semantic_query::ResultCompleteness::Complete,
                         reuse: verter_session_query::facts::reuse::ReuseClass::Shared,
                     })
                 },
@@ -3250,7 +3240,9 @@ mod tests {
 
         fn capture_completeness(&self) -> ResultCompleteness {
             if self.partial {
-                ResultCompleteness::partial(crate::semantic_query::PartialReasonSet::PROPAGATED)
+                ResultCompleteness::partial(
+                    verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
+                )
             } else {
                 ResultCompleteness::Complete
             }

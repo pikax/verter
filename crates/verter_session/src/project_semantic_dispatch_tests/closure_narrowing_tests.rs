@@ -118,8 +118,8 @@ const FILE: &str = "/ws/closures/invoked.ts";
 fn degradation_of(
     source: &str,
     name: &str,
-) -> Option<crate::semantic_query::FlowReturnDegradation> {
-    use crate::semantic_query::{
+) -> Option<verter_type_engine::semantic_query::FlowReturnDegradation> {
+    use verter_type_engine::semantic_query::{
         SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
     };
     let host = std::sync::Arc::new(crate::VerterHost::new_standalone(
@@ -138,7 +138,7 @@ fn degradation_of(
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
-    let key = crate::semantic_query::FlowReturnKey {
+    let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             std::sync::Arc::from(FILE),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -148,8 +148,8 @@ fn degradation_of(
         ),
         normalized_type_args: std::sync::Arc::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(FILE),
-        demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
-        input: crate::semantic_query::FlowInputContext::empty(),
+        demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        input: verter_type_engine::semantic_query::FlowInputContext::empty(),
         result_contract: super::flow_solve::flow_return_result_contract_id(),
     };
     let super::QueryResult::Value(SemanticQueryOutput {

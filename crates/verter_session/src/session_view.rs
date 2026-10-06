@@ -1041,7 +1041,7 @@ pub fn session_overlay_discriminator(view: &dyn SessionView) -> Option<Hash16> {
 ///
 /// This is the SINGLE derivation every augmentation-index producer routes
 /// through, including the semantic body stitch in
-/// [`crate::project_semantic_dispatch::build::ProjectSemanticDispatch`], so
+/// [`verter_type_engine::project_semantic_dispatch::build::ProjectSemanticDispatch`], so
 /// producers cannot disagree on what
 /// [`crate::file_artifact_store::AugmentationPopulation::Session`] means.
 ///

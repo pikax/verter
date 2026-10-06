@@ -4,7 +4,7 @@
 
 use super::checker_probe_lane_tests::{default_probe_host, with_probe_outcome_on_host};
 use super::evaluate::StructuralFactDemandOutcome;
-use crate::semantic_query::PartialReasonSet;
+use verter_type_engine::semantic_query::PartialReasonSet;
 
 const SOURCE: &str = "type R<T> = { [K in keyof T as K]: T[K] };\n";
 

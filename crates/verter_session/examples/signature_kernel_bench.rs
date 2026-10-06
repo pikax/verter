@@ -81,8 +81,10 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::Instant;
 
 use verter_scheduler::scheduler::SchedulerConfig;
-use verter_session::semantic_query::{ReturnProjectionDemand, SemanticNodeData, SemanticNodeId};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
+    ReturnProjectionDemand, SemanticNodeData, SemanticNodeId,
+};
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity, TopLevelOwnerId};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 

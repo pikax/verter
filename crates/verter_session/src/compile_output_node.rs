@@ -36,18 +36,20 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 
-use crate::cache_runtime::admission::{
-    CacheAdmission, CacheEntry, Candidate, DeferredVictims, FactCandidateDiscriminant,
-    PublishCoreOutcome, PublishOutcome,
-};
-use crate::cache_runtime::node::{ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode};
-use crate::cache_runtime::singleflight::InflightTable;
 use crate::types::{
     CachedTsx, CachedVirtualFile, CompileSlot, DiagnosticsSnapshot, ProfileState, VirtualNodeKind,
 };
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_type_engine::cache_runtime::admission::{
+    CacheAdmission, CacheEntry, Candidate, DeferredVictims, FactCandidateDiscriminant,
+    PublishCoreOutcome, PublishOutcome,
+};
+use verter_type_engine::cache_runtime::node::{
+    ArtifactNode, ComputeCtx, QueryFlightKey, QueryNode,
+};
+use verter_type_engine::cache_runtime::singleflight::InflightTable;
 
 // ── Key shapes ────────────────────────────────────────────────────────
 
@@ -162,7 +164,7 @@ impl CompileOutputValue {
 /// MUST produce byte-identical output and a single warm entry serves
 /// both.
 ///
-/// This node is NOT driven through [`crate::cache_runtime::lookup`].
+/// This node is NOT driven through [`verter_type_engine::cache_runtime::lookup`].
 /// The production callsite (`virtual_file_pipeline.rs`) consults the
 /// store with [`Self::peek`] and, on a miss, cold-builds the output
 /// inline (the `compile_entry` path) and admits the fresh value through

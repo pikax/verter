@@ -116,8 +116,10 @@ fn request_only_singleflight_follower_replays_identical_taint() {
 
     let before_leader = cold_flight_runs(&host);
     let (leader_bundle, leader_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             |_probe| host.prepared_decl_bundle_with_store_view(&view, None, &owner),
         );
     let leader_flights = cold_flight_runs(&host) - before_leader;
@@ -137,8 +139,10 @@ fn request_only_singleflight_follower_replays_identical_taint() {
 
     let before_follower = cold_flight_runs(&host);
     let (follower_bundle, follower_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             |_probe| host.prepared_decl_bundle_with_store_view(&view, None, &owner),
         );
     let follower_flights = cold_flight_runs(&host) - before_follower;
@@ -194,8 +198,10 @@ fn shared_singleflight_follower_stays_cacheable() {
         .participate(owner.to_string(), view.compat_token());
 
     let (leader_bundle, leader_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             |_probe| host.prepared_decl_bundle_with_store_view(&view, None, owner),
         );
     assert!(leader_bundle.is_some(), "the control leader must be served");
@@ -206,8 +212,10 @@ fn shared_singleflight_follower_stays_cacheable() {
     );
 
     let (follower_bundle, follower_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             |_probe| host.prepared_decl_bundle_with_store_view(&view, None, owner),
         );
     drop(lane_pin);
@@ -327,10 +335,13 @@ fn request_only_bundle_never_publishes_shared() {
     assert_eq!(first_flights, 1, "the cold touch runs one flight body");
 
     let before_second = cold_flight_runs(&host);
-    let (second, second_non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
-        |_probe| host.prepared_decl_bundle_with_store_view(&view, None, &owner),
-    );
+    let (second, second_non_cacheable) =
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
+            |_probe| host.prepared_decl_bundle_with_store_view(&view, None, &owner),
+        );
     let second_flights = cold_flight_runs(&host) - before_second;
     drop(lane_pin);
 
@@ -380,7 +391,7 @@ fn traced_read<R>(host: &VerterHost, work: impl FnOnce() -> R) -> TracedRead<R> 
     let ((value, reason), read_set) = host.with_fact_tracer(
         verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         || {
-            let scope = crate::fact_tracing::RefusalObservationScope::enter();
+            let scope = verter_type_engine::fact_tracing::RefusalObservationScope::enter();
             let value = work();
             (value, scope.observed())
         },
