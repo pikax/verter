@@ -11,7 +11,8 @@
 //! would mean a cold-build path slipped through bypassing
 //! `install_fact_tracer` — the defect the carrier substrate closes.
 //!
-//! The scan walks `crates/verter_session/src/**/*.rs`, strips any
+//! The scan walks `crates/verter_session/src/**/*.rs` and
+//! `crates/verter_type_engine/src/**/*.rs`, strips any
 //! `#[cfg(test)]` regions (so the existing test-only memo driver
 //! invocations at `semantic_query_memo/tests.rs` do not false-trigger),
 //! and counts `graph.acquire_query(` matches. Production
@@ -21,10 +22,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-fn read_session_src(rel: &str) -> String {
+/// Read a `verter_type_engine` source file relative to its `src/`.
+fn read_engine_source(rel: &str) -> String {
     let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
     let mut path = PathBuf::from(cargo_manifest_dir);
-    path.push("src");
+    path.push("../verter_type_engine/src");
     path.push(rel);
     fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
@@ -135,11 +137,15 @@ fn strip_comments(src: &str) -> String {
 
 #[test]
 fn dispatch_has_exactly_one_production_acquire_query_call_site() {
-    // Locate every production .rs file under crates/verter_session/src/.
+    // Locate every production .rs file under crates/verter_session/src/ and
+    // crates/verter_type_engine/src/.
     let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let src_root = PathBuf::from(cargo_manifest_dir).join("src");
     let mut files = Vec::new();
-    walk_dir(&src_root, &mut files);
+    walk_dir(&PathBuf::from(cargo_manifest_dir).join("src"), &mut files);
+    walk_dir(
+        &PathBuf::from(cargo_manifest_dir).join("../verter_type_engine/src"),
+        &mut files,
+    );
 
     // For each production file, strip comments + `#[cfg(test)]`
     // regions then count `graph.acquire_query(` occurrences.
@@ -193,7 +199,7 @@ fn dispatch_has_exactly_one_production_acquire_query_call_site() {
 
 #[test]
 fn shared_cold_build_helper_exists_in_dispatch() {
-    let src = read_session_src("project_semantic_dispatch/mod.rs");
+    let src = read_engine_source("project_semantic_dispatch/mod.rs");
     assert!(
         src.contains("fn execute_via_cold_build_helper("),
         "ProjectSemanticDispatch must expose the shared cold-build helper \
@@ -216,7 +222,7 @@ fn execute_read_does_not_acquire_queries_directly() {
     // After the shared cold-build helper refactor, `execute_read`
     // delegates to `execute_via_cold_build_helper`; it does NOT call
     // `graph.acquire_query(` directly.
-    let src = read_session_src("project_semantic_dispatch/raise.rs");
+    let src = read_engine_source("project_semantic_dispatch/raise.rs");
     assert!(
         !src.contains("graph.acquire_query("),
         "execute_read must NOT call `graph.acquire_query(` directly. It must \

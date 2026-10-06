@@ -1115,7 +1115,7 @@ fn merged_decl_reduction_preserves_authored_multi_heritage_arm_order() {
 #[test]
 fn display_source_does_not_call_graph_interning_or_dispatch() {
     let display_rs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
+        .join("../verter_type_engine/src")
         .join("semantic_query")
         .join("display.rs");
     let source = std::fs::read_to_string(&display_rs)

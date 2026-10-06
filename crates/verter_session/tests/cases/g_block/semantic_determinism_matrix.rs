@@ -509,7 +509,7 @@ const STABLE_KEY_TABLE: &[StableKeyRow] = &[
 /// declaration (the same source-text guard discipline the dispatch
 /// tests use).
 fn live_semantic_node_data_variants() -> Vec<String> {
-    let source = read_repo_file("crates/verter_session/src/semantic_query.rs");
+    let source = read_repo_file("crates/verter_type_engine/src/semantic_query.rs");
     let start = source
         .find("pub enum SemanticNodeData {")
         .expect("the SemanticNodeData declaration");
@@ -1010,7 +1010,10 @@ fn det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes() {
         "DET-05: the persisted-cache axis is no longer registered dormant — its driver must \
          exist and run"
     );
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("verter_type_engine")
+        .join("src");
     for cache in ["semantic_query_memo", "signature_kernel"] {
         let mut stack = vec![root.join(cache)];
         // bounded-loop: the two cache module trees.

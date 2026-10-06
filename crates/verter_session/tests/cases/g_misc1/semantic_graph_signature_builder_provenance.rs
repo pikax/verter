@@ -53,11 +53,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Read a `verter_session` source file relative to `src/`.
-fn read_session_source(relative: &str) -> String {
+/// Read a `verter_type_engine` source file relative to its `src/`.
+fn read_engine_source(relative: &str) -> String {
     let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
     let mut path = PathBuf::from(cargo_manifest_dir);
-    path.push("src");
+    path.push("../verter_type_engine/src");
     path.push(relative);
     fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
@@ -110,8 +110,8 @@ const FORBIDDEN: &[&str] = &[
 /// current content.
 #[test]
 fn semantic_graph_signature_builder_is_provenance_pure() {
-    let src = read_session_source("semantic_query_memo/mod.rs");
-    let body = extract_fn_body(&src, "pub(crate) fn semantic_graph_read_set_signature(");
+    let src = read_engine_source("semantic_query_memo/mod.rs");
+    let body = extract_fn_body(&src, "pub fn semantic_graph_read_set_signature(");
     for forbidden in FORBIDDEN {
         assert!(
             !body.contains(forbidden),
@@ -160,9 +160,9 @@ fn scanner_flags_a_planted_violation() {
     );
 
     // Sanity: the scanned source file exists and the builder is in it.
-    let src = read_session_source("semantic_query_memo/mod.rs");
+    let src = read_engine_source("semantic_query_memo/mod.rs");
     assert!(
-        src.contains("pub(crate) fn semantic_graph_read_set_signature("),
+        src.contains("pub fn semantic_graph_read_set_signature("),
         "the graph signature builder must be present in semantic_query_memo/mod.rs"
     );
 }

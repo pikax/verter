@@ -474,15 +474,35 @@ declare global { interface G1 {} }
     // Grep evidence — the provenance projection is computed ONLY by the
     // artifact module; no consumer re-walks raw `IndexedReady` header
     // inventories for overload-group / augmentation-order data.
+    // The session crate and the type engine it builds on are both scanned;
+    // engine paths are reported as `verter_type_engine/<path under src>`.
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src_dir = manifest_dir.join("src");
+    let engine_src_dir = manifest_dir
+        .join("..")
+        .join("verter_type_engine")
+        .join("src");
+    assert!(
+        engine_src_dir.is_dir(),
+        "source root {} is missing",
+        engine_src_dir.display()
+    );
     let mut offenders: Vec<String> = Vec::new();
-    for path in rust_files_under(&src_dir) {
-        let name = path
-            .strip_prefix(&src_dir)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+    let scanned = rust_files_under(&src_dir)
+        .into_iter()
+        .map(|path| (String::new(), src_dir.clone(), path))
+        .chain(rust_files_under(&engine_src_dir).into_iter().map(|path| {
+            (
+                "verter_type_engine/".to_string(),
+                engine_src_dir.clone(),
+                path,
+            )
+        }));
+    for (prefix, root, path) in scanned {
+        let name = format!(
+            "{prefix}{}",
+            path.strip_prefix(&root).unwrap().to_string_lossy()
+        );
         if name == "binder_identity_facts.rs" {
             continue;
         }
@@ -594,46 +614,65 @@ pub(crate) fn binder_identity_facts_are_pre_u2_and_not_n0_owned() {
     // Not N0-owned: nothing named `n0` / `nav_location` may produce the
     // artifact; the only files referencing the substrate are the
     // artifact module itself, the store home (`project_type_store`),
-    // the crate root, and the test-support shim.
-    let src_dir = manifest_dir.join("src");
+    // the crate root, and the test-support shim. The session crate and
+    // the type engine it builds on are both scanned; allowlist entries
+    // are `<crate>/<path under src>`.
+    let crate_srcs = [
+        ("verter_session", manifest_dir.join("src")),
+        (
+            "verter_type_engine",
+            manifest_dir
+                .join("..")
+                .join("verter_type_engine")
+                .join("src"),
+        ),
+    ];
     let allowed = [
-        "binder_identity_facts.rs",
-        "project_type_store.rs",
-        "lib.rs",
-        "for_tests.rs",
+        "verter_session/binder_identity_facts.rs",
+        "verter_session/project_type_store.rs",
+        "verter_session/lib.rs",
+        "verter_session/for_tests.rs",
         // The query-identity type surface — hosts `BinderScopeId` /
         // `DeclarationSlotSeed` (the query-identity projection of the
         // substrate), not a producer.
-        "semantic_query.rs",
+        "verter_type_engine/semantic_query.rs",
         // The facade's family-A memo producer (`memo.rs`) and its engine
         // binding (`engine_binding.rs`) — they SERVE the demand-produced
         // artifact, they do not produce a second one.
-        "project_semantic_dispatch/memo.rs",
-        "project_semantic_dispatch/engine_binding.rs",
+        "verter_type_engine/project_semantic_dispatch/memo.rs",
+        "verter_type_engine/project_semantic_dispatch/engine_binding.rs",
     ];
     let mut offenders: Vec<String> = Vec::new();
-    for path in rust_files_under(&src_dir) {
-        // Normalise the separator so the allowlist below is one list for
-        // every platform (Windows yields `a\b.rs`, POSIX `a/b.rs`).
-        let name = path
-            .strip_prefix(&src_dir)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if allowed.iter().any(|a| *a == name) {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        if text.contains("BinderIdentityFacts") {
-            offenders.push(name.clone());
-        }
-        let lowered = name.to_ascii_lowercase();
+    for (krate, src_dir) in &crate_srcs {
         assert!(
-            !lowered.contains("n0") && !lowered.contains("nav_location"),
-            "no N0 navigation/location producer module may exist for the \
-             binder-identity substrate (found {name})"
+            src_dir.is_dir(),
+            "source root {} is missing",
+            src_dir.display()
         );
+        for path in rust_files_under(src_dir) {
+            // Normalise the separator so the allowlist below is one list for
+            // every platform (Windows yields `a\b.rs`, POSIX `a/b.rs`).
+            let rel = path
+                .strip_prefix(src_dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let name = format!("{krate}/{rel}");
+            if allowed.iter().any(|a| *a == name) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            if text.contains("BinderIdentityFacts") {
+                offenders.push(name.clone());
+            }
+            let lowered = rel.to_ascii_lowercase();
+            assert!(
+                !lowered.contains("n0") && !lowered.contains("nav_location"),
+                "no N0 navigation/location producer module may exist for the \
+                 binder-identity substrate (found {name})"
+            );
+        }
     }
     assert!(
         offenders.is_empty(),

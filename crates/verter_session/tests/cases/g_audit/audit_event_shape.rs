@@ -245,7 +245,9 @@ fn stage_6c_emission_sites_reference_typed_variants() {
     let session_src = crates.join("verter_session").join("src");
 
     let file_artifact_store = session_src.join("file_artifact_store.rs");
-    let augmentation_stitch = session_src
+    let augmentation_stitch = crates
+        .join("verter_type_engine")
+        .join("src")
         .join("project_semantic_dispatch")
         .join("build.rs");
 

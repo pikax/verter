@@ -36,11 +36,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-/// Read a `verter_session` source file relative to `src/`.
-fn read_session_source(relative: &str) -> String {
+/// Read a `verter_type_engine` source file relative to its `src/`.
+fn read_engine_source(relative: &str) -> String {
     let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
     let mut path = PathBuf::from(cargo_manifest_dir);
-    path.push("src");
+    path.push("../verter_type_engine/src");
     path.push(relative);
     fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
@@ -264,7 +264,7 @@ enum ProducerKind {
 }
 
 struct Producer {
-    /// Source file relative to `src/`.
+    /// Source file relative to the type engine's `src/`.
     file: &'static str,
     /// A substring that uniquely identifies the producer's signature
     /// line.
@@ -284,12 +284,12 @@ fn producers() -> [Producer; 3] {
         // other semantic family rides, so it is outside this roster.
         Producer {
             file: "fact_signature_helpers.rs",
-            signature: "pub(crate) fn fact_signature_from_fence(",
+            signature: "pub fn fact_signature_from_fence(",
             kind: ProducerKind::EntryProducer,
         },
         Producer {
             file: "fact_signature_helpers.rs",
-            signature: "pub(crate) fn engine_fact_signature_for_materialize_memo(",
+            signature: "pub fn engine_fact_signature_for_materialize_memo(",
             kind: ProducerKind::EntryProducer,
         },
         // The CONVERTER — `dep_signature_to_fact_signature` translates a
@@ -300,7 +300,7 @@ fn producers() -> [Producer; 3] {
         // from it, only that it still handles the variant.
         Producer {
             file: "fact_signature_helpers.rs",
-            signature: "pub(crate) fn dep_signature_to_fact_signature(",
+            signature: "pub fn dep_signature_to_fact_signature(",
             kind: ProducerKind::Converter,
         },
     ]
@@ -311,7 +311,7 @@ fn producers() -> [Producer; 3] {
 #[test]
 fn no_admitted_carrier_roots_on_route_generation() {
     for producer in producers() {
-        let src = read_session_source(producer.file);
+        let src = read_engine_source(producer.file);
         let body = extract_balanced_body(&src, producer.signature);
         match producer.kind {
             ProducerKind::EntryProducer => assert!(
@@ -603,13 +603,13 @@ fn route_generation_scanner_discriminates() {
 
     // Sanity: the scanned producers exist.
     assert!(
-        read_session_source("fact_signature_helpers.rs")
-            .contains("pub(crate) fn fact_signature_from_fence("),
+        read_engine_source("fact_signature_helpers.rs")
+            .contains("pub fn fact_signature_from_fence("),
         "fact_signature_from_fence must be present in fact_signature_helpers.rs",
     );
     assert!(
-        read_session_source("fact_signature_helpers.rs")
-            .contains("pub(crate) fn dep_signature_to_fact_signature("),
+        read_engine_source("fact_signature_helpers.rs")
+            .contains("pub fn dep_signature_to_fact_signature("),
         "dep_signature_to_fact_signature must be present in fact_signature_helpers.rs",
     );
 }

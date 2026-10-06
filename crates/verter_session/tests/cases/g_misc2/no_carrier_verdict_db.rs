@@ -447,7 +447,7 @@ fn no_carrier_verdict_db_in_production() {
     // exist has to be in the collected set. If the traversal returned
     // empty/partial, this fails loudly instead of passing silently.
     let sentinel = std::path::Path::new("crates")
-        .join("verter_session")
+        .join("verter_type_engine")
         .join("src")
         .join("component_meta_caches.rs");
     assert!(

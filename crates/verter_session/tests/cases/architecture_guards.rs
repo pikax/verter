@@ -84,7 +84,7 @@ fn creo_is_the_only_emit_occurrence_identity_path() {
         violations.join("\n")
     );
 
-    let query = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+    let query = read_workspace_file("crates/verter_type_engine/src/semantic_query.rs");
     let results =
         read_workspace_file("crates/verter_session/src/typeinfo/framework_surface/results.rs");
     let output = read_workspace_file("crates/verter_session/src/meta_resolve/output.rs");
@@ -847,6 +847,7 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
 
     /// Transitively collect every crate-internal re-export ALIAS of
     /// `canonical_forbidden`. Walks every `.rs` under `crates/verter_session/src`
+    /// and `crates/verter_type_engine/src`
     /// and gathers `pub use …X as ALIAS;` / `pub(crate) use …X as ALIAS;`
     /// renames where `X` is already known-forbidden, iterating to a fixpoint so a
     /// chain (`forbidden as r0`, then `r0 as r1`, …) is fully resolved. The
@@ -950,9 +951,18 @@ fn component_meta_resolution_path_has_no_eager_materializer_or_member_fallback()
             false
         }
 
-        let src_dir = workspace_root().join("crates/verter_session/src");
+        // The session crate and the type engine it builds on: a re-export
+        // alias published by the engine is importable from session code too.
         let mut rs_files = Vec::new();
-        collect_rs_files(&src_dir, &mut rs_files);
+        for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+            let src_dir = workspace_root().join(krate);
+            assert!(
+                src_dir.is_dir(),
+                "source root {} is missing",
+                src_dir.display()
+            );
+            collect_rs_files(&src_dir, &mut rs_files);
+        }
         rs_files
             .iter()
             .filter_map(|p| std::fs::read_to_string(p).ok())
@@ -1881,10 +1891,26 @@ mod resolver_core_recursion {
         visitor.visit_file(&parsed);
     }
 
+    /// Production `resolver_core/` files of the session crate and of the
+    /// type engine it builds on (part of the resolver tree lives there).
     pub(super) fn walk_resolver_core_files() -> Vec<PathBuf> {
-        let dir = workspace_root().join("crates/verter_session/src/resolver_core");
+        let dirs = [
+            "crates/verter_session/src/resolver_core",
+            "crates/verter_type_engine/src/resolver_core",
+        ]
+        .map(|d| workspace_root().join(d));
+        for dir in &dirs {
+            assert!(
+                dir.is_dir(),
+                "resolver_core root {} is missing",
+                dir.display()
+            );
+        }
         let mut files = Vec::new();
-        for entry in WalkDir::new(&dir).into_iter().filter_map(Result::ok) {
+        for entry in dirs
+            .iter()
+            .flat_map(|dir| WalkDir::new(dir).into_iter().filter_map(Result::ok))
+        {
             let path = entry.path();
             if !path.is_file() {
                 continue;
@@ -3853,6 +3879,7 @@ pub(crate) mod foundations_guards {
     pub fn guard1_in_scope_dirs() -> Vec<&'static str> {
         vec![
             "crates/verter_session/src",
+            "crates/verter_type_engine/src",
             "crates/verter_semantic/src",
             "crates/verter_diagnostics/src",
             "crates/verter_type_runtime/src",
@@ -6274,11 +6301,19 @@ fn invalidation_by_canonical_impl_exists(crate_root: &std::path::Path, type_head
         let Ok(src) = fs::read_to_string(&file) else {
             continue;
         };
+        // A path-qualified trait (`verter_type_engine::invalidation_domain::
+        // InvalidationByCanonical`) is long enough that rustfmt breaks the
+        // header before `for`; match the header with whitespace runs collapsed
+        // to one space so the line break does not hide the impl.
+        let collapsed = src.split_whitespace().collect::<Vec<_>>().join(" ");
         if src.contains(&needle_generic)
             || src.contains(&needle_concrete_eol)
             || src.contains(&needle_concrete_brace)
             || src.contains(&format!("{needle_concrete}\r\n"))
             || src.contains(&format!("{needle_concrete}{{"))
+            || collapsed.contains(&needle_generic)
+            || collapsed.contains(&needle_concrete_brace)
+            || collapsed.contains(&format!("{needle_concrete}{{"))
         {
             return true;
         }
@@ -6292,9 +6327,12 @@ fn every_db_field_implements_invalidation_by_canonical() {
     let heads = db_field_type_heads_in_struct(&src, "ProjectTypeStore");
 
     let crate_root = workspace_path("crates/verter_session/src");
+    let engine_root = workspace_path("crates/verter_type_engine/src");
     let mut missing: Vec<String> = Vec::new();
     for head in &heads {
-        if !invalidation_by_canonical_impl_exists(&crate_root, head) {
+        if !invalidation_by_canonical_impl_exists(&crate_root, head)
+            && !invalidation_by_canonical_impl_exists(&engine_root, head)
+        {
             missing.push(head.clone());
         }
     }
@@ -6303,7 +6341,8 @@ fn every_db_field_implements_invalidation_by_canonical() {
         missing.is_empty(),
         "guard 9: DB-typed field(s) on ProjectTypeStore have no \
          corresponding `impl InvalidationByCanonical for ...` block \
-         in `crates/verter_session/src/`: {missing:?}. Plan §12.A12 \
+         in `crates/verter_session/src/` or `crates/verter_type_engine/src/`: \
+         {missing:?}. Plan §12.A12 \
          requires every DB to implement the per-canonical drain \
          trait so the cascade `invalidate_canonical_across_all_dbs` \
          can dispatch monomorphically."
@@ -6327,8 +6366,14 @@ fn guard9_predicate_rejects_missing_invalidation_by_canonical_impl() {
         vec!["NonExistentSentinelGuard9Db".to_string()],
         "guard 9 predicate must extract the field's type head id",
     );
-    let crate_root = workspace_path("crates/verter_session/src");
-    let exists = invalidation_by_canonical_impl_exists(&crate_root, "NonExistentSentinelGuard9Db");
+    let exists = ["crates/verter_session/src", "crates/verter_type_engine/src"]
+        .iter()
+        .any(|root| {
+            invalidation_by_canonical_impl_exists(
+                &workspace_path(root),
+                "NonExistentSentinelGuard9Db",
+            )
+        });
     assert!(
         !exists,
         "guard 9 predicate must report `false` for a head identifier \
@@ -6682,7 +6727,7 @@ fn lsp_binary_compile_graph_cannot_reach_verter_mcp() {
 ///
 /// This guard rejects any reintroduction of an OXC-parser-arena
 /// thread-local cache. It scans every `.rs` file under
-/// `crates/verter_session/src/` (excluding `_tests.rs` and `tests.rs`)
+/// `crates/verter_session/src/` and `crates/verter_type_engine/src/` (excluding `_tests.rs` and `tests.rs`)
 /// for the literal cache names — a discriminating identifier is more
 /// reliable here than a generic `thread_local!\s*\{` regex which would
 /// match the legitimate per-thread depth counters in
@@ -6694,9 +6739,17 @@ fn no_thread_local_oxc_caches() {
         "HOST_PARSED_TYPE_CONTEXT_CACHE",
     ];
     let mut hits: Vec<(String, &str)> = Vec::new();
-    let crate_root = workspace_path("crates/verter_session/src");
-    for entry in walkdir::WalkDir::new(&crate_root)
-        .into_iter()
+    // The session crate and the type engine it builds on.
+    let crate_roots = [
+        workspace_path("crates/verter_session/src"),
+        workspace_path("crates/verter_type_engine/src"),
+    ];
+    for root in &crate_roots {
+        assert!(root.is_dir(), "source root {} is missing", root.display());
+    }
+    for entry in crate_roots
+        .iter()
+        .flat_map(|root| walkdir::WalkDir::new(root).into_iter())
         .filter_map(Result::ok)
         .filter(|e| e.path().is_file())
     {
@@ -7028,6 +7081,7 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
 
     let crate_roots = [
         workspace_path("crates/verter_session/src"),
+        workspace_path("crates/verter_type_engine/src"),
         workspace_path("crates/verter_semantic_source/src"),
     ];
     let mut violators: Vec<String> = Vec::new();
@@ -7333,7 +7387,7 @@ fn recursion_budget_invariant_across_module_boundary() {
 
 /// Architecture guard: every bump of the `inflight_aborted_retries`
 /// and `cold_aborts_swept` counters in
-/// `crates/verter_session/src/semantic_query_memo/mod.rs` must go
+/// `crates/verter_type_engine/src/semantic_query_memo/mod.rs` must go
 /// through the `record_inflight_aborted_retry` /
 /// `record_cold_abort_swept` helpers. Direct
 /// `self.stats.<counter>.fetch_add` patterns OUTSIDE the helper
@@ -7418,7 +7472,7 @@ fn audit_counter_helper_violations(src: &str) -> Vec<String> {
 
 #[test]
 fn audit_counter_single_helper() {
-    let src = read_workspace_file("crates/verter_session/src/semantic_query_memo/mod.rs");
+    let src = read_workspace_file("crates/verter_type_engine/src/semantic_query_memo/mod.rs");
     let violations = audit_counter_helper_violations(&src);
 
     assert!(
@@ -9069,7 +9123,8 @@ fn slot_binding_graph_emits_synthesis_spans() {
 
 #[test]
 fn walker_emits_tracing_events() {
-    let src = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/walk.rs");
+    let src =
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/walk.rs");
     assert!(
         src.contains("debug_span!(\n            target: \"verter::dispatch::walk\",\n            \"walk_shallow_surface\"")
             || src.contains("debug_span!(\"walk_shallow_surface\"")
@@ -9140,7 +9195,11 @@ fn getcomponentmeta_uses_per_macro_projectors() {
 #[test]
 fn reachability_gc_uses_unified_artifact_name() {
     use std::fs;
-    let scan_dirs = ["crates/verter_session/src", "crates/verter_workspace/src"];
+    let scan_dirs = [
+        "crates/verter_session/src",
+        "crates/verter_type_engine/src",
+        "crates/verter_workspace/src",
+    ];
     let mut violations: Vec<String> = Vec::new();
     for dir in &scan_dirs {
         let root = workspace_root().join(dir);
@@ -10265,6 +10324,7 @@ mod typed_ir_resolver_guards {
         let mut out: Vec<(String, u32, String)> = Vec::new();
         for (path, rel) in &files {
             let in_scope = rel.starts_with("crates/verter_session/src/")
+                || rel.starts_with("crates/verter_type_engine/src/")
                 || rel.starts_with("crates/verter_semantic/src/analysis/");
             if !in_scope {
                 continue;
@@ -10567,13 +10627,21 @@ mod content_pinned_artifact_read_guards {
         false
     }
 
-    /// Repo-relative `.rs` files under `crates/verter_session/src`,
-    /// excluding test files (`*_tests.rs`, `tests.rs`).
+    /// Repo-relative `.rs` files under `crates/verter_session/src` and
+    /// `crates/verter_type_engine/src` (the type engine the session builds
+    /// on), excluding test files (`*_tests.rs`, `tests.rs`).
     fn verter_session_production_rs_files() -> Vec<(PathBuf, String)> {
         let root = super::workspace_root();
-        let src_dir = root.join("crates/verter_session/src");
         let mut files: Vec<PathBuf> = Vec::new();
-        walk_rs(&src_dir, &mut files);
+        for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+            let src_dir = root.join(krate);
+            assert!(
+                src_dir.is_dir(),
+                "source root {} is missing",
+                src_dir.display()
+            );
+            walk_rs(&src_dir, &mut files);
+        }
         let mut out: Vec<(PathBuf, String)> = Vec::new();
         for f in files {
             let rel = f
@@ -11987,14 +12055,18 @@ const INTO_OWNED_VIEW_ALLOWLIST: &[&str] = &[
     "crates/verter_session/src/meta.rs",
 ];
 
+/// `.rs` files of the session crate and of the type engine it builds on.
 fn store_view_guard_production_rs_files() -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
-    let root = workspace_root().join("crates/verter_session/src");
-    walk_dir_collect_rs_and_ts(&root, &mut |path| {
-        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            files.push(path.to_path_buf());
-        }
-    });
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let root = workspace_root().join(krate);
+        assert!(root.is_dir(), "source root {} is missing", root.display());
+        walk_dir_collect_rs_and_ts(&root, &mut |path| {
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                files.push(path.to_path_buf());
+            }
+        });
+    }
     files
 }
 
@@ -13113,11 +13185,20 @@ fn ident_hits_in_production_body(body: &str, banned_idents: &[&str]) -> Vec<(usi
 /// first marker). An unreadable file is a hard failure — silent green on
 /// I/O errors would make the guard decorative.
 fn session_production_ident_hits(banned_idents: &[&str]) -> Vec<(String, String)> {
-    let crate_root = workspace_path("crates/verter_session/src");
+    // The session crate and the type engine it builds on: both hold the
+    // production code these bans protect.
+    let crate_roots = [
+        workspace_path("crates/verter_session/src"),
+        workspace_path("crates/verter_type_engine/src"),
+    ];
+    for root in &crate_roots {
+        assert!(root.is_dir(), "source root {} is missing", root.display());
+    }
     let mut hits: Vec<(String, String)> = Vec::new();
     let mut scanned_files = 0usize;
-    for entry in walkdir::WalkDir::new(&crate_root)
-        .into_iter()
+    for entry in crate_roots
+        .iter()
+        .flat_map(|root| walkdir::WalkDir::new(root).into_iter())
         .filter_map(Result::ok)
         .filter(|e| e.path().is_file())
     {
@@ -13142,7 +13223,8 @@ fn session_production_ident_hits(banned_idents: &[&str]) -> Vec<(String, String)
     assert!(
         scanned_files > 100,
         "guard scanner found only {scanned_files} production files under \
-         crates/verter_session/src — the walk itself is broken",
+         crates/verter_session/src and crates/verter_type_engine/src — the \
+         walk itself is broken",
     );
     hits
 }
@@ -14164,7 +14246,7 @@ verter_session_query = { workspace = true }
 /// `SemanticNodeData::SyntheticBinding` CARRIER, never on the identity.
 #[test]
 fn synthetic_binding_identity_is_content_free() {
-    let src = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+    let src = read_workspace_file("crates/verter_type_engine/src/semantic_query.rs");
     let body = carrier_guard_struct_body(&src, "SyntheticBindingId");
     // Anti-vacuity: the extractor found the real struct (its known field).
     assert!(
@@ -14238,7 +14320,7 @@ fn enum_variant_struct_body(src: &str, variant: &str) -> String {
 ///       keyed subject.
 #[test]
 fn synthetic_binding_cache_subject_is_content_free_and_carrier_sealed() {
-    let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
+    let src = read_workspace_file("crates/verter_type_engine/src/component_meta_caches.rs");
 
     // (a) The `ShapeSubject::SyntheticBinding` variant body is content-free.
     let variant_body = enum_variant_struct_body(&src, "SyntheticBinding");
@@ -14468,7 +14550,7 @@ fn named_fn_param_mentions_type(src: &str, fn_name: &str, type_name: &str) -> bo
 ///       the cache.
 #[test]
 fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
-    let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
+    let src = read_workspace_file("crates/verter_type_engine/src/component_meta_caches.rs");
 
     // (a) The `ShapeSubject::MemberValueNode` variant keys on the sealed
     //     newtype, not a bare `SemanticNodeId`.
@@ -14702,7 +14784,8 @@ fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
 /// the global fence lands with the final cutover.
 #[test]
 fn carrier_constructors_do_not_use_unknown_as_control_flow() {
-    let src = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/carrier.rs");
+    let src =
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/carrier.rs");
     // Scope to the PRODUCTION portion (before the module's `#[cfg(test)]`
     // block) with `//` comments stripped, so only real CODE constructing
     // `TypeExpr::Unknown` trips the scan (module / field docs may mention it
@@ -14752,7 +14835,7 @@ fn carrier_constructors_do_not_use_unknown_as_control_flow() {
 /// `HotTypeRef` name — must turn this guard RED.
 #[test]
 fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
-    let src = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+    let src = read_workspace_file("crates/verter_type_engine/src/semantic_query.rs");
 
     // (1) Anti-vacuity: the real `struct HotTypeRef` declaration exists.
     assert!(
@@ -14849,7 +14932,7 @@ fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
 #[test]
 fn session_graph_lowerer_makes_no_query() {
     let src = read_workspace_file(
-        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
     );
     let production = carrier_production_code(&src);
     // Anti-vacuity: the extractor found the real lowerer production code.
@@ -14981,7 +15064,7 @@ fn session_graph_lowerer_makes_no_query() {
 #[test]
 fn unresolved_carriers_not_materialized_during_emission() {
     let src = read_workspace_file(
-        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
     );
     let production = carrier_production_code(&src);
     assert!(
@@ -15265,7 +15348,7 @@ fn structural_builder_reexport_violation(body: &str, builder: &str) -> bool {
 /// module, so there is no other file that could name the private lowerer.
 #[test]
 fn structural_carrier_producer_lowerer_is_module_private() {
-    let rel = "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs";
+    let rel = "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs";
     let body = std::fs::read_to_string(workspace_path(rel))
         .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
     let production_files = session_production_src_files();
@@ -15294,7 +15377,7 @@ fn structural_carrier_producer_lowerer_is_module_private() {
         assert_eq!(
             definitions,
             vec![
-                "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs"
+                "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs"
                     .to_string()
             ],
             "the raw `fn {builder}(` must be defined ONLY in \
@@ -15383,7 +15466,7 @@ fn structural_carrier_producer_lowerer_privacy_classifier_discriminates() {
     // builders and re-exports none of them (revert proof: the production tree is
     // pristine).
     let real = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
     .expect("the producer's owner module must be readable");
     for builder in STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS {
@@ -15931,7 +16014,7 @@ fn macro_arg_producer_derive_shadow_import_violations(src: &str) -> Vec<String> 
 /// structure cannot already make a compile error.
 #[test]
 fn macro_arg_producer_has_no_production_expansion_surface() {
-    let rel = "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs";
+    let rel = "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs";
     let src = std::fs::read_to_string(workspace_path(rel))
         .unwrap_or_else(|e| panic!("guard could not read {rel}: {e}"));
     // Anti-vacuity: the producer module must exist and carry the lowerer — its
@@ -15979,7 +16062,7 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
     // three sanctioned `#[cfg(test)] #[path] mod *_tests;` test children, no
     // derive / macro_use / out-of-line production mod / bang macro.
     let real = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
     .expect("the producer module must be readable");
     assert!(
@@ -16214,7 +16297,7 @@ fn macro_arg_producer_expansion_surface_classifier_discriminates() {
 /// sibling, cannot name the child-private lowering builders.
 #[test]
 fn structural_carrier_producer_module_is_narrow() {
-    let dir = workspace_path("crates/verter_session/src/structural_carrier_producer");
+    let dir = workspace_path("crates/verter_type_engine/src/structural_carrier_producer");
     const SANCTIONED: &[&str] = &["mod.rs", "macro_arg_producer.rs", "infer_binder_names.rs"];
     let mut found_modules: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read owner dir: {e}")) {
@@ -16747,35 +16830,41 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Walk every non-test `verter_session/src/**.rs` production file, returning
+/// Walk every non-test `verter_session/src/**.rs` and
+/// `verter_type_engine/src/**.rs` production file, returning
 /// `(workspace-relative path, body)` pairs. Skips `*_tests.rs` / `tests.rs` /
 /// `typeinfo_tests/` (mirrors the production scan scope in
 /// [`session_production_ident_hits`]).
 fn session_production_src_files() -> Vec<(String, String)> {
-    let crate_root = workspace_path("crates/verter_session/src");
     let mut out: Vec<(String, String)> = Vec::new();
-    for entry in walkdir::WalkDir::new(&crate_root)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.path().is_file())
-    {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let path_str = path.to_string_lossy().replace('\\', "/");
-        if path_str.ends_with("_tests.rs")
-            || path_str.ends_with("/tests.rs")
-            || path_str.contains("/typeinfo_tests/")
+    for crate_dir in [
+        "crates/verter_session/src/",
+        "crates/verter_type_engine/src/",
+    ] {
+        let crate_root = workspace_path(crate_dir.trim_end_matches('/'));
+        for entry in walkdir::WalkDir::new(&crate_root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_file())
         {
-            continue;
-        }
-        if let Ok(body) = std::fs::read_to_string(path) {
-            let rel = path_str
-                .rsplit_once("crates/verter_session/src/")
-                .map(|(_, s)| format!("crates/verter_session/src/{s}"))
-                .unwrap_or(path_str);
-            out.push((rel, body));
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let path_str = path.to_string_lossy().replace('\\', "/");
+            if path_str.ends_with("_tests.rs")
+                || path_str.ends_with("/tests.rs")
+                || path_str.contains("/typeinfo_tests/")
+            {
+                continue;
+            }
+            if let Ok(body) = std::fs::read_to_string(path) {
+                let rel = path_str
+                    .rsplit_once(crate_dir)
+                    .map(|(_, s)| format!("{crate_dir}{s}"))
+                    .unwrap_or(path_str);
+                out.push((rel, body));
+            }
         }
     }
     assert!(
@@ -16908,7 +16997,7 @@ fn macro_arg_eager_lowering_tripwire_discriminates() {
     );
     assert!(
         !macro_arg_eager_lowering_violations(
-            "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+            "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
             both
         ),
         "the single producer module (`macro_arg_producer.rs`) is the sanctioned \
@@ -17174,7 +17263,7 @@ fn macro_hot_mirror_purity_scanner_discriminates() {
     // The REAL producer source is clean (revert proof: the production
     // `macro_arg_producer.rs` carries none of the banned idents).
     let mirror_src = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
     .expect("the macro-arg producer source must be readable");
     assert!(
@@ -17850,7 +17939,7 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut saw_helper_decl = false;
     let mut saw_mod_decl = false;
-    let mut saw_sanctioned_reexport = false;
+    let mut reexported: Vec<String> = Vec::new();
     for item in &file.items {
         match item {
             // The typed-IR walker is the one sanctioned non-producer sibling.
@@ -17939,13 +18028,10 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
             // A test-gated (`test` / `test-support`) re-export is test wiring,
             // never compiled into a shipped artifact.
             syn::Item::Use(u) if attrs_test_or_test_support_gate(&u.attrs) => {}
-            syn::Item::Use(u) => {
-                if let Some(reason) = mod_rs_use_violation(u) {
-                    out.push(reason);
-                } else {
-                    saw_sanctioned_reexport = true;
-                }
-            }
+            syn::Item::Use(u) => match mod_rs_use_violation(u) {
+                Err(reason) => out.push(reason),
+                Ok(leaves) => reexported.extend(leaves),
+            },
             // Any other item in mod.rs (a fn, const, trait, struct, impl, …) is an
             // unexpected surface in the owner root.
             other => {
@@ -17964,94 +18050,97 @@ fn mod_rs_reexport_shape_violations(src: &str) -> Vec<String> {
     if !saw_mod_decl {
         out.push("mod.rs must declare `mod macro_arg_producer;`".to_string());
     }
-    if !saw_sanctioned_reexport {
-        out.push(
-            "mod.rs must contain EXACTLY `pub(crate) use \
-             macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror};`"
-                .to_string(),
-        );
+    reexported.sort();
+    let required_present = ["MacroHotMirror", "macro_type_arg_hot_ref"]
+        .iter()
+        .all(|leaf| reexported.iter().any(|r| r == leaf));
+    let unique = reexported.windows(2).all(|pair| pair[0] != pair[1]);
+    if !required_present || !unique {
+        out.push(format!(
+            "mod.rs must re-export EXACTLY `macro_type_arg_hot_ref` (crate-private) and \
+             `MacroHotMirror`, each once, with only optional owned `MacroHotProduct` / opaque \
+             `MacroMirrorAttachment` nominal leaves; found {reexported:?}"
+        ));
     }
     out
 }
 
-/// Require the sole producer function and mirror nominal, allowing only the
-/// owned `MacroHotProduct` and opaque `MacroMirrorAttachment` record names.
-/// Wrong visibility/root, aliases, globs, duplicate/unknown leaves, and private
-/// builder exports remain violations.
-fn mod_rs_use_violation(u: &syn::ItemUse) -> Option<String> {
-    // Visibility must be EXACTLY `pub(crate)` (the crate-root restricted path).
-    let vis_ok = match &u.vis {
+/// Check one mod.rs re-export: `macro_arg_producer::<leaf>` or a group of
+/// bare leaves drawn ONLY from the sole producer function and the mirror
+/// nominals (`MacroHotMirror`, owned `MacroHotProduct`, opaque
+/// `MacroMirrorAttachment`). The producer function stays crate-private
+/// (`pub(crate)`); the nominals may be `pub(crate)` or `pub` (the host crate
+/// names the mirror types). Wrong visibility/root, aliases, globs, nested
+/// paths, unknown leaves and private builder exports are violations. Returns
+/// the statement's leaves.
+fn mod_rs_use_violation(u: &syn::ItemUse) -> Result<Vec<String>, String> {
+    let crate_private = match &u.vis {
         syn::Visibility::Restricted(r) => r.path.is_ident("crate") && r.in_token.is_none(),
         _ => false,
     };
-    if !vis_ok {
-        return Some(format!(
-            "the mod.rs re-export must be `pub(crate) use …` exactly; found a different visibility \
-             on `use {}`",
+    let public = matches!(u.vis, syn::Visibility::Public(_));
+    if !crate_private && !public {
+        return Err(format!(
+            "the mod.rs re-export must be `pub(crate) use …` or `pub use …`; found a different \
+             visibility on `use {}`",
             quote_use_tree(&u.tree)
         ));
     }
-    // The tree must be `macro_arg_producer::{macro_type_arg_hot_ref, MacroHotMirror}`.
     let syn::UseTree::Path(path) = &u.tree else {
-        return Some("the mod.rs re-export root must be `macro_arg_producer::{…}`".to_string());
+        return Err("the mod.rs re-export root must be `macro_arg_producer::…`".to_string());
     };
     if path.ident != "macro_arg_producer" {
-        return Some(format!(
+        return Err(format!(
             "the mod.rs re-export root must be `macro_arg_producer`, found `{}`",
             path.ident
         ));
     }
-    let syn::UseTree::Group(group) = &*path.tree else {
-        return Some(
-            "the mod.rs re-export must be a group `macro_arg_producer::{macro_type_arg_hot_ref, \
-             MacroHotMirror}` — not a single leaf, glob, or aliased import"
-                .to_string(),
-        );
+    let leaf_trees: Vec<&syn::UseTree> = match &*path.tree {
+        syn::UseTree::Group(group) => group.items.iter().collect(),
+        single => vec![single],
     };
-    // Collect the group's leaves; each MUST be a bare name (no alias, no glob, no
-    // nested path).
     let mut leaves: Vec<String> = Vec::new();
-    for leaf in &group.items {
+    for leaf in leaf_trees {
         match leaf {
             syn::UseTree::Name(n) => leaves.push(n.ident.to_string()),
             syn::UseTree::Rename(r) => {
-                return Some(format!(
+                return Err(format!(
                     "the mod.rs re-export must not alias — found `{} as {}`",
                     r.ident, r.rename
                 ));
             }
             syn::UseTree::Glob(_) => {
-                return Some("the mod.rs re-export must not use a glob `*`".to_string());
+                return Err("the mod.rs re-export must not use a glob `*`".to_string());
             }
             syn::UseTree::Path(p) => {
-                return Some(format!(
+                return Err(format!(
                     "the mod.rs re-export must not nest a path — found `{}::…`",
                     p.ident
                 ));
             }
             syn::UseTree::Group(_) => {
-                return Some("the mod.rs re-export must not nest a group".to_string());
+                return Err("the mod.rs re-export must not nest a group".to_string());
             }
         }
     }
-    leaves.sort();
-    let expected = [
-        "MacroHotMirror".to_string(),
-        "macro_type_arg_hot_ref".to_string(),
-    ];
-    let required_present = expected.iter().all(|leaf| leaves.contains(leaf));
-    let finite_nominals = ["MacroHotProduct", "MacroMirrorAttachment"];
-    let allowed_only = leaves
-        .iter()
-        .all(|leaf| expected.contains(leaf) || finite_nominals.contains(&leaf.as_str()));
-    let unique = leaves.windows(2).all(|pair| pair[0] != pair[1]);
-    if !required_present || !allowed_only || !unique {
-        return Some(format!(
-            "the mod.rs re-export leaves must be EXACTLY `{{macro_type_arg_hot_ref, \
-             MacroHotMirror}}` with only optional owned `MacroHotProduct` / opaque `MacroMirrorAttachment` nominal leaves, found {leaves:?}"
-        ));
+    let nominals = ["MacroHotMirror", "MacroHotProduct", "MacroMirrorAttachment"];
+    for leaf in &leaves {
+        if leaf == "macro_type_arg_hot_ref" {
+            if !crate_private {
+                return Err(
+                    "the sole producer function `macro_type_arg_hot_ref` must be re-exported \
+                     `pub(crate)` — never wider"
+                        .to_string(),
+                );
+            }
+        } else if !nominals.contains(&leaf.as_str()) {
+            return Err(format!(
+                "the mod.rs re-export leaves must be drawn ONLY from `macro_type_arg_hot_ref` and \
+                 the mirror nominals {nominals:?}; found `{leaf}`"
+            ));
+        }
     }
-    None
+    Ok(leaves)
 }
 
 /// Render a `syn::UseTree` to a compact string for diagnostics.
@@ -18190,7 +18279,7 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
     // producer builder as an fn-pointer value re-opens the builder WITHOUT a `fn`
     // item. Scan `macro_arg_producer.rs`.
     let producer_rel =
-        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs";
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs";
     let producer_src = std::fs::read_to_string(workspace_path(producer_rel))
         .unwrap_or_else(|e| panic!("guard could not read {producer_rel}: {e}"));
     let value_violations = macro_arg_producer_value_exposure_violations(&producer_src);
@@ -18220,7 +18309,7 @@ fn macro_hot_mirror_exposes_single_crate_visible_producer_entry() {
 
     // PIN mod.rs EXACTLY — PRIVATE typed-IR-helper and producer module
     // declarations plus EXACTLY the sanctioned producer re-export.
-    let mod_rel = "crates/verter_session/src/structural_carrier_producer/mod.rs";
+    let mod_rel = "crates/verter_type_engine/src/structural_carrier_producer/mod.rs";
     let mod_src = std::fs::read_to_string(workspace_path(mod_rel))
         .unwrap_or_else(|e| panic!("guard could not read {mod_rel}: {e}"));
     let mod_violations = mod_rs_reexport_shape_violations(&mod_src);
@@ -18589,9 +18678,9 @@ fn mirror_entry_surface_classifier_discriminates() {
     // entries, with free + associated coverage across every production file.
     let mut real: Vec<String> = Vec::new();
     for rel in [
-        "crates/verter_session/src/structural_carrier_producer/mod.rs",
-        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
-        "crates/verter_session/src/structural_carrier_producer/infer_binder_names.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/mod.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/infer_binder_names.rs",
     ] {
         let src = std::fs::read_to_string(workspace_path(rel))
             .unwrap_or_else(|e| panic!("could not read {rel}: {e}"));
@@ -18820,7 +18909,7 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
 
     // ── REAL files pass ALL three collectors ───────────────────────────────
     let producer_src = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/macro_arg_producer.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/macro_arg_producer.rs",
     ))
     .expect("producer module readable");
     assert!(
@@ -18833,7 +18922,7 @@ fn mirror_value_trait_and_modrs_collectors_discriminate() {
          Debug/Clone for MacroHotMirror)"
     );
     let mod_src = std::fs::read_to_string(workspace_path(
-        "crates/verter_session/src/structural_carrier_producer/mod.rs",
+        "crates/verter_type_engine/src/structural_carrier_producer/mod.rs",
     ))
     .expect("mod.rs readable");
     assert!(
@@ -19230,9 +19319,22 @@ mod component_meta_scope_shadowing_memo {
         let mut out: Vec<(String, String)> = Vec::new();
         const SHELL: &str = "crates/verter_session/src/meta_resolve.rs";
         out.push((SHELL.to_string(), read_workspace_file(SHELL)));
-        let dir = root.join("crates/verter_session/src/meta_resolve");
-        for entry in walkdir::WalkDir::new(&dir)
-            .into_iter()
+        // The `meta_resolve` module tree spans the session crate and the type
+        // engine it builds on.
+        let dirs = [
+            root.join("crates/verter_session/src/meta_resolve"),
+            root.join("crates/verter_type_engine/src/meta_resolve"),
+        ];
+        for dir in &dirs {
+            assert!(
+                dir.is_dir(),
+                "meta_resolve root {} is missing",
+                dir.display()
+            );
+        }
+        for entry in dirs
+            .iter()
+            .flat_map(|dir| walkdir::WalkDir::new(dir).into_iter())
             .filter_map(Result::ok)
         {
             let path = entry.path();
@@ -19266,7 +19368,7 @@ mod component_meta_scope_shadowing_memo {
 /// field is an O(fields × scope-names) reclone on the publication hot path.
 ///
 /// SCOPE: production source only — `crates/verter_session/src/meta_resolve.rs`
-/// and `crates/verter_session/src/meta_resolve/**/*.rs` (NOT
+/// and `crates/{verter_session,verter_type_engine}/src/meta_resolve/**/*.rs` (NOT
 /// `project_semantic_dispatch/**`, NOT `resolver_core/**`, NOT tests).
 ///
 /// ALLOWLIST: the FIRST engine-less `None`-arm

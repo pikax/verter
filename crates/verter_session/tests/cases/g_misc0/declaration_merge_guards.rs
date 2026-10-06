@@ -89,15 +89,18 @@ fn eval_env_add_decl_appends_not_overwrites() {
 }
 
 /// (iii) No `raw_body = TypeExpr::intersection(...)` declaration-merge synthesis
-/// anywhere in `verter_session` — the merge is a distinct `MergedDecl` carrier,
+/// anywhere in `verter_session` or `verter_type_engine` — the merge is a distinct `MergedDecl` carrier,
 /// never an intersection fabricated on the shallow symbol.
 #[test]
 fn no_intersection_merge_synthesis_in_verter_session() {
+    // The session crate and the type engine it builds on (the engine owns
+    // the semantic dispatch and lowering the merge would flow through).
     let mut files = Vec::new();
-    walk_rs(
-        &workspace_root().join("crates/verter_session/src"),
-        &mut files,
-    );
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let root = workspace_root().join(krate);
+        assert!(root.is_dir(), "source root {} is missing", root.display());
+        walk_rs(&root, &mut files);
+    }
     let mut hits = Vec::new();
     for file in files {
         let Ok(text) = fs::read_to_string(&file) else {

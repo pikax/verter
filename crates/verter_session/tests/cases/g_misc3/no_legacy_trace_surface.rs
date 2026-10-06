@@ -161,7 +161,7 @@ fn legacy_trace_env_vars_not_consumed_anywhere() {
 }
 
 /// Every literal `StructuredAuditEvent::Custom { … }`
-/// construction site in the session crate must carry a
+/// construction site in the session crate and the type engine must carry a
 /// `// Custom justified: …` comment within the preceding 3 lines.
 ///
 /// Pattern-match sites (`Custom { .. }`, `Custom { name, detail } =>`)
@@ -170,15 +170,21 @@ fn legacy_trace_env_vars_not_consumed_anywhere() {
 #[test]
 fn every_custom_variant_construction_site_has_justification_comment() {
     let crates = crates_dir();
-    let session_src = crates.join("verter_session").join("src");
-    let files = walk_rs_files(&session_src);
     let mut violations = Vec::new();
-
-    // Also search tests dirs since test-side Custom construction is
-    // allowed but must carry justification too.
-    let session_tests = crates.join("verter_session").join("tests");
-    let mut all_files = files;
-    all_files.extend(walk_rs_files(&session_tests));
+    let mut all_files = Vec::new();
+    // The session crate and the type engine it builds on. Also search
+    // tests dirs since test-side Custom construction is allowed but must
+    // carry justification too.
+    for krate in ["verter_session", "verter_type_engine"] {
+        let crate_src = crates.join(krate).join("src");
+        assert!(
+            crate_src.is_dir(),
+            "source root {} is missing",
+            crate_src.display()
+        );
+        all_files.extend(walk_rs_files(&crate_src));
+        all_files.extend(walk_rs_files(&crates.join(krate).join("tests")));
+    }
 
     for file in &all_files {
         let text = read_file(file);
@@ -274,7 +280,7 @@ fn is_struct_event_alias(text: &str, _line_idx: usize) -> bool {
 fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace() {
     let crates = crates_dir();
     let observers = crates
-        .join("verter_session")
+        .join("verter_type_engine")
         .join("src")
         .join("request_observers.rs");
     let text = read_file(&observers);

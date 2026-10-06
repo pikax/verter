@@ -39,6 +39,16 @@ fn read_session_source(relative: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
 }
 
+/// Read a `verter_type_engine` source file relative to its `src/`.
+fn read_engine_source(relative: &str) -> String {
+    let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let mut path = PathBuf::from(cargo_manifest_dir);
+    path.push("../verter_type_engine/src");
+    path.push(relative);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+}
+
 /// Extract the brace-balanced body (including the outer `{ }`) of the
 /// first occurrence of `needle`.
 fn extract_balanced_body<'a>(src: &'a str, needle: &str) -> &'a str {
@@ -176,7 +186,11 @@ fn structural_carrier_producers_use_no_permissive_get_any() {
     ];
 
     for item in scanned {
-        let src = read_session_source(item.file);
+        let src = if item.file.starts_with("project_semantic_dispatch/") {
+            read_engine_source(item.file)
+        } else {
+            read_session_source(item.file)
+        };
         let body = extract_balanced_body(&src, item.signature);
         for banned in BANNED {
             assert!(

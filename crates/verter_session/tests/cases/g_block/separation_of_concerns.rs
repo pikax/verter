@@ -85,7 +85,7 @@ fn regression_guard_read_set_signature_has_no_generation_field() {
 #[test]
 fn regression_guard_cache_entry_carries_generation_distinct_from_signature() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
+        .join("../verter_type_engine/src")
         .join("cache_runtime")
         .join("admission.rs");
     let src = std::fs::read_to_string(&path).expect("read admission.rs");
