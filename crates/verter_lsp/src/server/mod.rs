@@ -132,7 +132,7 @@ mod rename_plan;
 mod rename_prepare;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 // Completion-resolve auto-import edit translation:
 // `resolve_provider_auto_import_edits` and `completion_resolve_error`, called
@@ -602,6 +602,9 @@ pub struct ServerCore {
     /// it replies.
     #[cfg(test)]
     settlement_observed_hook: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Named points inside a foreground request at which a test moves state.
+    #[cfg(test)]
+    request_barriers: Arc<test_support::RequestBarriers>,
     /// Handle for the background workspace scanner. Receives priority signals
     /// from `did_open` to reorder the scan queue. `None` until `initialized()`.
     /// Arc-wrapped so background init can install the scanner without &self.
@@ -756,6 +759,10 @@ impl VerterLanguageServer {
         F: std::future::Future<Output = Result<Option<T>>>,
     {
         let first = crate::documents::ForegroundSettlement::capture(&self.documents, uri);
+        #[cfg(test)]
+        self.request_barriers
+            .reach(test_support::RequestBarrier::Capture)
+            .await;
         let mut retry = None;
         let mut recomputations = 0;
         loop {
@@ -765,6 +772,10 @@ impl VerterLanguageServer {
                 // request began: a genuine content change.
                 return first.settle(&self.documents, uri, response);
             }
+            #[cfg(test)]
+            self.request_barriers
+                .reach(test_support::RequestBarrier::Settlement)
+                .await;
             let settlement = retry.as_ref().unwrap_or(&first);
             // One observation of the basis decides the reply. Background
             // settlement can move the generation right after it; that move is
@@ -797,6 +808,10 @@ impl VerterLanguageServer {
                 &self.documents,
                 uri,
             ));
+            #[cfg(test)]
+            self.request_barriers
+                .reach(test_support::RequestBarrier::Capture)
+                .await;
         }
     }
 
@@ -1326,6 +1341,8 @@ impl VerterLanguageServer {
             completion_final_recompute_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             settlement_observed_hook: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            request_barriers: Arc::default(),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ownership_generation_fence: Arc::new(
@@ -1908,3 +1925,7 @@ mod request_surface_guard_tests;
 
 #[cfg(test)]
 mod retention_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "../request_validity_tests/mod.rs"]
+mod request_validity_tests;
