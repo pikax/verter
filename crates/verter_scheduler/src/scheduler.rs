@@ -2137,7 +2137,7 @@ mod tests {
         scheduler
             .nodes
             .get(id)
-            .map_or(1, |node| node.incarnation_id())
+            .map_or(0, |node| node.incarnation_id())
     }
 
     use super::*;
@@ -7882,6 +7882,10 @@ mod tests {
 
         let dep_id = "/dep.ts";
         let dep_arc: Arc<str> = Arc::from(dep_id);
+        // Capture the unpublished node's identity before publishing tracking.
+        // Both transitional states must describe the same producer.
+        let dep_node = sched.create_node(dep_id, None);
+        let dep_incarnation = dep_node.incarnation_id();
 
         // State A — post-swap intermediate state #1: tracking
         // entry has been published but FileNode has not. This is
@@ -7892,7 +7896,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&dep_arc),
             AutoIngestedRecord {
-                incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
+                incarnation: dep_incarnation,
                 generation: dep_gen,
                 since: Instant::now(),
             },
@@ -7900,7 +7904,7 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
-            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
+            incarnation: dep_incarnation,
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -7922,7 +7926,6 @@ mod tests {
         // yet drained it). The matrix's last arm (no-live-DAG
         // identity, current_analysis None) consults the tracking
         // entry and returns Gating.
-        let dep_node = sched.create_node(dep_id, None);
         sched
             .source_root
             .publish_transition(|publication| publication.bump_node_generation(&dep_node));
