@@ -10,6 +10,7 @@ import {
   loadProducts,
   mandatoryCases,
   REPO_ROOT,
+  SCHEDULER_FIELD_ROUTE_WITNESSES,
   selectedCaseIds,
   validate,
 } from "./verify.mjs";
@@ -410,6 +411,49 @@ test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer 
       (e) =>
         (e.code === "route-surface-drift" || e.code === "route-surface-not-live") &&
         e.caseId === "ARH2-characterization",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: dropping a required scheduler field-route witness is rejected", () => {
+  assert.deepEqual([...new Set(SCHEDULER_FIELD_ROUTE_WITNESSES.map((w) => w.concern))].sort(), [
+    "deferred-blocker replacement",
+    "generation-floor fence",
+    "incarnation rejection",
+    "removal drain",
+  ]);
+  for (const dropped of SCHEDULER_FIELD_ROUTE_WITNESSES) {
+    const dirty = cloneProducts();
+    for (const pin of dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2")
+      .pins) {
+      pin.witnesses = pin.witnesses.filter(
+        (w) => w.file !== dropped.file || w.test !== dropped.test,
+      );
+    }
+    const result = validate(dirty);
+    assert.equal(result.ok, false, `dropping ${dropped.test} must fail`);
+    assert.ok(
+      result.errors.some(
+        (e) =>
+          e.caseId === "ARH2-characterization" &&
+          e.code === "route-required-witness-missing" &&
+          e.detail.includes(`${dropped.file}::${dropped.test}`),
+      ),
+      JSON.stringify(result.errors),
+    );
+  }
+  // A required witness re-homed to a different file is not the pinned proof.
+  const dirty = cloneProducts();
+  const pin = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2").pins[0];
+  const moved = pin.witnesses.find((w) => w.test === "deferred_blockers_are_replaced_not_appended");
+  moved.file = "crates/verter_scheduler/src/scheduler/lifecycle.rs";
+  const result = validate(dirty);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.code === "route-required-witness-missing" &&
+        e.detail.includes("scheduler.rs::deferred_blockers_are_replaced_not_appended"),
     ),
     JSON.stringify(result.errors),
   );
