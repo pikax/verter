@@ -72,6 +72,12 @@ function stable(value) {
   );
 }
 
+// Scenario dirs are recorded with forward slashes while commands and program
+// roots reach the records through the platform's `join`: the same path is
+// legitimately spelled with either separator, so provenance comparisons are
+// separator-insensitive rather than bound to the recording worker's platform.
+const forwardSlashes = (p) => (typeof p === "string" ? p.replace(/\\/g, "/") : p);
+
 /**
  * Validate a run object. `expected` is the measured reference the run was
  * summarised against; `scenarios` the catalog it ran.
@@ -353,8 +359,11 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
         join(dir ?? "", "cli", "tsconfig.json"),
         "--extendedDiagnostics",
         ...(inv.arm === "tsc-cli-1" ? ["--singleThreaded"] : []),
-      ];
-      if (stable(inv.command) !== stable(command))
+      ].map(forwardSlashes);
+      if (
+        stable(Array.isArray(inv.command) ? inv.command.map(forwardSlashes) : inv.command) !==
+        stable(command)
+      )
         fail(`${id}: CLI command does not match the verified executable, project and thread mode`);
     }
     const end = invocationEnd(inv, runLimits(opts));
@@ -421,7 +430,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
         /\\/g,
         "/",
       );
-      const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase());
+      const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase().replace(/\\/g, "/"));
       const want = [`${dir}/lib.bench.d.ts`, `${dir}/scenario.ts`].map((f) => f.toLowerCase());
       if (roots.length !== 2 || want.some((w) => !roots.includes(w)))
         fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);

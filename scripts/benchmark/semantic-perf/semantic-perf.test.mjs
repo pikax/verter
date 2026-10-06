@@ -1433,6 +1433,12 @@ function cliFixture(arm = "tsc-cli") {
 test("CLI provenance binds the executable, project and thread mode even for killed children", () => {
   for (const arm of ["tsc-cli", "tsc-cli-1"]) {
     assert.deepEqual(validate(cliFixture(arm)).failures, []);
+    // The project path spelled with either separator is the same project:
+    // records reach validation from workers of either platform.
+    const backslashed = cliFixture(arm);
+    for (const inv of backslashed.invocations)
+      inv.command = inv.command.map((a) => a.replace(/\//g, "\\"));
+    assert.deepEqual(validate(backslashed).failures, []);
     for (const command of [
       ["/other/tsc", "-p", "/x/synthetic/strict/cli/tsconfig.json", "--extendedDiagnostics"],
       ["/tsc/tsc", "-p", "/other/tsconfig.json", "--extendedDiagnostics"],
@@ -1469,6 +1475,27 @@ test("CLI engine memory refuses cgroup and unknown accounting without losing ans
     const run = cliFixture();
     for (const inv of run.invocations)
       Object.assign(inv.supervisor, overrides, { peakBytes: 1e12 });
+    resummarize(run);
+    assert.deepEqual(validate(run).failures, []);
+    const cell = run.summary.cells[0].arms["tsc-cli"];
+    assert.equal(cell.peakBytes, null);
+    assert.equal(cell.peakMetric, null);
+    assert.equal(cell.status, "completed");
+    assert.equal(cell.memoryUnavailable, "supervisor accounting is not attributable to the engine");
+  }
+  // A partially attributable cell is refused as a whole: the statistic would
+  // span an unknown subset of the cell's completed invocations, and a budget
+  // verdict over that subset is not the cell's either.
+  for (const last of [true, false]) {
+    const run = cliFixture();
+    const measured = run.invocations.filter((i) => !i.warmup);
+    const attributable = measured[last ? 0 : 1];
+    attributable.supervisor.peakBytes = (MEM_MB + 1) * 1024 * 1024;
+    Object.assign(measured[last ? 1 : 0].supervisor, {
+      backend: "linux-cgroup-v2",
+      peakMetric: "cgroup-memory.peak",
+      peakBytes: 1e12,
+    });
     resummarize(run);
     assert.deepEqual(validate(run).failures, []);
     const cell = run.summary.cells[0].arms["tsc-cli"];
@@ -1598,6 +1625,13 @@ test("the real quick catalog and invocation manifest validate and reject a missi
     };
   });
   run.summary = summarize(run, expected, scenarios);
+  assert.deepEqual(validateRun(run, expected, scenarios).failures, []);
+  // Program roots spelled with the platform's separators are the same
+  // program: the probe normalises to forward slashes, and validation must
+  // not depend on which spelling a record carries.
+  for (const inv of run.invocations)
+    if (Array.isArray(inv.probe?.rootFiles))
+      inv.probe.rootFiles = inv.probe.rootFiles.map((f) => f.replace(/\//g, "\\"));
   assert.deepEqual(validateRun(run, expected, scenarios).failures, []);
   delete run.meta.scenarios[keys[0]];
   assert.ok(

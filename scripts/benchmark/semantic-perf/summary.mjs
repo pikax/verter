@@ -175,6 +175,10 @@ function cliArmSummary(invs, limits) {
   const overBudget = memory.filter(
     (i) => typeof i.supervisor?.peakBytes === "number" && i.supervisor.peakBytes > budgetBytes,
   ).length;
+  // A statistic over the attributable subset is not the cell's engine memory:
+  // unless every completed invocation is attributable, the cell refuses to
+  // publish one (peak bytes, peak metric and the budget verdict alike).
+  const attributable = memory.length === completed.length;
   const killed = invs.filter((i) =>
     ["killed", "unattributed-kill"].includes(invocationEnd(i, limits).kind),
   );
@@ -186,7 +190,7 @@ function cliArmSummary(invs, limits) {
         ? `killed (${invocationEnd(killed[0], limits).detail})`
         : killed.length
           ? "inconsistent"
-          : overBudget
+          : attributable && overBudget
             ? "over the engine budget"
             : "completed",
     ends: [...new Set(ends.map((e) => e.kind))],
@@ -198,12 +202,11 @@ function cliArmSummary(invs, limits) {
         .filter((i) => invocationEnd(i, limits).kind === "killed" && !i.skipped)
         .map((i) => i.supervisor?.wallMs),
     ),
-    peakBytes: stats(memory.map((i) => i.supervisor?.peakBytes)),
-    peakMetric: memory[0]?.supervisor?.peakMetric ?? null,
-    memoryUnavailable:
-      memory.length === completed.length
-        ? null
-        : "supervisor accounting is not attributable to the engine",
+    peakBytes: attributable ? stats(memory.map((i) => i.supervisor?.peakBytes)) : null,
+    peakMetric: attributable ? (memory[0]?.supervisor?.peakMetric ?? null) : null,
+    memoryUnavailable: attributable
+      ? null
+      : "supervisor accounting is not attributable to the engine",
     cpuMs: stats(
       completed.map((i) => (i.supervisor?.cpuUserMs ?? NaN) + (i.supervisor?.cpuKernelMs ?? NaN)),
     ),
