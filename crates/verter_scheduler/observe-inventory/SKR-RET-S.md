@@ -1,18 +1,22 @@
-# Scheduler removal inventory
+# Scheduler incarnation inventory
 
 Classification follows [the observation policy](../../../docs/arch/semantic-observe.md).
-This inventory covers the removal transition in `src/scheduler/lifecycle.rs`.
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
-| DAG mutex hold across removal sweep, node unpublication, and source-root publication | Admission, completion, dispatch and source-root coherence | REQUIRED-lifetime | One removal transition; released before stranded-waiter wakes | `src/scheduler/lifecycle.rs` | always |
-| Live `FileNode` incarnation and generation reads | Removal sweep, source-root `Absent` publication, admission crossing gate | REQUIRED-lifetime | Current node incarnation; captured values live only through the transition | `src/scheduler/lifecycle.rs` | always |
-| Tombstone/removal epoch writes | Queued-request rejection and suppression of removed dependencies | REQUIRED-lifetime | Existing canonical deletion state until explicit source re-add/reset; not yet reclaimable under the current suppression contract | `src/scheduler/lifecycle.rs`; storage in `src/scheduler.rs` | always |
-| Generation floor writes and DAG retirement floor updates | Restart generation selection and refusal of retired work | REQUIRED-lifetime | Existing canonical history until identity replacement permits reclamation | `src/scheduler/lifecycle.rs`, `src/dag.rs`; scheduler storage in `src/scheduler.rs` | always |
-| Blocker, terminal-failure, deferred-blocker, auto-ingest, and edge cleanup | Dependency gating and removal liveness | REQUIRED-lifetime | Current work/owner records; removed within the lifecycle hold | `src/scheduler/lifecycle.rs` | always |
-| `after_sweep` admission rendezvous | No production consumer; barrier-controlled regression test only | OPTIONAL | One test removal call; parameter and invocation absent in production | `src/scheduler/lifecycle.rs` | `cfg(test)` |
+| DAG lifecycle hold across admission, removal, reset, snapshot publication and failure | Atomic admission, capacity and source-root coherence | REQUIRED-lifetime | One transition; callbacks and inbox sends run after unlock | `src/scheduler/{admission,lifecycle,completion,driver}.rs`, `src/scheduler.rs` | always |
+| Checked process-unique incarnation allocator | New FileNode and work identities | REQUIRED-lifetime | One scalar per process; exhaustion refuses allocation before reuse | `src/node.rs` | always |
+| FileNode incarnation, live generation and retirement marker | File admission and worker dispatch/publication | REQUIRED-lifetime | One node object; delayed Arc owners may retain a retired object until work drains | `src/node.rs`, `src/dag.rs` | always |
+| Queued request incarnation stamp | Reject inbox work across removal/reset/replacement | REQUIRED-lifetime | One queued request; no per-path deletion record | `src/driver.rs`, `src/scheduler/{admission,lifecycle}.rs` | always |
+| WorkNodeIdentity and DepKey incarnation fields | Dedup, dependency gating, cycle traversal, completion and failure | REQUIRED-lifetime | Current DAG work or dependency edge | `src/dag.rs`, `src/dag/terminal_failures.rs`, `src/scheduler/{identity,dependencies,completion,driver}.rs` | always |
+| Auto-ingest tracking incarnation and conditional clears | Distinguish queued producer from dead producer without touching successor tracking | REQUIRED-lifetime | Existing bounded active producer tracking lifetime | `src/scheduler/dependencies.rs`, `src/scheduler.rs` | always |
+| Tombstones and DAG retirement floors | None; replaced by queued stamps and live object admission | REQUIRED-lifetime, retired | No population or backing allocation | `src/scheduler.rs`, `src/dag.rs` | absent |
+| Generation floors | External artifact publication/eviction and host base source revision uniqueness | REQUIRED-lifetime | Removed known canonical history until those consumers carry captured incarnation/source witnesses; unknown removals allocate none | `src/scheduler.rs`, `src/scheduler/lifecycle.rs` | always |
+| Source-root and edge/blocker/failure cleanup | Source visibility, dependency gating and capacity release | REQUIRED-lifetime | Current records and existing source-root retention leases | `src/scheduler/{lifecycle,completion}.rs`, `src/scheduler.rs` | always |
+| Stale completion refusal counter | Attribution and tests only | OPTIONAL | Scheduler instance | `src/scheduler.rs`, `src/scheduler/completion.rs` | `cfg(any(test, feature = "semantic-observe"))` |
+| after_sweep admission rendezvous | No production consumer; regression barrier only | OPTIONAL | One test removal call | `src/scheduler/lifecycle.rs` | `cfg(test)` |
 
-The change adds no event histories, attribution counters, or production trace
-storage. Existing history stores above remain correctness-bearing until the
-replacement identity and deletion-authority contracts are settled; this patch
-does not claim their retirement or zero backing capacity.
+Internal file work can reuse a generation without aliasing a removed object.
+The external restart fence remains necessary, so this inventory does not claim
+that all three history populations have drained. No event history or production
+per-operation feature check is introduced.

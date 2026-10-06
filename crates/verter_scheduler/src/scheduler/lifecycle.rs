@@ -18,6 +18,203 @@ mod tests {
     use super::*;
     use std::sync::Barrier;
 
+    struct PausedSource {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+    }
+
+    impl StageExecutor for PausedSource {
+        fn execute_source(
+            &self,
+            _: &str,
+            _: FileLanguage,
+            content: Arc<str>,
+            generation: u64,
+        ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
+            self.entered.wait();
+            self.release.wait();
+            Ok(SourceSnapshot::new_empty(content, generation))
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn delayed_source_worker_cannot_republish_a_retired_incarnation() {
+        for reset in [false, true] {
+            let loader = Arc::new(crate::source_loader::MemorySourceLoader::new());
+            loader.insert("/delayed.ts".into(), Arc::from("source"));
+            let scheduler = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
+            let old = scheduler.submit_request(Request {
+                file_id: "/delayed.ts".into(),
+                source: None,
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                file_language: None,
+                request_context: None,
+            });
+            scheduler.drain_inbox();
+            let node = scheduler.nodes.get("/delayed.ts").unwrap().clone();
+            let generation = node.generation();
+            let job = scheduler
+                .dag
+                .lock()
+                .next_ready()
+                .expect("source work is ready");
+            let entered = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            let worker = {
+                let scheduler = scheduler.clone();
+                let entered = entered.clone();
+                let release = release.clone();
+                std::thread::spawn(move || {
+                    Scheduler::execute_source_stage(
+                        &node,
+                        generation,
+                        &PausedSource { entered, release },
+                        loader.as_ref(),
+                        &scheduler.inbox.sender,
+                        scheduler.dag.clone(),
+                        scheduler.source_root.clone(),
+                    )
+                })
+            };
+            entered.wait();
+            if reset {
+                scheduler.reset();
+            } else {
+                scheduler.remove("/delayed.ts");
+            }
+            // Exercise the protocol without the external-publisher restart fence.
+            let fresh = Arc::new(FileNode::new(
+                "/delayed.ts".into(),
+                scheduler.source_loader.classify("/delayed.ts"),
+            ));
+            let fresh_generation = fresh.generation();
+            let incarnation = fresh.incarnation_id();
+            scheduler.nodes.insert("/delayed.ts".into(), fresh);
+            let current = scheduler.submit_request(Request {
+                file_id: "/delayed.ts".into(),
+                source: None,
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                file_language: None,
+                request_context: None,
+            });
+            scheduler.drive_all();
+            let before = scheduler.capture_source_root();
+            release.wait();
+            let late = worker.join().expect("source worker panicked");
+            assert_eq!(fresh_generation, 0);
+            assert!(late.is_none(), "retired source must refuse publication");
+            assert!(matches!(old.try_get(), Some(CompletionState::Shutdown)));
+            assert!(matches!(current.try_get(), Some(CompletionState::Ready(_))));
+            assert_eq!(
+                scheduler.nodes.get("/delayed.ts").unwrap().incarnation_id(),
+                incarnation
+            );
+            assert_eq!(
+                before.lookup("/delayed.ts"),
+                scheduler.capture_source_root().lookup("/delayed.ts")
+            );
+            assert!(scheduler.dag.lock().token_for(&job.identity).is_none());
+            assert_eq!(scheduler.dag.lock().total_active(), 0);
+        }
+    }
+
+    #[test]
+    fn unknown_removals_do_not_allocate_restart_history() {
+        let scheduler = Scheduler::test_new_sync(
+            SchedulerConfig::default(),
+            Arc::new(crate::source_loader::MemorySourceLoader::new()),
+        );
+        let capacity = scheduler.generation_floors.capacity();
+        for index in 0..256 {
+            scheduler.remove(&format!("/unknown-{index}.ts"));
+        }
+        assert!(scheduler.generation_floors.is_empty());
+        assert_eq!(scheduler.generation_floors.capacity(), capacity);
+        assert!(scheduler.nodes.is_empty());
+        assert_eq!(scheduler.dag.lock().total_active(), 0);
+    }
+
+    #[test]
+    fn delayed_failure_cannot_cancel_same_generation_successor_after_remove_or_reset() {
+        for reset in [false, true] {
+            let loader = Arc::new(crate::source_loader::MemorySourceLoader::new());
+            loader.insert("/reused.ts".into(), Arc::from("source"));
+            let scheduler = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
+            let request = || Request {
+                file_id: "/reused.ts".into(),
+                source: None,
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                file_language: None,
+                request_context: None,
+            };
+            let old = scheduler.submit_request(request());
+            scheduler.drive_all();
+            assert!(matches!(old.try_get(), Some(CompletionState::Ready(_))));
+            let generation = scheduler.nodes.get("/reused.ts").unwrap().generation();
+            let incarnation = scheduler.nodes.get("/reused.ts").unwrap().incarnation_id();
+            let enter = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            let late = {
+                let scheduler = Arc::clone(&scheduler);
+                let enter = Arc::clone(&enter);
+                let release = Arc::clone(&release);
+                std::thread::spawn(move || {
+                    enter.wait();
+                    release.wait();
+                    Scheduler::terminalize_failure(
+                        &scheduler.dag,
+                        &Arc::from("/reused.ts"),
+                        incarnation,
+                        generation,
+                        &TaskKind::Load,
+                        crate::job::SchedulerError::FileNotFound {
+                            file_id: "/reused.ts".into(),
+                        },
+                    )
+                })
+            };
+            enter.wait();
+            if reset {
+                scheduler.reset();
+            } else {
+                scheduler.remove("/reused.ts");
+            }
+            scheduler.nodes.insert(
+                "/reused.ts".into(),
+                Arc::new(FileNode::new(
+                    "/reused.ts".into(),
+                    scheduler.source_loader.classify("/reused.ts"),
+                )),
+            );
+            let current = scheduler.submit_request(request());
+            scheduler.drain_inbox();
+            let current_generation = scheduler
+                .nodes
+                .get("/reused.ts")
+                .map(|node| node.generation());
+            release.wait();
+            let stranded = late.join().expect("delayed failure panicked");
+            assert!(stranded.is_empty());
+            assert_eq!(
+                current_generation,
+                Some(generation),
+                "fixture must exercise colliding work generations"
+            );
+            assert!(
+                current.try_get().is_none(),
+                "retired failure must not signal successor"
+            );
+            scheduler.drive_all();
+            assert!(matches!(current.try_get(), Some(CompletionState::Ready(_))));
+        }
+    }
+
     #[test]
     fn removal_cannot_admit_prepared_work_between_sweep_and_unpublication() {
         let loader = Arc::new(crate::source_loader::MemorySourceLoader::new());
@@ -44,7 +241,11 @@ mod tests {
                 priority: Priority::Interactive,
                 file_language: None,
                 request_context: None,
-                submitted_epoch: scheduler.removal_epoch.load(Ordering::Acquire),
+                submitted_incarnation: scheduler
+                    .nodes
+                    .get("/removed.vue")
+                    .unwrap()
+                    .incarnation_id(),
                 sender,
             })
             .expect("live request must prepare");
@@ -161,7 +362,7 @@ impl Scheduler {
     }
 
     /// Create a FileNode for a file, respecting the generation floor
-    /// from prior incarnations so stale completions never match.
+    /// for external publishers that do not yet carry an incarnation witness.
     pub(super) fn create_node(
         &self,
         file_id: &str,
@@ -177,16 +378,38 @@ impl Scheduler {
         min_generation: u64,
     ) -> Arc<FileNode> {
         let language = file_language.unwrap_or_else(|| self.source_loader.classify(file_id));
-        let floor_gen = self
-            .generation_floors
-            .get(file_id)
-            .map(|floor| *floor + 1)
-            .unwrap_or(0);
         Arc::new(FileNode::new_at(
             file_id.to_string(),
             language,
-            floor_gen.max(min_generation),
+            self.generation_floors
+                .get(file_id)
+                .map_or(min_generation, |floor| {
+                    min_generation.max(floor.saturating_add(1))
+                }),
         ))
+    }
+
+    /// Bind queued work to the current object under the lifecycle hold.
+    /// Zero is a refused stamp; allocated incarnation ids start at one.
+    pub(super) fn stamp_request(&self, id: &str, language: Option<FileLanguage>) -> u64 {
+        if language.is_none() {
+            let _dag = self.dag.lock();
+            if self.shutdown.load(Ordering::Acquire) {
+                return 0;
+            }
+            if let Some(node) = self.nodes.get(id) {
+                return node.incarnation_id();
+            }
+        }
+        let language = language.unwrap_or_else(|| self.source_loader.classify(id));
+        let _dag = self.dag.lock();
+        if self.shutdown.load(Ordering::Acquire) {
+            return 0;
+        }
+        self.nodes
+            .entry(id.to_owned())
+            .or_insert_with(|| self.create_node(id, Some(language)))
+            .incarnation_id()
     }
 
     /// Remove a file from the scheduler.
@@ -209,9 +432,14 @@ impl Scheduler {
             // linearization point. A prepared request cannot bump the live
             // node past the sweep before that node is removed.
             let mut dag = self.dag.lock();
-            let epoch = self.removal_epoch.fetch_add(1, Ordering::AcqRel) + 1;
-            self.tombstones.insert(id.to_string(), epoch);
-            let last_gen = self.nodes.get(id).map(|n| n.generation()).unwrap_or(0);
+            let last_gen = self
+                .nodes
+                .get(id)
+                .map(|node| {
+                    node.retire(&mut dag);
+                    node.generation()
+                })
+                .unwrap_or(0);
 
             // Preserve removal's Shutdown cause before the supersede sweep.
             dag.signal_file_shutdown(&canonical);
@@ -231,11 +459,8 @@ impl Scheduler {
             self.deferred_blocker_ids.remove(id);
             self.auto_ingested_recent.remove(&canonical);
 
-            // Publish the floor before removing the node: preparation may
-            // ensure a replacement outside the DAG lock as soon as the shard
-            // entry disappears, and must start that replacement above it.
             if self.nodes.contains_key(id) {
-                self.generation_floors.insert(id.to_string(), last_gen);
+                self.generation_floors.insert(id.to_owned(), last_gen);
             }
             let removed = self.source_root.publish_transition(|publication| {
                 let removed = self.nodes.remove(id);
@@ -311,6 +536,13 @@ impl Scheduler {
         let canonical: Arc<str> = Arc::from(id);
         before_dag_lock();
         let mut dag = self.dag.lock();
+        if !self
+            .nodes
+            .get(id)
+            .is_some_and(|live| live.incarnation_id() == node.incarnation_id())
+        {
+            return;
+        }
         before_publication();
         // The bump and the source-root publication run under ONE
         // publication hold, so a concurrent `capture_source_root` sees

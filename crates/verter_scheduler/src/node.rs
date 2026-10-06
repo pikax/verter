@@ -251,6 +251,9 @@ pub struct FileNode {
     /// Monotonic and never reused, so it cannot ABA the way a reclaimed
     /// pointer address can.
     incarnation_id: u64,
+    /// Object-lifetime admission fence. Retired objects held by delayed work
+    /// cannot authorize any new DAG admission, even at a reused generation.
+    retired: AtomicBool,
 }
 
 /// Source of process-unique [`FileNode::incarnation_id`] values.
@@ -283,7 +286,10 @@ impl FileNode {
             analysis: ArcSwap::new(Arc::new(None)),
             artifacts: DashMap::new(),
             pending_source: ArcSwap::new(Arc::new(None)),
-            incarnation_id: NEXT_INCARNATION_ID.fetch_add(1, Ordering::Relaxed),
+            incarnation_id: NEXT_INCARNATION_ID
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("file incarnation identity space exhausted"),
+            retired: AtomicBool::new(false),
         }
     }
 
@@ -291,6 +297,16 @@ impl FileNode {
     /// [`FileNode::incarnation_id`].
     pub fn incarnation_id(&self) -> u64 {
         self.incarnation_id
+    }
+
+    pub(crate) fn retire(&self, _lifecycle: &mut crate::dag::SchedulerDag) {
+        self.retired.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn admits_work(&self, incarnation: u64, generation: u64) -> bool {
+        !self.retired.load(Ordering::Acquire)
+            && self.incarnation_id == incarnation
+            && self.generation() == generation
     }
 
     /// Current generation (acquire ordering for cross-thread visibility).

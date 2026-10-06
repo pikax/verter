@@ -27,10 +27,10 @@ sweeps + waiter registration for every request inside one critical
 section): the pump can never observe a half-admitted batch, one batch is
 ONE wake + ONE `submit_count` bump, and a source-updating batch
 supersedes every file's old generation atomically. Both paths share one
-admission core — `prepare_request` (pre-lock: tombstone gate + node
-ensure, cloning the `FileNode` `Arc` out of the `nodes` DashMap BEFORE
-locking, the AB-BA-safe DAG-first ordering; it CREATES a missing node but
-never re-homes one, carrying the resolved language forward as
+admission core — `prepare_request` (pre-lock: queued-incarnation gate + live-node
+lookup, cloning the `FileNode` `Arc` out of the `nodes` DashMap BEFORE
+locking, the AB-BA-safe DAG-first ordering; it never creates or re-homes
+a node, carrying the resolved language forward as
 `PreparedRequest.requested_language` instead), `admit_prepared_under_lock`
 (sole place a request bumps generation, runs the supersede sweep,
 registers the waiter, admits work — including the LANGUAGE RE-HOME, which
@@ -89,81 +89,56 @@ FALSE: the first because `pub mod dag` re-exports the module, the second
 because a leading underscore suppresses a lint and is not access control.
 Before writing "by construction", enumerate.
 
-**Retirement is structural, not per-site (READ THIS FIRST).** Three
-review rounds each found the same defect through a different door — a
-stage completion, a pending-Artifact admission, `remove()` — because each
-admission site had to remember to gate itself. It is now a property of
-the primitives instead:
+**File admission requires a live object witness.**
 
-- `SchedulerDag` keeps a per-canonical **retirement floor**. Everything
-  below the floor is retired and can never be admitted again. The floor
-  only ever advances.
-- `SchedulerDag::submit` is the ONE admission primitive (the sole
-  `by_identity` insert) and consults the floor as its first statement,
-  returning `Option<SubmissionToken>`. A retired admission is refused BY
-  CONSTRUCTION — no caller can bypass or forget it, and a new admission
-  site inherits the guarantee for free. `None` is a refusal, not an
-  error; production callers must handle it (tests use `submit_expect`).
-- `retire_generations_below(canonical, floor)` is the ONE retirement
-  primitive: it installs the forward floor AND does the backward sweep —
-  file waiter groups, admitted nodes, blocker records, terminal-failure
-  records — in a single lock-held step, so the two halves cannot drift.
-  `supersede_old_file_generations` delegates to it; `remove()` calls it
-  in the SAME hold as its cancel sweep (its floor is `last_gen + 1`,
-  which still permits a re-added file, since `create_node` starts above
-  the same recorded generation floor).
-- It performs ONE fan-out covering every consumer kind, sweeping the dep
-  index by canonical + generation. Cancelling nodes only reaches
-  consumers whose dep was actually ADMITTED, and `signal_file_failed`
-  only drains file waiter groups — so an owner gated on `dep:Analysis-G`
-  while `dep:Source-G` was still running, where no `Analysis-G` node ever
-  existed, used to park forever. Sweeping the dep index reaches it
-  regardless of which stage it named or whether that stage was admitted.
+`WorkNodeIdentity::{FileStage, Artifact}` and the corresponding `DepKey`
+variants include the process-unique `FileNode` incarnation as well as generation.
+`SchedulerDag::submit_file` accepts the actual node and checks canonical,
+incarnation, generation and its object-lifetime retirement marker under the
+lifecycle hold. Its unchecked insertion primitive is private; raw identity
+submission is test-only. Cache-node admission has a separate entry point.
+Neither queued work nor a delayed worker can reconstruct authority from a
+replacement node at the same generation.
 
-The per-site gates below are still correct and still carry their own
-tests, but they are now defence in depth rather than the only thing
-standing between a retired generation and an admission.
+Queued requests bind to the live node during submission under `dag.lock()`.
+`prepare_request` looks up that exact incarnation and never creates a replacement
+for an obsolete inbox item. Fresh requests may load any readable SourceLoader
+backing after removal; scheduler removal does not permanently suppress paths.
+A missing backing file produces a terminal dependency failure.
 
-**Removal is one lifecycle transition under `dag.lock()`.**
-`Scheduler::remove` is owned by `scheduler/lifecycle.rs`. It reads the live
-node generation, installs the removal barrier, signals `Shutdown`, retires
-and cancels work, scrubs blocker/failure/tracking state, records the restart
-generation floor, removes the node with its source-root `Absent` publication,
-and clears its edges while holding the SAME DAG lock. The restart floor is
-published before the node shard entry disappears, since preparation can
-ensure an unpublished replacement outside the DAG lock. Stranded-waiter wakes
-run after unlock.
+`retire_generations_below` performs the backward sweep of file waiters, admitted
+nodes, dependency waiters, blocker records and failure records. It stores no DAG
+retirement floor. Admission's live-object check rejects later stale work,
+including gates on stages that were never admitted.
 
-A prepared request cannot acquire the DAG lock between the cancellation sweep
-and node unpublication. Once removal releases the lock, the admission crossing
-gate observes either no live node (`Shutdown`) or a different incarnation
-(`Superseded`); it never bumps the removed node beyond the completed sweep.
-`removal_cannot_admit_prepared_work_between_sweep_and_unpublication` attempts
-an actual admission from a competing thread at that boundary, checks that no
-DAG work survives, checks the crossing sender's `Shutdown`, and verifies a
-fresh post-removal request succeeds.
+`remove` marks the object retired, signals Shutdown, cancels work, scrubs records,
+unpublishes the node and publishes its source-root Absent state under one DAG
+hold. Stranded-waiter wakes run after unlock. `reset` uses the same ordering for
+all members and DAG clear, excluding cooperative admission as well as the
+stopped driver. Invalidation and close revalidate the sampled object after
+acquiring the lock.
 
-The reset/clear-all path still removes nodes outside the DAG lock and clears
-the DAG afterward; stopping the dedicated driver does not by itself exclude
-cooperative pumps. Reset remains a separate lifecycle boundary requiring the
-same atomicity rule.
+Scheduler tombstones and DAG retirement floors have no storage. The scheduler's
+per-canonical generation floors remain an external publication fence:
+`commit_artifact`, artifact eviction and the host's base source revision currently
+carry generation without a captured node incarnation. Their migration must
+precede reclamation of that remaining history. Internal admission, dispatch,
+publication, completion and failure use full incarnation identity independently
+of that fence.
 
-**The floor is necessary but NOT sufficient — liveness is the other
-half.** `prepare_request` runs OUTSIDE `dag.lock()`, so a prepared
+**Preparation must still name the live object at admission.** `prepare_request` runs OUTSIDE `dag.lock()`, so a prepared
 request can cross a retirement boundary before it is admitted: a
-concurrent `remove()` installs the floor, cancels the DAG and deletes the
-`FileNode` in the gap, leaving the captured `Arc` DETACHED. The floor
-cannot catch that on its own — bumping a detached node lands its
-generation exactly ON the removal floor (`last_gen + 1`), which `submit`
-admits because a legitimate re-add arrives at exactly the same value.
-Generation cannot separate them; only liveness can. So
+concurrent `remove()` retires the object, cancels the DAG and deletes the
+`FileNode` in the gap, leaving the captured `Arc` detached. A replacement
+can reuse the same generation, so generation cannot separate them;
+only the live incarnation can. So
 `admit_prepared_under_lock` opens with a CROSSING GATE, before any
 publication: the live `FileNode` must exist AND its
 `incarnation_id()` must equal `PreparedRequest.prepared_incarnation`,
 otherwise the sender is terminalized (`Shutdown` when the file is gone,
 `Superseded` when a different incarnation is published) and nothing is
 registered or admitted. Registration precedes admission, so a refused
-`submit` must also terminalize: an ignored `None` leaves a waiter group
+`submit_file` must also terminalize: an ignored `None` leaves a waiter group
 parked on work no producer will ever run
 (`signal_file_shutdown_at`).
 
@@ -207,10 +182,10 @@ request intentionally has no downstream identity after completion. On
 refusal it publishes and consumes NOTHING
 and calls `refuse_stale_stage_completion`, which cancels the dequeued
 identity idempotently — safe against a later generation because
-`WorkNodeIdentity::FileStage` carries the generation — signals the
+`WorkNodeIdentity::FileStage` carries incarnation and generation — signals the
 retired generation's waiter groups so a refusal can never strand a
 request (a no-op when a sweep already drained them), requeues stranded
-waiters after the lock drops, bumps `stale_completion_refusals`, and only
+waiters after the lock drops, bumps the test/`semantic-observe`-only `stale_completion_refusals`, and only
 THEN `debug_assert!`s.
 
 `StageExecutor::extract_deps` is host-specific. The session host returns only
@@ -601,8 +576,8 @@ pub struct Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) io_pool: Arc<SchedulerIoPool>,
     // ... other existing state (inbox, edges, dag, overlay, source_loader,
-    //     executor, tombstones, generation_floors, deferred_blocker_ids,
-    //     removal_epoch, shutdown, driver_handle, counters, config) ...
+    //     executor, generation_floors, deferred_blocker_ids,
+    //     shutdown, driver_handle, counters, config) ...
 }
 ```
 

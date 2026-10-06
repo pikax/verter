@@ -354,15 +354,6 @@ pub struct Scheduler {
     /// parse/analyze work. Workers tag `CallerKind::IoWorker`.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) io_pool: Arc<crate::execution::pool::SchedulerIoPool>,
-    /// Tombstones for removed files. Value is a monotonic removal counter.
-    /// A `source: Some(...)` submission only clears the tombstone if it was
-    /// submitted AFTER the removal (checked via an atomic counter on the
-    /// scheduler that is bumped on each removal and stamped on each submission).
-    pub tombstones: DashMap<String, u64>,
-    /// Per-file generation floor. After remove, the floor is set to the
-    /// removed node's generation. A re-added node starts at floor+1, so
-    /// stale completions from the old incarnation never match.
-    pub generation_floors: DashMap<String, u64>,
     /// Deferred blocker IDs for files whose node was at generation 0 when
     /// `register_resolved_deps` was called. Replayed when the node advances
     /// past generation 0 during Source stage completion.
@@ -396,10 +387,9 @@ pub struct Scheduler {
     /// landed (driver crash between insert and dequeue) without
     /// inserting an extra sweep loop.
     pub(crate) auto_ingested_recent: DashMap<Arc<str>, AutoIngestedRecord>,
-    /// Monotonic counter bumped on every `remove()`. Submissions carry the
-    /// counter value at submission time so the driver can reject pre-remove
-    /// submissions even if they carry a source buffer.
-    pub(crate) removal_epoch: AtomicU64,
+    /// Restart fence for external artifact publishers that carry only a
+    /// generation. Internal queued/worker work uses object incarnations.
+    pub generation_floors: DashMap<String, u64>,
     /// Count of stage completions refused at their publish point
     /// because the owning `FileNode` moved between dispatch and
     /// publish — a superseded generation or a re-homed incarnation.
@@ -409,6 +399,7 @@ pub struct Scheduler {
     /// caller error), so without a counter a test cannot distinguish
     /// "the gate fired" from "the race never happened". Expected to
     /// stay ZERO absent concurrent invalidation.
+    #[cfg(any(test, feature = "semantic-observe"))]
     pub(crate) stale_completion_refusals: AtomicU64,
     /// Shutdown flag.
     pub(crate) shutdown: AtomicBool,
@@ -581,11 +572,10 @@ impl Scheduler {
             config,
             cpu_pool,
             io_pool,
-            tombstones: DashMap::new(),
-            generation_floors: DashMap::new(),
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
-            removal_epoch: AtomicU64::new(0),
+            generation_floors: DashMap::new(),
+            #[cfg(any(test, feature = "semantic-observe"))]
             stale_completion_refusals: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             driver_handle: Mutex::new(None),
@@ -680,11 +670,10 @@ impl Scheduler {
             cpu_pool,
             #[cfg(not(target_arch = "wasm32"))]
             io_pool,
-            tombstones: DashMap::new(),
-            generation_floors: DashMap::new(),
             deferred_blocker_ids: DashMap::new(),
             auto_ingested_recent: DashMap::new(),
-            removal_epoch: AtomicU64::new(0),
+            generation_floors: DashMap::new(),
+            #[cfg(any(test, feature = "semantic-observe"))]
             stale_completion_refusals: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
             #[cfg(not(target_arch = "wasm32"))]
@@ -898,6 +887,8 @@ impl Scheduler {
             canonical: Arc::from(request.file_id.as_str()),
             target: request.target.clone(),
         });
+        let submitted_incarnation =
+            self.stamp_request(&request.file_id, request.file_language.clone());
         let submission = Submission::NewRequest {
             file_id: request.file_id,
             target: request.target,
@@ -905,7 +896,7 @@ impl Scheduler {
             source: request.source,
             file_language: request.file_language,
             sender: sender.clone(),
-            submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
+            submitted_incarnation,
             request_context: request.request_context,
         };
         match self.send_submission(submission) {
@@ -957,8 +948,9 @@ impl Scheduler {
         verter_audit::attribute_n!(SchedulerSubmitBatch, requests.len());
         let mut handles = Vec::with_capacity(requests.len());
         let mut queued = Vec::with_capacity(requests.len());
-        let submitted_epoch = self.removal_epoch.load(Ordering::Acquire);
         for request in requests {
+            let submitted_incarnation =
+                self.stamp_request(&request.file_id, request.file_language.clone());
             let (handle, sender) = completion_pair();
             // Mirror `submit_request`'s request-level target stamp so a
             // cooperative waiter on a batch handle gets the same
@@ -975,7 +967,7 @@ impl Scheduler {
                 source: request.source,
                 file_language: request.file_language,
                 sender,
-                submitted_epoch,
+                submitted_incarnation,
                 request_context: request.request_context,
             });
             handles.push(handle);
@@ -1160,59 +1152,33 @@ impl Scheduler {
             }
         }
 
-        // 2. Drain inbox — driver is stopped, so this is exclusive.
+        // 2. Drain queued requests; cooperative admission validates their stamps.
         while let Ok(submission) = self.inbox.receiver.try_recv() {
             Self::shutdown_drained_submission(submission);
         }
         self.shutdown_all_scoped_cache_flights();
 
-        // 3. Remove all nodes, recording generation floors so re-added
-        //    files start above any prior incarnation's generation.
-        let ids: Vec<String> = self.nodes.iter().map(|e| e.key().clone()).collect();
-        // ONE epoch covers every removed member: a batch transition
-        // publishes a single root advance, not one per file. The DAG
-        // signalling runs after the publication hold is released.
-        let removed: Vec<(String, u64)> = self.source_root.publish_transition(|publication| {
-            let mut removed = Vec::with_capacity(ids.len());
-            for id in &ids {
-                if let Some((_, node)) = self.nodes.remove(id) {
-                    let canonical: Arc<str> = Arc::from(id.as_str());
-                    publication.absent(&canonical, node.incarnation_id(), node.generation());
-                    removed.push((id.clone(), node.generation()));
+        // Cooperative pumps share the same lifecycle hold as admission.
+        // No successor can appear between node unpublication and DAG clear.
+        {
+            let mut dag = self.dag.lock();
+            let ids: Vec<String> = self.nodes.iter().map(|e| e.key().clone()).collect();
+            self.source_root.publish_transition(|publication| {
+                for id in &ids {
+                    if let Some((_, node)) = self.nodes.remove(id) {
+                        node.retire(&mut dag);
+                        self.generation_floors.insert(id.clone(), node.generation());
+                        let canonical: Arc<str> = Arc::from(id.as_str());
+                        publication.absent(&canonical, node.incarnation_id(), node.generation());
+                    }
                 }
-            }
-            removed
-        });
-        for (id, gen) in removed {
-            self.generation_floors.insert(id.clone(), gen);
-            let canonical: Arc<str> = Arc::from(id.as_str());
-            self.dag.lock().signal_file_shutdown(&canonical);
+            });
+            dag.clear();
+            self.edges.reverse_index.inner.clear();
+            self.edges.forward_deps.clear();
+            self.deferred_blocker_ids.clear();
+            self.auto_ingested_recent.clear();
         }
-
-        // 4. Clear state except generation_floors (preserved across resets
-        //    to prevent cross-incarnation stale completions from matching).
-        self.edges.reverse_index.inner.clear();
-        self.edges.forward_deps.clear();
-        self.dag.lock().clear();
-        self.tombstones.clear();
-        // generation_floors intentionally NOT cleared — stale worker completions
-        // from the old incarnation can still arrive after restart, and floors
-        // ensure re-added files start at a generation above any prior use.
-        self.deferred_blocker_ids.clear();
-        // Artifact blocker registry lives on the DAG and is cleared
-        // alongside the DAG itself in `dag.lock().clear()` above
-        // (see `SchedulerDag::clear` — clears `artifact_blocker_deps`).
-        // Auto-ingest tracking map is owned by the scheduler (not the
-        // DAG). Without an explicit clear here, every register_resolved_deps
-        // call that fired in the prior incarnation leaks an entry
-        // across reset() — accumulating across LSP workspace switches,
-        // MCP session boundaries, and multi-project bench cycles. The
-        // map is bounded by the active dep set so the leak is bounded
-        // per reset, but it is still real (entries persist for the
-        // 60s aging window or until a matrix consult that happens to
-        // observe the matching generation, which will rarely happen
-        // across an incarnation boundary).
-        self.auto_ingested_recent.clear();
 
         // 5. Drain inbox again — catch any completions that workers sent
         //    between step 2 and now. These are harmless (nodes removed in
@@ -1286,80 +1252,50 @@ impl Scheduler {
         blocker_dep_ids: Vec<String>,
     ) {
         // Ensure the node exists.
-        self.nodes
-            .entry(file_id.to_string())
-            .or_insert_with(|| self.create_node(file_id, None));
-
-        // Update forward/reverse edges.
-        let new_deps: std::collections::BTreeSet<String> = resolved_dep_ids.into_iter().collect();
-        self.edges.record_forward_deps(file_id, new_deps);
-
-        // Store blocker IDs for replay on the next Source completion.
-        // Also handle the empty-set case as an explicit clear of any
-        // prior pending Artifact blocker registry entry at the
-        // owner's live generation — the caller is now declaring
-        // there are no late blockers, and a stale registry entry
-        // would gate subsequent Artifact admissions on deps that the
-        // caller no longer considers blocking.
-        if !blocker_dep_ids.is_empty() {
-            // Resolve languages HERE. This is the sole content writer of
-            // `deferred_blocker_ids` and it runs with no DAG lock held, so the
-            // host classifier is safe to call. `register_resolved_deps` can
-            // return early below (generation 0 / Source not yet committed)
-            // WITHOUT running its node-ensure pass, so a deferred id may well
-            // reach Source completion with no node — carrying the language is
-            // what lets that path create one without touching the host under
-            // the mutex.
+        // Host callbacks finish before the lifecycle hold.
+        let requested_incarnation = self.stamp_request(file_id, None);
+        let dep_languages: std::collections::HashMap<String, FileLanguage> = blocker_dep_ids
+            .iter()
+            .map(|id| (id.clone(), self.source_loader.classify(id)))
+            .collect();
+        let canonical_arc: Arc<str> = Arc::from(file_id);
+        let (generation, incarnation, inherited_priority) = {
+            let mut dag = self.dag.lock();
+            let Some(node) = self
+                .nodes
+                .get(file_id)
+                .map(|entry| Arc::clone(entry.value()))
+            else {
+                return;
+            };
+            if node.incarnation_id() != requested_incarnation {
+                return;
+            }
+            self.edges
+                .record_forward_deps(file_id, resolved_dep_ids.into_iter().collect());
+            let generation = node.generation();
+            if blocker_dep_ids.is_empty() {
+                self.deferred_blocker_ids.remove(file_id);
+                dag.clear_artifact_blockers(&canonical_arc, generation);
+                return;
+            }
             self.deferred_blocker_ids.insert(
-                file_id.to_string(),
+                file_id.to_owned(),
                 blocker_dep_ids
                     .iter()
-                    .map(|id| (id.clone(), self.source_loader.classify(id)))
+                    .map(|id| (id.clone(), dep_languages[id].clone()))
                     .collect(),
             );
-        } else {
-            self.deferred_blocker_ids.remove(file_id);
-            // Clear any prior pending registry entry at the live
-            // generation before early-returning. An empty
-            // `blocker_dep_ids` is the caller's authoritative "no
-            // pending blockers" signal — leaving a stale entry in
-            // place would gate future Artifact admissions on deps
-            // the caller no longer considers blocking.
-            // Snapshot the generation and drop the nodes-shard Ref
-            // BEFORE acquiring `dag.lock()`. Holding a DashMap Ref
-            // across a parking_lot Mutex acquisition forms an AB-BA
-            // ordering with any caller that takes `dag.lock` first
-            // and then mutates the same nodes shard. The DAG-first
-            // ordering is the canonical one, so the nodes-shard
-            // reader must release before locking.
-            let gen = self.nodes.get(file_id).map(|n| n.generation());
-            if let Some(gen) = gen {
-                if gen > 0 {
-                    let canonical_arc: Arc<str> = Arc::from(file_id);
-                    self.dag.lock().clear_artifact_blockers(&canonical_arc, gen);
-                }
+            if node.current_integrated_source().is_none() {
+                return;
             }
-            return;
-        }
-
-        // If Source has already completed for the current generation, register
-        // blockers immediately. Otherwise they'll be replayed on the next
-        // Source completion.
-        let node = match self.nodes.get(file_id) {
-            Some(n) => n.clone(),
-            None => return,
+            (
+                generation,
+                node.incarnation_id(),
+                dag.highest_priority_for_file(&canonical_arc, generation)
+                    .unwrap_or(Priority::Background),
+            )
         };
-        let generation = node.generation();
-        if generation == 0 || node.current_integrated_source().is_none() {
-            return; // Source hasn't committed yet — deferred replay will handle it
-        }
-
-        let canonical_arc: Arc<str> = Arc::from(file_id);
-        let inherited_priority = self
-            .dag
-            .lock()
-            .highest_priority_for_file(&canonical_arc, generation)
-            .unwrap_or(Priority::Background);
 
         // First pass: auto-ingest deps that lack a FileNode so their
         // Source/Analysis pipeline starts. Auto-ingest is a Scheduler
@@ -1371,12 +1307,7 @@ impl Scheduler {
         // Source-failed corpse without this set (both have
         // `current_source().is_none()` and no live DAG identity for
         // Source/Analysis).
-        let mut auto_ingested: std::collections::HashSet<&str> =
-            std::collections::HashSet::with_capacity(blocker_dep_ids.len());
         for dep_id in &blocker_dep_ids {
-            if self.tombstones.contains_key(dep_id) {
-                continue;
-            }
             // Atomically ENSURE the dep node exists — never replace one.
             //
             // `contains_key` followed by an unconditional `insert` was a
@@ -1392,11 +1323,15 @@ impl Scheduler {
             // concurrent creator either wins (we observe it and reuse
             // it) or waits for us.
             let mut created_generation: Option<u64> = None;
+            let mut submitted_incarnation = 0;
+            let dep_language = dep_languages[dep_id].clone();
             {
+                let _dag = self.dag.lock();
                 let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
                 let _ensured = self.nodes.entry(dep_id.clone()).or_insert_with(|| {
-                    let dep_node = self.create_node_at_least(dep_id, None, 1);
+                    let dep_node = self.create_node_at_least(dep_id, Some(dep_language), 1);
                     let dep_gen = dep_node.generation();
+                    submitted_incarnation = dep_node.incarnation_id();
                     // Plant the auto-ingest tracking entry BEFORE
                     // publishing the FileNode and BEFORE sending the
                     // NewRequest. A concurrent matrix consultation that
@@ -1413,6 +1348,7 @@ impl Scheduler {
                     self.auto_ingested_recent.insert(
                         Arc::clone(&dep_canonical),
                         AutoIngestedRecord {
+                            incarnation: submitted_incarnation,
                             generation: dep_gen,
                             since: Instant::now(),
                         },
@@ -1433,9 +1369,8 @@ impl Scheduler {
                         let (_, s) = completion_pair::<RequestResult>();
                         s
                     },
-                    submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
+                    submitted_incarnation,
                 });
-                auto_ingested.insert(dep_id.as_str());
             }
         }
 
@@ -1460,6 +1395,11 @@ impl Scheduler {
         // first-time blocker registration would drop the dep
         // immediately and skip the gating it just set up.
         let mut dag = self.dag.lock();
+        if !self.nodes.get(file_id).is_some_and(|live| {
+            live.incarnation_id() == incarnation && live.generation() == generation
+        }) {
+            return;
+        }
         let mut dep_keys: Vec<DepKey> = Vec::new();
         // Failed-dep records collected from the 3-state matrix. These
         // ride together with the live `dep_keys` inside the
@@ -1473,11 +1413,12 @@ impl Scheduler {
         // prerequisite. Owner Analysis itself remains ungated.
         let mut failed_records: Vec<crate::dag::FailedDepRecord> = Vec::new();
         for dep_id in &blocker_dep_ids {
-            if self.tombstones.contains_key(dep_id) {
-                continue;
-            }
             let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
-            let dep_gen = self.nodes.get(dep_id).map(|n| n.generation()).unwrap_or(0);
+            let Some(dep_node) = self.nodes.get(dep_id).map(|n| Arc::clone(n.value())) else {
+                continue;
+            };
+            let dep_gen = dep_node.generation();
+            let dep_incarnation = dep_node.incarnation_id();
             // Run the shared 3-state matrix:
             //
             // - `Gating`     → record the DepKey for the Artifact
@@ -1490,26 +1431,14 @@ impl Scheduler {
             //                  drains the registry and surfaces a
             //                  typed `DependencyFailed` before codegen
             //                  runs over a dead prerequisite.
-            let status = if auto_ingested.contains(dep_id.as_str()) {
-                // Just-ingested: grace the dep — its Source request
-                // is in the inbox waiting to be dispatched. The
-                // canonical dead-producer matrix can't distinguish
-                // "pending inbox load" from "Source failed" because
-                // both leave the same FileNode + DAG shape, so we
-                // trust the auto-ingest side-effect. (A genuine
-                // terminal failure is intercepted by the matrix's
-                // `terminal_dep_failures` consult before this branch
-                // is reached.)
-                BlockerStatus::Gating
-            } else {
-                self.ensure_analysis_for_demand(
-                    &mut dag,
-                    &dep_canonical,
-                    dep_gen,
-                    std::cmp::min(inherited_priority, Priority::Interactive),
-                    AnalysisDemandKind::ArtifactBlocker,
-                )
-            };
+            let status = self.ensure_analysis_for_demand(
+                &mut dag,
+                &dep_canonical,
+                dep_incarnation,
+                dep_gen,
+                std::cmp::min(inherited_priority, Priority::Interactive),
+                AnalysisDemandKind::ArtifactBlocker,
+            );
             match status {
                 BlockerStatus::Satisfied => continue,
                 BlockerStatus::Failed(record) => {
@@ -1519,6 +1448,7 @@ impl Scheduler {
                 BlockerStatus::Gating => {
                     let dep_key = DepKey::FileStage {
                         canonical: Arc::clone(&dep_canonical),
+                        incarnation: dep_incarnation,
                         generation: dep_gen,
                         stage: FileStageKey::Analysis,
                     };
@@ -1540,7 +1470,7 @@ impl Scheduler {
         // each see the other as not-yet-gating and both register
         // mutually-blocking blocker entries.
         let (filtered_dep_keys, _dropped_dep_keys) =
-            Self::filter_macro_cycle_deps(&dag, &canonical_arc, generation, dep_keys);
+            Self::filter_macro_cycle_deps(&dag, &canonical_arc, incarnation, generation, dep_keys);
         let dep_keys = filtered_dep_keys;
 
         if dep_keys.is_empty() && failed_records.is_empty() {
@@ -1608,6 +1538,7 @@ impl Scheduler {
             Some(r) => Arc::clone(&r),
             None => return,
         };
+        let incarnation = node.incarnation_id();
         let generation = snapshot.generation;
         // Full coherence check: node generation, Source, AND Analysis
         // must all match. Without this, an external compile can publish
@@ -1623,6 +1554,7 @@ impl Scheduler {
         let canonical: Arc<str> = Arc::from(file_id);
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::clone(&canonical),
+            incarnation,
             generation,
             profile_hash: profile_hash_to_bytes(profile_hash),
             content_hash: [0u8; 16],
@@ -1635,10 +1567,16 @@ impl Scheduler {
         // so an external commit that lands during a worker's
         // executor run is preserved.
         let mut guard = self.dag.lock();
+        if !self.nodes.get(file_id).is_some_and(|live| {
+            live.incarnation_id() == incarnation && live.generation() == generation
+        }) {
+            return;
+        }
         node.artifacts.insert(profile_hash, Arc::clone(&snap));
         let result = RequestResult::Artifact(snap);
         guard.signal_stage_complete(
             &canonical,
+            incarnation,
             generation,
             &TaskKind::Artifact { profile_hash },
             &result,
@@ -1754,6 +1692,14 @@ impl Scheduler {
         };
         let canonical: Arc<str> = Arc::from(id);
         let mut dag = self.dag.lock();
+        let submitted_incarnation = node.incarnation_id();
+        if !self
+            .nodes
+            .get(id)
+            .is_some_and(|live| live.incarnation_id() == submitted_incarnation)
+        {
+            return;
+        }
         // Bump + publish atomically; see [`Self::invalidate`].
         let new_gen = self.source_root.publish_transition(|publication| {
             let new_gen = publication.bump_node_generation(&node);
@@ -1773,7 +1719,7 @@ impl Scheduler {
             priority: Priority::Background,
             source: None,
             file_language: None,
-            submitted_epoch: self.removal_epoch.load(Ordering::Acquire),
+            submitted_incarnation,
             request_context: None,
             sender: {
                 let (_, sender) = completion_pair::<RequestResult>();
@@ -2187,6 +2133,13 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
+    fn fixture_incarnation(scheduler: &Scheduler, id: &str) -> u64 {
+        scheduler
+            .nodes
+            .get(id)
+            .map_or(1, |node| node.incarnation_id())
+    }
+
     use super::*;
     use crate::source_loader::MemorySourceLoader;
 
@@ -2904,6 +2857,7 @@ mod tests {
 
         let source_id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: 1,
             stage: FileStageKey::Source,
         };
@@ -3349,6 +3303,7 @@ mod tests {
 
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: 1,
             profile_hash: profile_hash_to_bytes(42),
             content_hash: [0u8; 16],
@@ -3425,6 +3380,7 @@ mod tests {
 
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: 1,
             profile_hash: profile_hash_to_bytes(42),
             content_hash: [0u8; 16],
@@ -4428,12 +4384,12 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_rejects_pre_remove_source_submission() {
+    fn incarnation_rejects_pre_remove_source_submission() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("content"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
-        // Submit a request (stamped with current epoch=0)
+        // Bind the request to the current incarnation.
         let h1 = sched.submit_request(Request {
             file_id: "/a.vue".to_string(),
             target: TargetStage::Analysis,
@@ -4443,11 +4399,10 @@ mod tests {
             request_context: None,
         });
 
-        // Remove BEFORE the driver processes h1 (bumps epoch to 1)
+        // Retire that incarnation before the driver processes h1.
         sched.remove("/a.vue");
 
-        // Now drive — h1 was stamped at epoch 0, tombstone is at epoch 1
-        // so it should be rejected even though it carries source.
+        // The old incarnation is rejected even though it carries source.
         sched.drive_all();
 
         match h1.try_get().unwrap() {
@@ -4463,45 +4418,49 @@ mod tests {
     }
 
     #[test]
-    fn auto_ingress_skips_tombstoned_deps() {
-        let loader = Arc::new(MemorySourceLoader::new());
-        loader.insert("/a.vue".to_string(), Arc::from("a"));
-        loader.insert("/deleted-dep.ts".to_string(), Arc::from("dep"));
-
-        // Executor that says /a.vue depends on /deleted-dep.ts
-        let mut blockers_map = std::collections::HashMap::new();
-        blockers_map.insert("/a.vue".to_string(), vec!["/deleted-dep.ts".to_string()]);
-        let executor = Arc::new(BlockingExecutor {
-            blockers: blockers_map,
-        });
-        let sched =
-            Scheduler::test_new_sync_with_executor(SchedulerConfig::default(), loader, executor);
-
-        // Tombstone the dep (simulating a prior deletion)
-        sched.remove("/deleted-dep.ts");
-
-        // Now process /a.vue — auto-ingress should skip the tombstoned dep
-        let h = sched.submit_request(Request {
-            file_id: "/a.vue".to_string(),
-            target: TargetStage::Artifact { profile_hash: 1 },
-            priority: Priority::Interactive,
-            source: Some(Arc::from("a")),
-            file_language: None,
-            request_context: None,
-        });
-        sched.drive_all();
-
-        // The handle should resolve (not hang on a blocker for a deleted dep)
-        assert!(
-            h.try_get().is_some(),
-            "should not hang on blocker for tombstoned dep"
-        );
-
-        // Negative: the deleted dep should NOT be recreated
-        assert!(
-            !sched.has_node("/deleted-dep.ts"),
-            "tombstoned dep must not be auto-ingested"
-        );
+    fn auto_ingress_uses_backing_availability_after_unknown_removal() {
+        for readable in [true, false] {
+            let loader = Arc::new(MemorySourceLoader::new());
+            loader.insert("/a.vue".into(), Arc::from("a"));
+            loader.insert("/deleted-dep.ts".into(), Arc::from("dep"));
+            let mut blockers_map = std::collections::HashMap::new();
+            blockers_map.insert("/a.vue".into(), vec!["/deleted-dep.ts".into()]);
+            let executor = Arc::new(BlockingExecutor {
+                blockers: blockers_map,
+            });
+            let sched = Scheduler::test_new_sync_with_executor(
+                SchedulerConfig::default(),
+                loader.clone(),
+                executor,
+            );
+            sched.remove("/deleted-dep.ts");
+            if !readable {
+                loader.remove("/deleted-dep.ts");
+            }
+            let h = sched.submit_request(Request {
+                file_id: "/a.vue".into(),
+                target: TargetStage::Artifact { profile_hash: 1 },
+                priority: Priority::Interactive,
+                source: Some(Arc::from("a")),
+                file_language: None,
+                request_context: None,
+            });
+            sched.drive_all();
+            if readable {
+                assert!(matches!(h.try_get(), Some(CompletionState::Ready(_))));
+                assert!(sched
+                    .nodes
+                    .get("/deleted-dep.ts")
+                    .unwrap()
+                    .current_analysis()
+                    .is_some());
+            } else {
+                assert!(
+                    matches!(h.try_get(), Some(CompletionState::Failed(_))),
+                    "absent backing must terminate dependants"
+                );
+            }
+        }
     }
 
     #[test]
@@ -4685,7 +4644,6 @@ mod tests {
 
         // All state cleared
         assert!(!sched.has_node("/a.vue"), "nodes must be cleared");
-        assert!(sched.tombstones.is_empty(), "tombstones must be cleared");
         assert!(
             sched.deferred_blocker_ids.is_empty(),
             "deferred blockers must be cleared"
@@ -4774,6 +4732,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&synthetic),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                 generation: 7,
                 since: Instant::now(),
             },
@@ -4812,6 +4771,7 @@ mod tests {
             sched.auto_ingested_recent.insert(
                 Arc::clone(&canonical),
                 AutoIngestedRecord {
+                    incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                     generation: 11,
                     since: Instant::now(),
                 },
@@ -5259,6 +5219,7 @@ mod tests {
         // /a.vue at the live generation prior to register.
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: gen,
             stage: FileStageKey::Analysis,
         };
@@ -6929,6 +6890,7 @@ mod tests {
         let mut set: std::collections::BTreeSet<DepKey> = std::collections::BTreeSet::new();
         set.insert(DepKey::FileStage {
             canonical: Arc::from("/stale-dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/stale-dep.ts"),
             generation: 1,
             stage: FileStageKey::Analysis,
         });
@@ -7021,6 +6983,7 @@ mod tests {
         let mut set: std::collections::BTreeSet<DepKey> = std::collections::BTreeSet::new();
         set.insert(DepKey::FileStage {
             canonical: Arc::from("/stale-dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/stale-dep.ts"),
             generation: 1,
             stage: FileStageKey::Analysis,
         });
@@ -7098,6 +7061,7 @@ mod tests {
         // generation register_resolved_deps would have recorded.
         let dep_key = DepKey::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_recorded_gen,
             stage: FileStageKey::Analysis,
         };
@@ -7254,6 +7218,7 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -7263,6 +7228,7 @@ mod tests {
         // never admitted in the first place.
         let dep_analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -7348,12 +7314,14 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
         let dag = sched.dag.lock();
         let dep_analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -7441,6 +7409,7 @@ mod tests {
         // Confirm no live Analysis DAG identity for the dead dep.
         let dep_analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -7604,11 +7573,13 @@ mod tests {
         // dep — the NewRequest is queued but not drained.
         let dep_source_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Source,
         };
         let dep_analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -7630,7 +7601,12 @@ mod tests {
         // `auto_ingest_tracking_gates` consult, the call intercepts
         // the terminal arm and returns Gating so a same-tick
         // Artifact admission keeps the dep as a blocker.
-        let status = sched.file_stage_analysis_blocker_status(&dag, &dep_arc, dep_gen);
+        let status = sched.file_stage_analysis_blocker_status(
+            &dag,
+            &dep_arc,
+            fixture_incarnation(&sched, dep_arc.as_ref()),
+            dep_gen,
+        );
         assert!(
             matches!(status, BlockerStatus::Gating),
             "matrix must return Gating when the dep has an \
@@ -7645,6 +7621,7 @@ mod tests {
         // `admit_artifact_with_blockers` drop the dep silently.
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -7758,6 +7735,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&dep_arc),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                 generation: 1,
                 since: Instant::now(),
             },
@@ -7772,6 +7750,7 @@ mod tests {
         // opportunistically cleans the gen=1 tracking entry.
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -7833,6 +7812,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&dep_arc),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                 generation: 2,
                 since: Instant::now(),
             },
@@ -7840,6 +7820,7 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -7911,6 +7892,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&dep_arc),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                 generation: dep_gen,
                 since: Instant::now(),
             },
@@ -7918,6 +7900,7 @@ mod tests {
 
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -8007,11 +7990,16 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&canonical),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, "/dep.ts"),
                 generation: 2,
                 since: Instant::now(),
             },
         );
-        sched.clear_auto_ingest_tracking(&canonical, /* old_gen */ 1);
+        sched.clear_auto_ingest_tracking(
+            &canonical,
+            fixture_incarnation(&sched, canonical.as_ref()),
+            /* old_gen */ 1,
+        );
         {
             let entry = sched.auto_ingested_recent.get(&canonical).expect(
                 "clear_auto_ingest_tracking with stale gen must NOT drop the newer-gen entry",
@@ -8061,6 +8049,7 @@ mod tests {
         sched.auto_ingested_recent.insert(
             Arc::clone(&canonical),
             AutoIngestedRecord {
+                incarnation: fixture_incarnation(&sched, "/dep.ts"),
                 generation: 2,
                 since: Instant::now(),
             },
@@ -8107,6 +8096,7 @@ mod tests {
             sched_clone_b.auto_ingested_recent.insert(
                 Arc::clone(&canonical_b),
                 AutoIngestedRecord {
+                    incarnation: fixture_incarnation(&sched_clone_b, "/dep.ts"),
                     generation: 3,
                     since: Instant::now(),
                 },
@@ -8354,6 +8344,7 @@ mod tests {
 
         let artifact_identity = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: a_gen,
             profile_hash: profile_hash_to_bytes(77),
             content_hash: [0u8; 16],
@@ -8393,11 +8384,13 @@ mod tests {
                 .is_some();
             let dep_source_id = WorkNodeIdentity::FileStage {
                 canonical: Arc::from("/dep.ts"),
+                incarnation: fixture_incarnation(&sched, "/dep.ts"),
                 generation: dep_gen,
                 stage: FileStageKey::Source,
             };
             let dep_analysis_id = WorkNodeIdentity::FileStage {
                 canonical: Arc::from("/dep.ts"),
+                incarnation: fixture_incarnation(&sched, "/dep.ts"),
                 generation: dep_gen,
                 stage: FileStageKey::Analysis,
             };
@@ -8748,6 +8741,7 @@ mod tests {
         for stage in [FileStageKey::Source, FileStageKey::Analysis] {
             let stale = WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(&canonical),
+                incarnation: fixture_incarnation(&sched, canonical.as_ref()),
                 generation: 1,
                 stage,
             };
@@ -8861,6 +8855,7 @@ mod tests {
 
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/inc.vue"),
+            incarnation: fixture_incarnation(&sched, "/inc.vue"),
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -8940,10 +8935,16 @@ mod tests {
             "precondition: generation advanced"
         );
 
-        sched.admit_pending_artifacts(&canonical, generation, Priority::Background);
+        sched.admit_pending_artifacts(
+            &canonical,
+            fixture_incarnation(&sched, canonical.as_ref()),
+            generation,
+            Priority::Background,
+        );
 
         let stale_artifact = WorkNodeIdentity::Artifact {
             canonical: Arc::clone(&canonical),
+            incarnation: fixture_incarnation(&sched, canonical.as_ref()),
             generation,
             profile_hash: profile_hash_to_bytes(7),
             content_hash: [0u8; 16],
@@ -9034,20 +9035,8 @@ mod tests {
         );
     }
 
-    /// `remove()` must close the admission door FORWARD, not just sweep
-    /// backward.
-    ///
-    /// `remove()` tombstones the file and runs its cancel sweep, then
-    /// RELEASES the lock before the `FileNode` comes out of the map. A
-    /// queued completion entering that gap still saw a live node at a
-    /// live generation, so it could admit Artifact-G after the sweep;
-    /// once the node was gone that work could never dispatch (its
-    /// `FileNode` is missing) and its capacity reservation was never
-    /// released. Sweeping cannot fix that — the sweep already ran.
-    ///
-    /// The structural answer is a retirement FLOOR consulted by the one
-    /// admission primitive, so a post-sweep admission is refused by
-    /// construction rather than by each caller remembering to re-check.
+    /// A retained Arc to a removed node cannot authorize later admission.
+    /// The object retirement marker closes admission after the sweep.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn removal_retires_the_canonical_so_late_admission_is_refused() {
@@ -9067,7 +9056,8 @@ mod tests {
         });
         sched.drain_inbox();
         let canonical: Arc<str> = Arc::from("/gone.vue");
-        let generation = sched.nodes.get("/gone.vue").unwrap().generation();
+        let old_node = sched.nodes.get("/gone.vue").unwrap().clone();
+        let generation = old_node.generation();
 
         sched.remove("/gone.vue");
 
@@ -9075,19 +9065,22 @@ mod tests {
         // would have performed. It must be refused.
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::clone(&canonical),
+            incarnation: old_node.incarnation_id(),
             generation,
             profile_hash: profile_hash_to_bytes(5),
             content_hash: [0u8; 16],
         };
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&canonical),
+            incarnation: old_node.incarnation_id(),
             generation,
             stage: FileStageKey::Analysis,
         };
         {
             let mut dag = sched.dag.lock();
             assert!(
-                dag.submit(
+                dag.submit_file(
+                    &old_node,
                     artifact_id.clone(),
                     WorkKind::Artifact,
                     Priority::Background,
@@ -9099,7 +9092,8 @@ mod tests {
                  gone, so dispatch can never run it and never releases its reservation",
             );
             assert!(
-                dag.submit(
+                dag.submit_file(
+                    &old_node,
                     analysis_id.clone(),
                     WorkKind::Analysis,
                     Priority::Background,
@@ -9154,12 +9148,14 @@ mod tests {
 
         let owner_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&owner),
+            incarnation: fixture_incarnation(&sched, owner.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         // Gate the owner on the dep's ANALYSIS — which is never admitted.
         let gating_dep = DepKey::FileStage {
             canonical: Arc::clone(&dep),
+            incarnation: fixture_incarnation(&sched, dep.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -9180,6 +9176,7 @@ mod tests {
             assert!(
                 dag.token_for(&WorkNodeIdentity::FileStage {
                     canonical: Arc::clone(&dep),
+                    incarnation: fixture_incarnation(&sched, dep.as_ref()),
                     generation: dep_gen,
                     stage: FileStageKey::Analysis,
                 })
@@ -9230,17 +9227,13 @@ mod tests {
     /// be rejected before it registers a waiter or admits anything.
     ///
     /// `prepare_request` runs outside `dag.lock()`, so a prepared request
-    /// can cross a retirement boundary: `remove()` installs the floor,
+    /// can cross a retirement boundary: `remove()` retires the object,
     /// cancels the DAG, deletes the `FileNode` and drains the shutdown
     /// waiters, all in the gap. The captured `Arc` survives — this
     /// request holds it — but it is DETACHED from the canonical.
     ///
-    /// The retirement floor alone cannot catch this. Bumping a detached
-    /// node lands its generation exactly ON the floor (`last_gen + 1`),
-    /// and `submit` admits at the floor because a legitimate re-add
-    /// arrives at exactly the same value. Liveness is what separates
-    /// them, which is why the crossing gate is an incarnation check
-    /// rather than a generation one.
+    /// Generations can coincide on different objects. The crossing gate
+    /// must compare the captured incarnation with the published object.
     ///
     /// Discriminator: without the gate the waiter is registered and
     /// either the admission succeeds against a node no dispatcher can
@@ -9277,7 +9270,7 @@ mod tests {
             source: Some(Arc::from("x")),
             file_language: None,
             sender,
-            submitted_epoch: sched.removal_epoch.load(Ordering::Acquire),
+            submitted_incarnation: fixture_incarnation(&sched, "/cross.vue"),
             request_context: None,
         };
         let prepared = sched
@@ -9361,72 +9354,33 @@ mod tests {
         }
     }
 
-    /// The anti-hang path: an admission refused by the retirement floor
-    /// AFTER its waiter group was registered must terminalize that group.
-    ///
-    /// Registration precedes admission, so a refusal whose `None` is
-    /// dropped leaves a group waiting on work no producer will ever run —
-    /// a permanent park. This is the single path standing between a
-    /// refusal and a stranded waiter, and it is the whole subject of this
-    /// train, so it is pinned rather than assumed.
-    ///
-    /// The floor is raised above the LIVE generation directly, which is
-    /// the one state that reaches `submit`'s refusal with the node still
-    /// live and its incarnation intact — so the crossing gate passes and
-    /// only the floor refuses.
+    /// A queued request bound to a retired incarnation terminates before
+    /// registering a waiter that no producer can satisfy.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn admission_refused_by_the_floor_terminalizes_its_registered_waiter() {
-        use crate::job::CompletionState;
-
+    fn retired_queued_request_terminates_before_registering_a_waiter() {
         let loader = Arc::new(MemorySourceLoader::new());
-        loader.insert("/refused.vue".to_string(), Arc::from("x"));
+        loader.insert("/refused.vue".into(), Arc::from("x"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
-
-        // Materialize the node, then retire ABOVE its live generation
-        // without removing it: the node stays published at its own
-        // incarnation, so the crossing gate passes and the floor is the
-        // only thing that can refuse.
-        sched.submit_request(Request {
-            file_id: "/refused.vue".to_string(),
-            target: TargetStage::Analysis,
-            priority: Priority::Background,
-            source: Some(Arc::from("x")),
-            file_language: None,
-            request_context: None,
-        });
-        sched.drain_inbox();
-        let canonical: Arc<str> = Arc::from("/refused.vue");
-        let live_gen = sched.nodes.get("/refused.vue").unwrap().generation();
-        sched
-            .dag
-            .lock()
-            .retire_generations_below(&canonical, live_gen + 5);
-
-        let handle = sched.submit_request(Request {
-            file_id: "/refused.vue".to_string(),
+        let incarnation = sched.stamp_request("/refused.vue", None);
+        let (handle, sender) = completion_pair();
+        sched.remove("/refused.vue");
+        let prepared = sched.prepare_request(QueuedRequest {
+            file_id: "/refused.vue".into(),
             target: TargetStage::Analysis,
             priority: Priority::Background,
             source: None,
             file_language: None,
+            sender,
+            submitted_incarnation: incarnation,
             request_context: None,
         });
-        sched.drain_inbox();
-
-        assert!(
-            handle.try_get().is_some(),
-            "an admission refused by the retirement floor left its already-registered waiter \
-             parked forever — nothing will ever produce that identity",
-        );
-        assert!(
-            matches!(handle.try_get(), Some(CompletionState::Shutdown)),
-            "the refused admission must terminalize as Shutdown; got {:?}",
-            handle.try_get(),
-        );
+        assert!(prepared.is_none());
+        assert!(matches!(handle.try_get(), Some(CompletionState::Shutdown)));
+        assert_eq!(sched.dag.lock().total_active(), 0);
+        assert!(!sched.has_node("/refused.vue"));
     }
 
-    /// `signal_file_shutdown_at` must be scoped to the ONE generation it
-    /// names — a neighbouring live generation's waiters must survive.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn signal_file_shutdown_at_is_scoped_to_one_generation() {
@@ -9626,6 +9580,7 @@ mod tests {
         );
         let _ = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/bare-dep.ts"),
+            incarnation: fixture_incarnation(&sched, "/bare-dep.ts"),
             generation: dep_gen,
             stage: FileStageKey::Source,
         };
@@ -9718,6 +9673,7 @@ mod tests {
                 .find(|stage| {
                     dag.token_for(&WorkNodeIdentity::FileStage {
                         canonical: Arc::clone(&canonical),
+                        incarnation: fixture_incarnation(&sched, canonical.as_ref()),
                         generation: gen_before,
                         stage: *stage,
                     })
@@ -9754,6 +9710,7 @@ mod tests {
         // 1. Stale-token removal.
         let stale = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&canonical),
+            incarnation: fixture_incarnation(&sched, canonical.as_ref()),
             generation: gen_before,
             stage: admitted_stage,
         };
@@ -10204,6 +10161,7 @@ mod tests {
                 dep_gen_observed = dep_gen;
                 let key = DepKey::FileStage {
                     canonical: Arc::clone(&dep_arc),
+                    incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                     generation: dep_gen,
                     stage: FileStageKey::Analysis,
                 };
@@ -10316,6 +10274,7 @@ mod tests {
         );
         let source_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&canonical),
+            incarnation: fixture_incarnation(&sched, canonical.as_ref()),
             generation,
             stage: FileStageKey::Source,
         };
@@ -10332,7 +10291,7 @@ mod tests {
             None,
             None,
             source_sender,
-            sched.removal_epoch.load(Ordering::Acquire),
+            fixture_incarnation(&sched, "/paused.vue"),
             None,
         );
         let (analysis_joiner, analysis_sender) = completion_pair::<RequestResult>();
@@ -10343,7 +10302,7 @@ mod tests {
             None,
             None,
             analysis_sender,
-            sched.removal_epoch.load(Ordering::Acquire),
+            fixture_incarnation(&sched, "/paused.vue"),
             None,
         );
 
@@ -10353,6 +10312,7 @@ mod tests {
         );
         let analysis_identity = WorkNodeIdentity::FileStage {
             canonical,
+            incarnation: 1,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -10407,6 +10367,7 @@ mod tests {
         let dep_canonical: Arc<str> = Arc::from("/dep.ts");
         let dep_analysis = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&dep_canonical),
+            incarnation: fixture_incarnation(&sched, dep_canonical.as_ref()),
             generation: dep_generation,
             stage: FileStageKey::Analysis,
         };
@@ -10522,11 +10483,13 @@ mod tests {
         let dep_arc: Arc<str> = Arc::from("/dep.ts");
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&owner_arc),
+            incarnation: fixture_incarnation(&sched, owner_arc.as_ref()),
             generation: owner_gen,
             stage: FileStageKey::Analysis,
         };
@@ -10705,6 +10668,7 @@ mod tests {
                 if dep_gen > 0 {
                     let key = DepKey::FileStage {
                         canonical: Arc::clone(&dep_arc),
+                        incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                         generation: dep_gen,
                         stage: FileStageKey::Analysis,
                     };
@@ -10923,6 +10887,7 @@ mod tests {
                 if dep_gen > 0 {
                     let key = DepKey::FileStage {
                         canonical: Arc::clone(&dep_arc),
+                        incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                         generation: dep_gen,
                         stage: FileStageKey::Analysis,
                     };
@@ -11237,6 +11202,7 @@ mod tests {
 
         let artifact_identity = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: a_gen,
             profile_hash: profile_hash_to_bytes(99),
             content_hash: [0u8; 16],
@@ -11364,6 +11330,7 @@ mod tests {
 
         let key_v1 = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen_v1,
             stage: FileStageKey::Analysis,
         };
@@ -11393,6 +11360,7 @@ mod tests {
             let mut dag = sched.dag.lock();
             dag.signal_stage_complete(
                 &dep_arc,
+                fixture_incarnation(&sched, dep_arc.as_ref()),
                 dep_gen_v1,
                 &TaskKind::Load,
                 &RequestResult::Source(Arc::clone(&source_snap)),
@@ -11427,6 +11395,7 @@ mod tests {
             let mut dag = sched.dag.lock();
             dag.signal_stage_complete(
                 &dep_arc,
+                fixture_incarnation(&sched, dep_arc.as_ref()),
                 dep_gen_v1,
                 &TaskKind::Analysis,
                 &RequestResult::Analysis(Arc::clone(&analysis_snap)),
@@ -11460,6 +11429,7 @@ mod tests {
             let mut dag = sched.dag.lock();
             dag.signal_stage_complete(
                 &dep_arc,
+                fixture_incarnation(&sched, dep_arc.as_ref()),
                 dep_gen_v1,
                 &TaskKind::Artifact { profile_hash: 1 },
                 &RequestResult::Artifact(Arc::clone(&artifact_snap)),
@@ -11508,6 +11478,7 @@ mod tests {
         sched.nodes.insert("/dep.ts".to_string(), dep_node);
         let key_v1 = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen_v1,
             stage: FileStageKey::Analysis,
         };
@@ -11554,12 +11525,14 @@ mod tests {
         // /dep.ts references and not other files.
         let key_v2 = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen_v2,
             stage: FileStageKey::Analysis,
         };
         let sibling_arc: Arc<str> = Arc::from("/sibling.ts");
         let sibling_key = DepKey::FileStage {
             canonical: Arc::clone(&sibling_arc),
+            incarnation: fixture_incarnation(&sched, sibling_arc.as_ref()),
             generation: 5,
             stage: FileStageKey::Analysis,
         };
@@ -11672,6 +11645,7 @@ mod tests {
             if dep_gen > 0 {
                 let key = DepKey::FileStage {
                     canonical: Arc::clone(&dep_arc),
+                    incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
                     generation: dep_gen,
                     stage: FileStageKey::Analysis,
                 };
@@ -11850,6 +11824,7 @@ mod tests {
         // race covered by the sibling test).
         let artifact_identity = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/a.vue"),
+            incarnation: fixture_incarnation(&sched, "/a.vue"),
             generation: a_gen,
             profile_hash: profile_hash_to_bytes(77),
             content_hash: [0u8; 16],
@@ -12005,6 +11980,7 @@ mod tests {
         // persistent store carries the record.
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -12039,6 +12015,7 @@ mod tests {
             sched.admit_artifact_with_blockers(
                 &mut dag,
                 &a_arc,
+                fixture_incarnation(&sched, a_arc.as_ref()),
                 a_gen,
                 /* profile_hash = */ 77,
                 Priority::Interactive,
@@ -12052,7 +12029,7 @@ mod tests {
         assert!(
             registry_after_p1.failed.iter().any(|r| matches!(
                 &r.dep_key,
-                DepKey::FileStage { canonical, stage, generation }
+                DepKey::FileStage { canonical, stage, generation, .. }
                 if canonical.as_ref() == "/dep.ts"
                     && *stage == FileStageKey::Analysis
                     && *generation == dep_gen
@@ -12074,12 +12051,13 @@ mod tests {
                 .admit_artifact_with_blockers(
                     &mut dag,
                     &a_arc,
+                    fixture_incarnation(&sched, a_arc.as_ref()),
                     a_gen,
                     /* profile_hash = */ 99,
                     Priority::Interactive,
                     None,
                 )
-                .expect("test artifact admission refused by the retirement floor")
+                .expect("test artifact admission refused by the live object witness")
         };
 
         // Discriminating assertion #2: drain `next_ready` and verify
@@ -12228,6 +12206,7 @@ mod tests {
         // (no entry there).
         let dep_key = DepKey::FileStage {
             canonical: Arc::clone(&dep_arc),
+            incarnation: fixture_incarnation(&sched, dep_arc.as_ref()),
             generation: dep_gen,
             stage: FileStageKey::Analysis,
         };
@@ -12266,12 +12245,13 @@ mod tests {
                 .admit_artifact_with_blockers(
                     &mut dag,
                     &a_arc,
+                    fixture_incarnation(&sched, a_arc.as_ref()),
                     a_gen,
                     /* profile_hash = */ 31,
                     Priority::Interactive,
                     None,
                 )
-                .expect("test artifact admission refused by the retirement floor")
+                .expect("test artifact admission refused by the live object witness")
         };
 
         // Discriminating assertion #1: the registry slot for the
@@ -12603,6 +12583,7 @@ mod tests {
 
         let identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -12965,11 +12946,12 @@ mod tests {
         let owner: Arc<str> = Arc::from("/a.vue");
         let self_dep = DepKey::FileStage {
             canonical: Arc::clone(&owner),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let (kept, dropped) =
-            Scheduler::filter_macro_cycle_deps(&dag, &owner, 1, vec![self_dep.clone()]);
+            Scheduler::filter_macro_cycle_deps(&dag, &owner, 1, 1, vec![self_dep.clone()]);
         assert!(
             kept.is_empty(),
             "self-cycle dep must be filtered out: kept={kept:?}"
@@ -12998,11 +12980,13 @@ mod tests {
         // gating on B" half of the mutual cycle.
         let a_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&a),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let b_dep = DepKey::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -13019,10 +13003,12 @@ mod tests {
         // dep so B can admit and break the cycle.
         let a_dep = DepKey::FileStage {
             canonical: Arc::clone(&a),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
-        let (kept, dropped) = Scheduler::filter_macro_cycle_deps(&dag, &b, 1, vec![a_dep.clone()]);
+        let (kept, dropped) =
+            Scheduler::filter_macro_cycle_deps(&dag, &b, 1, 1, vec![a_dep.clone()]);
         assert!(
             kept.is_empty(),
             "mutual-cycle dep must be filtered out on the immediate path: kept={kept:?}",
@@ -13053,21 +13039,25 @@ mod tests {
         // transitive chain and reports the cycle.
         let b_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let c_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&c),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let c_dep = DepKey::FileStage {
             canonical: Arc::clone(&c),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let a_dep = DepKey::FileStage {
             canonical: Arc::clone(&a),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -13090,10 +13080,12 @@ mod tests {
         // it.
         let b_dep = DepKey::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
-        let (kept, dropped) = Scheduler::filter_macro_cycle_deps(&dag, &a, 1, vec![b_dep.clone()]);
+        let (kept, dropped) =
+            Scheduler::filter_macro_cycle_deps(&dag, &a, 1, 1, vec![b_dep.clone()]);
         assert!(
             kept.is_empty(),
             "three-node transitive cycle A→B→C→A must be filtered: kept={kept:?}",
@@ -13116,6 +13108,7 @@ mod tests {
         // B's Analysis is admitted with NO deps back to A.
         let b_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -13130,10 +13123,12 @@ mod tests {
         // A→B dep must survive the filter.
         let b_dep = DepKey::FileStage {
             canonical: Arc::clone(&b),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
-        let (kept, dropped) = Scheduler::filter_macro_cycle_deps(&dag, &a, 1, vec![b_dep.clone()]);
+        let (kept, dropped) =
+            Scheduler::filter_macro_cycle_deps(&dag, &a, 1, 1, vec![b_dep.clone()]);
         assert!(
             dropped.is_empty(),
             "non-cycle dep must be preserved: dropped={dropped:?}",
@@ -13246,21 +13241,25 @@ mod tests {
         let b_arc: Arc<str> = Arc::from("/b.vue");
         let a_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&a_arc),
+            incarnation: fixture_incarnation(&sched, a_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let b_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&b_arc),
+            incarnation: fixture_incarnation(&sched, b_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let dep_on_a = DepKey::FileStage {
             canonical: Arc::clone(&a_arc),
+            incarnation: fixture_incarnation(&sched, a_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let dep_on_b = DepKey::FileStage {
             canonical: Arc::clone(&b_arc),
+            incarnation: fixture_incarnation(&sched, b_arc.as_ref()),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -13367,6 +13366,7 @@ mod tests {
         let waiter = std::thread::spawn(move || {
             let analysis_id = WorkNodeIdentity::FileStage {
                 canonical: Arc::from("/a.vue"),
+                incarnation: 1,
                 generation: 1,
                 stage: FileStageKey::Analysis,
             };
@@ -14205,6 +14205,7 @@ mod tests {
         // a synthetic Failed.
         let identity = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -14269,6 +14270,7 @@ mod tests {
         // `Request{Artifact{..}}` target — the race-window state.
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -14330,6 +14332,7 @@ mod tests {
         // `Request{Analysis}` target — the race-window state.
         let source_frame = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Source,
         };
@@ -14384,6 +14387,7 @@ mod tests {
         let profile = 0x42u64;
         let artifact_frame = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             profile_hash: profile_hash_to_bytes(profile),
             content_hash: [1u8; 16],
@@ -14451,6 +14455,7 @@ mod tests {
 
         let artifact_frame = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 1,
             profile_hash: profile_hash_to_bytes(active_profile),
             content_hash: [1u8; 16],
@@ -14521,6 +14526,7 @@ mod tests {
         // catches the resolution.
         let active_frame = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: fixture_incarnation(&sched, "/x.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -14621,11 +14627,13 @@ mod tests {
         // Failed must surface.
         let active_frame = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/y.vue"),
+            incarnation: fixture_incarnation(&sched, "/y.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };
         let late_stamped_work = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/y.vue"),
+            incarnation: fixture_incarnation(&sched, "/y.vue"),
             generation: 1,
             stage: FileStageKey::Analysis,
         };

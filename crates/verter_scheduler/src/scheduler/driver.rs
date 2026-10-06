@@ -559,7 +559,7 @@ impl Scheduler {
                 source,
                 file_language,
                 sender,
-                submitted_epoch,
+                submitted_incarnation,
                 request_context,
             } => {
                 self.handle_new_request(
@@ -569,7 +569,7 @@ impl Scheduler {
                     source,
                     file_language,
                     sender,
-                    submitted_epoch,
+                    submitted_incarnation,
                     request_context,
                 );
             }
@@ -832,17 +832,19 @@ impl Scheduler {
                  {kind:?} / {identity:?}",
             ),
         };
-        let (file_id, generation) = match &job.identity {
+        let (file_id, incarnation, generation) = match &job.identity {
             WorkNodeIdentity::FileStage {
                 canonical,
+                incarnation,
                 generation,
                 ..
-            } => (canonical.to_string(), *generation),
+            } => (canonical.to_string(), *incarnation, *generation),
             WorkNodeIdentity::Artifact {
                 canonical,
+                incarnation,
                 generation,
                 ..
-            } => (canonical.to_string(), *generation),
+            } => (canonical.to_string(), *incarnation, *generation),
             WorkNodeIdentity::CacheNode { .. } => {
                 unreachable!(
                     "CacheNode identities are routed above and never reach file-stage \
@@ -862,7 +864,7 @@ impl Scheduler {
                 return DispatchOutcome::Skipped;
             }
         };
-        if node.generation() != generation {
+        if node.incarnation_id() != incarnation || node.generation() != generation {
             verter_debug_assert!(
                 self.dag.lock().token_for(&job.identity).is_none(),
                 "defensive dispatch skip: generation-mismatch case implies the prior \
@@ -1069,6 +1071,7 @@ impl Scheduler {
                     err,
                     &dag_for_violation,
                     &canonical_for_violation,
+                    incarnation,
                     generation,
                     &task_kind,
                     &inbox_for_violation,
@@ -1129,6 +1132,7 @@ impl Scheduler {
                     err,
                     &dag_for_violation,
                     &canonical_for_violation,
+                    incarnation,
                     generation,
                     &task_kind,
                     &inbox_for_violation,
@@ -1255,11 +1259,13 @@ impl Scheduler {
     /// observes a terminal failure rather than a hang. No silent drop,
     /// no requeue, no double-credit.
     #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn terminalize_pool_submit_violation(
         self: &Arc<Self>,
         err: crate::execution::pool::SchedulerPoolSubmitError,
         dag: &DagMutex,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         task_kind: &TaskKind,
         inbox_sender: &crossbeam_channel::Sender<Submission>,
@@ -1297,7 +1303,8 @@ impl Scheduler {
             stage: format!("{task_kind:?}"),
             message: format!("scheduler pool submit failed: {err:?}"),
         };
-        let stranded = Self::terminalize_failure(dag, canonical, generation, task_kind, error);
+        let stranded =
+            Self::terminalize_failure(dag, canonical, incarnation, generation, task_kind, error);
         Self::requeue_terminalize_stranded(inbox_sender, &stranded);
         DispatchOutcome::Skipped
     }
@@ -1368,17 +1375,19 @@ impl Scheduler {
             self.deliver_stage_completion(completion);
             return;
         }
-        let (file_id, generation) = match &job.identity {
+        let (file_id, incarnation, generation) = match &job.identity {
             WorkNodeIdentity::FileStage {
                 canonical,
+                incarnation,
                 generation,
                 ..
-            } => (canonical.to_string(), *generation),
+            } => (canonical.to_string(), *incarnation, *generation),
             WorkNodeIdentity::Artifact {
                 canonical,
+                incarnation,
                 generation,
                 ..
-            } => (canonical.to_string(), *generation),
+            } => (canonical.to_string(), *incarnation, *generation),
             WorkNodeIdentity::CacheNode { .. } => {
                 unreachable!(
                     "CacheNode identities are routed above and never reach file-stage \
@@ -1405,7 +1414,7 @@ impl Scheduler {
             }
         };
 
-        if node.generation() != generation {
+        if node.incarnation_id() != incarnation || node.generation() != generation {
             verter_debug_assert!(
                 self.dag.lock().token_for(&job.identity).is_none(),
                 "defensive inline dispatch skip: generation-mismatch case implies the prior \
@@ -1487,6 +1496,7 @@ impl Scheduler {
         dag: Arc<DagMutex>,
         source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     ) -> Option<Submission> {
+        let incarnation = node.incarnation_id();
         // Typed dependency-failure short-circuit BEFORE task-kind
         // dispatch. The marker survives both the fan-out path (a
         // producer terminalization after the consumer admitted) and
@@ -1512,6 +1522,7 @@ impl Scheduler {
             let stranded = Self::terminalize_failure(
                 &dag,
                 &canonical,
+                incarnation,
                 generation,
                 task_kind,
                 SchedulerError::DependencyFailed {
@@ -1596,6 +1607,7 @@ impl Scheduler {
         dag: Arc<DagMutex>,
         source_root: Arc<crate::source_root::SchedulerSourceDirectory>,
     ) -> Option<Submission> {
+        let incarnation = node.incarnation_id();
         use crate::job::SchedulerError;
 
         let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
@@ -1619,6 +1631,7 @@ impl Scheduler {
                 let stranded = Self::terminalize_failure(
                     &dag,
                     &canonical,
+                    incarnation,
                     generation,
                     &TaskKind::Load,
                     SchedulerError::FileNotFound {
@@ -1663,8 +1676,14 @@ impl Scheduler {
                         }
                     }
                 };
-                let stranded =
-                    Self::terminalize_failure(&dag, &canonical, generation, &TaskKind::Load, error);
+                let stranded = Self::terminalize_failure(
+                    &dag,
+                    &canonical,
+                    incarnation,
+                    generation,
+                    &TaskKind::Load,
+                    error,
+                );
                 Self::requeue_terminalize_stranded(inbox_sender, &stranded);
                 return None;
             }
@@ -1680,6 +1699,10 @@ impl Scheduler {
         // The `pending_source` clear, the DAG signal and the inbox send
         // stay OUTSIDE the hold — the publication lock is inner to the
         // DAG lock and must never be held across it.
+        let identity =
+            Self::dag_identity_for_task(&canonical, incarnation, generation, &TaskKind::Load);
+        let guard = dag.lock();
+        guard.token_for(&identity)?;
         let committed = source_root.publish_transition(|publication| {
             if node.generation() != generation {
                 return false;
@@ -1693,6 +1716,7 @@ impl Scheduler {
             );
             true
         });
+        drop(guard);
         if committed {
             let pending = node.pending_source.load();
             if let Some((gen, _)) = pending.as_ref() {
@@ -1722,6 +1746,7 @@ impl Scheduler {
         inbox_sender: &crossbeam_channel::Sender<Submission>,
         dag: Arc<DagMutex>,
     ) -> Option<Submission> {
+        let incarnation = node.incarnation_id();
         use crate::job::SchedulerError;
 
         let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
@@ -1735,6 +1760,7 @@ impl Scheduler {
                 let stranded = Self::terminalize_failure(
                     &dag,
                     &canonical,
+                    incarnation,
                     generation,
                     &TaskKind::Analysis,
                     SchedulerError::StageFailed {
@@ -1748,12 +1774,21 @@ impl Scheduler {
             }
         };
 
+        let identity =
+            Self::dag_identity_for_task(&canonical, incarnation, generation, &TaskKind::Analysis);
+        let mut guard = dag.lock();
+        guard.token_for(&identity)?;
         if node.generation() == generation {
             node.analysis.store(Arc::new(Some(Arc::clone(&snapshot))));
 
             let result = RequestResult::Analysis(snapshot);
-            dag.lock()
-                .signal_stage_complete(&canonical, generation, &TaskKind::Analysis, &result);
+            guard.signal_stage_complete(
+                &canonical,
+                incarnation,
+                generation,
+                &TaskKind::Analysis,
+                &result,
+            );
 
             Some(Submission::StageComplete {
                 file_id: node.canonical_id.clone(),
@@ -1786,6 +1821,7 @@ impl Scheduler {
         inbox_sender: &crossbeam_channel::Sender<Submission>,
         dag: Arc<DagMutex>,
     ) -> Option<Submission> {
+        let incarnation = node.incarnation_id();
         use crate::job::SchedulerError;
 
         let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
@@ -1802,6 +1838,7 @@ impl Scheduler {
         if Self::artifact_already_committed_at(node, profile_hash, generation) {
             let artifact_id = WorkNodeIdentity::Artifact {
                 canonical: Arc::clone(&canonical),
+                incarnation,
                 generation,
                 profile_hash: profile_hash_to_bytes(profile_hash),
                 content_hash: [0u8; 16],
@@ -1843,6 +1880,7 @@ impl Scheduler {
                 let stranded = Self::terminalize_failure(
                     &dag,
                     &canonical,
+                    incarnation,
                     generation,
                     &TaskKind::Artifact { profile_hash },
                     SchedulerError::StageFailed {
@@ -1869,6 +1907,13 @@ impl Scheduler {
             // identity, so no further work is needed on the worker
             // side.
             let mut guard = dag.lock();
+            let identity = Self::dag_identity_for_task(
+                &canonical,
+                incarnation,
+                generation,
+                &TaskKind::Artifact { profile_hash },
+            );
+            guard.token_for(&identity)?;
             if let Some(existing) = node.artifacts.get(&profile_hash) {
                 if existing.generation == generation {
                     drop(guard);
@@ -1879,6 +1924,7 @@ impl Scheduler {
             let result = RequestResult::Artifact(snapshot);
             guard.signal_stage_complete(
                 &canonical,
+                incarnation,
                 generation,
                 &TaskKind::Artifact { profile_hash },
                 &result,

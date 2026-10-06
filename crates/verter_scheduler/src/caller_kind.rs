@@ -248,6 +248,7 @@ mod tests {
         use std::sync::Arc;
         let id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -283,6 +284,7 @@ mod tests {
         use std::sync::Arc;
         let id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 7,
             stage: FileStageKey::Analysis,
         };
@@ -326,6 +328,7 @@ mod tests {
         use std::sync::Arc;
         let id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -356,6 +359,7 @@ mod tests {
         use std::sync::Arc;
         let id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 3,
             stage: FileStageKey::Source,
         };
@@ -385,6 +389,7 @@ mod tests {
         use std::sync::Arc;
         let id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 5,
             stage: FileStageKey::Source,
         };
@@ -409,6 +414,7 @@ mod tests {
         let profile = 0x42u64;
         let id = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 7,
             profile_hash: profile_hash_to_bytes(profile),
             content_hash: [0u8; 16],
@@ -468,6 +474,7 @@ mod tests {
         assert_ne!(active_profile, other_profile);
         let id = WorkNodeIdentity::Artifact {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 7,
             profile_hash: profile_hash_to_bytes(active_profile),
             content_hash: [0u8; 16],

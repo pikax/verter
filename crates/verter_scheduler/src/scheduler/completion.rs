@@ -228,6 +228,7 @@ impl Scheduler {
         generation: u64,
         identity: &WorkNodeIdentity,
     ) -> Vec<crate::dag::SubmissionToken> {
+        let existed = dag.token_for(identity).is_some();
         let stranded = dag.cancel(identity);
         // A refusal must never leave a request group parked forever.
         //
@@ -241,17 +242,20 @@ impl Scheduler {
         // been refused and will never be republished. Signalling them is
         // idempotent and strictly bounded to the retired generation, so
         // it cannot disturb a newer one.
-        dag.signal_file_failed(
-            canonical,
-            generation,
-            crate::job::SchedulerError::StageFailed {
-                file_id: canonical.to_string(),
-                stage: "stage_complete".into(),
-                message: "stage completion refused: the file moved to a different \
+        if existed {
+            dag.signal_file_failed(
+                canonical,
+                generation,
+                crate::job::SchedulerError::StageFailed {
+                    file_id: canonical.to_string(),
+                    stage: "stage_complete".into(),
+                    message: "stage completion refused: the file moved to a different \
                           incarnation or generation while the stage was in flight"
-                    .into(),
-            },
-        );
+                        .into(),
+                },
+            );
+        }
+        #[cfg(any(test, feature = "semantic-observe"))]
         self.stale_completion_refusals
             .fetch_add(1, Ordering::Relaxed);
         verter_debug_assert!(
@@ -282,7 +286,7 @@ impl Scheduler {
             // returning and leaving its reservation parked.
             let canonical_arc: Arc<str> = Arc::from(file_id);
             if let Some(identity) =
-                Self::dispatched_identity_for(&canonical_arc, generation, &task_kind)
+                Self::dispatched_identity_for(&canonical_arc, incarnation, generation, &task_kind)
             {
                 let stranded = {
                     let mut dag = self.dag.lock();
@@ -346,7 +350,6 @@ impl Scheduler {
                     .map(|deps| {
                         deps.blocker_ids
                             .iter()
-                            .filter(|id| !self.tombstones.contains_key(*id))
                             .map(|id| (id.clone(), self.source_loader.classify(id)))
                             .collect()
                     })
@@ -382,6 +385,7 @@ impl Scheduler {
                 // replacing it.
                 let source_id = WorkNodeIdentity::FileStage {
                     canonical: Arc::clone(&canonical_arc),
+                    incarnation,
                     generation,
                     stage: FileStageKey::Source,
                 };
@@ -437,9 +441,6 @@ impl Scheduler {
                                 let mut failed_records: Vec<crate::dag::FailedDepRecord> =
                                     Vec::new();
                                 for dep_id in &all_blocker_ids {
-                                    if self.tombstones.contains_key(dep_id) {
-                                        continue;
-                                    }
                                     let parent_ctx =
                                         dag.winner_context_for(&canonical_arc, generation);
 
@@ -453,7 +454,7 @@ impl Scheduler {
                                     // against. The vacant entry holds the shard
                                     // lock, so a concurrent creator either wins
                                     // (we observe it and reuse it) or waits.
-                                    let mut created_generation: Option<u64> = None;
+                                    let mut created_node: Option<Arc<FileNode>> = None;
                                     if let Some(dep_language) = dep_languages.get(dep_id) {
                                         let dep_language = dep_language.clone();
                                         let _ensured =
@@ -466,14 +467,16 @@ impl Scheduler {
                                                     Some(dep_language),
                                                     1,
                                                 );
-                                                created_generation = Some(dep_node.generation());
+                                                created_node = Some(Arc::clone(&dep_node));
                                                 dep_node
                                             });
                                     }
-                                    if let Some(dep_gen) = created_generation {
+                                    if let Some(dep_node) = created_node {
+                                        let dep_gen = dep_node.generation();
                                         let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
                                         admit_work(
                                             &mut dag,
+                                            &dep_node,
                                             &dep_canonical,
                                             dep_gen,
                                             TaskKind::Load,
@@ -505,11 +508,17 @@ impl Scheduler {
                                     //                 recovery still re-promotes
                                     //                 the dep to gating.
                                     let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
-                                    let dep_gen =
-                                        self.nodes.get(dep_id).map(|n| n.generation()).unwrap_or(0);
+                                    let Some(dep_node) =
+                                        self.nodes.get(dep_id).map(|n| Arc::clone(n.value()))
+                                    else {
+                                        continue;
+                                    };
+                                    let dep_gen = dep_node.generation();
+                                    let dep_incarnation = dep_node.incarnation_id();
                                     let status = self.ensure_analysis_for_demand(
                                         &mut dag,
                                         &dep_canonical,
+                                        dep_incarnation,
                                         dep_gen,
                                         std::cmp::min(inherited_priority, Priority::Interactive),
                                         AnalysisDemandKind::ArtifactBlocker,
@@ -523,6 +532,7 @@ impl Scheduler {
                                         BlockerStatus::Gating => {
                                             dep_keys.push(DepKey::FileStage {
                                                 canonical: dep_canonical,
+                                                incarnation: dep_incarnation,
                                                 generation: dep_gen,
                                                 stage: FileStageKey::Analysis,
                                             });
@@ -553,6 +563,7 @@ impl Scheduler {
                                         Self::filter_macro_cycle_deps(
                                             &dag,
                                             &canonical_arc,
+                                            incarnation,
                                             generation,
                                             dep_keys,
                                         );
@@ -589,6 +600,7 @@ impl Scheduler {
                         let result = RequestResult::Source(source);
                         dag.signal_stage_complete(
                             &canonical_arc,
+                            incarnation,
                             generation,
                             &TaskKind::Load,
                             &result,
@@ -598,7 +610,8 @@ impl Scheduler {
                         // request has reached its target; a later Analysis or
                         // Artifact request observes the committed Source and
                         // admits the missing stage through normal admission.
-                        let requires_analysis = dag.has_analysis_demand(&canonical_arc, generation);
+                        let requires_analysis =
+                            dag.has_analysis_demand(&canonical_arc, incarnation, generation);
                         // Re-read the file's urgency under THIS hold. The
                         // value sampled before extraction can be stale: an
                         // interactive request joining the same generation
@@ -612,6 +625,7 @@ impl Scheduler {
                             let status = self.ensure_analysis_for_demand(
                                 &mut dag,
                                 &canonical_arc,
+                                incarnation,
                                 generation,
                                 std::cmp::min(effective_priority, inherited_priority),
                                 AnalysisDemandKind::DirectRequest,
@@ -651,6 +665,7 @@ impl Scheduler {
                 // proceed on the next dispatch pass.
                 let analysis_id = WorkNodeIdentity::FileStage {
                     canonical: Arc::clone(&canonical_arc),
+                    incarnation,
                     generation,
                     stage: FileStageKey::Analysis,
                 };
@@ -672,11 +687,16 @@ impl Scheduler {
                 // dep file's nodes-shard entry.
                 let dependents = self.edges.reverse_index.get(file_id);
                 for dep_file in dependents {
-                    let dep_gen = self.nodes.get(&dep_file).map(|n| n.generation());
-                    let Some(dep_gen) = dep_gen else { continue };
+                    let Some(dep_node) = self.nodes.get(&dep_file).map(|n| Arc::clone(n.value()))
+                    else {
+                        continue;
+                    };
+                    let dep_gen = dep_node.generation();
+                    let dep_incarnation = dep_node.incarnation_id();
                     let dep_canonical: Arc<str> = Arc::from(dep_file.as_str());
                     let dep_analysis_id = WorkNodeIdentity::FileStage {
                         canonical: Arc::clone(&dep_canonical),
+                        incarnation: dep_incarnation,
                         generation: dep_gen,
                         stage: FileStageKey::Analysis,
                     };
@@ -688,13 +708,23 @@ impl Scheduler {
                         .lock()
                         .highest_priority_for_file(&dep_canonical, dep_gen)
                         .unwrap_or(Priority::Background);
-                    self.admit_pending_artifacts(&dep_canonical, dep_gen, inherited);
+                    self.admit_pending_artifacts(
+                        &dep_canonical,
+                        dep_incarnation,
+                        dep_gen,
+                        inherited,
+                    );
                 }
 
                 // Admit this file's pending artifact waiters if its own
                 // gate is clear.
                 if !self.dag.lock().has_pending_deps(&analysis_id) {
-                    self.admit_pending_artifacts(&canonical_arc, generation, inherited_priority);
+                    self.admit_pending_artifacts(
+                        &canonical_arc,
+                        incarnation,
+                        generation,
+                        inherited_priority,
+                    );
                 }
             }
             TaskKind::Artifact { profile_hash } => {
@@ -715,6 +745,7 @@ impl Scheduler {
                 // grow the registry across long-lived sessions.
                 let artifact_id = WorkNodeIdentity::Artifact {
                     canonical: Arc::clone(&canonical_arc),
+                    incarnation,
                     generation,
                     profile_hash: profile_hash_to_bytes(*profile_hash),
                     content_hash: [0u8; 16],
@@ -760,12 +791,16 @@ impl Scheduler {
     pub(super) fn terminalize_failure(
         dag: &DagMutex,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         task_kind: &TaskKind,
         error: crate::job::SchedulerError,
     ) -> Vec<crate::dag::SubmissionToken> {
-        let identity = Self::dag_identity_for_task(canonical, generation, task_kind);
+        let identity = Self::dag_identity_for_task(canonical, incarnation, generation, task_kind);
         let mut guard = dag.lock();
+        if guard.token_for(&identity).is_none() {
+            return Vec::new();
+        }
         // 1. Cancel the DAG node — releases the parked capacity
         //    reservation through the by-value `release(self)` consume
         //    in `cancel`'s reservation drop path. Source / Analysis
@@ -801,8 +836,12 @@ impl Scheduler {
         //     marker for the chokepoint to fire on.
         let mut stranded = Vec::new();
         if matches!(task_kind, TaskKind::Analysis) {
-            let analysis_stranded =
-                guard.fanout_analysis_failure_to_waiters(canonical, generation, &error);
+            let analysis_stranded = guard.fanout_analysis_failure_to_waiters(
+                canonical,
+                incarnation,
+                generation,
+                &error,
+            );
             stranded.extend(analysis_stranded);
         }
         // 1. Cancel the DAG node — releases the parked capacity
@@ -838,8 +877,12 @@ impl Scheduler {
         //     a typed `DependencyFailed` instead of synthesising a
         //     stage-only envelope.
         if matches!(task_kind, TaskKind::Load | TaskKind::Parse) {
-            let analysis_stranded =
-                guard.fanout_source_failure_to_analysis_waiters(canonical, generation, &error);
+            let analysis_stranded = guard.fanout_source_failure_to_analysis_waiters(
+                canonical,
+                incarnation,
+                generation,
+                &error,
+            );
             stranded.extend(analysis_stranded);
         }
         // 1c. Persistent terminal-dep-failure record. The fan-out
@@ -862,6 +905,7 @@ impl Scheduler {
         ) {
             let analysis_dep_key = crate::dag::DepKey::FileStage {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 stage: crate::dag::FileStageKey::Analysis,
             };
@@ -944,8 +988,10 @@ impl Scheduler {
             stage: format!("{task_kind:?}"),
             message: "stage executor panicked".to_string(),
         };
+        let incarnation = node.incarnation_id();
         let canonical: Arc<str> = Arc::from(node.canonical_id.as_str());
-        let stranded = Self::terminalize_failure(&dag, &canonical, generation, task_kind, error);
+        let stranded =
+            Self::terminalize_failure(&dag, &canonical, incarnation, generation, task_kind, error);
         Self::requeue_terminalize_stranded(inbox_sender, &stranded);
     }
 
