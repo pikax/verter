@@ -16,7 +16,6 @@ import {
   invocationEnd,
   runLimits,
   supervisorDeadlineMs,
-  compactCliStdout,
   warmRepeatsFor,
 } from "./analyze.mjs";
 import {
@@ -720,7 +719,7 @@ export async function main(argv) {
     let cliStdout = null;
     if (!probeOut && result.record?.stdoutPath) {
       try {
-        cliStdout = compactCliStdout(readFileSync(result.record.stdoutPath, "utf8"));
+        cliStdout = readFileSync(result.record.stdoutPath, "utf8");
       } catch {
         cliStdout = null;
       }

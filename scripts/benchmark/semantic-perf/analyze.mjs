@@ -181,16 +181,6 @@ export function invocationEnd(inv, limits = {}) {
 }
 
 /**
- * The stored form of a whole-program run's stdout: whole up to 1 MiB, else
- * both ends (tsc -p prints its diagnostics, then its extended diagnostics).
- * Deterministic, so the validator can re-derive it from the raw file.
- */
-export function compactCliStdout(text) {
-  if (typeof text !== "string") return null;
-  return text.length > 1 << 20 ? text.slice(0, 1 << 19) + "\n…\n" + text.slice(-(1 << 19)) : text;
-}
-
-/**
  * Problems with a probe record that must hold for its numbers to be read:
  * every phase and request time present, finite and non-negative, every warm
  * repeat answered with the cold answer, the statistics present and clean.

@@ -726,7 +726,7 @@ const scope = (entries) => ({
  */
 const PENDING = Symbol("pending infer declaration");
 function pendingNode(node, sentinel) {
-  Object.defineProperty(node, PENDING, { value: sentinel, enumerable: false });
+  Object.defineProperty(node, PENDING, { value: sentinel, enumerable: false, configurable: true });
   return node;
 }
 
@@ -994,7 +994,10 @@ export function normalize(node, env = []) {
       });
       const numbering = new Map(order.map((s, i) => [s, i]));
       visitNormalized(ext, (x) => {
-        if (numbering.has(x[PENDING])) x.bound.index = numbering.get(x[PENDING]);
+        if (numbering.has(x[PENDING])) {
+          x.bound.index = numbering.get(x[PENDING]);
+          delete x[PENDING];
+        }
       });
       return {
         k: "conditional",
