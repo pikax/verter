@@ -656,7 +656,7 @@ The 3 originally-proposed variants — `MaterializeSurface`, `ResolvePublicInsta
 | File | Purpose |
 | --- | --- |
 | `crates/verter_type_engine/src/project_semantic_dispatch/` | `ProjectSemanticDispatch`, `SemanticQueryApi` impl, build/walk/relate/lower/substitute/evaluate/guards/enumerate sub-modules |
-| `crates/verter_session/src/semantic_query_memo.rs` | `SemanticGraphStore` (node memo + relation memo) |
+| `crates/verter_type_engine/src/semantic_query_memo/mod.rs` | `SemanticGraphStore` (node memo + relation memo) |
 | `crates/verter_session/src/host_manage.rs` | `get_component_meta()` entry point, `HostNamedTypeCacheAdapter` (reads/writes `SemanticGraphStore` directly for Vue macro results) |
 | `crates/verter_session/src/host_resolve.rs` | `HostFrontierAdapter`, cross-file type resolution |
 | `crates/verter_session/src/resolver_core/component_meta_query_engine/` | `ComponentMetaQueryEngine` — request-scoped query-planner. Builder of `SemanticQueryKey` lists; the engine asks the shared dispatch and assembles `ComponentMetaAnalysis` from the returned `CacheRead<T>` results. **Authority model lives in `mod.rs`'s file-level doc-comment** — read it before adding cache state to the engine. No private durable resolver/expander state; child modules `helpers` / `prepared_surface` / `registry_decl` / `route_keys` / `routed_expr` / `shallow_preserve` / `surface` provide focused method clusters. |

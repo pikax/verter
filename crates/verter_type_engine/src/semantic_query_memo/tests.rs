@@ -35,7 +35,7 @@ fn production_relation_admission_is_semantic_store_owned() {
     assert!(
         store_source.lines().any(|line| line
             .trim_start()
-            .starts_with("pub fn publish_scc_members_fenced<")),
+            .starts_with("pub(crate) fn publish_scc_members_fenced<")),
         "the production relation write must be crate-private"
     );
 }
