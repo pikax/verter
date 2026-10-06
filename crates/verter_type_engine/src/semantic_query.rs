@@ -3421,9 +3421,9 @@ mod instantiate_body_source {
 
 // Named across the crate boundary only by the host's test suites.
 #[cfg(any(test, feature = "test-support"))]
-pub use instantiate_body_source::InstantiateBodySource;
+pub use self::instantiate_body_source::InstantiateBodySource;
 #[cfg(not(any(test, feature = "test-support")))]
-pub(crate) use instantiate_body_source::InstantiateBodySource;
+pub(crate) use self::instantiate_body_source::InstantiateBodySource;
 
 /// The authored-arm instantiate source payload: the sealed operand
 /// identity plus the force request's projection demand.
