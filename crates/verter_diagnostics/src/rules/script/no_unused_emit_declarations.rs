@@ -11,7 +11,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 /// `TemplateAnalysisSnapshot::emit_definitions` is populated FAIL-OPEN by the
 /// shared unused-declaration pipeline: members appear only when emission could
@@ -63,8 +63,8 @@ impl LintRule for NoUnusedEmitDeclarations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::template::AnalyzedEmitDefinition;
 
-    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

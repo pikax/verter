@@ -12,8 +12,8 @@
 
 use crate::meta::MetaProject;
 use crate::meta_resolve::ResolvedComponentMetaState;
-use crate::types::ProjectionMode;
 use std::sync::Arc;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// Reusable runtime owner for a session's query execution.
 ///

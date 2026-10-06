@@ -1,7 +1,7 @@
 //! Activity gate for the semantic substrate's close-time payload release.
 //!
 //! Semantic node ids are plain ordinals, read by id through
-//! [`crate::semantic_query_memo::SemanticGraphStore::node_data`] from many
+//! [`verter_type_engine::semantic_query_memo::SemanticGraphStore::node_data`] from many
 //! places, and a computation commonly reads the same id more than once —
 //! classify it on one read, then take a shape-specific accessor on a later
 //! one. When a document closes, the store releases the nodes it interned for
@@ -58,7 +58,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::semantic_query_memo::SemanticReleaseReport;
+use verter_type_engine::semantic_query_memo::SemanticReleaseReport;
 
 /// One queued close: the canonical to release and the arena watermark taken
 /// at the close (only nodes below it are released).

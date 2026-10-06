@@ -15,9 +15,9 @@
 //! materialization refusal fails closed and cannot serve or publish the base
 //! artifact. The authored-body-lowering demand
 //! delegates to the decl-body memo's locator deref
-//! ([`crate::decl_body_memo::DeclBodyMemo::deref_locator_body`]), whose
+//! ([`verter_semantic_source::decl_body_memo::DeclBodyMemo::deref_locator_body`]), whose
 //! demanded lowering runs LEASE-ONLY through
-//! [`crate::decl_lowering::DeclLoweringService::run_leased`] against the
+//! [`verter_semantic_source::decl_lowering::DeclLoweringService::run_leased`] against the
 //! scheduler-retained parse snapshot. The port adds NO second lowering path
 //! and NO resolution of its own — it routes, delegates, maps the typed
 //! product onto the neutral wire vocabulary, and carries the serve's
@@ -29,9 +29,9 @@ use verter_session_query::{
 };
 use verter_type_expr::locators::AuthoredBodyLocator;
 
-use crate::decl_body_memo::locator_deref::DerefedAuthoredBody;
-use crate::decl_body_memo::{DerefedBodyShape, LocatorBodyDerefError};
-use crate::resolver_core::RequestBoundResolverContext;
+use verter_session_query::source::deref::DerefedAuthoredBody;
+use verter_session_query::source::deref::{DerefedBodyShape, LocatorBodyDerefError};
+use verter_type_engine::resolver_core::RequestBoundResolverContext;
 
 /// Host-backed adapter implementing the query layer's host port.
 ///
@@ -53,7 +53,7 @@ use crate::resolver_core::RequestBoundResolverContext;
 /// boundary instead of stopping at the request-sticky / traced-scope
 /// suppression rails inside the bridge.
 pub struct SessionQueryHostPort<'ctx> {
-    ctx: &'ctx dyn RequestBoundResolverContext,
+    ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
 }
 
 impl<'ctx> SessionQueryHostPort<'ctx> {
@@ -69,7 +69,9 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
     /// therefore redundant defense-in-depth (it can only ever hold),
     /// retained so a hypothetical future marker misuse trips loudly in dev
     /// builds.
-    pub(crate) fn new(ctx: &'ctx dyn RequestBoundResolverContext) -> Self {
+    pub(crate) fn new(
+        ctx: &'ctx dyn RequestBoundResolverContext<crate::resolver_core::HostCapabilities>,
+    ) -> Self {
         verter_debug_assert!(
             ctx.is_request_bound(),
             "QueryHostPort binds a request-view-bound ResolverContext"
@@ -91,7 +93,9 @@ impl<'ctx> SessionQueryHostPort<'ctx> {
 
 // NEGATIVE — the direct host cannot satisfy the request-bound marker. Adding
 // any such implementation makes this assertion fail to compile.
-static_assertions::assert_not_impl_all!(crate::VerterHost: RequestBoundResolverContext);
+static_assertions::assert_not_impl_all!(
+    crate::VerterHost: RequestBoundResolverContext<crate::resolver_core::HostCapabilities>
+);
 
 const _: () = {
     // POSITIVE — both genuinely request-bound contexts coerce to the

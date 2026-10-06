@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 use crate::memory::MemoryWorkspace;
 use crate::resolution_currency::{ResolutionOutcome, ResolutionOverlaySnapshot};
@@ -200,7 +200,7 @@ fn an_overlay_changes_a_realpath_only_when_the_effective_value_moves() {
     use crate::resolution_currency::{
         CanonicalResolutionId, CapturedResolutionWorld, ResolutionFactKey, ResolutionWorldRoot,
     };
-    use verter_semantic::resolver_core::{PathProbe, ResolutionPopulation, ResolutionWorldId};
+    use verter_session_query::resolution::{PathProbe, ResolutionPopulation, ResolutionWorldId};
 
     let world_with_realpath = |realpath: &str| {
         let mut root = ResolutionWorldRoot::bootstrap(ResolutionWorldId::from_raw(1));
@@ -368,22 +368,26 @@ impl Drop for CountingCharge {
     }
 }
 
-impl crate::overlay_residency::ResolutionRetentionAccount for CountingAccount {
+impl verter_session_query::retention::resolution_charge::ResolutionRetentionAccount
+    for CountingAccount
+{
     fn reserve_retained(
         &self,
         bytes: usize,
-    ) -> Option<crate::overlay_residency::ResolutionRetentionCharge> {
+    ) -> Option<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge> {
         if !self.admit {
             return None;
         }
         self.charged
             .fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
-        Some(crate::overlay_residency::ResolutionRetentionCharge::new(
-            CountingCharge {
-                bytes,
-                charged: Arc::clone(&self.charged),
-            },
-        ))
+        Some(
+            verter_session_query::retention::resolution_charge::ResolutionRetentionCharge::new(
+                CountingCharge {
+                    bytes,
+                    charged: Arc::clone(&self.charged),
+                },
+            ),
+        )
     }
 }
 

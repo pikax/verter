@@ -31,8 +31,10 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{FlowReturnResult, ReturnProjectionDemand, SemanticNodeData};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
+    FlowReturnResult, ReturnProjectionDemand, SemanticNodeData,
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -291,12 +293,12 @@ fn assert_same_two_basis(
 /// order so authored order stays visible; leaves print kinds, names
 /// and literal values.
 fn render_node(
-    graph: &Arc<verter_session::for_tests::SemanticGraphStore>,
-    node: verter_session::semantic_query::SemanticNodeId,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     depth: usize,
     out: &mut String,
 ) {
-    use verter_session::semantic_query::SemanticNodeData as D;
+    use verter_type_engine::semantic_query::SemanticNodeData as D;
     if depth > 8 {
         out.push('…');
         return;
@@ -347,7 +349,7 @@ fn render_node(
                     out.push(',');
                 }
                 match entry {
-                    verter_session::semantic_query::SurfaceEntry::Member(member) => {
+                    verter_type_engine::semantic_query::SurfaceEntry::Member(member) => {
                         match &member.key {
                             verter_type_expr::AuthoredPropertyKey::String(name) => {
                                 out.push_str(name);
@@ -507,7 +509,7 @@ const STABLE_KEY_TABLE: &[StableKeyRow] = &[
 /// declaration (the same source-text guard discipline the dispatch
 /// tests use).
 fn live_semantic_node_data_variants() -> Vec<String> {
-    let source = read_repo_file("crates/verter_session/src/semantic_query.rs");
+    let source = read_repo_file("crates/verter_type_engine/src/semantic_query.rs");
     let start = source
         .find("pub enum SemanticNodeData {")
         .expect("the SemanticNodeData declaration");
@@ -1008,7 +1010,10 @@ fn det_05_persisted_axis_is_dormant_while_no_semantic_cache_serializes() {
         "DET-05: the persisted-cache axis is no longer registered dormant — its driver must \
          exist and run"
     );
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("verter_type_engine")
+        .join("src");
     for cache in ["semantic_query_memo", "signature_kernel"] {
         let mut stack = vec![root.join(cache)];
         // bounded-loop: the two cache module trees.
@@ -1130,7 +1135,7 @@ export function witness(v: number | string, flag: boolean) {
 /// fresh token answers exactly what a cold host answers, on both bases: a
 /// cancelled attempt never leaves a partial answer behind.
 fn drive_det_05_cancel_and_retry() {
-    use verter_scheduler::cancellation::CancellationToken;
+    use verter_execution::cancellation::CancellationToken;
     use verter_session::host_flow_return_audit::FlowReturnError;
     let canonical = "/det/cancel.ts";
     let cold_host = build_host(&[(canonical, CANCEL_TS)]);
@@ -1553,8 +1558,8 @@ export function witness(v: "a" | "ab" | "abc" | "b") { return v; }
 fn det_08_contextual_body_demands() {
     assert_ready("DET-08", "det_08_contextual_body_demands");
     use verter_session::host_flow_return_audit::FlowReturnError;
-    use verter_session::semantic_query::demand::{Demand, ProjectionPath};
-    use verter_session::semantic_query::{FlowReturnFailure, PathSegment, PropertyKey};
+    use verter_type_engine::semantic_query::demand::{Demand, ProjectionPath};
+    use verter_type_engine::semantic_query::{FlowReturnFailure, PathSegment, PropertyKey};
 
     const CONTEXT_TS: &str =
         "export function contextual(v: number | string) { return { a: v, b: 1 as const }; }";
@@ -1810,7 +1815,9 @@ fn det_09_policy_change_with_resident_parents() {
 fn signature_kernel_interned_identities_are_schedule_independent() {
     // bounded-loop: one race per worker-count in the AC3 matrix.
     for workers in [1usize, 2, 4, 8] {
-        let ids = verter_session::for_tests::duplicate_publisher_one_sets(workers);
+        let ids = verter_type_engine::signature_kernel::test_support::duplicate_publisher_one_sets(
+            workers,
+        );
         assert_eq!(ids.len(), workers, "publisher count {workers}");
         let first = &ids[0];
         for id in &ids {
@@ -1820,7 +1827,8 @@ fn signature_kernel_interned_identities_are_schedule_independent() {
             );
         }
     }
-    let (fwd, rev) = verter_session::for_tests::opposite_order_one_call_binder_tokens();
+    let (fwd, rev) =
+        verter_type_engine::signature_kernel::test_support::opposite_order_one_call_binder_tokens();
     assert_eq!(
         fwd, rev,
         "opposite intern order changed logical binder identity"

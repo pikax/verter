@@ -42,17 +42,19 @@ fn workspace_root() -> PathBuf {
 /// `semantic_query_memo/mod.rs` defines `get_unvalidated` AND owns the
 /// cooperative-admission slow path / non-admission batch probe whose
 /// own coordination flow performs the validate-before-publish dance.
-const SANCTIONED_FILE: &str = "crates/verter_session/src/semantic_query_memo/mod.rs";
+const SANCTIONED_FILE: &str = "crates/verter_type_engine/src/semantic_query_memo/mod.rs";
 
 /// Collect every production (non-test) `.rs` file under the
-/// `verter_session` crate `src/` tree. `*_tests.rs` files, `tests.rs`
-/// module files, and the `#[cfg(test)]`-gated `host_test_audit.rs`
+/// `verter_session` and `verter_type_engine` crate `src/` trees (the
+/// semantic graph store and most of its readers live in the engine).
+/// `*_tests.rs` files, `tests.rs` module files, and the `#[cfg(test)]`-gated `host_test_audit.rs`
 /// are excluded — they are not production warm-read paths.
 fn collect_production_session_src_files() -> Vec<PathBuf> {
     use walkdir::WalkDir;
-    let src_root = workspace_root().join("crates/verter_session/src");
     let mut scanned = Vec::new();
-    for entry in WalkDir::new(&src_root) {
+    let roots = ["crates/verter_session/src", "crates/verter_type_engine/src"]
+        .map(|krate| workspace_root().join(krate));
+    for entry in roots.iter().flat_map(WalkDir::new) {
         let entry = entry.expect("walkdir entry");
         if !entry.file_type().is_file() {
             continue;
@@ -151,7 +153,7 @@ fn semantic_graph_store_exposes_renamed_unvalidated_read() {
     // The validated read must still exist — it is the production
     // warm-read entry point every seal-scope caller routes through.
     assert!(
-        src.contains("pub(crate) fn get_validated("),
+        src.contains("pub fn get_validated<"),
         "SemanticGraphStore must expose `get_validated` — the production \
          warm-read entry point that validates `ReadSetSignature` before \
          bubbling.",
@@ -204,5 +206,11 @@ fn scanner_flags_a_planted_violation() {
     assert!(
         Path::new(&workspace_root().join(SANCTIONED_FILE)).is_file(),
         "the sanctioned cooperative-admission file must exist",
+    );
+    // The exemption must name a file the production scan actually covers.
+    assert!(
+        scanned.contains(&workspace_root().join(SANCTIONED_FILE)),
+        "the sanctioned cooperative-admission file must be part of the \
+         production file scan",
     );
 }

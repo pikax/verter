@@ -42,8 +42,8 @@
 //! base-scan `content_hash_for` returns the planted stale hash and
 //! every assertion FAILS; against the post-fix tree they PASS.
 
-use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use rustc_hash::FxHashMap;
 
@@ -153,7 +153,7 @@ fn host_view_content_hash_is_scheduler_authoritative_not_stale_artifact() {
     let source = view
         .source(canonical)
         .expect("HostView reports source for a live canonical");
-    let source_hash = crate::hash::hash_16(source.as_bytes());
+    let source_hash = verter_semantic_source::source_hash::hash_16(source.as_bytes());
     assert_eq!(
         view_hash, source_hash,
         "HostView::content_hash_for MUST equal the hash of the bytes source() \
@@ -267,7 +267,7 @@ fn overlaid_view_base_fallthrough_content_hash_is_scheduler_authoritative() {
         .expect("the overlay-covered canonical has a content hash");
     assert_eq!(
         overlay_hash,
-        crate::hash::hash_16(b"export const unrelated = 1;\n"),
+        verter_semantic_source::source_hash::hash_16(b"export const unrelated = 1;\n"),
         "the overlay-covered canonical resolves to the overlay source's hash",
     );
 }
@@ -644,7 +644,7 @@ fn overlay_artifact_downstream_reachable_for_normalised_js() {
 /// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`]
 /// (the normalised analysis canonical keys the `FileArtifactStore`
 /// artifact), but the subsequent
-/// [`crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content`]
+/// [`verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content`]
 /// call recovered the parse facts through a `FileArtifactStore` lookup
 /// keyed by the RAW canonical. The only overlay artifact is keyed by the
 /// NORMALISED canonical (`/pkg/index.d.ts` for `/pkg/index.js`), so the

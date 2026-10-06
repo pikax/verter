@@ -1,5 +1,5 @@
 //! Discriminating test for the [`verter_audit::current_observer`] TLS
-//! plumbing in [`verter_session::request_context::RequestContextGuard`].
+//! plumbing in [`verter_type_engine::request_context::RequestContextGuard`].
 //!
 //! Pre-change tree (no `verter_audit::install_observer` call inside
 //! `RequestContextGuard::install`): `current_observer()` returns
@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use verter_audit::{current_observer, AuditEvent};
-use verter_session::request_context::{
+use verter_type_engine::request_context::{
     current_request_context, RequestContext, RequestContextGuard,
 };
 

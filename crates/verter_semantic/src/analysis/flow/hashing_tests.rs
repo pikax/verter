@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use super::*;
-use crate::analysis::flow::flow_graph::build_function_flow_graph_for_test as build_function_flow_graph;
-use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
-use crate::analysis::flow::FunctionBodySkeleton;
+use verter_session_query::flow::flow_graph::build_function_flow_graph_for_test as build_function_flow_graph;
+use verter_session_query::flow::hashing::*;
+use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+use verter_session_query::flow::skeleton::FunctionBodySkeleton;
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
     crate::analysis::flow::skeleton_tests::indexed_skeleton_of(source)

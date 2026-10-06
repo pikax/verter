@@ -19,10 +19,11 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::file_artifact_store::{
-    AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, AugmenterSet,
+    AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
 };
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::resolution::AugmenterSet;
 
 fn host_with_an_augmenter() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));

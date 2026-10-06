@@ -1,11 +1,13 @@
 //! Cold augmentation matching belongs to the source request, outside storage guards.
 use crate::file_artifact_store::{
     compute_augmenter_set_fingerprint, emit_module_augmentation_index_shape_event,
-    AugmentationTargetKey, AugmentationTargetKind, AugmenterEntry, AugmenterSet, FileArtifactStore,
+    AugmentationTargetKey, AugmentationTargetKind, FileArtifactStore,
 };
 use smallvec::SmallVec;
 use std::sync::Arc;
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::resolution::AugmenterEntry;
+use verter_session_query::resolution::AugmenterSet;
 
 pub(crate) struct AugmentationRequestDriver<'a> {
     db: &'a FileArtifactStore,
@@ -52,7 +54,7 @@ impl<'a> AugmentationRequestDriver<'a> {
                 let relative = if matches!(
                     key.target,
                     AugmentationTargetKind::ResolvedRelativeCanonical(_)
-                ) && verter_semantic::resolver_core::is_relative_specifier(
+                ) && verter_session_query::resolution::is_relative_specifier(
                     fact.specifier.as_ref(),
                 ) {
                     resolve_relative_canonical(
@@ -62,7 +64,7 @@ impl<'a> AugmentationRequestDriver<'a> {
                 } else {
                     None
                 };
-                if crate::file_artifact_store::augmenter_matches_target(
+                if verter_session_query::source::augmentation::augmenter_matches_target(
                     fact,
                     key,
                     relative.as_deref(),

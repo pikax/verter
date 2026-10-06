@@ -31,13 +31,13 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::Mutex as AsyncMutex;
 
-use verter_semantic::analysis::types::Hash16;
 use verter_session::external_ts::{
     CarrierOwnershipResolution, EngineBackend, EnvDims, ExternalTsProjectResolver, OpenState,
     ProjectBinding, ScriptKind, SnapshotFile, SnapshotRole, WorkspaceProjectResolver,
 };
 use verter_session::semantic_capability::CertifiedTypeEngineBinding;
 use verter_session::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 use verter_workspace::FilesystemWorkspace;
 
 use crate::carrier_provider_projection::PreparedCarrierProviderContent;

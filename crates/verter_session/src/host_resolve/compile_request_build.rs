@@ -1334,7 +1334,7 @@ pub(crate) enum HostProductsFailure {
     /// A fatal refusal: the diagnostics payload for the compile failure.
     Fatal(DiagnosticsSnapshot),
     /// The semantic inputs were aborted: nothing is published.
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
 /// Maps the Vue bound backend's multi-product execution refusal for the

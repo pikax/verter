@@ -9,6 +9,7 @@ authors.workspace = true
 description = "Code actions engine for Verter Vue compiler — quick fixes and refactoring"
 
 [dependencies]
+verter_session_query = { workspace = true }
 verter_span = { path = "../verter_span" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_semantic = { path = "../verter_semantic" }

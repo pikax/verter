@@ -20,7 +20,7 @@
 //! (created once per top-level request, threaded into every resolver
 //! context the request builds, dropped with the request) and is keyed by
 //! `(canonical, world)` with the
-//! [`StoreViewCompatToken`](crate::resolver_core::StoreViewCompatToken)
+//! [`StoreViewCompatToken`](verter_session_query::facts::store_view::StoreViewCompatToken)
 //! on the entry:
 //!
 //! - the world (`Base` / `Overlay(content hash)`) keeps the two
@@ -43,10 +43,11 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 
 use crate::resolver_core::request_store_view::BundleMemoWorld;
-use crate::resolver_core::reuse::ReuseClass;
-use crate::resolver_core::{CanonicalCompletionOverlay, SessionResolverContext, StoreView};
+use crate::resolver_core::{CanonicalCompletionOverlay, SessionResolverContext};
 use crate::session_view::{OverlaidView, SessionView};
 use crate::{HostConfig, VerterHost};
+use verter_session_query::facts::reuse::ReuseClass;
+use verter_session_query::facts::store_view::StoreView;
 
 const OWNER: &str = "/proj/owner.ts";
 const DEP: &str = "/proj/dep.ts";
@@ -124,14 +125,16 @@ fn overlay_bundle_computes_once_sequentially_per_request_world() {
     let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
 
     let first =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("overlay-bearing bundle must materialise");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("overlay-bearing bundle must materialise");
     assert_eq!(
         first.owner_whole_hash, overlay_hash,
         "the overlay-bearing bundle is built from the OVERLAY content",
     );
     assert!(
-        crate::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
+        verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
             &ctx,
             &first,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -143,8 +146,10 @@ fn overlay_bundle_computes_once_sequentially_per_request_world() {
     );
 
     let second =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("second read must serve the bundle");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("second read must serve the bundle");
     assert!(
         Arc::ptr_eq(&first, &second),
         "the second overlay bundle read within the SAME request must be a \
@@ -165,8 +170,10 @@ fn memo_only_population_remains_empty() {
     let (store_view, producer_overlay) = request_pieces(&host, &view);
     let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&producer_overlay));
     let bundle =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("prepared bundle");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("prepared bundle");
 
     let memo_only = CanonicalCompletionOverlay::new();
     memo_only.bundle_memo().insert(
@@ -183,7 +190,7 @@ fn memo_only_population_remains_empty() {
     assert_eq!(memo_only.bundle_memo().len_for_tests(), 1);
     assert_eq!(
         memo_only.completion_state_for_tests(),
-        verter_workspace::CompletionOverlayState::Empty,
+        verter_session_query::facts::fact_cache::CompletionOverlayState::Empty,
         "memo contents never affect fact validation and must not partition aggregate reuse"
     );
 }
@@ -200,8 +207,10 @@ fn fresh_request_observes_new_overlay_content() {
     let (store_view_a, overlay_a) = request_pieces(&host, &view_a);
     let bundle_a = {
         let ctx = SessionResolverContext::new(&host, &view_a, &store_view_a, overlay_a);
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("request 1 bundle must materialise")
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("request 1 bundle must materialise")
     };
     assert_eq!(bundle_a.owner_whole_hash, hash_a);
 
@@ -213,8 +222,10 @@ fn fresh_request_observes_new_overlay_content() {
     let (store_view_b, overlay_b) = request_pieces(&host, &view_b);
     let ctx_b = SessionResolverContext::new(&host, &view_b, &store_view_b, overlay_b);
     let bundle_b =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx_b, OWNER)
-            .expect("request 2 bundle must materialise");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx_b, OWNER,
+        )
+        .expect("request 2 bundle must materialise");
 
     assert!(
         !Arc::ptr_eq(&bundle_a, &bundle_b),
@@ -225,7 +236,7 @@ fn fresh_request_observes_new_overlay_content() {
         "the new request's bundle reflects the NEW overlay content",
     );
     assert!(
-        crate::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
+        verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
             &ctx_b,
             &bundle_b,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -236,7 +247,7 @@ fn fresh_request_observes_new_overlay_content() {
         "the new request's bundle carries the NEW overlay's declaration",
     );
     assert!(
-        crate::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
+        verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
             &ctx_b,
             &bundle_b,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -259,16 +270,20 @@ fn fresh_request_same_overlay_content_rematerializes() {
     let (store_view_1, overlay_1) = request_pieces(&host, &view_1);
     let bundle_1 = {
         let ctx = SessionResolverContext::new(&host, &view_1, &store_view_1, overlay_1);
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("request 1 bundle")
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("request 1 bundle")
     };
 
     let view_2 = overlaid_view(&host, OWNER, OVERLAY_OWNER_A);
     let (store_view_2, overlay_2) = request_pieces(&host, &view_2);
     let bundle_2 = {
         let ctx = SessionResolverContext::new(&host, &view_2, &store_view_2, overlay_2);
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("request 2 bundle")
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("request 2 bundle")
     };
 
     assert!(
@@ -297,17 +312,23 @@ fn base_and_overlay_bundle_memos_are_isolated() {
     let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
 
     let dep_first =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, DEP)
-            .expect("base-path bundle must serve for the non-overlaid dep");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, DEP,
+        )
+        .expect("base-path bundle must serve for the non-overlaid dep");
     let dep_second =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, DEP)
-            .expect("base-path bundle must serve again");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, DEP,
+        )
+        .expect("base-path bundle must serve again");
     let owner_bundle =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("overlay-path bundle must serve for the masked owner");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("overlay-path bundle must serve for the masked owner");
 
     assert!(
-        crate::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
+        verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_from_input(
             &ctx,
             &dep_first,
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -357,7 +378,8 @@ fn tombstoned_canonical_is_not_memoized() {
     let host = host_with_base_files();
 
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-    let overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     let mut tombstones: std::collections::HashSet<String> = std::collections::HashSet::new();
     tombstones.insert(OWNER.to_string());
     let view =
@@ -371,7 +393,9 @@ fn tombstoned_canonical_is_not_memoized() {
     let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
 
     let bundle =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER);
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        );
     assert!(
         bundle.is_none(),
         "a session-tombstoned canonical has no current content — no bundle",
@@ -401,8 +425,10 @@ fn external_supersession_between_snapshots_misses_memo() {
     let (store_view_1, overlay) = request_pieces(&host, &view);
     let bundle_1 = {
         let ctx = SessionResolverContext::new(&host, &view, &store_view_1, Arc::clone(&overlay));
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("attempt 1 bundle")
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("attempt 1 bundle")
     };
 
     // External mutation: a base upsert moves the external-supersession
@@ -417,7 +443,7 @@ fn external_supersession_between_snapshots_misses_memo() {
         .into_owned_view()
         .with_session_overlay(&host, &view);
     {
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         assert_ne!(
             store_view_1.compat_token(),
             store_view_2.compat_token(),
@@ -426,8 +452,10 @@ fn external_supersession_between_snapshots_misses_memo() {
     }
     let bundle_2 = {
         let ctx = SessionResolverContext::new(&host, &view, &store_view_2, Arc::clone(&overlay));
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("attempt 2 bundle")
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("attempt 2 bundle")
     };
 
     assert!(
@@ -456,16 +484,18 @@ fn resolution_retarget_between_snapshots_misses_memo() {
     let (store_view_1, overlay) = request_pieces(&host, &view);
     let bundle_1 = {
         let ctx = SessionResolverContext::new(&host, &view, &store_view_1, Arc::clone(&overlay));
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("attempt 1 bundle")
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("attempt 1 bundle")
     };
 
     let applied = host.ws().set_exact_resolutions(
         OWNER,
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             resolved_canonical_id: Some(UNRELATED.to_string()),
             possible_canonical_ids: vec![UNRELATED.to_string()],
         }],
@@ -506,7 +536,7 @@ fn resolution_retarget_between_snapshots_misses_memo() {
             token_1.resolution_fact_generation, token_2.resolution_fact_generation,
             "fixture invariant: the retarget must mint a resolution fact version"
         );
-        use crate::resolver_core::StoreView;
+        use verter_session_query::facts::store_view::StoreView;
         assert_ne!(
             store_view_1.compat_token(),
             store_view_2.compat_token(),
@@ -518,8 +548,10 @@ fn resolution_retarget_between_snapshots_misses_memo() {
 
     let bundle_2 = {
         let ctx = SessionResolverContext::new(&host, &view, &store_view_2, Arc::clone(&overlay));
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("attempt 2 bundle")
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("attempt 2 bundle")
     };
 
     assert!(
@@ -538,8 +570,8 @@ fn resolution_retarget_between_snapshots_misses_memo() {
 fn unattributed_refusal_is_not_memoized() {
     let host = host_with_base_files();
     *host.materialize_seam_hook.lock() = Some(Arc::new(|| {
-        crate::resolver_core::resolver_context::note_non_cacheable_propagation(
-            verter_workspace::NonCacheablePropagation::Transitive,
+        verter_type_engine::fact_tracing::note_non_cacheable_propagation(
+            verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
         );
     }));
 
@@ -551,8 +583,10 @@ fn unattributed_refusal_is_not_memoized() {
     let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
 
     let first =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("an unattributed refusal still serves its caller");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("an unattributed refusal still serves its caller");
     *host.materialize_seam_hook.lock() = None;
     assert_eq!(
         overlay
@@ -564,8 +598,10 @@ fn unattributed_refusal_is_not_memoized() {
     );
 
     let second =
-        crate::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(&ctx, OWNER)
-            .expect("the second read re-materialises");
+        verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
+            &ctx, OWNER,
+        )
+        .expect("the second read re-materialises");
 
     assert!(
         !Arc::ptr_eq(&first, &second),
@@ -619,7 +655,7 @@ fn session_view_component_meta_request_hits_the_request_bundle_memo() {
 
     let resolved = host.resolve_component_meta_with_view(
         "/proj/Comp.vue",
-        crate::types::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::ProjectionMode::Expanded,
         &view,
     );
     assert!(
@@ -693,10 +729,15 @@ fn base_touch(
 ) {
     let view = host.resolver_store_view_read().into_owned_view();
     let before = cold_flight_runs(host);
-    let (bundle, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
-        |_probe| host.prepared_decl_bundle_with_store_view(&view, Some(memo.bundle_memo()), owner),
-    );
+    let (bundle, non_cacheable) =
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
+            |_probe| {
+                host.prepared_decl_bundle_with_store_view(&view, Some(memo.bundle_memo()), owner)
+            },
+        );
     (bundle, non_cacheable, cold_flight_runs(host) - before)
 }
 
@@ -886,7 +927,7 @@ fn request_only_bundle_computes_once_and_replays_each_touch() {
 fn lease_missed_bundle_is_not_request_memoized() {
     assert_transient_refusal_is_not_memoized(
         "/rc_base_memo_lease",
-        crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+        verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
     );
 }
 
@@ -897,7 +938,7 @@ fn lease_missed_bundle_is_not_request_memoized() {
 fn cancelled_or_partial_bundle_is_not_request_memoized() {
     assert_transient_refusal_is_not_memoized(
         "/rc_base_memo_budget",
-        crate::resolver_core::resolver_context::NonCacheableReadReason::InferenceBudgetExceeded,
+        verter_session_query::facts::reuse::NonCacheableReadReason::InferenceBudgetExceeded,
     );
 }
 
@@ -907,7 +948,7 @@ fn cancelled_or_partial_bundle_is_not_request_memoized() {
 /// memoised without the refusal.
 fn assert_transient_refusal_is_not_memoized(
     root: &str,
-    reason: crate::resolver_core::resolver_context::NonCacheableReadReason,
+    reason: verter_session_query::facts::reuse::NonCacheableReadReason,
 ) {
     let (host, owner) = base_host(root);
     // The seam fires inside the IndexedReady materialise flight, which
@@ -915,7 +956,7 @@ fn assert_transient_refusal_is_not_memoized(
     // the bundle producer's own observation scope, exactly as a real
     // nested producer's would.
     *host.materialize_seam_hook.lock() = Some(Arc::new(move || {
-        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(reason);
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(reason);
     }));
 
     let request = CanonicalCompletionOverlay::new();

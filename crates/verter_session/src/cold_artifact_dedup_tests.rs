@@ -16,9 +16,12 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::ProjectionMode;
-use crate::types::{HostConfig, MetaProvenanceSnapshot, UpsertRequest};
 use crate::VerterHost;
+use crate::{
+    meta_provenance::MetaProvenanceSnapshot,
+    types::{HostConfig, UpsertRequest},
+};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 fn make_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -276,7 +279,7 @@ fn concurrent_cold_resolves_collapse() {
 
     // The base lane identity is the bare canonical (the overlay lane
     // carries the "overlay\0" prefix — collision-free by construction).
-    let token = crate::resolver_core::StoreViewCompatToken {
+    let token = verter_session_query::facts::store_view::StoreViewCompatToken {
         epoch: 0,
         session: None,
         validity_fingerprint: 0,
@@ -535,8 +538,8 @@ fn route_mutation_refreshes_edges_without_reparse() {
         owner,
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some(dep2.to_string()),
             possible_canonical_ids: vec![dep2.to_string()],
         }],
@@ -820,8 +823,8 @@ fn follower_arriving_after_mutation_does_not_adopt_fenced_flight_result() {
             owner,
             vec![verter_workspace::ExactResolution {
                 specifier: "./dep".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(dep2.to_string()),
                 possible_canonical_ids: vec![dep2.to_string()],
             }],
@@ -834,7 +837,7 @@ fn follower_arriving_after_mutation_does_not_adopt_fenced_flight_result() {
         // Deterministic admission (no wall clock): a bare-`run` leader
         // mid-compute holds the leader-only baseline of 2 strong refs on
         // the lane; the committed follower adds its own clone.
-        let token = crate::resolver_core::StoreViewCompatToken {
+        let token = verter_session_query::facts::store_view::StoreViewCompatToken {
             epoch: 0,
             session: None,
             validity_fingerprint: 0,
@@ -932,23 +935,26 @@ fn moved_parse_env_forces_full_rematerialise_not_edge_refresh() {
 
     // Forge a stored candidate whose parse env MOVED — the one dimension
     // the reuse gate consults.
-    let forge = |parse_env_hash: crate::types::Hash16| crate::project_type_store::IndexedReady {
-        whole_hash: built.whole_hash,
-        file_language: built.file_language.clone(),
-        shallow_state: Arc::clone(&built.shallow_state),
-        built_at_content_generation: built.built_at_content_generation,
-        parse_env_hash,
-        raw_source: Arc::clone(&built.raw_source),
-        eval_source: Arc::clone(&built.eval_source),
-        framework_parse: built.framework_parse.clone(),
-        script_analysis: built.script_analysis.clone(),
-        export_signatures: built.export_signatures.clone(),
-        snapshot: Arc::clone(&built.snapshot),
-        route_inventory: Arc::clone(&built.route_inventory),
-        declares_interface_app_config: built.declares_interface_app_config,
-        macro_hot_mirror: crate::structural_carrier_producer::MacroHotMirror::default(),
-        source_parse_key: crate::project_type_store::SourceParseKey::default(),
-        input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
+    let forge = |parse_env_hash: verter_session_query::analysis::types::Hash16| {
+        crate::project_type_store::IndexedReady {
+            whole_hash: built.whole_hash,
+            file_language: built.file_language.clone(),
+            shallow_state: Arc::clone(&built.shallow_state),
+            built_at_content_generation: built.built_at_content_generation,
+            parse_env_hash,
+            raw_source: Arc::clone(&built.raw_source),
+            eval_source: Arc::clone(&built.eval_source),
+            framework_parse: built.framework_parse.clone(),
+            script_analysis: built.script_analysis.clone(),
+            export_signatures: built.export_signatures.clone(),
+            snapshot: Arc::clone(&built.snapshot),
+            route_inventory: Arc::clone(&built.route_inventory),
+            declares_interface_app_config: built.declares_interface_app_config,
+            macro_hot_mirror:
+                verter_type_engine::structural_carrier_producer::MacroHotMirror::default(),
+            source_parse_key: crate::project_type_store::SourceParseKey::default(),
+            input_projection: crate::resolver_core::request_inputs::CachedProjection::default(),
+        }
     };
     let mut moved_env = live_env;
     moved_env[0] = moved_env[0].wrapping_add(1);
@@ -1092,7 +1098,7 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
         }));
     }
 
-    let token = crate::resolver_core::StoreViewCompatToken {
+    let token = verter_session_query::facts::store_view::StoreViewCompatToken {
         epoch: 0,
         session: None,
         validity_fingerprint: 0,
@@ -1108,8 +1114,8 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
             owner,
             vec![verter_workspace::ExactResolution {
                 specifier: "./dep".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(target.to_string()),
                 possible_canonical_ids: vec![target.to_string()],
             }],
@@ -1138,16 +1144,18 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
             let follower = {
                 let host = Arc::clone(&host);
                 scope.spawn(move || {
-                    use crate::request_context::{RequestContext, RequestContextGuard};
+                    use verter_type_engine::request_context::{
+                        RequestContext, RequestContextGuard,
+                    };
                     let rctx = RequestContext::new(1, Arc::from(owner), false, None);
                     let _req_guard = RequestContextGuard::install(rctx);
-                    let (result, read_set) = host
-                        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                            host.ensure_indexed_ready(owner)
-                        });
+                    let (result, read_set) = host.with_fact_tracer(
+                        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                        || host.ensure_indexed_ready(owner),
+                    );
                     let non_cacheable = read_set.non_cacheable_read_observed();
                     let result_is_partial =
-                        crate::request_context::current_request_result_is_partial();
+                        verter_type_engine::request_context::current_request_result_is_partial();
                     (result, non_cacheable, result_is_partial)
                 })
             };
@@ -1232,10 +1240,10 @@ fn sustained_churn_fallback_serves_return_only_with_admission_suppressed() {
     // Negative control: a clean (published) serve marks NO non-cacheability.
     *host.materialize_seam_hook.lock() = None;
     *host.flight_retry_seam_hook.lock() = None;
-    let (clean, clean_read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.ensure_indexed_ready(owner)
-        });
+    let (clean, clean_read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.ensure_indexed_ready(owner),
+    );
     assert!(clean.is_some(), "the clean re-run must serve");
     assert!(
         !clean_read_set.non_cacheable_read_observed(),
@@ -1522,8 +1530,8 @@ fn overlay_mid_flight_mutation_trips_the_overlay_publish_fence() {
             other,
             vec![verter_workspace::ExactResolution {
                 specifier: "./fence_probe".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(canonical.to_string()),
                 possible_canonical_ids: vec![canonical.to_string()],
             }],
@@ -1633,7 +1641,7 @@ fn concurrent_overlay_materialise_collapses() {
     let lane_discriminator = view.overlay_artifact_discriminator(canonical);
     let lane_key =
         format!("overlay\u{0}{canonical}\u{0}{lane_hash:02x?}\u{0}{lane_discriminator:02x?}");
-    let token = crate::resolver_core::StoreViewCompatToken {
+    let token = verter_session_query::facts::store_view::StoreViewCompatToken {
         epoch: 0,
         session: None,
         validity_fingerprint: 0,
@@ -1738,8 +1746,10 @@ fn route_fact_capture_is_side_effect_free() {
 
     // 1. NEVER-MATERIALISED canonical: capture observes nothing, builds
     //    nothing.
-    let captured =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    let captured = host.current_derived_fact_hash(
+        owner,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert!(
         captured.is_none(),
         "a never-materialised canonical has no Route fact (FileWholeHash \
@@ -1760,8 +1770,10 @@ fn route_fact_capture_is_side_effect_free() {
     moved_env[0] = moved_env[0].wrapping_add(1);
     *host.parse_env_override.lock() = Some(moved_env);
     host.provenance().reset();
-    let stale_capture =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    let stale_capture = host.current_derived_fact_hash(
+        owner,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert!(
         stale_capture.is_none(),
         "a stale surface's capture must decline (None), never refresh it",
@@ -1775,16 +1787,19 @@ fn route_fact_capture_is_side_effect_free() {
         owner,
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some(dep2.to_string()),
             possible_canonical_ids: vec![dep2.to_string()],
         }],
     );
     host.provenance().reset();
     assert!(
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route)
-            .is_some(),
+        host.current_derived_fact_hash(
+            owner,
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route
+        )
+        .is_some(),
         "a route mutation does not stale a PARSE artifact — its Route \
          digest keeps answering",
     );
@@ -1798,8 +1813,10 @@ fn route_fact_capture_is_side_effect_free() {
         "import type { P } from './dep';\nexport type Owner = { p: P };\n",
     );
     host.provenance().reset();
-    let content_stale_capture =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    let content_stale_capture = host.current_derived_fact_hash(
+        owner,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert!(
         content_stale_capture.is_none(),
         "a content-stale candidate's capture must decline (None), never \
@@ -1813,8 +1830,10 @@ fn route_fact_capture_is_side_effect_free() {
         .ensure_indexed_ready(owner)
         .expect("owner must re-materialise");
     host.provenance().reset();
-    let current_capture =
-        host.current_derived_fact_hash(owner, crate::resolver_core::DerivedFactKind::Route);
+    let current_capture = host.current_derived_fact_hash(
+        owner,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert_eq!(
         current_capture,
         current.route_surface_hash(),
@@ -1844,12 +1863,14 @@ fn route_fact_producer_matches_validator_snapshot() {
 
     let view = host.resolver_store_view_read().into_owned_view();
     for canonical in [barrel, leaf] {
-        let producer =
-            host.current_derived_fact_hash(canonical, crate::resolver_core::DerivedFactKind::Route);
-        let validator = crate::resolver_core::StoreView::derived_hash_for(
+        let producer = host.current_derived_fact_hash(
+            canonical,
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+        );
+        let validator = verter_session_query::facts::store_view::StoreView::derived_hash_for(
             &view,
             canonical,
-            crate::resolver_core::DerivedFactKind::Route,
+            verter_session_query::facts::fact_cache::DerivedFactKind::Route,
         );
         // Both files were materialised by the resolve and carry a
         // resolvable surface, so the Route fact MUST exist on both
@@ -1895,8 +1916,10 @@ fn route_fact_none_for_non_route_resolvable_current_surface() {
         "precondition: the fixture surface must not be route-resolvable",
     );
 
-    let producer =
-        host.current_derived_fact_hash(plain, crate::resolver_core::DerivedFactKind::Route);
+    let producer = host.current_derived_fact_hash(
+        plain,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert!(
         producer.is_none(),
         "producer: no Route fact for a non-route-resolvable surface",
@@ -1909,10 +1932,10 @@ fn route_fact_none_for_non_route_resolvable_current_surface() {
          canonical",
     );
     // … but carries no Route derived hash for it.
-    let validator = crate::resolver_core::StoreView::derived_hash_for(
+    let validator = verter_session_query::facts::store_view::StoreView::derived_hash_for(
         &view,
         plain,
-        crate::resolver_core::DerivedFactKind::Route,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
     );
     assert!(
         validator.is_none(),
@@ -1942,8 +1965,10 @@ fn route_fact_capture_declines_for_never_materialised_canonical() {
         "precondition: the canonical has never been materialised",
     );
 
-    let captured =
-        host.current_derived_fact_hash(never, crate::resolver_core::DerivedFactKind::Route);
+    let captured = host.current_derived_fact_hash(
+        never,
+        verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+    );
     assert_eq!(
         captured, None,
         "fact capture must record NO Route fact for a never-materialised \
@@ -2003,8 +2028,8 @@ fn scheduler_tracked_canonical_never_turns_artifact_only_on_route_mutation() {
         SCRATCH_ID,
         vec![verter_workspace::ExactResolution {
             specifier: "./somewhere".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some("/workspace/src/somewhere.ts".to_string()),
             possible_canonical_ids: vec!["/workspace/src/somewhere.ts".to_string()],
         }],
@@ -2050,8 +2075,8 @@ fn set_exact_resolutions_replacement_reroutes_and_identical_repush_is_noop() {
     let exact = |target: &str| {
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some(target.to_string()),
             possible_canonical_ids: vec![target.to_string()],
         }]
@@ -2519,7 +2544,7 @@ fn route_entry_built_from_fenced_participant_serves_with_empty_facts() {
 fn lazy_sfc_analysis_workers_count_their_structure_parse() {
     use std::sync::atomic::Ordering;
 
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let source = "<script setup lang=\"ts\">const a: number = 1;</script>\n\
                   <template><div>{{ a }}</div></template>\n\
                   <style>.x { color: red; }</style>\n";
@@ -2698,8 +2723,8 @@ fn park_nth_materialize_pre_fence(
 fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
     use std::sync::atomic::Ordering;
 
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
     };
 
@@ -2715,7 +2740,7 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
             canonical_id: Arc::from(owner),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -2808,8 +2833,8 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
 fn fenced_declaring_serve_class_surface_static_is_served_but_not_admitted() {
     use std::sync::atomic::Ordering;
 
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ClassSurfaceContext, ClassSurfaceSide, QueryResult, ResolvedDeclSlotIdentity,
         SemanticQueryApi, SemanticQueryKey,
     };
@@ -3019,7 +3044,7 @@ fn owner_import_surface_from_fenced_route_walk_is_served_but_not_admitted() {
 fn fenced_bundle_flight_is_not_a_joinable_rendezvous() {
     use std::sync::atomic::Ordering;
 
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let host = make_host(&[]);
     let owner = "/workspace/src/owner.ts";
@@ -3128,7 +3153,7 @@ fn fenced_bundle_flight_is_not_a_joinable_rendezvous() {
 fn fenced_surface_empty_miss_is_not_a_joinable_rendezvous() {
     use std::sync::atomic::Ordering;
 
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let host = make_host(&[]);
     let owner = "/workspace/src/surface_empty_owner.ts";
@@ -3225,7 +3250,7 @@ fn fenced_surface_empty_miss_is_not_a_joinable_rendezvous() {
 /// than declining every miss.
 #[test]
 fn unfenced_surface_empty_miss_stays_a_joinable_rendezvous() {
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let host = make_host(&[]);
     let owner = "/workspace/src/surface_empty_owner.ts";
@@ -3506,7 +3531,8 @@ fn fenced_serve_baked_edges_reresolve_in_dependency_candidates() {
         let flight = {
             let host = Arc::clone(&host);
             scope.spawn(move || {
-                let snapshot = crate::types::FileAnalysisSnapshot::default();
+                let snapshot =
+                    verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
                 host.cache_dependency_candidates_from_snapshot(owner, &snapshot)
             })
         };
@@ -3520,8 +3546,8 @@ fn fenced_serve_baked_edges_reresolve_in_dependency_candidates() {
             owner,
             vec![verter_workspace::ExactResolution {
                 specifier: "./dep".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some(dep2.to_string()),
                 possible_canonical_ids: vec![dep2.to_string()],
             }],
@@ -3914,9 +3940,9 @@ fn vue_overlay_cold_flight_parses_the_script_program_once() {
 /// scheduler ingress) — the artifact-only scope `read_analysis_source`
 /// serves without loading the canonical into the scheduler.
 fn seed_artifact_only_vue(host: &VerterHost, canonical: &str, source: &str) {
-    let mut artifact = crate::project_type_store::IndexedReady::new_for_test(crate::hash::hash_16(
-        source.as_bytes(),
-    ));
+    let mut artifact = crate::project_type_store::IndexedReady::new_for_test(
+        verter_semantic_source::source_hash::hash_16(source.as_bytes()),
+    );
     artifact.built_at_content_generation = host.ws().content_generation();
     // The reuse gate is parse-env equality, so a seeded artifact must
     // carry the LIVE parse-env stamp or every read re-materialises it
@@ -4062,13 +4088,13 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     // compute (semantic-memo builds, the owner-import-surface and
     // component-meta proof producers) installs around its cold body —
     // and read the chokepoint flag its admission gates consult.
-    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    let (entry, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.build_named_type_export_route_entry(barrel, "Shared"),
     );
     let suppression_raised = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let (route, facts) = entry.expect("the route must resolve through the later wildcard");
     assert!(
@@ -4115,13 +4141,13 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
         "export * from './missing';\nexport * from './present';\n",
     );
 
-    let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    let (entry, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.build_named_type_export_route_entry(barrel, "Shared"),
     );
     let suppression_raised = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let (route, facts) = entry.expect("the route must resolve through the later wildcard");
     assert!(
@@ -4189,13 +4215,13 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     // producers) installs around its cold body — and read the
     // chokepoint flag its admission gates consult.
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
-    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    let (surface, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.owner_import_surface(owner),
     );
     let suppression_raised = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let surface = surface.expect("the unrooted build still serves its caller the surface");
     assert_eq!(
@@ -4247,13 +4273,13 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     );
 
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
-    let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    let (surface, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.owner_import_surface(owner),
     );
     let suppression_raised = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
     let surface = surface.expect("the rooted build serves the surface");
     assert!(
@@ -4270,7 +4296,7 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
     assert!(
         surface.read_set_signature.facts.iter().any(|fact| matches!(
             fact,
-            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                 if inner.resolution_fact().is_some()
         )),
         "the skipped specifier is rooted on the owner's resolution \

@@ -44,12 +44,12 @@
 
 use std::sync::Arc;
 
-use verter_session::request_context::{RequestContext, RequestContextGuard};
-use verter_session::semantic_query::{
+use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::{
     LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 /// Fixture: a Mapped whose `value_expr` is a Tuple containing the
@@ -121,14 +121,14 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
     match graph.node_data(carrier).as_deref() {
         Some(SemanticNodeData::Opaque(
-            verter_session::semantic_query::QueryError::DeclPlaceholder {
+            verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
                 canonical_id,
                 owner,
                 name,
                 whole_hash,
             },
         )) => {
-            let identity = verter_session::semantic_query::DeclIdentity {
+            let identity = verter_type_engine::semantic_query::DeclIdentity {
                 canonical_id: Arc::clone(canonical_id),
                 owner: *owner,
                 whole_hash: *whole_hash,

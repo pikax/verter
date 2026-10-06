@@ -1,6 +1,6 @@
 use super::*;
 use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_resolution::ModuleResolverCore;
 
 fn empty_snapshot(gen: u64) -> Arc<WorkspaceSnapshot> {
     Arc::new(WorkspaceSnapshot {

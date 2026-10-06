@@ -131,9 +131,11 @@ mod tests {
 
     use crate::rules::FileContext;
 
-    use verter_semantic::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
-    use verter_semantic::analysis::{
-        style, ElementNamespace, StyleBlockAnalysis, TemplateAttribute,
+    use verter_semantic::analysis::style;
+    use verter_session_query::analysis::template::{TemplateAnalysisSnapshot, TemplateElement};
+    use verter_session_query::analysis::{
+        style::StyleBlockAnalysis,
+        template::{ElementNamespace, TemplateAttribute},
     };
     use verter_span::Span;
 

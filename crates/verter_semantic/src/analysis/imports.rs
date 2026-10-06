@@ -5,7 +5,7 @@ use oxc_span::SourceType;
 use verter_parser::oxc_parse::Parser;
 
 use crate::analysis::classify::classify_vue_api;
-use crate::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, ImportBindingKind, ImportSourceInfo,
 };
 use verter_type_expr::TopLevelOwnerId;
@@ -107,7 +107,7 @@ pub(crate) fn analyze_import_declaration(
                         imported_name: Some(s.imported.name().to_string()),
                         is_type_only: spec_type_only,
                         vue_api,
-                        span: s.local.span.into(),
+                        span: verter_span::Span::new(s.local.span.start, s.local.span.end),
                     });
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
@@ -117,7 +117,7 @@ pub(crate) fn analyze_import_declaration(
                         imported_name: Some("default".to_string()),
                         is_type_only,
                         vue_api: None,
-                        span: s.local.span.into(),
+                        span: verter_span::Span::new(s.local.span.start, s.local.span.end),
                     });
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
@@ -127,7 +127,7 @@ pub(crate) fn analyze_import_declaration(
                         imported_name: None,
                         is_type_only,
                         vue_api: None,
-                        span: s.local.span.into(),
+                        span: verter_span::Span::new(s.local.span.start, s.local.span.end),
                     });
                 }
             }
@@ -139,7 +139,7 @@ pub(crate) fn analyze_import_declaration(
         owner,
         is_type_only,
         bindings,
-        span: decl.span.into(),
+        span: verter_span::Span::new(decl.span.start, decl.span.end),
         resolved_canonical_id: None,
     }
 }
@@ -157,7 +157,7 @@ fn is_vue_source(source: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::types::VueApiClassification;
+    use verter_session_query::analysis::types::VueApiClassification;
 
     fn parse_imports(code: &str) -> Vec<ImportSourceInfo> {
         let alloc = Allocator::new();

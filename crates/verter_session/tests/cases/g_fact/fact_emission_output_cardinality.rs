@@ -197,7 +197,7 @@ fn emitted_fact_cardinality_is_affine_in_decl_count() {
 
 #[test]
 fn fact_emission_produces_expected_fact_count_on_10k_decls() {
-    use verter_semantic::facts::registry::FactKey;
+    use verter_session_query::facts::registry::FactKey;
 
     // 10k single-member interface decls produce per-decl `MemberShape`
     // + per-member `MemberPresence` + the per-file `SyntacticExportSet`

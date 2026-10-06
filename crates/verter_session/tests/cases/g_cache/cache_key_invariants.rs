@@ -20,7 +20,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use verter_session::file_artifact_store::FileArtifactKey;
+use verter_session_query::source::artifact_key::FileArtifactKey;
 
 fn make_key(
     canonical: &str,
@@ -32,12 +32,12 @@ fn make_key(
         canonical: Arc::from(canonical),
         content_hash,
         parse_env_hash,
-        parse_key: verter_session::build_toolchain_fingerprint::parse_key_for_test(
+        parse_key: verter_session_query::source::toolchain::parse_key_for_test(
             canonical,
             parse_marker,
         ),
         build_toolchain_fingerprint:
-            verter_session::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         file_language_id: FileArtifactKey::synthetic_file_language_for_test(canonical),
     }
 }
@@ -111,11 +111,11 @@ fn r6_key_struct_has_no_fact_dep_signature_field() {
     assert_eq!(parse_env_hash, [2u8; 16]);
     assert_eq!(
         parse_key,
-        verter_session::build_toolchain_fingerprint::parse_key_for_test("/a.ts", 1)
+        verter_session_query::source::toolchain::parse_key_for_test("/a.ts", 1)
     );
     assert_eq!(
         build_toolchain_fingerprint,
-        verter_session::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+        verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
     );
     assert_eq!(
         file_language_id,

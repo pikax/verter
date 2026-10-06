@@ -311,7 +311,7 @@ test("a dropped contract citation fails", async () => {
 
 test("an undocumented contract hotspot fails", async () => {
   const mutated = structuredClone(model);
-  const dropped = "crates/verter_session/src/flow_slice_content.rs";
+  const dropped = "crates/verter_semantic_source/src/flow_slice_content.rs";
   for (const page of mutated.pages) {
     page.documentsHotspots = (page.documentsHotspots ?? []).filter(
       (hotspot) => hotspot !== dropped,

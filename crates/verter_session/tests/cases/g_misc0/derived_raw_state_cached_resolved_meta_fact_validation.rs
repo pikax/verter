@@ -50,7 +50,9 @@ fn cached_resolved_meta_substrate_and_consumer_wired() {
         .expect("ResolvedComponentMetaCacheEntry struct close");
     let window = &types_src[idx..idx + end];
     assert!(
-        window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
+        window.contains(
+            "fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>"
+        ),
         "ResolvedComponentMetaCacheEntry.fact_versions must be \
          `Arc<[FactVersionRef]>`. Window:\n{window}"
     );

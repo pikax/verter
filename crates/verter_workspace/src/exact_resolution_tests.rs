@@ -9,7 +9,7 @@
 use super::*;
 use crate::types::ExactResolution;
 use std::collections::BTreeSet;
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 fn default_ctx() -> ResolutionContext {
     ResolutionContext {

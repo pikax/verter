@@ -38,7 +38,7 @@
 //! 6. the fallthrough resolver's per-element / per-child / per-root
 //!    node-cache validation view fails CLOSED when the cold compute's
 //!    seed is non-current — the resolver validates through the
-//!    request-bound `&crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)` (currentness-gated), not a raw
+//!    request-bound `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)` (currentness-gated), not a raw
 //!    re-read of the store view that drops the currentness flag.
 //!
 //! The static-guard half of the contract (part 5) lives in
@@ -48,9 +48,9 @@
 //! `warm_validation_entry_points_require_current_store_view`,
 //! `resolver_store_view_into_owned_view_is_allowlisted`).
 
-use crate::resolver_core::StoreView;
 use std::sync::Arc;
 use std::time::Duration;
+use verter_session_query::facts::store_view::StoreView;
 
 use crate::resolver_store::HostStoreView;
 use crate::types::{FileLanguage, UpsertRequest};
@@ -148,7 +148,7 @@ fn resolve_named_symbol_misses_under_sustained_non_current_view() {
 #[test]
 fn evaluate_type_expression_does_not_cache_from_non_current_view() {
     use crate::typeinfo::types::EvaluateTypeExpressionRequest;
-    use crate::types::ProjectionMode;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     let (host, canonical) = host_with_decl();
 
@@ -216,7 +216,7 @@ fn evaluate_type_expression_does_not_cache_from_non_current_view() {
 fn evaluate_type_expression_removes_orphan_scratch_on_non_current_miss() {
     use crate::typeinfo::evaluate_type_expression::compute_scratch_uri;
     use crate::typeinfo::types::EvaluateTypeExpressionRequest;
-    use crate::types::ProjectionMode;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     let (host, canonical) = host_with_decl();
 
@@ -335,7 +335,7 @@ fn cold_seed_context_fails_warm_probes_closed() {
         .shallow_file_state(&canonical)
         .expect("decl.ts must have shallow state")
         .whole_hash;
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: canonical.clone(),
         hash: whole_hash,
     };
@@ -351,7 +351,7 @@ fn cold_seed_context_fails_warm_probes_closed() {
         let ctx = HostResolverContext::from_current(&host, &current, overlay);
 
         assert!(
-            crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
+            verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
                 .validates(&fact),
             "control: a current-rooted context must validate the live self-root fact"
         );
@@ -377,8 +377,9 @@ fn cold_seed_context_fails_warm_probes_closed() {
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
         let ctx = HostResolverContext::from_cold_seed(&host_for_seed, &cold_seed, overlay);
 
-        let validates = crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
-            .validates(&fact_for_seed);
+        let validates =
+            verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
+                .validates(&fact_for_seed);
         HostStoreView::disarm_supersede_always_for_tests();
         (seed_is_current, validates)
     });
@@ -465,7 +466,10 @@ impl crate::session_view::SessionView for EmptyBaseSessionView {
     fn source(&self, _canonical: &str) -> Option<Arc<str>> {
         None
     }
-    fn content_hash_for(&self, _canonical: &str) -> Option<crate::types::Hash16> {
+    fn content_hash_for(
+        &self,
+        _canonical: &str,
+    ) -> Option<verter_session_query::analysis::types::Hash16> {
         None
     }
     fn project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
@@ -495,7 +499,7 @@ fn session_cold_seed_context_fails_warm_probes_closed() {
         .shallow_file_state(&canonical)
         .expect("decl.ts must have shallow state")
         .whole_hash;
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: canonical.clone(),
         hash: whole_hash,
     };
@@ -518,7 +522,7 @@ fn session_cold_seed_context_fails_warm_probes_closed() {
             SessionResolverContext::from_cold_seed(&host, &session_view, &current_seed, overlay);
 
         assert!(
-            crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
+            verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
                 .validates(&fact),
             "control: a current-rooted session context must validate the live self-root fact"
         );
@@ -553,8 +557,9 @@ fn session_cold_seed_context_fails_warm_probes_closed() {
             overlay,
         );
 
-        let validates = crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
-            .validates(&fact_for_seed);
+        let validates =
+            verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
+                .validates(&fact_for_seed);
         HostStoreView::disarm_supersede_always_for_tests();
         (seed_is_current, validates)
     });
@@ -591,7 +596,7 @@ fn view_bound_cold_seed_currentness_comes_from_its_own_read() {
         .shallow_file_state(&canonical)
         .expect("decl.ts must have shallow state")
         .whole_hash;
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: canonical.clone(),
         hash: whole_hash,
     };
@@ -637,8 +642,9 @@ fn view_bound_cold_seed_currentness_comes_from_its_own_read() {
             &mismatched_seed,
             overlay,
         );
-        let validates = crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
-            .validates(&fact_a);
+        let validates =
+            verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
+                .validates(&fact_a);
         HostStoreView::disarm_supersede_always_for_tests();
         (second_is_current, validates)
     });
@@ -674,8 +680,9 @@ fn view_bound_cold_seed_currentness_comes_from_its_own_read() {
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
         let ctx =
             SessionResolverContext::from_cold_seed(&host_b, &session_view_b, &cold_seed, overlay);
-        let validates = crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
-            .validates(&fact_b);
+        let validates =
+            verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
+                .validates(&fact_b);
         HostStoreView::disarm_supersede_always_for_tests();
         (seed_is_current, validates)
     });
@@ -696,7 +703,7 @@ fn view_bound_cold_seed_currentness_comes_from_its_own_read() {
 fn fallthrough_cold_compute_node_cache_validation_fails_closed_under_churn() {
     // The fallthrough resolver validates per-element / per-child /
     // per-root fallthrough-node cache entries through its request-bound
-    // `&crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)`. When the cold compute's seed is non-current the
+    // `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)`. When the cold compute's seed is non-current the
     // ctx must be a cold-seed context whose `validates*` family fails
     // CLOSED, so a stale warm fallthrough-node hit cannot be consumed.
     //
@@ -714,7 +721,7 @@ fn fallthrough_cold_compute_node_cache_validation_fails_closed_under_churn() {
         .shallow_file_state(&canonical)
         .expect("decl.ts must have shallow state")
         .whole_hash;
-    let fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: canonical.clone(),
         hash: whole_hash,
     };
@@ -736,8 +743,9 @@ fn fallthrough_cold_compute_node_cache_validation_fails_closed_under_churn() {
         let overlay = Arc::new(CanonicalCompletionOverlay::new());
         let ctx = HostResolverContext::from_cold_seed(&host_for_seed, &cold_seed, overlay);
 
-        let validates = crate::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
-            .validates(&fact_for_seed);
+        let validates =
+            verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx)
+                .validates(&fact_for_seed);
         HostStoreView::disarm_supersede_always_for_tests();
         (is_current, validates)
     });
@@ -821,7 +829,7 @@ impl Gate {
 fn evaluate_type_expression_cleanup_preserves_concurrently_owned_scratch() {
     use crate::typeinfo::evaluate_type_expression::{compute_scratch_uri, test_interleave};
     use crate::typeinfo::types::EvaluateTypeExpressionRequest;
-    use crate::types::ProjectionMode;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     // Use a scope file + expression UNIQUE to this test so the synthesised
     // scratch URI (a content hash of `scope || expression || imports`)

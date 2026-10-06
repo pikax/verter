@@ -9,7 +9,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 pub struct NoDeprecatedFilter;
 
@@ -70,8 +70,9 @@ fn has_filter_pipe(expr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::template::BindingUsageKind;
+    use verter_session_query::analysis::template::TemplateBindingOccurrence;
 
-    use verter_semantic::analysis::template::*;
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

@@ -223,7 +223,7 @@ impl Scheduler {
         generation: u64,
         profile_hash: u64,
         priority: Priority,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) -> Option<crate::dag::SubmissionToken> {
         let live = self
             .nodes

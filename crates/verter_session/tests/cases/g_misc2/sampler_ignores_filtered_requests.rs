@@ -32,8 +32,8 @@ use verter_audit::{
     RequestKindPayload, RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
 };
 use verter_session::host_audit_runtime::AuditRequestRegistration;
-use verter_session::request_context::RequestContext;
 use verter_session::{HostConfig, VerterHost};
+use verter_type_engine::request_context::RequestContext;
 
 #[test]
 fn filtered_kind_registration_is_noop_and_invisible_to_sampler() {

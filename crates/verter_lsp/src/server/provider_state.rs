@@ -62,7 +62,7 @@ pub(super) struct CarrierSyncCommit<'a> {
 /// the snapshot's authoritative configured-owner resolution before admission.
 fn configured_frontier_scope(
     snapshot: &verter_workspace::WorkspaceSnapshot,
-    owner: verter_workspace::workspace_snapshot::ProjectId,
+    owner: verter_session_query::resolution::ProjectId,
     initiating_canonical: &str,
 ) -> Option<(Vec<String>, String)> {
     let project = snapshot.projects.get(owner.0 as usize)?;
@@ -78,7 +78,7 @@ fn configured_frontier_scope(
         .materialized_files
         .iter()
         .map(|path| path.as_str().to_string())
-        .filter(|path| verter_semantic::resolver_core::path_is_carrier(path))
+        .filter(|path| verter_session_query::resolution::path_is_carrier(path))
         .filter(|path| {
             matches!(
                 snapshot.configured_owner_resolution_for_file(path),
@@ -88,7 +88,7 @@ fn configured_frontier_scope(
             )
         })
         .collect();
-    if verter_semantic::resolver_core::path_is_carrier(initiating_canonical) {
+    if verter_session_query::resolution::path_is_carrier(initiating_canonical) {
         sources.push(initiating_canonical.to_string());
     }
     sources.sort_unstable();
@@ -628,7 +628,7 @@ impl VerterLanguageServer {
                 let Some(resolved) = resolved else {
                     continue;
                 };
-                if verter_semantic::resolver_core::path_is_carrier(&resolved) {
+                if verter_session_query::resolution::path_is_carrier(&resolved) {
                     continue;
                 }
                 if seen_barrels.insert(resolved.clone()) {
@@ -654,7 +654,7 @@ impl VerterLanguageServer {
             let mut re_exports_carrier = false;
             for module_reference in ingress.module_references.iter() {
                 if module_reference.syntax
-                    != verter_semantic::analysis::ModuleReferenceSyntax::ExportFrom
+                    != verter_session_query::analysis::types::ModuleReferenceSyntax::ExportFrom
                 {
                     continue;
                 }
@@ -671,7 +671,7 @@ impl VerterLanguageServer {
                     }
                     verter_workspace::ResolutionPublication::Refused(_) => return false,
                 };
-                if verter_semantic::resolver_core::path_is_carrier(&target) {
+                if verter_session_query::resolution::path_is_carrier(&target) {
                     re_exports_carrier = true;
                     push_carrier(target, &mut carrier_targets);
                 } else if seen_barrels.insert(target.clone()) {
@@ -746,7 +746,7 @@ impl VerterLanguageServer {
     pub(super) fn carrier_multi_claimancy(&self, uri: &Uri) -> CarrierMultiClaimancy {
         let host = self.documents.host();
         let canonical = crate::documents::uri_to_canonical_id(uri);
-        if !verter_semantic::resolver_core::path_is_carrier(&canonical) {
+        if !verter_session_query::resolution::path_is_carrier(&canonical) {
             return CarrierMultiClaimancy::NotMultiClaimant(None);
         }
         let Some(published) = host.workspace_read().published_root() else {

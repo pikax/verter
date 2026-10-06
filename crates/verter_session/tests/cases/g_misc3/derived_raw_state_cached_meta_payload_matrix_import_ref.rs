@@ -12,9 +12,11 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use verter_semantic::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
-use verter_semantic::facts::{FactKey, FactLane};
-use verter_session::resolver_core::{FactVersionRef, ParseFactRef, PermissiveStoreView, StoreView};
+use verter_session::resolver_core::PermissiveStoreView;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+use verter_session_query::facts::registry::{InternedName, InternedSpecifier, SymbolSpace};
+use verter_session_query::facts::store_view::StoreView;
+use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {
     let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -35,7 +37,9 @@ fn cached_meta_payload_signature_carries_import_ref() {
         .expect("CachedMetaPayload struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("fact_versions: Arc<[crate::resolver_core::FactVersionRef]>"),
+        window.contains(
+            "fact_versions: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>"
+        ),
         "Block 1A matrix slice: CachedMetaPayload must carry \
          `fact_versions: Arc<[FactVersionRef]>` after the Block 1A migration. \
          Window:\n{window}"

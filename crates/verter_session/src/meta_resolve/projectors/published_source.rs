@@ -6,11 +6,11 @@
 //! node-domain projections — no reduction, no dispatch execution, no
 //! `TypeExpr` materialisation.
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::SemanticNodeId;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 fn published_anchor_for_identity(
-    identity: &crate::semantic_query::DeclIdentity,
+    identity: &verter_type_engine::semantic_query::DeclIdentity,
 ) -> Option<verter_type_expr::locators::AuthoredAnchor> {
     use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
@@ -27,7 +27,7 @@ fn published_anchor_for_identity(
 /// union of complete leaves, otherwise the caller's `existing` source
 /// unchanged (never a fabricated stand-in).
 pub(super) fn published_source_for_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: Option<SemanticNodeId>,
     existing: verter_type_expr::facts::SemanticTypeSource,
 ) -> verter_type_expr::facts::SemanticTypeSource {
@@ -40,7 +40,7 @@ pub(super) fn published_source_for_node(
 /// publishes when no upgrade exists (its authored source, a proven absence,
 /// or a typed required-position failure; never a fabricated stand-in).
 pub(super) fn published_source_upgrade_for_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: Option<SemanticNodeId>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     match node.and_then(|node| dispatch.node_leaf_fact(node)) {
@@ -92,8 +92,10 @@ pub(super) fn published_source_upgrade_for_node(
 /// the position publishes when no upgrade exists (its authored source, or —
 /// for a REQUIRED payload position with no authored source — the typed
 /// source-construction failure; never a fabricated stand-in).
-pub(super) fn published_member_source_upgrade_for_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(super) fn published_member_source_upgrade_for_node<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: Option<SemanticNodeId>,
     include_lossy_instantiation: bool,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
@@ -111,15 +113,16 @@ pub(super) fn published_member_source_upgrade_for_node(
         ));
     }
     let identity =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).as_deref() {
-            Some(crate::semantic_query::SemanticNodeData::DeclRef { identity }) => {
+        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+            .as_deref()
+        {
+            Some(verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity }) => {
                 Some(identity.clone())
             }
-            Some(crate::semantic_query::SemanticNodeData::InstantiationRef { base, .. })
-                if include_lossy_instantiation =>
-            {
-                Some(base.clone())
-            }
+            Some(verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
+                base,
+                ..
+            }) if include_lossy_instantiation => Some(base.clone()),
             _ => None,
         };
     match identity {
@@ -173,20 +176,23 @@ pub(crate) enum MemberValuePosition {
 /// miss or an interior unknown-materializing failure, so publishing the address
 /// cannot turn either into a completed `unknown`. `None` is reserved for no
 /// live node, a root failure carrier, or no stamped type-argument base.
-pub(crate) fn structural_member_value_source(
-    dispatch: &ProjectSemanticDispatch<'_>,
+pub(crate) fn structural_member_value_source<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
-    member_key: &crate::semantic_query::PropertyKey,
+    member_key: &verter_type_engine::semantic_query::PropertyKey,
     type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
-    let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let data =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
     if matches!(
         data.as_ref(),
-        crate::semantic_query::SemanticNodeData::Opaque(error)
+        verter_type_engine::semantic_query::SemanticNodeData::Opaque(error)
             if !matches!(
                 error,
-                crate::semantic_query::QueryError::RecursiveRef { .. }
-                    | crate::semantic_query::QueryError::DeclPlaceholder { .. }
+                verter_type_engine::semantic_query::QueryError::RecursiveRef { .. }
+                    | verter_type_engine::semantic_query::QueryError::DeclPlaceholder { .. }
             )
     ) {
         return None;
@@ -214,7 +220,7 @@ mod owner_identity_tests {
 
     #[test]
     fn published_anchor_preserves_decl_identity_owner() {
-        let identity = crate::semantic_query::DeclIdentity {
+        let identity = verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/w/Component.vue"),
             owner: TopLevelOwnerId::instance(0),
             whole_hash: [3u8; 16],

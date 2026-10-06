@@ -15,9 +15,12 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::ProjectionMode;
-use crate::types::{HostConfig, MetaProvenanceSnapshot, UpsertRequest};
 use crate::VerterHost;
+use crate::{
+    meta_provenance::MetaProvenanceSnapshot,
+    types::{HostConfig, UpsertRequest},
+};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 fn make_host() -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -356,7 +359,7 @@ fn live_artifact_memo_pins_snapshot_across_many_other_files() {
 /// while the header-derived `MemberShape` fact stays eager.
 #[test]
 fn emit_parse_facts_never_hashes_decl_bodies() {
-    use verter_semantic::facts::registry::{FactKey, SymbolSpace};
+    use verter_session_query::facts::registry::{FactKey, SymbolSpace};
 
     let host = make_host();
     upsert(&host, SCRATCH_ID, SCRATCH);
@@ -436,7 +439,7 @@ fn emit_parse_facts_never_hashes_decl_bodies() {
 /// unrelated decls.
 #[test]
 fn local_export_alias_lazy_fact_uses_public_key_and_backing_decl() {
-    use verter_semantic::facts::registry::{FactKey, SymbolSpace};
+    use verter_session_query::facts::registry::{FactKey, SymbolSpace};
 
     const ALIAS_ID: &str = "/workspace/src/alias.ts";
     let src = "type Foo = { a: 1 };\n\
@@ -664,7 +667,7 @@ fn enum_member_edit_moves_parse_stable_hash() {
 /// is emitted and the lookup FAILS; post-fix: each variant emits one.
 #[test]
 fn enum_members_emit_header_member_presence_facts() {
-    use verter_semantic::facts::registry::{FactKey, MemberKind, SymbolSpace};
+    use verter_session_query::facts::registry::{FactKey, MemberKind, SymbolSpace};
 
     const ENUM_ID: &str = "/workspace/src/enum_facts.ts";
     let host = make_host();
@@ -802,7 +805,7 @@ fn merged_enum_later_decl_member_edit_moves_parse_stable_hash() {
 /// the merged `MemberShape` diverged from the flattened form.
 #[test]
 fn merged_enum_emits_member_facts_for_every_declaration() {
-    use verter_semantic::facts::registry::{FactKey, SymbolSpace};
+    use verter_session_query::facts::registry::{FactKey, SymbolSpace};
 
     const MERGED_ID: &str = "/workspace/src/merged_enum_facts.ts";
     const SINGLE_ID: &str = "/workspace/src/single_enum_facts.ts";

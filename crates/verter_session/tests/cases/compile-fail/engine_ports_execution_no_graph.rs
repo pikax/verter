@@ -1,4 +1,4 @@
-use verter_session::for_tests::ExecutionSubmission;
+use verter_type_engine::resolver_core::request_ports::ExecutionSubmission;
 
 fn cannot_escape<P: ExecutionSubmission + ?Sized>(port: &P) {
     let binding = port.attach_engine();

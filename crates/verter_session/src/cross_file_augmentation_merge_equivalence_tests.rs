@@ -28,15 +28,15 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
-use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+use verter_session_query::declarations::AugmentationScopeKind;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
-use crate::semantic_query::{ProjectionMode, SemanticNodeData};
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
 fn make_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -56,7 +56,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
 
 fn node_data(
     host: &VerterHost,
-    node: crate::semantic_query::SemanticNodeId,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Arc<SemanticNodeData> {
     host.project_type_store()
         .semantic_graph()
@@ -126,7 +126,7 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
     use crate::file_artifact_store::{
         AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
     };
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
     use verter_type_expr::TopLevelOwnerId;
 
     let host = make_host();
@@ -221,7 +221,7 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
         crate::resolver_core::prepared_decl::ImportCanonicalization {
             final_resolution: rustc_hash::FxHashMap::from_iter([(
                 verter_type_expr::DeclBindingKey::new(TopLevelOwnerId::module(1), "Foo"),
-                verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+                verter_session_query::type_solver::ResolvedRootIdentity::new_in_owner(
                     "/types.ts",
                     TopLevelOwnerId::ordinary_file(),
                     "Foo",
@@ -241,7 +241,7 @@ fn relative_augmentation_pre_stitch_pipeline_matches_external_control() {
     assert!(
         matches!(
             &wrong_owner_result,
-            Err(crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+            Err(verter_session_query::inputs::prepared::PreparationFailure::MissingExternalOwner {
             local_name,
         }) if local_name == "Foo"
         ),
@@ -496,20 +496,24 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
 fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     use rustc_hash::FxHashMap;
 
-    use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef, StoreView};
-    use crate::resolver_store::{HostStoreView, SourceEnvIdentity};
+    use crate::resolver_store::HostStoreView;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::facts::store_view::StoreView;
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
+    use verter_session_query::source::artifact_key::FileArtifactKey;
+    use verter_session_query::source::env_identity::SourceEnvIdentity;
 
     let host = make_host();
     upsert_augmentation_fixture(&host);
 
     // Cold resolve of the augmented base decl under a fact tracer: the
     // parent fold must record the contributor source-env observation.
-    let (resolved, read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-        });
+    let (resolved, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
+    );
     let node = resolved.expect("augmented Foo must resolve");
     match node_data(&host, node).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => {
@@ -633,11 +637,13 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
 /// isolation; this one drives it through the end-to-end warm-read rail.
 #[test]
 fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
-    use crate::locator_identity::ParseEnvHash;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
-    use crate::resolver_store::SourceEnvIdentity;
-    use crate::semantic_query::{
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
+    use verter_session_query::source::env_identity::SourceEnvIdentity;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
     };
@@ -647,10 +653,10 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
 
     // Recording half: the cold production resolve records ONE
     // FileSourceEnv observation for the folded contributor.
-    let (resolved, read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-        });
+    let (resolved, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
+    );
     resolved.expect("augmented Foo must resolve");
     let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
         panic!("the traced resolve must seal a fact signature (no overflow)");
@@ -684,18 +690,22 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::from("/types.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Foo"),
-            ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                "/types.ts",
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ),
-        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from("/types.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("Foo"),
+                ),
+                Arc::from(
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                        .into_boxed_slice(),
+                ),
+                dispatch.instantiate_context_for(
+                    "/types.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
         match dispatch.execute_type_node(key) {
             QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
             other => panic!("the augmented parent demand must produce a value, got {other:?}"),
@@ -756,8 +766,10 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
 /// `FileSourceEnv` fact here and fails.
 #[test]
 fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
-    use crate::file_artifact_store::FileArtifactKey;
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let host = make_host();
     upsert_ts(
@@ -778,10 +790,10 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
          declare module './types' { interface Foo { fromWest: boolean } }\n",
     );
 
-    let (resolved, read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-        });
+    let (resolved, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
+    );
     let node = resolved.expect("the doubly-augmented Foo must resolve");
 
     // Both augmenters genuinely CONTRIBUTED (so both were version-rooted by
@@ -883,8 +895,8 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
 /// the SAME family slot and only the fact rail can discriminate.
 #[test]
 fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
     };
@@ -907,13 +919,15 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
                 Arc::from("/types.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("Foo"),
             ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            Arc::from(
+                Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+            ),
             dispatch.instantiate_context_for(
                 "/types.ts",
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -1016,24 +1030,29 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 /// failing both the `+ 1` build assertion and the edited-surface assertion.
 #[test]
 fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::prepared_decl::{PreparationFailure, PreparedTypeDeclResolution};
+    use verter_session_query::inputs::prepared::PreparationFailure;
+    use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 
-    use crate::semantic_query::{ProjectionReductionContext, QueryResult, SemanticQueryKey};
+    use verter_type_engine::semantic_query::{
+        ProjectionReductionContext, QueryResult, SemanticQueryKey,
+    };
 
     fn prepare_and_read(
         host: &VerterHost,
     ) -> (
         PreparedTypeDeclResolution,
-        crate::semantic_query::CacheRead<
-            crate::semantic_query::QueryResult<crate::semantic_query::SemanticNodeId>,
+        verter_type_engine::semantic_query::CacheRead<
+            verter_type_engine::semantic_query::QueryResult<
+                verter_type_engine::semantic_query::SemanticNodeId,
+            >,
         >,
     ) {
         let view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
         let preparation =
-            crate::resolver_core::request_ports::OwnedLowering::prepared_type_for_projection(
+            verter_type_engine::resolver_core::request_ports::OwnedLowering::prepared_type_for_projection(
                 &ctx,
                 &ctx.prepared_decl_bundle("/use.ts")
                     .expect("consumer prepared bundle"),
@@ -1041,18 +1060,22 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
                 "U",
             );
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::from("/use.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("U"),
-            ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                "/use.ts",
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ),
-        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from("/use.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("U"),
+                ),
+                Arc::from(
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                        .into_boxed_slice(),
+                ),
+                dispatch.instantiate_context_for(
+                    "/use.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
         (preparation, dispatch.execute_read(key))
     }
 
@@ -1127,8 +1150,8 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
 
 #[test]
 fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end_to_end() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
     };
@@ -1165,13 +1188,15 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, &baseline_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
                 Arc::from("/use.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("U"),
             ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            Arc::from(
+                Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+            ),
             dispatch.instantiate_context_for(
                 "/use.ts",
                 ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -1293,8 +1318,8 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
 ///     that the `true` above is caused by the torn state, not the key itself.
 #[test]
 fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
 
     let host = make_host();
     // TWO external `declare module "ext-pkg"` peers (no base body) + a consumer
@@ -1324,18 +1349,22 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::from("/use.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("U"),
-            ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                "/use.ts",
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ),
-        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from("/use.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("U"),
+                ),
+                Arc::from(
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                        .into_boxed_slice(),
+                ),
+                dispatch.instantiate_context_for(
+                    "/use.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
         dispatch.execute_read(key).cache_suppress
     };
 
@@ -1411,8 +1440,8 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
 /// `non_cacheable` assertion FAILS.
 #[test]
 fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
 
     // Drive the `/types.ts::Foo` Instantiate under an OUTER fact tracer, returning
     // (build.cache_suppress, build.result_is_partial, outer_tracer.non_cacheable).
@@ -1429,33 +1458,35 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             crate::for_tests::augmentation_force_source_env_unobservable_for_tests(host, true)
         });
         let view = host.resolver_store_view_read().into_owned_view();
-        let (read, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+        let (read, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(host),
             || {
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
                 let ctx = crate::resolver_core::HostResolverContext::new(host, &view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&ctx);
-                let key =
-                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                let key = SemanticQueryKey::Instantiate(
+                    verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(
                             Arc::from("/types.ts"),
                             verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             Arc::from("Foo"),
                         ),
                         Arc::from(
-                            Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
+                            Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                                .into_boxed_slice(),
                         ),
                         dispatch.instantiate_context_for(
                             "/types.ts",
                             ProjectionReductionContext::published(ProjectionMode::Expanded),
                         ),
-                    ));
+                    ),
+                );
                 dispatch.execute_read(key)
             },
         );
         let outer_non_cacheable = matches!(
             finalise,
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
         (
             read.cache_suppress,
@@ -1530,8 +1561,8 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
 ///     by the broken lease, not the key itself.
 #[test]
 fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
 
     let host = make_host();
     // TWO external `declare module "ext-pkg"` peers augmenting `Cfg`, plus a
@@ -1567,6 +1598,7 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         aug1_state
             .decl_bodies()
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin1")
+            .value
             .is_some(),
         "the file-scope pin demand must acquire aug1's retained-snapshot lease"
     );
@@ -1578,18 +1610,22 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let ctx = crate::resolver_core::HostResolverContext::new(&host, view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&ctx);
-        let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-            dispatch.type_slot_for(
-                Arc::from("/use.ts"),
-                verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("U"),
-            ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                "/use.ts",
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
-            ),
-        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    Arc::from("/use.ts"),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    Arc::from("U"),
+                ),
+                Arc::from(
+                    Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
+                        .into_boxed_slice(),
+                ),
+                dispatch.instantiate_context_for(
+                    "/use.ts",
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                ),
+            ));
         dispatch.execute_read(key).cache_suppress
     };
 
@@ -1664,10 +1700,12 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
 /// one-augmenter fingerprint the augmented fixture would produce.
 #[test]
 fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
-    use crate::file_artifact_store::{
-        compute_augmenter_set_fingerprint, AugmentationTargetKind, AugmenterEntry, FileArtifactKey,
+    use crate::file_artifact_store::{compute_augmenter_set_fingerprint, AugmentationTargetKind};
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef};
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let host = make_host();
     // NO augmenter anywhere in the workspace — the augmentation index for
@@ -1678,10 +1716,10 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
         "export interface Foo { base: string }\n",
     );
 
-    let (resolved, read_set) = host
-        .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-            host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded))
-        });
+    let (resolved, read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
+    );
     let node = resolved.expect("the un-augmented Foo must resolve");
     let projected = host
         .project_node_to_type_expr_for_test(node)
@@ -1697,7 +1735,7 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     };
 
     let expected_key =
-        crate::resolver_core::route_db::build_module_augmentation_index_shape_fact_key(
+        verter_session_query::source::augmentation_keys::build_module_augmentation_index_shape_fact_key(
             &AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from("/types.ts")),
         );
     let recorded = signature

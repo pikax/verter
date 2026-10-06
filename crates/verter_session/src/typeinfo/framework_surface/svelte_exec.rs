@@ -20,17 +20,17 @@
 
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use verter_compiler::svelte::parser::template_ast::{
     SvelteAttributeKind, SvelteElementKind, SvelteNode,
 };
 use verter_semantic::analysis::framework_facts::svelte::{
     ExactSveltePropsCalls, SvelteInstanceExport, SvelteLegacyProp, SvelteScriptFacts,
 };
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedMacroKind, AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding,
     TypeResolutionSource,
 };
+use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt as _;
 use verter_type_expr::facts::SvelteSnippetImportFact;
 use verter_type_expr::locators::AuthoredTypePayloadRef;
 use verter_type_expr::{
@@ -42,14 +42,7 @@ use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
 use crate::framework::script_facts::ScriptFactEvidence;
 use crate::framework::surface_store::{FullKey, StoredSurfaceDto};
-use crate::meta_resolve::callable_view::{CallableNodeView, PositionalParamNode};
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{
-    DisplayNeeds, PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult,
-    ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryValue, ValueRootKey,
-};
-use crate::semantic_query_memo::SemanticGraphStore;
+use crate::output_sinks::OutputProjector;
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::framework_surface::results::{
     resolved_emit_payload_publication, EmitsSurface, MacroSurfaceDtos, ModelBinding, ModelSurface,
@@ -63,8 +56,17 @@ use crate::typeinfo::framework_surface::vue_exec::{
 use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
 use crate::typeinfo::surface::{TypeInfoSurface, TypeInfoSurfaceEntry};
 use crate::typeinfo::types::TypeInfoQueryLevel;
+use verter_type_engine::project_semantic_dispatch::callable_view::{
+    CallableNodeView, PositionalParamNode,
+};
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{
+    DisplayNeeds, PartialReasonSet, ProjectionMode, ProjectionReductionContext, QueryResult,
+    ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryValue, ValueRootKey,
+};
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
-crate::project_semantic_dispatch::output_materialization::define_output_capability! {
+crate::output_sinks::define_output_capability! {
     /// The Svelte framework-surface executor's output-sink capability: the
     /// Svelte resolution leg here holds this to materialize a graph node into
     /// a sealed output carrier and unwrap it. Its constructor is visible ONLY
@@ -107,11 +109,21 @@ fn store_kind_for_source(source: SvelteSurfaceSource) -> FrameworkSurfaceKind {
 ///   this family (no `$props()`, no dispatcher, no legacy slots, …).
 #[must_use]
 pub(crate) fn resolve_svelte_surface(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     source: SvelteSurfaceSource,
 ) -> ResolvedMacroPayload {
+    // Refuse BEFORE any surface is computed: a host that does not admit the
+    // Svelte adapter has no Svelte surface store.
+    let Some(surfaces) = dispatch.host_attachment().svelte_surfaces() else {
+        return ResolvedOutcome::Unsupported {
+            diagnostics: vec!["the Svelte adapter is not admitted by this host".to_string()],
+        };
+    };
     // Load the CURRENT (overlay-aware) `IndexedReady` BEFORE touching the cache,
     // so the content-addressed key carries the live overlay `whole_hash`. An
     // unloaded owner has no surface and no cache entry.
@@ -138,19 +150,25 @@ pub(crate) fn resolve_svelte_surface(
     // Warm read against the SAME `ctx` view the surface resolves under — a
     // carrier edit (a cross-file dependency the captured `TypeExpr` reaches)
     // invalidates the entry lazily via the recorded fact signature + generation.
-    if let Some(cached) = dispatch.read_svelte_surface(&key, generation) {
+    if let Some(cached) = crate::framework::surface_store::read_framework_surface(
+        surfaces,
+        &key,
+        |facts| dispatch.validates_fact_signature(facts),
+        generation,
+    ) {
         cached.read_set_signature.bubble_via_tls();
         return ResolvedOutcome::Resolved(Arc::clone(&cached.dto_bundle));
     }
 
     // Cold compute under an installed fact tracer so the CROSS-FILE facts the
     // captured-`TypeExpr` resolution reads enter the entry's `ReadSetSignature`.
-    let _completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-    let (outcome, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+    let _completeness_scope =
+        verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+    let (outcome, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
         || compute_svelte_surface(ctx, dispatch, owner, source),
     );
-    let completeness = crate::request_context::current_cold_compute_completeness();
+    let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
     let outcome = if completeness.is_partial() {
         let diagnostics = partial_diagnostic_messages(completeness.reasons());
         match outcome {
@@ -183,7 +201,7 @@ pub(crate) fn resolve_svelte_surface(
     };
     let non_cacheable_read_observed = matches!(
         &finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     // ReturnOnly never publishes — a surface resolved from a served-without-
@@ -197,15 +215,16 @@ pub(crate) fn resolve_svelte_surface(
     // non-overflowed observation set (the no-poison invariant). `Missing` /
     // `Partial` / `Unsupported` flow through without warming.
     if let ResolvedOutcome::Resolved(dtos) = &outcome {
-        if let crate::resolver_core::FactReadSetFinalise::Ok(facts) = finalise {
+        if let verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) = finalise
+        {
             let entry = StoredSurfaceDto {
                 dto_bundle: Arc::clone(dtos),
-                read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(facts),
+                read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                    facts,
+                ),
                 validated_at_generation: generation,
             };
-            return ResolvedOutcome::Resolved(Arc::clone(
-                &dispatch.publish_svelte_surface(key, entry).dto_bundle,
-            ));
+            return ResolvedOutcome::Resolved(Arc::clone(&surfaces.insert(key, entry).dto_bundle));
         }
     }
     outcome
@@ -214,8 +233,11 @@ pub(crate) fn resolve_svelte_surface(
 /// The cold per-source resolution (no caching) — dispatched under the fact
 /// tracer by [`resolve_svelte_surface`].
 fn compute_svelte_surface(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     source: SvelteSurfaceSource,
 ) -> ResolvedMacroPayload {
@@ -290,7 +312,7 @@ struct SvelteFactObservations<'a> {
     /// `$props()` call, not "not computed". `None` on the conservative
     /// arm so partial/unavailable evidence cannot synthesise a surface.
     props_calls: Option<&'a ExactSveltePropsCalls>,
-    prop_defaults: Vec<&'a verter_semantic::analysis::types::AnalyzedDefaultValue>,
+    prop_defaults: Vec<&'a verter_session_query::analysis::types::AnalyzedDefaultValue>,
     bindable_members: Vec<&'a String>,
     legacy_props: Vec<&'a SvelteLegacyProp>,
     snippet_imports: Vec<SvelteSnippetImportFact>,
@@ -555,8 +577,11 @@ fn runes_props_from_destructure_geometry(
 /// PROPS from the runes `$props()` type: navigate the captured props type to its
 /// one-level object surface through the shared engine and normalize as props.
 fn resolve_runes_props(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
@@ -580,8 +605,12 @@ fn resolve_runes_props(
     // from an imported base reports THAT base's file, not the props_type's.
     let surface = navigate_param_to_object_surface(ctx, dispatch, owner, props_type);
     let (mut fields, prop_origins) = match surface {
-        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(
+            surface,
+        )
+        | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
+            surface,
+        ) => {
             let surface = surface.into_inner();
             let prop_origins = prop_origins_from_surface(owner, &surface);
 
@@ -622,27 +651,27 @@ fn resolve_runes_props(
         // A props type that RESOLVES to no object surface (a primitive /
         // open generic) still establishes a PRESENT props surface —
         // supported-empty, never a Missing.
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
             (Vec::new(), Vec::new())
         }
         // An UNRESOLVABLE `$props()` type is NOT a supported-empty surface:
         // record the typed reason (the enclosing cold-compute scope turns the
         // outcome PARTIAL on the wire and refuses store admission) and
         // publish the usable positive subset the producer still built.
-        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-            match incomplete.into_recorded_partial() {
-                Some(surface) => {
-                    let prop_origins = prop_origins_from_surface(owner, &surface);
-                    let fields = props_from_typeinfo_surface(
-                        ctx,
-                        dispatch,
-                        &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
-                    );
-                    (fields, prop_origins)
-                }
-                None => (Vec::new(), Vec::new()),
+        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+            incomplete,
+        ) => match incomplete.into_recorded_partial() {
+            Some(surface) => {
+                let prop_origins = prop_origins_from_surface(owner, &surface);
+                let fields = props_from_typeinfo_surface(
+                    ctx,
+                    dispatch,
+                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
+                );
+                (fields, prop_origins)
             }
-        }
+            None => (Vec::new(), Vec::new()),
+        },
     };
     for row in &mut fields {
         if matches!(
@@ -746,8 +775,9 @@ fn member_declaration_origin(
     owner: &str,
     member: &crate::typeinfo::surface::TypeInfoSurfaceMember,
 ) -> Option<crate::typeinfo::framework_surface::results::PropOrigin> {
-    use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
     use crate::typeinfo::framework_surface::results::{OriginHop, PropOrigin};
+    use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+    use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
     let canonical_file = member.origin.canonical_file.as_ref()?;
     let canonical_source = canonical_file.as_ref().to_string();
@@ -852,8 +882,11 @@ fn legacy_prop_field(
 /// prop type is the member's value type (resolved shallow through the shared
 /// engine via the runes-props surface).
 fn resolve_bindable(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
@@ -927,8 +960,11 @@ fn resolve_bindable(
 /// [`verter_type_expr::PropCallableRole::SvelteSnippet`] role, then normalize
 /// those members as slots.
 fn resolve_snippet_props(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
@@ -993,7 +1029,10 @@ fn resolve_snippet_props(
 /// field). The binding type is the typed-IR element type (typed-IR only — no
 /// source slicing).
 fn svelte_snippet_slots_from_typeinfo_surface(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     resolved: &impl ResolvedSurfaceAccess,
     return_base: Option<&verter_type_expr::locators::AuthoredBodyLocator>,
 ) -> Vec<(AnalyzedSlotField, Option<TypePublication>)> {
@@ -1002,8 +1041,8 @@ fn svelte_snippet_slots_from_typeinfo_surface(
     // Node-domain demand identity. `Navigate` so a carrier-wrapped snippet
     // (`Snippet<Args>` with `Args` a `DeclRef`-to-tuple) resolves its `Params`.
     // The binding types are minted shallow at the terminal sink regardless.
-    let context = crate::semantic_query::ProjectionReductionContext::published(
-        crate::semantic_query::ProjectionMode::Navigate,
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        verter_type_engine::semantic_query::ProjectionMode::Navigate,
     );
     macro_surface
         .surface
@@ -1027,16 +1066,16 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 .realized_callable_root(context)
                 .recorded()
                 .and_then(|realized_root| {
-                    let combine = match crate::project_semantic_dispatch::node_data_for(
+                    let combine = match verter_type_engine::project_semantic_dispatch::node_data_for(
                         dispatch.graph(),
                         realized_root,
                     )
                     .as_deref()
                     {
                         Some(SemanticNodeData::Union(_)) => {
-                            crate::meta_resolve::callable_view::ArmCombineNode::Union
+                            verter_type_engine::project_semantic_dispatch::callable_view::ArmCombineNode::Union
                         }
-                        _ => crate::meta_resolve::callable_view::ArmCombineNode::Intersection,
+                        _ => verter_type_engine::project_semantic_dispatch::callable_view::ArmCombineNode::Intersection,
                     };
                     view.slot_param_and_return_by_arm(combine, context)
                 })
@@ -1096,8 +1135,8 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                 // A resolved-surface snippet slot has no authored props-object
                 // member list at an addressable position in this file — the
                 // honest typed miss, never a guessed offset.
-                props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
-                    verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                props_anchor: verter_session_query::analysis::types::MacroAnchor::Unsupported(
+                    verter_session_query::analysis::types::MacroAnchorUnsupported::NoMemberList,
                 ),
                 return_type,
                 payload: None,
@@ -1111,7 +1150,10 @@ fn svelte_snippet_slots_from_typeinfo_surface(
 
 #[cfg(test)]
 fn svelte_snippet_slot_fields_from_typeinfo_surface(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedSlotField> {
     svelte_snippet_slots_from_typeinfo_surface(dispatch, resolved, None)
@@ -1121,12 +1163,15 @@ fn svelte_snippet_slot_fields_from_typeinfo_surface(
 }
 
 fn materialize_snippet_slot_return(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     return_node: SemanticNodeId,
 ) -> TypeExpr {
     let cap = TypeinfoSvelteSurfaceOutputCap::new(dispatch);
     cap.materialize_output_type_expr(return_node)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
         .unwrap_or(TypeExpr::Unknown(
             verter_type_expr::UnknownValue::missing_output(),
         ))
@@ -1152,7 +1197,10 @@ fn materialize_snippet_slot_return(
 /// `raise_member_value` pattern) — a cap is a mint AUTHORITY and must not cross
 /// the boundary from the non-terminal caller.
 pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_slot_bindings(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     member_scope: &verter_type_expr::TypeExprScope,
     params: &[PositionalParamNode],
 ) -> Vec<AnalyzedSlotFieldBinding> {
@@ -1165,7 +1213,7 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_s
             // by-name `.and_then` form (never a direct read-of-mint decide).
             let raised = cap
                 .materialize_output_type_expr(param.ty)
-                .map(|raised| raised.into_type_expr(&cap));
+                .map(|raised| raised.into_type_expr(cap.authority()));
             let type_annotation = raised
                 .as_ref()
                 .and_then(crate::resolver_core::surface_projector::render_type_expr_display);
@@ -1241,7 +1289,10 @@ fn retain_svelte_snippet_members(
 /// the typed [`ParsedSvelte`] template tree. Each `<slot>` element contributes a
 /// slot named by its `name` attribute (default `"default"`); the forwarded prop
 /// attributes (every plain attribute other than `name`) become its bindings.
-fn resolve_legacy_slot_inventory(ctx: &dyn ResolverContext, owner: &str) -> ResolvedMacroPayload {
+fn resolve_legacy_slot_inventory(
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    owner: &str,
+) -> ResolvedMacroPayload {
     // Resolve the owner's `IndexedReady` through the request view `ctx` ONCE and
     // read EVERYTHING (carrier + raw source + whole-hash) from THIS snapshot, so
     // the cache key, the observed fact, the parsed template, and the slot-name
@@ -1255,18 +1306,18 @@ fn resolve_legacy_slot_inventory(ctx: &dyn ResolverContext, owner: &str) -> Reso
     };
     // Root the cached slot bundle to the owner's CONTENT so a content edit to the
     // `.svelte` misses the warm SLOTS entry.
-    crate::resolver_core::resolver_context::observe_fan_out(
-        crate::resolver_core::FactVersionRef::FileWholeHash {
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: owner.to_string(),
             hash: indexed.whole_hash,
         },
     );
     // Read the typed carrier FROM THE SNAPSHOT — never a source-text scan, never
     // a separate host-current carrier read.
-    let Some(artifact) = indexed.framework_parse.as_ref() else {
+    let Some(artifact) = ctx.framework_parse_artifact(&indexed) else {
         return ResolvedOutcome::Missing;
     };
-    let Some(parsed) = crate::typeinfo::adapters::svelte::svelte_parse(artifact) else {
+    let Some(parsed) = crate::typeinfo::adapters::svelte::svelte_parse(&artifact) else {
         return ResolvedOutcome::Missing;
     };
 
@@ -1315,8 +1366,8 @@ fn collect_slot_elements(
                             bindings,
                             // A markup `<slot>` element declares no authored
                             // props-object member list: honest typed miss.
-                            props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
-                                verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                            props_anchor: verter_session_query::analysis::types::MacroAnchor::Unsupported(
+                                verter_session_query::analysis::types::MacroAnchorUnsupported::NoMemberList,
                             ),
                             return_type: None,
                             payload: None,
@@ -1446,8 +1497,11 @@ fn slice_attr_value(
 /// payload). Present only when provenance-validated (`dispatcher_events` is
 /// `Some` only for a `svelte`-resolved dispatcher).
 fn resolve_dispatcher(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
@@ -1493,8 +1547,11 @@ fn resolve_dispatcher(
 /// present-but-empty EMITS surface (the runes-event compatibility surface is
 /// supported, even when no callback events exist).
 fn resolve_callback_prop_events(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {
@@ -1539,7 +1596,10 @@ fn resolve_callback_prop_events(
 ///   (`Fn & undefined` = `never`) is deliberately REFUSED, matching the shared
 ///   `realize_callable_member`.
 fn callback_events_from_props_surface(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     surface: &TypeInfoSurface,
     return_base: &verter_type_expr::locators::AuthoredBodyLocator,
     owner: &str,
@@ -1549,8 +1609,8 @@ fn callback_events_from_props_surface(
     // shared `CallableNodeView`; materialization happens ONCE at the terminal
     // `materialize_payload_tuple` sink (which constructs its own mint cap from
     // `ctx`). This normalizer calls NO mint verb and holds NO cap.
-    let context = crate::semantic_query::ProjectionReductionContext::published(
-        crate::semantic_query::ProjectionMode::Navigate,
+    let context = verter_type_engine::semantic_query::ProjectionReductionContext::published(
+        verter_type_engine::semantic_query::ProjectionMode::Navigate,
     );
     let mut events: Vec<ResolvedEmitOccurrence> = Vec::new();
     for entry in surface.entries.iter() {
@@ -1700,8 +1760,11 @@ fn callback_events_from_props_surface(
 /// signature's param nodes ARE the callback's own declared parameter types, which
 /// all materialize — so the fallback is position-safety robustness only.
 pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_tuple(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    params: &[crate::semantic_query::FunctionParam],
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
+    params: &[verter_type_engine::semantic_query::FunctionParam],
 ) -> TypeExpr {
     use verter_type_expr::TupleElement;
     // Construct the mint cap INTERNALLY from the active `ctx` (the
@@ -1721,7 +1784,7 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_t
             // only.
             let ty = cap
                 .materialize_output_type_expr(param.ty)
-                .map(|raised| raised.into_type_expr(&cap))
+                .map(|raised| raised.into_type_expr(cap.authority()))
                 .unwrap_or_else(|| TypeExpr::Unknown(UnknownValue::missing_output()));
             TupleElement {
                 // Node-domain `FunctionParam.name` (`Option<Arc<str>>`) → the
@@ -1792,7 +1855,10 @@ fn instance_export_display_node(
 /// single resolver so aliases preserve their public name while `typeof`
 /// targets the captured local [`verter_type_expr::DeclBindingKey`].
 pub(crate) fn resolve_svelte_value_export_member(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     exported_name: &str,
     binding_key: &verter_type_expr::DeclBindingKey,
@@ -1807,7 +1873,7 @@ pub(crate) fn resolve_svelte_value_export_member(
         },
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     ));
-    crate::request_context::observe_component_meta_read_suppress(&read);
+    verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
 
     let node = match read.value {
         QueryResult::Value(node) | QueryResult::Recursive(node) => Some(node),
@@ -1817,7 +1883,7 @@ pub(crate) fn resolve_svelte_value_export_member(
         let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
         let reduced = dispatch.reduce_output_node_with_context(node, context);
         if reduced.result_is_partial() {
-            crate::request_context::mark_request_result_partial();
+            verter_type_engine::request_context::mark_request_result_partial();
         }
         // The projected surface DECLARES this binding, so it cannot name the
         // binding's own nominal identity: a `unique symbol` export rendered
@@ -1862,7 +1928,7 @@ pub(crate) fn resolve_svelte_value_export_member(
             // the export's OWN name as an import of the surface that declares
             // it.
             let shallow =
-                crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                     dispatch,
                     dispatch
                         .widened_nominal_typeof(reduced.node_id())
@@ -1876,7 +1942,7 @@ pub(crate) fn resolve_svelte_value_export_member(
             .widened_nominal_typeof(reduced.node_id())
             .unwrap_or_else(|| reduced.node_id());
         let shallow =
-            crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+            verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                 dispatch,
                 member_node,
             )
@@ -1894,7 +1960,7 @@ pub(crate) fn resolve_svelte_value_export_member(
         } else {
             instance_export_display_node(graph, member_node)
         };
-        let type_annotation: String = crate::semantic_query::display::display(
+        let type_annotation: String = verter_type_engine::semantic_query::display::display(
             graph,
             &SemanticQueryValue::TypeNode(display_node),
             DisplayNeeds::empty(),
@@ -1925,7 +1991,10 @@ pub(crate) fn resolve_svelte_value_export_member(
 /// member of the public instance; the member type stays a shallow `Ref` to the
 /// exported binding (shallow-by-default — the consumer re-resolves on demand).
 fn resolve_instance_exports(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
 ) -> ResolvedMacroPayload {

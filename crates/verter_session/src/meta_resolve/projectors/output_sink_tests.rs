@@ -6,20 +6,21 @@
 //! re-resolvable input carrier (never a fabricated root-sentinel shape,
 //! never a warm admission).
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc as StdArc;
 
 use super::reduce_field_value_node;
 use crate::meta::MetaProject;
-use crate::project_semantic_dispatch::raise::{
-    node_contains_semantic_miss_with_dispatch, node_root_is_unmaterialized_sentinel_with_dispatch,
-};
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, QueryError, SemanticNodeData,
-};
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::raise::{
+    node_contains_semantic_miss_with_dispatch, node_root_is_unmaterialized_sentinel_with_dispatch,
+};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{
+    ProjectionMode, ProjectionReductionContext, QueryError, SemanticNodeData,
+};
 use verter_type_expr::TypeExpr;
 
 fn ref_indexed_access(object: TypeExpr) -> TypeExpr {
@@ -78,7 +79,7 @@ fn input_side_no_poison_gate_reads_typed_whole_tree_miss_fact() {
         .unwrap();
     let host = project.host();
     let _store_view = host.resolver_store_view_read().into_owned_view();
-    let ctx: &dyn ResolverContext = host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host;
     let dispatch = ProjectSemanticDispatch::new(ctx);
     let transit =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
@@ -142,7 +143,7 @@ fn sealed_carrier_none_arm_splits_unraisable_failure_from_genuine_absence() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = StdArc::clone(host.project_type_store().semantic_graph());
     let str_id = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
 
@@ -151,37 +152,43 @@ fn sealed_carrier_none_arm_splits_unraisable_failure_from_genuine_absence() {
     // compat projection), and the torn read notes `OutputMaterializationLoss`
     // (NON-CACHEABLE) on the admission rail.
     let unraisable = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
-            vec![str_id, crate::semantic_query::SemanticNodeId(u64::MAX)].into_boxed_slice(),
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(StdArc::from(
+            vec![
+                str_id,
+                verter_type_engine::semantic_query::SemanticNodeId(u64::MAX),
+            ]
+            .into_boxed_slice(),
         )),
     ));
-    let (_carrier, facts) =
-        host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+    let (_carrier, facts) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
             let carrier = super::raise_node_to_sealed_carrier(
                 &dispatch,
                 unraisable,
-                crate::semantic_query::DepSignature::default(),
+                verter_type_engine::semantic_query::DepSignature::default(),
             );
             assert!(
                 carrier.result_is_partial(),
                 "a present-but-unraisable composite must degrade PARTIAL, never admitted complete"
             );
-        });
+        },
+    );
     assert!(
         matches!(
             facts.finalise(),
-            crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         ),
         "the unraisable arm must finalise NON-CACHEABLE on the loss rail"
     );
 
     // (2) GENUINELY-ABSENT: an id with no arena entry is a real absence —
     // the exact `missing_output`, NON-partial.
-    let absent = crate::semantic_query::SemanticNodeId(u64::MAX);
+    let absent = verter_type_engine::semantic_query::SemanticNodeId(u64::MAX);
     let carrier = super::raise_node_to_sealed_carrier(
         &dispatch,
         absent,
-        crate::semantic_query::DepSignature::default(),
+        verter_type_engine::semantic_query::DepSignature::default(),
     );
     assert!(
         !carrier.result_is_partial(),

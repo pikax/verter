@@ -23,13 +23,15 @@ fn publish(store: &FileArtifactStore, canonical: &str, source: &str) {
 
 #[test]
 fn lookup_path_source_has_no_known_canonicals_scan() {
-    let build = include_str!("../project_semantic_dispatch/build.rs");
+    let build = include_str!("../../../verter_type_engine/src/project_semantic_dispatch/build.rs");
     let external = build
         .split("fn resolve_external_module_augmentation(")
         .nth(1)
         .and_then(|rest| rest.split("\n    pub(super) fn ").next())
         .expect("resolve_external_module_augmentation body");
-    let discovery = include_str!("../project_semantic_dispatch/signature_discovery.rs");
+    let discovery = include_str!(
+        "../../../verter_type_engine/src/project_semantic_dispatch/signature_discovery.rs"
+    );
     let nominal = discovery
         .split("fn runtime_nominal(")
         .nth(1)
@@ -134,7 +136,7 @@ fn lookup_does_not_call_known_canonicals() {
     let _ = host.resolve_named_symbol(
         "/use.ts",
         "fa",
-        Some(crate::semantic_query::ProjectionMode::Expanded),
+        Some(verter_type_engine::semantic_query::ProjectionMode::Expanded),
     );
     assert_eq!(
         verter_workspace::known_canonicals_calls(),
@@ -181,7 +183,7 @@ fn injected_unimported_ambient_is_ingested_without_upserting_it() {
             "x",
             None,
             true,
-            verter_semantic::facts::SymbolSpace::Value,
+            verter_session_query::facts::SymbolSpace::Value,
         );
     assert!(
         !hit.entries.is_empty(),
@@ -222,7 +224,7 @@ fn upserted_unimported_ambient_is_ingested_on_standalone_host() {
             "Cfg",
             None,
             true,
-            verter_semantic::facts::SymbolSpace::Type,
+            verter_session_query::facts::SymbolSpace::Type,
         );
     assert!(
         !hit.entries.is_empty(),
@@ -423,8 +425,8 @@ fn ordinary_script_file_scope_globals_index_before_population_lookup() {
 
 #[test]
 fn script_file_scope_values_enter_the_population_by_name() {
-    use super::ContributorOrigin;
-    use verter_semantic::facts::SymbolSpace;
+    use verter_session_query::facts::SymbolSpace;
+    use verter_session_query::inputs::contributors::ContributorOrigin;
     let workspace = std::sync::Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
@@ -570,7 +572,7 @@ fn snapshot_replacement_discovers_new_globals_without_membership_change() {
 /// and removing the script drops every record it held.
 #[test]
 fn script_file_scope_types_are_released_on_supersession_and_removal() {
-    use super::ContributorOrigin;
+    use verter_session_query::inputs::contributors::ContributorOrigin;
     let host = VerterHost::new(
         HostConfig::default(),
         Arc::new(verter_workspace::MemoryWorkspace::new(

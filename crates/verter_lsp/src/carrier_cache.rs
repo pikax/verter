@@ -53,7 +53,7 @@
 //! readers; this keeps the cache logic unit-testable without a provider and
 //! reuses the shared owner-layer generation rails rather than a parallel ledger.
 
-use verter_semantic::analysis::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// The self-content regeneration key (§2.7(a)). Keyed ONLY by the orthogonal
 /// dimensions the carrier TEXT depends on — NEVER a dependency-closure signal

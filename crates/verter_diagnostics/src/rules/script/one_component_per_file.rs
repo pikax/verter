@@ -1,4 +1,4 @@
-﻿//! Rule: one-component-per-file
+//! Rule: one-component-per-file
 //!
 //! Each `.vue` file should contain only one component definition. Having multiple
 //! `defineProps` or `defineOptions` macros in a single file indicates multiple
@@ -9,7 +9,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct OneComponentPerFile;
 
@@ -117,7 +118,8 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::types::AnalyzedMacro;
+
     use verter_span::Span;
 
     fn run_script(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

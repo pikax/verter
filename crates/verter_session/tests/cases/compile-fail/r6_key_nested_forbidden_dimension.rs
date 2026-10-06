@@ -7,8 +7,8 @@
 //! laundered into a key by nesting it inside a composite field — the check is
 //! not limited to standalone dimensions.
 
-use verter_session::assert_r6_key_safe;
-use verter_session::semantic_query::SemanticNodeId;
+use verter_type_engine::locator_identity::assert_r6_key_safe;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 fn main() {
     assert_r6_key_safe::<Option<SemanticNodeId>>();

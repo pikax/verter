@@ -7,9 +7,9 @@ error[E0308]: mismatched types
   |             arguments to this function are incorrect
   |
   = note: expected reference `&PreparedFunctionBodySkeleton`
-             found reference `&verter_semantic::analysis::flow::FunctionBodySkeleton`
+             found reference `&verter_session_query::flow::skeleton::FunctionBodySkeleton`
 note: function defined here
- --> src/analysis/flow/flow_graph.rs
+ --> $WORKSPACE/crates/verter_session_query/src/flow/flow_graph.rs
   |
   | pub fn build_function_flow_graph(
   |        ^^^^^^^^^^^^^^^^^^^^^^^^^

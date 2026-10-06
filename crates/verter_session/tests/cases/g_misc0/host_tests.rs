@@ -1901,7 +1901,7 @@ const count = ref(0)
     assert!(count_binding.is_reactive);
     assert_eq!(
         count_binding.kind,
-        verter_semantic::analysis::AnalyzedBindingKind::Const
+        verter_session_query::analysis::types::AnalyzedBindingKind::Const
     );
 }
 
@@ -1929,7 +1929,7 @@ defineProps<{ msg: string }>()
     let props_macro = analysis
         .macros
         .iter()
-        .find(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|m| m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
         .expect("should have defineProps macro");
     assert!(props_macro.is_type_based);
 }
@@ -1957,9 +1957,13 @@ const count = ref(0)
     let analysis = host
         .get_analysis("Test.vue")
         .expect("analysis should exist");
-    let flags = verter_semantic::analysis::AnalysisFlags::from_bits_truncate(analysis.script_flags);
-    assert!(flags.contains(verter_semantic::analysis::AnalysisFlags::HAS_DEFINE_PROPS));
-    assert!(flags.contains(verter_semantic::analysis::AnalysisFlags::HAS_REACTIVE_STATE));
+    let flags = verter_session_query::analysis::types::AnalysisFlags::from_bits_truncate(
+        analysis.script_flags,
+    );
+    assert!(flags.contains(verter_session_query::analysis::types::AnalysisFlags::HAS_DEFINE_PROPS));
+    assert!(
+        flags.contains(verter_session_query::analysis::types::AnalysisFlags::HAS_REACTIVE_STATE)
+    );
 }
 
 /// @ai-generated - get_analysis returns style analysis
@@ -3028,7 +3032,7 @@ const msg = "hello"
 
 fn scope_probe_analysis(
     scope: verter_semantic::analysis::AnalysisScope,
-) -> verter_session::FileAnalysisSnapshot {
+) -> verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
     let host = VerterHost::new_standalone(HostConfig {
         analysis_scope: Some(scope),
         ..HostConfig::default()

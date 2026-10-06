@@ -88,7 +88,7 @@ fn request(
     PublicationRequestContext::new(
         AuditRequestId::new(id),
         PublicationSurface::ProjectionHost,
-        verter_scheduler::cancellation::CancellationToken::new(),
+        verter_execution::cancellation::CancellationToken::new(),
         accepted.source().snapshot_id().clone(),
     )
 }
@@ -327,7 +327,7 @@ fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
         first_source,
         first_grammar,
         persistence.clone(),
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     );
     assert!(matches!(
         first_store.publish_or_get(&first, request(1, &first)),
@@ -345,7 +345,7 @@ fn exact_cohort_adopts_across_authority_lifetimes_without_parser_start() {
         second_source,
         second_grammar,
         persistence,
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     );
     let adopted = second_store.publish_or_get(&second, request(2, &second));
     assert!(matches!(adopted, PublicationOutcome::Adopted(_)));
@@ -413,7 +413,7 @@ fn waiter_cancellation_detaches_without_cancelling_authority_owned_leader() {
         source,
         grammar,
         persistence,
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     ));
     let leader_store = Arc::clone(&store);
     let leader_accepted = accepted.clone();
@@ -422,7 +422,7 @@ fn waiter_cancellation_detaches_without_cancelling_authority_owned_leader() {
     });
     entered.wait();
 
-    let cancellation = verter_scheduler::cancellation::CancellationToken::new();
+    let cancellation = verter_execution::cancellation::CancellationToken::new();
     let waiter_store = Arc::clone(&store);
     let waiter_accepted = accepted.clone();
     let waiter_cancellation = cancellation.clone();
@@ -728,7 +728,7 @@ fn persisted_payload_with_producer_parse_drift_is_refused_before_adoption() {
         first_source,
         first_grammar,
         persistence.clone(),
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     );
     assert!(matches!(
         first_store.publish_or_get(&first, request(2, &first)),
@@ -742,7 +742,7 @@ fn persisted_payload_with_producer_parse_drift_is_refused_before_adoption() {
         second_source,
         second_grammar,
         persistence,
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     );
     assert!(matches!(
         second_store.publish_or_get(&second, request(3, &second)),
@@ -826,7 +826,7 @@ fn rejected_persistent_candidate_is_discarded_then_parsed_in_the_same_lane() {
         source,
         grammar,
         persistence.clone(),
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     );
     assert!(matches!(
         first_store.publish_or_get(&first, request(1, &first)),
@@ -840,7 +840,7 @@ fn rejected_persistent_candidate_is_discarded_then_parsed_in_the_same_lane() {
         source,
         grammar,
         persistence,
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     );
     assert!(matches!(
         second_store.publish_or_get(&second, request(2, &second)),
@@ -903,7 +903,7 @@ fn leader_panic_publishes_one_typed_terminal_and_audit_failure() {
         source,
         grammar,
         Arc::new(PanickingPersistence),
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     );
     assert!(matches!(
         store.publish_or_get(&accepted, request(1, &accepted)),
@@ -930,14 +930,14 @@ fn leader_panic_publishes_one_typed_terminal_and_audit_failure() {
 fn cancelled_request_never_enters_a_publication_lane() {
     let (source, grammar) = authorities();
     let accepted = accepted(&source, &grammar, 1, "<template>cancel</template>");
-    let provenance = Arc::new(crate::types::MetaProvenance::default());
+    let provenance = Arc::new(crate::meta_provenance::MetaProvenance::default());
     let store = CarrierPublicationStore::with_dependencies(
         source,
         grammar,
         Arc::new(crate::carrier_publication_store::persistence::InMemoryStableUnitStore::default()),
         Arc::clone(&provenance),
     );
-    let cancellation = verter_scheduler::cancellation::CancellationToken::new();
+    let cancellation = verter_execution::cancellation::CancellationToken::new();
     cancellation.cancel();
     let outcome = store.publish_or_get(
         &accepted,
@@ -963,7 +963,7 @@ fn cancelled_request_never_enters_a_publication_lane() {
 fn elected_publication_parses_once_and_warm_get_does_not_reparse() {
     let (source, grammar) = authorities();
     let accepted = accepted(&source, &grammar, 1, "<template><p>once</p></template>");
-    let provenance = Arc::new(crate::types::MetaProvenance::default());
+    let provenance = Arc::new(crate::meta_provenance::MetaProvenance::default());
     let store = CarrierPublicationStore::with_dependencies(
         source,
         grammar,
@@ -1447,7 +1447,7 @@ fn concurrent_differing_generations_of_one_content_parse_once() {
         Arc::clone(&source),
         Arc::clone(&grammar),
         units.clone(),
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     ));
     for round in 0..ROUNDS {
         let bytes = format!(
@@ -1606,7 +1606,7 @@ fn superseded_generation_retains_stable_unit_for_revisit() {
         Arc::clone(&source),
         Arc::clone(&grammar),
         units.clone(),
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     ));
     let bytes = "<template><p>revisit me</p></template>";
     let first = accepted(&source, &grammar, 1, bytes);
@@ -1722,7 +1722,7 @@ fn a_generation_that_loses_currency_while_adopting_is_superseded() {
         Arc::clone(&source),
         Arc::clone(&grammar),
         units.clone(),
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     ));
     let bytes = "<template><p>adopt me</p></template>";
     let first = accepted(&source, &grammar, 1, bytes);
@@ -1827,7 +1827,7 @@ fn a_superseded_stable_leader_is_fenced_on_its_double_checked_adoption() {
         Arc::clone(&source),
         Arc::clone(&grammar),
         units.clone(),
-        Arc::new(crate::types::MetaProvenance::default()),
+        Arc::new(crate::meta_provenance::MetaProvenance::default()),
     ));
     let bytes = "<template><p>lead then adopt</p></template>";
     // The first generation is CURRENT when it enters, misses the empty

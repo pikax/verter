@@ -16,12 +16,12 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
-use verter_semantic::analysis::component_meta::{
+use verter_session::VerterHost;
+use verter_session_query::analysis::component_meta::{
     ComponentMetaAnalysis, EventAnalysis, ExposedAnalysis, FallthroughEventEntry,
     FallthroughPropEntry, FallthroughSurface, InheritedSource, ModelAnalysis, NoFallthroughReason,
     PropAnalysis, SlotAnalysis, SlotBindingAnalysis,
 };
-use verter_session::VerterHost;
 use verter_type_expr::facts::SemanticTypeSource;
 use verter_type_expr::{LiteralValue, MappedModifier, ObjectMember, PrimitiveName, TypeExpr};
 

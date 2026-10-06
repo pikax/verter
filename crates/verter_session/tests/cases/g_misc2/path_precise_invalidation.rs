@@ -30,10 +30,10 @@ use std::path::PathBuf;
 
 use rustc_hash::FxHashSet;
 
-use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
-use verter_session::resolver_core::{
-    FactVersionRef, ParseFactRef, StoreView, StoreViewCompatToken, ValidatedFactCache,
-};
+use verter_session::resolver_core::ValidatedFactCache;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
+use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

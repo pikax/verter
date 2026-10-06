@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use verter_span::Span;
 
-use crate::facts::css::{CssBleedIssue, CssBleedLikelihood, StyleScopeKind};
+use verter_session_query::facts::css::{CssBleedIssue, CssBleedLikelihood, StyleScopeKind};
 
 /// Severity assigned by the diagnostic policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

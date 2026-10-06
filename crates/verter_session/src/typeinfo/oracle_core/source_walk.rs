@@ -57,7 +57,8 @@ use rustc_hash::FxHashSet;
 use verter_parser::utils::oxc::script::raw_surface::SymbolSpace;
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-use crate::resolver_core::{ExportTarget, ResolverContext};
+use verter_session_query::inputs::shallow::ExportTarget;
+use verter_type_engine::resolver_core::ResolverContext;
 
 use super::admission::{SourceContributor, SourceWalkResult};
 
@@ -84,7 +85,7 @@ const MAX_IMPORT_HOPS: usize = 64;
 /// cycle guard. The returned [`SourceWalkResult`] feeds
 /// [`super::admission::admit_source_walk`] directly.
 #[allow(dead_code)]
-pub(crate) fn resolve_source_declarations<C: ResolverContext>(
+pub(crate) fn resolve_source_declarations<C: crate::resolver_core::HostRequestContext>(
     ctx: &C,
     locator: &SourceLocator,
 ) -> SourceWalkResult {
@@ -106,7 +107,7 @@ enum WalkOutcome {
     Cycle,
 }
 
-fn walk<C: ResolverContext>(
+fn walk<C: crate::resolver_core::HostRequestContext>(
     ctx: &C,
     locator: &SourceLocator,
     visited: &mut FxHashSet<(String, String, SymbolSpace)>,
@@ -158,7 +159,7 @@ fn walk<C: ResolverContext>(
                 .lowered_type_decl(&shallow, owner, &def_name)
                 .and_then(
                     |_| match ctx.transient_type_parts(&shallow, owner, &def_name) {
-                        crate::decl_body_memo::DemandOutcome::Ready(Some(parts)) => {
+                        verter_session_query::source::demand::DemandOutcome::Ready(Some(parts)) => {
                             Some(parts.bodies.clone())
                         }
                         _ => None,
@@ -292,7 +293,7 @@ fn walk<C: ResolverContext>(
 /// `canonical`. Returns `None` when the name does not bind to a defining
 /// declaration in the controlled fixture set (an unresolved import, a missing
 /// leaf, an export with no backing declaration).
-fn resolve_defining<C: ResolverContext>(
+fn resolve_defining<C: ResolverContext<crate::resolver_core::HostCapabilities>>(
     ctx: &C,
     canonical: &str,
     name: &str,

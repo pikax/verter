@@ -1,8 +1,13 @@
-//! Owned input records shared by request ports. Source work stays private to
-//! session-owned artifact leases; these records contain only immutable data.
-use super::shallow_file_state::ShallowInputRecord;
+//! Session-owned request inputs: the projections that build the owned input
+//! records of `verter_session_query::inputs` from host artifacts, and the
+//! request leases that keep the source behind every served record alive.
 use rustc_hash::FxHashMap;
 use std::sync::{Arc, OnceLock};
+use verter_session_query::inputs::indexed::{
+    IndexedInputIdentity, IndexedInputRecord, IndexedInputServe,
+};
+use verter_session_query::inputs::prepared::PreparedInputRecord;
+use verter_session_query::inputs::shallow::ShallowInputRecord;
 
 #[derive(Debug)]
 pub(crate) struct CachedProjection<T>(OnceLock<Arc<T>>);
@@ -22,119 +27,39 @@ impl<T> CachedProjection<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct IndexedInputIdentity {
-    pub(crate) source: crate::decl_lowering::SnapshotKey,
-    pub(crate) observation_id: u64,
-    pub(crate) file_language: verter_language::FileLanguage,
-    pub(crate) parse_key: Option<verter_language::ParseKey>,
-}
-
-#[derive(Debug, Clone)]
-pub struct IndexedInputRecord {
-    pub(crate) identity: IndexedInputIdentity,
-    pub(crate) whole_hash: crate::types::Hash16,
-    pub(crate) file_language: verter_language::FileLanguage,
-    pub(crate) shallow_state: Arc<ShallowInputRecord>,
-    pub(crate) parse_env_hash: crate::types::Hash16,
-    pub(crate) raw_source: Arc<str>,
-    pub(crate) eval_source: Arc<str>,
-    pub(crate) framework_parse:
-        Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
-    pub(crate) script_analysis: Option<Arc<verter_semantic::analysis::ScriptAnalysisSnapshot>>,
-    pub(crate) snapshot: Arc<crate::types::FileAnalysisSnapshot>,
-    /// The owner's `interface AppConfig` shallow flag, mirrored from the
-    /// artifact onto the request-input record. The authoritative copy is
-    /// [`crate::project_type_store::IndexedReady::declares_interface_app_config`];
-    /// this mirror exists for the port-shaped consumers, whose only readers
-    /// today are the fact-validation proof surfaces (compiled under `test` /
-    /// `test-support`). A shipped build therefore carries no reader, so the
-    /// mirror is compiled out rather than left as write-only storage.
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) declares_interface_app_config: bool,
-    route_surface_hash: OnceLock<Option<crate::types::Hash16>>,
-    source_parse_identity: OnceLock<Option<verter_language::ParseKey>>,
-}
-impl IndexedInputRecord {
-    pub(crate) fn source_parse_key(&self) -> Option<verter_language::ParseKey> {
-        self.source_parse_identity
-            .get_or_init(|| {
-                crate::file_artifact_store::FileArtifactKey::for_source_identity(
-                    Arc::clone(&self.identity.source.canonical),
-                    self.whole_hash,
-                    &self.raw_source,
-                    self.file_language.clone(),
-                    self.framework_parse.as_deref(),
-                    self.parse_env_hash,
-                )
-                .map(|key| key.parse_key)
-            })
-            .clone()
-    }
-    pub(crate) fn route_surface_hash(&self) -> Option<crate::types::Hash16> {
-        *self.route_surface_hash.get_or_init(|| {
-            self.shallow_state
-                .has_resolvable_surface()
-                .then(|| crate::resolver_store::hash_route_surface_inputs(&self.shallow_state))
-        })
-    }
-}
-
 impl crate::project_type_store::IndexedReady {
+    #[allow(clippy::let_and_return)]
     pub(crate) fn input_record(&self) -> Arc<IndexedInputRecord> {
-        self.input_projection.get_or_init(|| IndexedInputRecord {
-            identity: IndexedInputIdentity {
-                source: self.shallow_state.source_identity.clone(),
-                observation_id: {
-                    static NEXT_ARTIFACT_OBSERVATION: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(1);
-                    NEXT_ARTIFACT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        self.input_projection.get_or_init(|| {
+            let record = IndexedInputRecord::new(
+                IndexedInputIdentity {
+                    source: self.shallow_state.source_identity.clone(),
+                    observation_id: {
+                        static NEXT_ARTIFACT_OBSERVATION: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(1);
+                        NEXT_ARTIFACT_OBSERVATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    },
+                    file_language: self.file_language.clone(),
+                    parse_key: self.cached_source_parse_key().flatten(),
                 },
-                file_language: self.file_language.clone(),
-                parse_key: self.cached_source_parse_key().flatten(),
-            },
-            whole_hash: self.whole_hash,
-            file_language: self.file_language.clone(),
-            shallow_state: self.shallow_state.input_record(),
-            parse_env_hash: self.parse_env_hash,
-            raw_source: Arc::clone(&self.raw_source),
-            eval_source: Arc::clone(&self.eval_source),
-            framework_parse: self.framework_parse.clone(),
-            script_analysis: self.script_analysis.clone(),
-            snapshot: Arc::clone(&self.snapshot),
+                self.whole_hash,
+                self.file_language.clone(),
+                self.shallow_state.input_record(),
+                self.parse_env_hash,
+                Arc::clone(&self.raw_source),
+                Arc::clone(&self.eval_source),
+                self.framework_parse
+                    .as_deref()
+                    .map(crate::parse::framework_parse_facts),
+                self.script_analysis.clone(),
+                Arc::clone(&self.snapshot),
+                self.cached_source_parse_key(),
+            );
             #[cfg(any(test, feature = "test-support"))]
-            declares_interface_app_config: self.declares_interface_app_config,
-            route_surface_hash: OnceLock::new(),
-            source_parse_identity: {
-                let cell = OnceLock::new();
-                if let Some(key) = self.cached_source_parse_key() {
-                    let _ = cell.set(key);
-                }
-                cell
-            },
+            let record =
+                record.with_declares_interface_app_config(self.declares_interface_app_config);
+            record
         })
-    }
-}
-
-#[derive(Clone)]
-pub struct IndexedInputServe {
-    pub(crate) indexed: Arc<IndexedInputRecord>,
-    pub(crate) store_published: bool,
-}
-
-#[derive(Clone)]
-pub struct PreparedInputRecord {
-    pub(crate) observation_id: u64,
-    pub(crate) owner_whole_hash: crate::types::Hash16,
-    pub(crate) owner_scopes:
-        Arc<FxHashMap<verter_type_expr::TopLevelOwnerId, super::prepared_decl::PreparedOwnerScope>>,
-}
-impl PreparedInputRecord {
-    pub(crate) fn owner_scope(
-        &self,
-        owner: verter_type_expr::TopLevelOwnerId,
-    ) -> Option<&super::prepared_decl::PreparedOwnerScope> {
-        self.owner_scopes.get(&owner)
     }
 }
 
@@ -146,9 +71,9 @@ mod tests {
 
     #[test]
     fn request_lowering_pins_fenced_source_after_current_content_changes() {
-        use super::super::request_ports::{IndexedInputs, OwnedLowering};
         use crate::types::{HostConfig, UpsertRequest};
         use std::sync::atomic::Ordering::Relaxed;
+        use verter_type_engine::resolver_core::request_ports::{IndexedInputs, OwnedLowering};
         let host = crate::VerterHost::new_standalone(HostConfig::default());
         let upsert = |source: &str| {
             host.upsert(UpsertRequest {
@@ -188,7 +113,7 @@ mod tests {
                     owner,
                     "Old"
                 ),
-                crate::decl_body_memo::DemandOutcome::Ready(Some(_))
+                verter_session_query::source::demand::DemandOutcome::Ready(Some(_))
             ));
             assert!(matches!(
                 OwnedLowering::transient_type_parts(
@@ -197,7 +122,7 @@ mod tests {
                     owner,
                     "Fresh"
                 ),
-                crate::decl_body_memo::DemandOutcome::Ready(None)
+                verter_session_query::source::demand::DemandOutcome::Ready(None)
             ));
             assert!(matches!(
                 OwnedLowering::transient_type_parts(
@@ -206,7 +131,7 @@ mod tests {
                     owner,
                     "Fresh"
                 ),
-                crate::decl_body_memo::DemandOutcome::Ready(Some(_))
+                verter_session_query::source::demand::DemandOutcome::Ready(Some(_))
             ));
             assert!(
                 !first.store_published,
@@ -308,39 +233,34 @@ struct RetainedInputs {
 }
 /// Exact request-selected mirror authority. This fixed operation cannot expose
 /// the retained source, its workers, or any session/cache service.
-pub(crate) struct MacroMirrorSelector {
+pub struct MacroMirrorSelector {
     retained: Arc<parking_lot::RwLock<RetainedInputs>>,
-    #[cfg(test)]
-    forcing: Arc<crate::host_test_force::TestForceKnobs>,
-    #[cfg(test)]
-    cold_builds: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, feature = "test-support"))]
+    knobs: Arc<verter_type_engine::engine_test_knobs::TestKnobs>,
 }
-impl MacroMirrorSelector {
-    pub(crate) fn attachment(
+impl verter_type_engine::resolver_core::request_ports::MacroMirrorSource for MacroMirrorSelector {
+    fn attachment(
         &self,
         identity: &IndexedInputIdentity,
-    ) -> Option<crate::structural_carrier_producer::MacroMirrorAttachment> {
+    ) -> Option<verter_type_engine::structural_carrier_producer::MacroMirrorAttachment> {
         let indexed = self.retained.read().indexed.get(identity).cloned()?;
         Some(indexed.macro_hot_mirror.attach(
-            #[cfg(test)]
-            Arc::clone(&self.forcing),
-            #[cfg(test)]
-            Arc::clone(&self.cold_builds),
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.knobs),
         ))
     }
 }
 impl InputArtifactLeases {
     pub(crate) fn macro_selector(
         &self,
-        #[cfg(test)] forcing: Arc<crate::host_test_force::TestForceKnobs>,
-        #[cfg(test)] cold_builds: Arc<std::sync::atomic::AtomicUsize>,
+        #[cfg(any(test, feature = "test-support"))] knobs: Arc<
+            verter_type_engine::engine_test_knobs::TestKnobs,
+        >,
     ) -> MacroMirrorSelector {
         MacroMirrorSelector {
             retained: Arc::clone(&self.retained),
-            #[cfg(test)]
-            forcing,
-            #[cfg(test)]
-            cold_builds,
+            #[cfg(any(test, feature = "test-support"))]
+            knobs,
         }
     }
 
@@ -352,7 +272,7 @@ impl InputArtifactLeases {
         let mut retained = self.retained.write();
         retained
             .sources
-            .entry(input.shallow_state.observation_id)
+            .entry(input.shallow_state.observation_id())
             .or_insert_with(|| Arc::clone(&serve.indexed.shallow_state));
         retained
             .indexed
@@ -371,7 +291,7 @@ impl InputArtifactLeases {
         self.retained
             .write()
             .sources
-            .entry(input.observation_id)
+            .entry(input.observation_id())
             .or_insert(source);
         input
     }
@@ -383,6 +303,13 @@ impl InputArtifactLeases {
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         self.retained.read().indexed.get(identity).cloned()
     }
+    /// The retained artifact behind a served indexed input.
+    pub(crate) fn indexed(
+        &self,
+        input: &IndexedInputRecord,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        self.retained.read().indexed.get(&input.identity).cloned()
+    }
     pub(crate) fn source(
         &self,
         input: &ShallowInputRecord,
@@ -391,7 +318,7 @@ impl InputArtifactLeases {
             .retained
             .read()
             .sources
-            .get(&input.observation_id)
+            .get(&input.observation_id())
             .cloned()?;
         (source.source_identity == input.source_identity).then_some(source)
     }
@@ -434,23 +361,10 @@ impl InputArtifactLeases {
     }
 }
 
-pub(crate) trait PreparedInputSource {
-    fn scope_inputs(&self) -> Arc<PreparedInputRecord>;
-}
-impl PreparedInputSource for Arc<super::prepared_decl::PreparedDeclBundle> {
+impl verter_type_engine::resolver_core::bare_name_resolve::PreparedInputSource
+    for super::prepared_decl::PreparedDeclBundle
+{
     fn scope_inputs(&self) -> Arc<PreparedInputRecord> {
         self.input_record()
     }
-}
-impl PreparedInputSource for Arc<PreparedInputRecord> {
-    fn scope_inputs(&self) -> Arc<PreparedInputRecord> {
-        Arc::clone(self)
-    }
-}
-
-/// Owned outcome of a source declaration demand.
-pub enum PreparedDeclOutcome<T> {
-    Ready(Option<T>),
-    LeaseMiss,
-    Failed(super::prepared_decl::PreparationFailure),
 }

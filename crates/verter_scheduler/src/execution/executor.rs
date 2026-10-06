@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use crate::cache_id::SchedulerCacheId;
-use crate::cancellation::CancellationToken;
 use crate::dag::{Hash16, PinId};
+use verter_execution::cancellation::CancellationToken;
 use verter_language::{FileLanguage, FrameworkAdapterId};
 
 use crate::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};

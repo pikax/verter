@@ -9,7 +9,8 @@
 //! already carries a field-access privacy error (E0616) on that type.
 #![allow(dead_code, unreachable_code)]
 
-use verter_session::for_tests::{FlowDemandPlan, FlowExecutionSelection, FlowObligationSpec};
+use verter_type_engine::project_semantic_dispatch::flow_solve::{FlowDemandPlan, FlowExecutionSelection};
+use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowObligationSpec;
 
 fn construct_plan() {
     let _ = FlowDemandPlan {

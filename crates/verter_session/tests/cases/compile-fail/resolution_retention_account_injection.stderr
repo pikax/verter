@@ -1,0 +1,16 @@
+error[E0603]: tuple struct constructor `ResolutionRetention` is private
+ --> tests/cases/compile-fail/resolution_retention_account_injection.rs:8:54
+  |
+8 |     let _injected = verter_session_query::retention::ResolutionRetention(account);
+  |                                                      ^^^^^^^^^^^^^^^^^^^ private tuple struct constructor
+  |
+ ::: $WORKSPACE/crates/verter_session_query/src/retention/mod.rs
+  |
+  | pub struct ResolutionRetention(Arc<SemanticRetentionAccount>);
+  |                                ----------------------------- a constructor is private if any of the fields is private
+  |
+note: the tuple struct constructor `ResolutionRetention` is defined here
+ --> $WORKSPACE/crates/verter_session_query/src/retention/mod.rs
+  |
+  | pub struct ResolutionRetention(Arc<SemanticRetentionAccount>);
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

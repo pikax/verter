@@ -18,8 +18,8 @@ use super::{
     CacheOutcomeKind, DispatchKeyKind, MaterializationScopeAudit, MaterializationSubject,
     MaterializeSkipReason, ProjectionModeAudit, StructuredAuditEvent as Event, VfsLayer,
 };
-use crate::types::Hash16;
 use verter_audit::AugmentationTargetKindTag;
+use verter_session_query::analysis::types::Hash16;
 
 // ──────────────────────────────────────────────────────────────────
 // Expected Display strings, authored to match the hand-written

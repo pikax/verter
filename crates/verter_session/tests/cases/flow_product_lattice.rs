@@ -2,14 +2,17 @@
 use std::sync::Arc;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::InputBasisId;
-use verter_semantic::analysis::flow::flow_graph::{FlowNodeId, FlowNodeKind};
 use verter_session::for_tests::*;
-use verter_session::semantic_query::{
+use verter_session_query::flow::flow_graph::{FlowNodeId, FlowNodeKind};
+use verter_session_query::flow::policy::{FlowReturnPolicy, NullabilityPolicy};
+use verter_type_engine::project_semantic_dispatch::flow_products::*;
+use verter_type_engine::project_semantic_dispatch::flow_solve::*;
+use verter_type_engine::semantic_query::{
     CanonicalTypeSubstitution, FlowFunctionSlotIdentity, FlowInputContext, FlowReturnContext,
-    FlowReturnKey, FlowReturnPolicy, LiteralValue, NullabilityPolicy, PrimitiveKind,
-    ResolvedDeclSlotIdentity, ReturnProjectionDemand, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey,
+    FlowReturnKey, LiteralValue, PrimitiveKind, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 const SOURCE: &str = "function products(x) { const y = x; return y; }";
 
@@ -124,7 +127,7 @@ fn request(basis: u8) -> FlowDemandRequest {
                 type_env_hash: [0; 16],
                 lib_env_hash: [0; 16],
                 project_identity: [0; 16],
-                result_evaluation: verter_session::semantic_query::CONTEXT_FREE_EVALUATION,
+                result_evaluation: verter_type_engine::semantic_query::CONTEXT_FREE_EVALUATION,
                 type_substitution: CanonicalTypeSubstitution::empty(),
                 policy: FlowReturnPolicy {
                     nullability: NullabilityPolicy::Strict,
@@ -739,7 +742,7 @@ fn product_domains_refuse_conflicts_mismatches_and_unproven_algebra() {
             &self,
             _: &[LiteralProvenance<'_>],
             _: SemanticNodeId,
-        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
+        ) -> Result<LiteralProvenanceResult, verter_session_query::flow::policy::FlowGap> {
             unreachable!()
         }
     }
@@ -1107,7 +1110,7 @@ fn predecessor_joins_follow_domain_order_and_a_failure_permanently_seals_evidenc
             &self,
             _: &[LiteralProvenance<'_>],
             _: SemanticNodeId,
-        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
+        ) -> Result<LiteralProvenanceResult, verter_session_query::flow::policy::FlowGap> {
             unreachable!()
         }
     }
@@ -1281,7 +1284,7 @@ fn actual_multiway_type_join_constructs_one_canonical_union_and_one_provenance_b
             &self,
             inputs: &[LiteralProvenance<'_>],
             result: SemanticNodeId,
-        ) -> Result<LiteralProvenanceResult, verter_session::semantic_query::FlowGap> {
+        ) -> Result<LiteralProvenanceResult, verter_session_query::flow::policy::FlowGap> {
             self.inputs.borrow_mut().push(inputs.len());
             self.graph.literal_provenance(inputs, result)
         }

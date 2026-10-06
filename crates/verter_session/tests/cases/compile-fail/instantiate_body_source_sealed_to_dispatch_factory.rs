@@ -13,9 +13,7 @@
 //! made `pub` (witness-less) again, these lines would COMPILE and trybuild
 //! would fail this fixture.
 
-use verter_session::semantic_query::{
-    InstantiateContext, ProjectionMode, ProjectionReductionContext,
-};
+use verter_type_engine::semantic_query::{InstantiateContext, ProjectionMode, ProjectionReductionContext};
 
 fn main() {
     let prc = ProjectionReductionContext::published(ProjectionMode::Expanded);

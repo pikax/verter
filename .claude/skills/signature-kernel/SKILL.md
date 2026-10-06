@@ -19,7 +19,7 @@ Where this skill and the contract disagree, the contract wins.
 
 ## 1. Module map
 
-`crates/verter_session/src/signature_kernel/` (crate-private; its single
+`crates/verter_type_engine/src/signature_kernel/` (crate-private; its single
 consumer is `project_semantic_dispatch/signature_discovery.rs`):
 
 | Module | Owns |
@@ -175,7 +175,7 @@ Executable homes:
 | `crates/verter_session/src/signature_corpus_tests.rs` | The corpus driver and the **flip law**: a `MatchesChecker` row fails when the live answer stops matching, and an owed/degraded row fails when the live answer STARTS matching. Both directions are proven by `signature_corpus_flip_law_fires_in_both_directions`. A verdict can only move by a deliberate re-pin. |
 | `crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs` | The §5.9 perturbation matrix and the §5.4 stable-key table, each enumerated against its authority and consumed by replay drivers. Every comparison runs on TWO bases: the stable-text completed observation AND the generated-bytes digest. |
 | `crates/verter_session/tests/allocator_canaries.rs` | `signature_kernel_warm_positional::warm_positional_read_does_not_allocate_or_lock` — the §12 Empty/One gate, in a separate test binary because it installs a counting `#[global_allocator]`. |
-| `crates/verter_session/src/signature_kernel/*_tests.rs` | Per-module unit coverage (lifetime, storage, substitution, positional, provenance, discovery, read view). |
+| `crates/verter_type_engine/src/signature_kernel/*_tests.rs` | Per-module unit coverage (lifetime, storage, substitution, positional, provenance, discovery, read view). |
 
 **Re-locking the contract digest.** `docs/arch/signature-kernel.md` is byte-locked
 by `manifest.json` → `contract.sha256`, checked by

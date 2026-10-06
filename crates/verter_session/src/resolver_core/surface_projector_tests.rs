@@ -31,9 +31,9 @@
 use std::sync::Arc;
 
 use super::component_meta::ResolvedNativeProp;
-use crate::semantic_query::{MemberMergeRole, SemanticNodeId};
 use crate::typeinfo::surface::{CanonicalSpan, SurfaceMemberOrigin, TypeInfoSurfaceMember};
 use verter_span::Span;
+use verter_type_engine::semantic_query::{MemberMergeRole, SemanticNodeId};
 use verter_type_expr::MemberVisibility;
 
 fn member(
@@ -43,7 +43,7 @@ fn member(
     name_span: Option<Span>,
 ) -> TypeInfoSurfaceMember {
     TypeInfoSurfaceMember {
-        key: crate::semantic_query::AuthoredPropertyKey::string(name),
+        key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
         name_span: name_span.map(|span| CanonicalSpan::new(Arc::from("/types.ts"), span)),
         value: SemanticNodeId(1),
         type_annotation_span: None,

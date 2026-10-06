@@ -61,7 +61,7 @@ fn upsert(host: &VerterHost, source: &str) {
 
 fn persisted_template(
     host: &VerterHost,
-) -> Option<Arc<verter_semantic::analysis::template::TemplateAnalysisSnapshot>> {
+) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
     host.derived_raw_cache().get(CANONICAL).and_then(|d| {
         d.raw_template_analysis()
             .map(|entry| Arc::clone(&entry.template))

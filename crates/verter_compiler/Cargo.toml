@@ -66,6 +66,7 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 test-support = []
 
 [dependencies]
+verter_session_query = { workspace = true }
 verter_debug_assert = { workspace = true }
 verter_ecma = { workspace = true }
 verter_audit = { path = "../verter_audit" }

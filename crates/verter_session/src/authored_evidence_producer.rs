@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::{AnalyzedEmitField, AnalyzedPropField};
+use verter_session_query::analysis::types::{AnalyzedEmitField, AnalyzedPropField};
 use verter_type_expr::locators::AuthoredBodyLocator;
 use verter_type_expr::{AuthoredSourceMint, AuthoredTypeEvidence};
 

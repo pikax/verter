@@ -17,11 +17,11 @@ use std::sync::Arc;
 use std::{fs, path};
 
 use rustc_hash::FxHashMap;
-use verter_semantic::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
-use verter_semantic::facts::{FactKey, FactLane};
-use verter_session::resolver_core::{
-    BarrelRouteSurface, FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, StoreView,
-};
+use verter_session::resolver_core::{BarrelRouteSurface, PermissiveStoreView};
+use verter_session_query::facts::fact_cache::{FactVersionRef, RouteSurfaceFactRef};
+use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_session_query::facts::store_view::StoreView;
+use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {
     let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))

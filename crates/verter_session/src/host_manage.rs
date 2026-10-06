@@ -2,19 +2,23 @@
 //!
 //! Contains [`VerterHost::remove`], [`VerterHost::get_analysis`],
 //! [`VerterHost::get_diagnostics`], and [`VerterHost::set_import_dependencies`].
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::request_observers::component_meta_debug;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::id::canonicalize_id;
-use crate::instant::Instant;
 use crate::resolver_core::{
     fallthrough_cache_key, DynamicRootCandidate, ExportGraphResolver, ExportSurface,
     FallthroughComputeHost, FallthroughRequestHost, FallthroughResolutionView,
-    FallthroughResolverHost, ImportedRuntimeValueResolver, ResolvedConsumedBindings, StoreView,
-    ValueDeclIdentity,
+    FallthroughResolverHost, ImportedRuntimeValueResolver, ResolvedConsumedBindings,
 };
 use crate::types::*;
 use crate::VerterHost;
+use verter_session_query::declarations::metadata::ValueDeclIdentity;
+use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::instant::Instant;
 
 // ──────────────────────────────────────────────────────────────────────────
 // private sub-modules under `host_manage/`. Public
@@ -56,6 +60,7 @@ pub(crate) mod prepared_decl;
 pub(crate) mod source_augmentation;
 pub(crate) mod source_owner_import;
 pub(crate) mod source_request;
+pub(crate) mod template_class_facts;
 
 // §11c.5 re-export block — preserves `crate::host_manage::populate_*` /
 // `crate::host_manage::extract_*` paths used by `meta.rs`,
@@ -269,25 +274,6 @@ pub(crate) fn resolve_eval_dependency_canonical_with(
     None
 }
 
-pub(crate) fn component_meta_debug_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-
-    *ENABLED.get_or_init(|| {
-        std::env::var_os("VERTER_COMPONENT_META_DEBUG").is_some()
-            || std::env::var_os("VERTER_META_DEBUG").is_some()
-    })
-}
-
-pub(crate) fn component_meta_debug(message: impl AsRef<str>) {
-    if component_meta_debug_enabled() {
-        use std::io::Write;
-
-        let mut stderr = std::io::stderr().lock();
-        let _ = writeln!(stderr, "[verter-meta] {}", message.as_ref());
-        let _ = stderr.flush();
-    }
-}
-
 // The legacy file/stderr trace is deleted. The
 // remaining infrastructure below is the thin shim that keeps
 // component_meta_trace_scope! / component_meta_trace_event! macro
@@ -362,35 +348,7 @@ pub(crate) fn component_meta_options_fingerprint(options: &ComponentMetaOptions)
     buf.extend_from_slice(&ComponentMetaOptions::SCHEMA.to_le_bytes());
     buf.push(u8::from(options.compat));
     buf.push(u8::from(options.include_fallthrough));
-    crate::hash::hash_16(&buf)
-}
-
-/// Push a structured event into the active request's accumulator.
-/// No-op when no request context is installed.
-pub fn push_structured_event(event: crate::component_meta_audit::StructuredAuditEvent) {
-    if let Some(acc) = crate::request_context::current_accumulator() {
-        acc.push_structured_event(event);
-    }
-}
-
-/// Push a typed `StructuredAuditEvent::CacheDrainedAtUpsert` into
-/// the active request's accumulator. Emitted at every cache-cascade
-/// drain site reached by the full `host.upsert(...)` path; the
-/// quintuple-unchanged fast path does NOT emit this event (R1).
-/// Tests observing the absence of these events prove the fast path
-/// is a true cache-state no-op.
-///
-/// The `layer` argument is a static string identifying the cache
-/// layer (e.g. `"dependency_cache"`, `"compile_slots"`); the
-/// runtime value is stored as an `Arc<str>` so the event remains
-/// serialisable.
-pub fn push_cache_drained_at_upsert(layer: &'static str, canonical_id: &str) {
-    push_structured_event(
-        crate::component_meta_audit::StructuredAuditEvent::CacheDrainedAtUpsert {
-            layer: std::sync::Arc::<str>::from(layer),
-            canonical_id: std::sync::Arc::<str>::from(canonical_id),
-        },
-    );
+    verter_semantic_source::source_hash::hash_16(&buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -401,142 +359,29 @@ pub fn push_cache_drained_at_upsert(layer: &'static str, canonical_id: &str) {
 // one `Relaxed` `fetch_add` when present. The hot-path counters never
 // take a lock and never allocate.
 
-/// Bump `node_arena_lock_acquisitions` on the current request's
-/// context AND feed the `WaitAudit` cross-cache aggregates with the
-/// observed lock-acquire wait. No-op without a context. The `wait`
-/// duration must already be `Duration::ZERO` when the active request's
-/// `audit_timing_capture` flag is off — call sites short-circuit
-/// `Instant::now()` at that point and pass `Duration::ZERO` here so
-/// the zero-cost path is preserved.
-pub fn record_node_arena_lock_acquisition(wait: std::time::Duration) {
-    if let Some(ctx) = crate::request_context::current_request_context() {
-        // Single mutation point: the observer-trait method on
-        // `RequestContext` bumps the per-cache counter (matched on
-        // the lock name) AND the cross-cache `WaitAudit` aggregates.
-        let wait_ns = wait.as_nanos().min(u64::MAX as u128) as u64;
-        <crate::request_context::RequestContext as verter_audit::AuditObserver>::record_lock_acquisition(
-            ctx.as_ref(),
-            "node_arena",
-            wait_ns,
-        );
-    }
-}
-
-/// Bump `family_map_lock_acquisitions` on the current request's
-/// context AND feed the `WaitAudit` cross-cache aggregates with the
-/// observed lock-acquire wait. No-op without a context. See
-/// [`record_node_arena_lock_acquisition`] for the timing-flag
-/// contract on the `wait` argument.
-pub fn record_family_map_lock_acquisition(wait: std::time::Duration) {
-    if let Some(ctx) = crate::request_context::current_request_context() {
-        // Single mutation point: the observer-trait method on
-        // `RequestContext` bumps the per-cache counter (matched on
-        // the lock name) AND the cross-cache `WaitAudit` aggregates.
-        let wait_ns = wait.as_nanos().min(u64::MAX as u128) as u64;
-        <crate::request_context::RequestContext as verter_audit::AuditObserver>::record_lock_acquisition(
-            ctx.as_ref(),
-            "family_map",
-            wait_ns,
-        );
-    }
-}
-
-/// Bump `dep_signature_merges` on the current request's context.
-/// No-op without a context.
-pub fn record_dep_signature_merge() {
-    if let Some(ctx) = crate::request_context::current_request_context() {
-        ctx.dep_signature_merges
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Bump `dep_signature_intern_hits` on the current request's context.
-/// No-op without a context.
-pub fn record_dep_signature_intern_hit() {
-    if let Some(ctx) = crate::request_context::current_request_context() {
-        ctx.dep_signature_intern_hits
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Construct and push a `StructuredAuditEvent::Custom` into
-/// the active request's accumulator. Single in-tree construction
-/// site for the `Custom` variant — the
-/// `every_custom_variant_construction_site_has_justification_comment`
-/// grep test checks each `Custom {` literal
-/// has a preceding `// Custom justified:` comment; the rationale
-/// below covers every call routed through this helper.
-pub(crate) fn push_structured_custom(name: &'static str, detail: impl Into<String>) {
-    let name = std::sync::Arc::<str>::from(name);
-    let detail = std::sync::Arc::<str>::from(detail.into());
-    // Custom justified: debug/trace sites across host_manage,
-    // host_resolve, meta_resolve, component_meta_host, and
-    // component_meta_audit do not map to typed variants of
-    // `StructuredAuditEvent` (RequestStart / VfsRead /
-    // MaterializeMemberRoute{Start,End} / etc.). The `Custom`
-    // variant exists precisely for ad-hoc structured logging; every
-    // call site funnels through this single helper so the
-    // justification is centralised and the grep gate has one place
-    // to inspect.
-    // Custom justified: single construction site for `Custom`
-    // across the session crate — see the rationale in the
-    // `push_structured_custom` doc comment above.
-    push_structured_event(crate::component_meta_audit::StructuredAuditEvent::Custom {
-        name,
-        detail,
-    });
-}
-
-/// Push a typed `StructuredAuditEvent` variant into the
-/// current accumulator. — preferred for any call site
-/// that maps to a named variant (`IndexedReadyBuilt`, `VfsRead`,
-/// `MaterializeMemberRouteStart`, …).
-#[macro_export]
-macro_rules! component_meta_trace_structured {
-    ($event:expr $(,)?) => {{
-        $crate::host_manage::push_structured_event($event);
-    }};
-}
-
-/// Convenience macro for debug/trace call-sites that don't fit a
-/// typed `StructuredAuditEvent` variant — the successor to
-/// the deleted `component_meta_trace_scope!` /
-/// `component_meta_trace_event!` macros. Expands to a single call
-/// into [`push_structured_custom`].
-macro_rules! component_meta_trace_custom {
-    ($name:expr, $detail:expr $(,)?) => {{
-        // The accumulator check gates the $detail expression so its
-        // allocations (typically a format!) are skipped when no audit
-        // run is in flight. Hot-path call sites depend on this.
-        if $crate::request_context::current_accumulator().is_some() {
-            $crate::host_manage::push_structured_custom($name, $detail);
-        }
-    }};
-}
-
-pub(crate) use component_meta_trace_custom;
-
 const COMPONENT_META_MAX_SYMBOLIC_STEPS: usize = 2_000;
 pub(in crate::host_manage) const STORE_VIEW_STABILITY_MAX_ATTEMPTS: usize = 3;
 
 impl FallthroughResolutionView for crate::types::FallthroughResolution {
-    fn accepted_props(&self) -> &[verter_semantic::analysis::component_meta::AcceptedPropAnalysis] {
+    fn accepted_props(
+        &self,
+    ) -> &[verter_session_query::analysis::component_meta::AcceptedPropAnalysis] {
         &self.accepted_props
     }
 
     fn accepted_events(
         &self,
-    ) -> &[verter_semantic::analysis::component_meta::AcceptedEventAnalysis] {
+    ) -> &[verter_session_query::analysis::component_meta::AcceptedEventAnalysis] {
         &self.accepted_events
     }
 
     fn fallthrough_surface(
         &self,
-    ) -> &verter_semantic::analysis::component_meta::FallthroughSurface {
+    ) -> &verter_session_query::analysis::component_meta::FallthroughSurface {
         &self.fallthrough_surface
     }
 
-    fn fact_versions(&self) -> &[crate::resolver_core::FactVersionRef] {
+    fn fact_versions(&self) -> &[verter_session_query::facts::fact_cache::FactVersionRef] {
         &self.fact_versions
     }
 }
@@ -548,7 +393,11 @@ impl FallthroughRequestHost for VerterHost {
     fn with_cacheability_context<R>(
         &self,
         fixed_store_view: Option<(&Self::View, u64, bool)>,
-        operation: impl FnOnce(&dyn crate::resolver_core::ResolverContext) -> R,
+        operation: impl FnOnce(
+            &dyn verter_type_engine::resolver_core::ResolverContext<
+                crate::resolver_core::HostCapabilities,
+            >,
+        ) -> R,
     ) -> R {
         let Some((view, _captured_fingerprint, is_current)) = fixed_store_view else {
             return self.with_base_resolver_context(operation);
@@ -669,7 +518,7 @@ impl FallthroughRequestHost for VerterHost {
         // currentness intrinsic to the seed: on a non-current (`ReturnOnly`)
         // snapshot the context's `validates*` family fails closed, so the
         // fallthrough resolver's per-element / per-child / per-root
-        // node-cache validation (which reads through `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)`)
+        // node-cache validation (which reads through `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)`)
         // MISSES rather than consuming a stale warm hit. The outer
         // `is_stable` / publish fence still gates promotion.
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -680,23 +529,23 @@ impl FallthroughRequestHost for VerterHost {
         .into_cold_seed_view();
         let host_ctx =
             crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
-        let ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = &host_ctx;
+        let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
         VerterHost::compute_fallthrough_surface_uncached(
             self,
             canonical_id,
             prop_type_overrides,
             visiting,
             ctx,
-            &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
         )
     }
 
-    fn store_fallthrough_result(
+    fn store_fallthrough_result<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &self,
         canonical_id: &str,
         prop_type_overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
         result: &Self::Resolution,
-        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_, W>,
     ) {
         self.cache_fallthrough_result(canonical_id, prop_type_overrides, result, admission);
     }
@@ -716,7 +565,7 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// [`crate::resolver_core::HostResolverContext`] instead of paying
     /// a fresh workspace-sweep cost per call.
     ///
-    /// `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` is ALSO the per-element / per-child / per-root
+    /// `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` is ALSO the per-element / per-child / per-root
     /// fallthrough-NODE cache validation view (see
     /// `intrinsic_members_for_tag`, `resolve_child_fallthrough`,
     /// `resolve_root_consumption`). It is the request-bound
@@ -731,9 +580,15 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// Production callers (`get_component_meta` / `..._via_view` /
     /// `..._with_resolution`) supply a real request-bound ctx; tests /
     /// off-path callers go through `with_bare_host_ctx_for_test`.
-    pub(in crate::host_manage) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
+    pub(in crate::host_manage) ctx:
+        &'a dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
     pub(in crate::host_manage) dispatch:
-        &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
+        &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            'a,
+            crate::resolver_core::HostCapabilities,
+        >,
 }
 
 #[cfg(test)]
@@ -798,7 +653,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         let cache_key =
             crate::resolver_core::fallthrough_resolver::intrinsic_surface_key(&project_anchor, tag);
 
-        // Validate through the request-bound `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (a borrow
+        // Validate through the request-bound `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (a borrow
         // into the cold compute's currentness-gated `RequestStoreView`,
         // built once at the request boundary) instead of rebuilding a full
         // owned `HostStoreView` per intrinsic-tag lookup — these fire ~per
@@ -820,7 +675,9 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         // completion and survives.
         if let Some(node) = self.host.resolver_runtime().fallthrough.get_cached_node(
             &cache_key,
-            &&crate::resolver_core::fact_validation_port::FactValidationView::new(self.ctx),
+            &&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(
+                self.ctx,
+            ),
         ) {
             match self.host.runtime_intrinsic_node_to_members(node) {
                 Some((members, node_generation)) if node_generation == cache_generation => {
@@ -886,14 +743,14 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
         let dep_canonical = match self.host.resolve_loaded_dependency_canonical(
             parent_canonical,
             import_source,
-            verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 admitted.into_result()?
             }
             verter_workspace::ResolutionPublication::Refused(_) => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
@@ -913,13 +770,13 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             .map(|binding| {
                 (
                     match binding.kind {
-                        verter_semantic::analysis::types::ImportBindingKind::Named => {
+                        verter_session_query::analysis::types::ImportBindingKind::Named => {
                             crate::resolver_core::ImportBindingKind::Named
                         }
-                        verter_semantic::analysis::types::ImportBindingKind::Default => {
+                        verter_session_query::analysis::types::ImportBindingKind::Default => {
                             crate::resolver_core::ImportBindingKind::Default
                         }
-                        verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                        verter_session_query::analysis::types::ImportBindingKind::Namespace => {
                             crate::resolver_core::ImportBindingKind::Namespace
                         }
                     },
@@ -952,7 +809,7 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     fn current_dependency_fact_versions(
         &self,
         canonical_id: &str,
-    ) -> Vec<crate::resolver_core::FactVersionRef> {
+    ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
         self.host
             .current_dependency_fact_versions(canonical_id, &std::collections::BTreeSet::new())
     }
@@ -968,12 +825,14 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
             crate::resolver_core::FallthroughOverrideIdentity::for_overrides(prop_type_overrides),
         );
 
-        // Validate through the request-bound `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (see
+        // Validate through the request-bound `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (see
         // `intrinsic_members_for_tag` note) — eliminates the per-child
         // owned-view rebuild and fails closed on a non-current cold-seed.
         if let Some(node) = self.host.resolver_runtime().fallthrough.get_cached_node(
             &cache_key,
-            &&crate::resolver_core::fact_validation_port::FactValidationView::new(self.ctx),
+            &&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(
+                self.ctx,
+            ),
         ) {
             if let Some(resolution) = self.host.runtime_child_node_to_resolution(node) {
                 return Some(resolution);
@@ -1016,7 +875,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
     type Snapshot = FileAnalysisSnapshot;
     // Arc-shared: the no-hydration fallthrough env is the memo-owned
     // whole-env handle itself; every consumer reads it immutably.
-    type EvalEnv = std::sync::Arc<verter_semantic::analysis::type_eval::EvalEnv>;
+    type EvalEnv = std::sync::Arc<verter_session_query::declarations::EvalEnv>;
 
     fn resolve_root_consumption(
         &self,
@@ -1024,7 +883,7 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
         branch_key: &str,
         snapshot: &Self::Snapshot,
         element_index: u32,
-        base: &verter_semantic::analysis::component_meta::ConsumedRootBindings,
+        base: &verter_session_query::analysis::component_meta::ConsumedRootBindings,
         has_unknown_spread: bool,
         eval_env: &mut Option<Self::EvalEnv>,
         overrides: Option<&crate::resolver_core::FallthroughPropOverrideSet>,
@@ -1035,13 +894,15 @@ impl FallthroughComputeHost for HostFallthroughResolver<'_> {
             crate::resolver_core::FallthroughOverrideIdentity::for_overrides(overrides),
         );
 
-        // Validate through the request-bound `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (see
+        // Validate through the request-bound `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` (see
         // `intrinsic_members_for_tag` note) — eliminates the per-root-
         // binding owned-view rebuild and fails closed on a non-current
         // cold-seed.
         if let Some(node) = self.host.resolver_runtime().fallthrough.get_cached_node(
             &cache_key,
-            &&crate::resolver_core::fact_validation_port::FactValidationView::new(self.ctx),
+            &&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(
+                self.ctx,
+            ),
         ) {
             if let Some(resolved) = self.host.runtime_consumed_bindings_to_resolution(node) {
                 return resolved;
@@ -1159,7 +1020,7 @@ pub(in crate::host_manage) fn log_snapshot_debug(
 #[derive(Debug, Clone)]
 pub(crate) struct ComputedEvaluatedTypes {
     pub(crate) evaluated_types:
-        Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     pub(crate) discovered_dependencies: std::collections::BTreeSet<String>,
     /// Step 9.1 / D32: surface-id sidecar populated during the
     /// `expand_macro_types_impl_with_expander` closure's per-field run.
@@ -1208,7 +1069,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         &self,
         canonical_id: &str,
         source: &str,
-        _sig: &verter_semantic::analysis::ExportSignature,
+        _sig: &verter_session_query::analysis::types::ExportSignature,
     ) -> Option<String> {
         // The shallow reexport surface names AUTHORED specifiers only,
         // so there is no artifact-baked target to prefer here: the
@@ -1218,7 +1079,7 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         match self.host.resolve_loaded_dependency_canonical(
             canonical_id,
             source,
-            verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            verter_session_query::resolution::ResolveRequestKind::EsmImport,
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 if let Some(resolved) = admitted.into_result() {
@@ -1226,8 +1087,8 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
                 }
             }
             verter_workspace::ResolutionPublication::Refused(_) => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
@@ -1238,8 +1099,8 @@ impl ExportGraphResolver for HostExportGraphResolver<'_> {
         {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
             verter_workspace::ResolutionPublication::Refused(_) => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 None
             }
@@ -1251,21 +1112,21 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
     fn dependency_eval_env(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_session_query::declarations::EvalEnv>> {
         self.host.base_eval_env_arc(canonical_id)
     }
 
     fn dependency_value_symbol_graph_native(
         &self,
         source: &ValueDeclIdentity,
-    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+    ) -> Option<verter_session_query::declarations::ValueDeclInfo> {
         self.host.dependency_value_symbol_graph_native(source)
     }
 
     fn prepared_value_decl(
         &self,
         source: &ValueDeclIdentity,
-    ) -> Option<Arc<verter_semantic::analysis::type_solver::PreparedValueDecl>> {
+    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
         self.host
             .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
     }
@@ -1280,16 +1141,16 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
 }
 
 pub(in crate::host_manage) fn exact_resolution_uses_type_preferred_target(
-    phase: verter_semantic::resolver_core::ResolvePhase,
-    kind: verter_semantic::resolver_core::ResolveRequestKind,
+    phase: verter_session_query::resolution::ResolvePhase,
+    kind: verter_session_query::resolution::ResolveRequestKind,
 ) -> bool {
     matches!(
         (phase, kind),
         (
-            verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            verter_session_query::resolution::ResolveRequestKind::TypeImport,
         ) | (
-            verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
+            verter_session_query::resolution::ResolvePhase::ProviderGraph,
             _
         )
     )
@@ -1307,13 +1168,13 @@ fn is_type_preferred_target(canonical_id: &str) -> bool {
         // type-bearing virtual surface, so it is type-preferred exactly like a
         // `.vue` SFC. Sourced from the registry carrier-extension set, never a
         // hardcoded `.vue` arm that would strand other carriers.
-        || verter_semantic::resolver_core::path_is_carrier(canonical_id)
+        || verter_session_query::resolution::path_is_carrier(canonical_id)
 }
 
 fn has_file_like_extension(canonical_id: &str) -> bool {
     // Carrier-GENERIC: any registered framework carrier (`.vue`, `.svelte`, …)
     // is a real file-like path, not a bare module specifier.
-    verter_semantic::resolver_core::path_is_carrier(canonical_id)
+    verter_session_query::resolution::path_is_carrier(canonical_id)
         || canonical_id.ends_with(".ts")
         || canonical_id.ends_with(".tsx")
         || canonical_id.ends_with(".mts")

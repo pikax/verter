@@ -17,12 +17,12 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::normalize_canonical_id;
 use verter_session::external_ts::{
     AmbiguityCause, BoundProject, CarrierOwnershipResolution, EngineBackend, EnvDims,
     ExternalTsProjectResolver, ProjectBinding, WorkspaceProjectResolver,
 };
 use verter_session::VerterHost;
+use verter_session_query::resolution::normalize_canonical_id;
 use verter_workspace::published_state::PublishedRoot;
 use verter_workspace::{
     decide_generated_unit_admission_with_basis, CanonicalPath, GeneratedUnitAdmission,

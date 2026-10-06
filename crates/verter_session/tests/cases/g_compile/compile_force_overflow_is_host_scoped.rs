@@ -27,10 +27,13 @@ use verter_session::for_tests::{
     compile_force_overflow_observations_for_tests, install_fact_tracer_for_tests,
     observe_fan_out_borrowed_for_tests, read_signature_overflow_at_install,
 };
-use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, FACT_SIGNATURE_CAP};
 use verter_session::{
     CompileCacheMode, CompileProfile, FileLanguage, HostConfig, UpsertRequest, VerterHost,
     VirtualNodeKind, VirtualQuery,
+};
+use verter_session_query::facts::{
+    fact_cache::FactVersionRef,
+    fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
 };
 
 fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {

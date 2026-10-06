@@ -887,7 +887,7 @@ const ROUTER_VIEW_NAMES: &[&str] = &["RouterView", "router-view", "NuxtPage", "n
 
 /// Extract navigation links from template component usages.
 pub fn extract_navigation_links(
-    components: &[crate::analysis::template::TemplateComponentUsage],
+    components: &[verter_session_query::analysis::template::TemplateComponentUsage],
     file_path: &str,
 ) -> Vec<NavigationLink> {
     let mut links = Vec::new();
@@ -913,7 +913,7 @@ pub fn extract_navigation_links(
 
 /// Extract navigation target from a component's props.
 fn extract_nav_target_from_props(
-    props: &[crate::analysis::template::TemplatePropUsage],
+    props: &[verter_session_query::analysis::template::TemplatePropUsage],
 ) -> NavigationTarget {
     for prop in props {
         if prop.name == "to" {
@@ -931,7 +931,7 @@ fn extract_nav_target_from_props(
 
 /// Extract RouterView/NuxtPage locations from template component usages.
 pub fn extract_router_views(
-    components: &[crate::analysis::template::TemplateComponentUsage],
+    components: &[verter_session_query::analysis::template::TemplateComponentUsage],
     file_path: &str,
 ) -> Vec<RouterViewLocation> {
     let mut views = Vec::new();
@@ -1224,7 +1224,7 @@ pub fn build_route_analysis(
     project_root: &str,
     template_components: &[(
         String,
-        Vec<crate::analysis::template::TemplateComponentUsage>,
+        Vec<verter_session_query::analysis::template::TemplateComponentUsage>,
     )],
 ) -> RouteAnalysisSnapshot {
     let framework = detect_routing_framework(inputs, project_root);

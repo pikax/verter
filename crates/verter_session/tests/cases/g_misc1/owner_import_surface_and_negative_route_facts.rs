@@ -27,7 +27,8 @@ fn read_file(rel: &str) -> String {
 fn owner_import_surface_builder_threads_chain_facts() {
     let source = read_file("src/owner_import_surface.rs");
     assert!(
-        source.contains("chain_facts: Vec<crate::resolver_core::FactVersionRef>"),
+        source
+            .contains("chain_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef>"),
         "build_owner_import_surface MUST accept `chain_facts: Vec<FactVersionRef>` so the \
          producer can thread the route-walk facts into the cached surface's \
          fact_dep_signature (R3/R26/R28)."

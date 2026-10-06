@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::framework::ctx::FrameworkAdapterCtx;
 use crate::framework::descriptor::{vue_descriptor, FrameworkAdapterDescriptor};

@@ -399,9 +399,9 @@ pub struct ProjectConfig {
     /// Resolved tsconfig file membership for owner selection.
     pub membership: verter_workspace::ProjectMembership,
     /// Existing IDE alias sources (currently Vite aliases) injected ahead of tsconfig paths.
-    pub workspace_aliases: Vec<verter_semantic::resolver_core::WorkspaceAlias>,
+    pub workspace_aliases: Vec<verter_session_query::resolution::WorkspaceAlias>,
     /// Preserved tsconfig compiler options for the native resolver.
-    pub compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions,
+    pub compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions,
     /// Resolved project-reference edges for the native resolver.
     pub references: Vec<String>,
     /// Lint configuration for this project.
@@ -473,7 +473,7 @@ pub fn is_client_only_file(path: &str) -> bool {
 }
 
 impl ProjectConfig {
-    pub fn to_ide_project_config(&self) -> verter_semantic::resolver_core::IdeProjectConfig {
+    pub fn to_ide_project_config(&self) -> verter_session_query::resolution::IdeProjectConfig {
         let mut project = verter_workspace::ide_project_config(
             self.root.clone(),
             self.workspace_root.clone(),
@@ -525,7 +525,7 @@ impl ProjectRegistry {
         let mut trust_required = Vec::new();
 
         for root_uri in roots {
-            let canonical = verter_semantic::resolver_core::normalize_canonical_id(
+            let canonical = verter_session_query::resolution::normalize_canonical_id(
                 &crate::documents::uri_to_canonical_id_from_str(root_uri),
             );
             let root_path = PathBuf::from(&canonical);
@@ -593,7 +593,7 @@ impl ProjectRegistry {
                             fallback_workspace_aliases = aliases
                                 .iter()
                                 .map(|(find, replacement)| {
-                                    verter_semantic::resolver_core::WorkspaceAlias {
+                                    verter_session_query::resolution::WorkspaceAlias {
                                         find: find.clone(),
                                         replacement: replacement.clone(),
                                     }
@@ -631,7 +631,7 @@ impl ProjectRegistry {
                                             .aliases
                                             .iter()
                                             .map(|(find, replacement)| {
-                                                verter_semantic::resolver_core::WorkspaceAlias {
+                                                verter_session_query::resolution::WorkspaceAlias {
                                                     find: find.clone(),
                                                     replacement: replacement.clone(),
                                                 }
@@ -646,7 +646,7 @@ impl ProjectRegistry {
                                         fallback_workspace_aliases = lkg
                                             .iter()
                                             .map(|(find, replacement)| {
-                                                verter_semantic::resolver_core::WorkspaceAlias {
+                                                verter_session_query::resolution::WorkspaceAlias {
                                                     find: find.clone(),
                                                     replacement: replacement.clone(),
                                                 }
@@ -678,7 +678,7 @@ impl ProjectRegistry {
                 membership: verter_workspace::ProjectMembership::MatchAll,
                 workspace_aliases: fallback_workspace_aliases,
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 lint_config: lint.clone(),
                 linter,
@@ -708,7 +708,7 @@ impl ProjectRegistry {
         let mut projects = Vec::new();
 
         for &root in roots {
-            let root = verter_semantic::resolver_core::normalize_canonical_id(root);
+            let root = verter_session_query::resolution::normalize_canonical_id(root);
             let root_path = PathBuf::from(&root);
 
             let discovered = verter_workspace::config::discover_tsconfigs(&root_path);
@@ -752,7 +752,7 @@ impl ProjectRegistry {
                 membership: verter_workspace::ProjectMembership::MatchAll,
                 workspace_aliases: Vec::new(),
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 lint_config: lint.clone(),
                 linter,
@@ -771,7 +771,7 @@ impl ProjectRegistry {
     ///
     /// Falls back to `None` if no project root is a prefix of the file path.
     pub fn find_project(&self, file_path: &str) -> Option<&ProjectConfig> {
-        let normalized = verter_semantic::resolver_core::normalize_canonical_id(file_path);
+        let normalized = verter_session_query::resolution::normalize_canonical_id(file_path);
         self.projects
             .iter()
             .find(|project| project_matches_file(project, &normalized))
@@ -831,8 +831,8 @@ impl ProjectRegistry {
         &self.projects
     }
 
-    pub fn to_native_project_resolver(&self) -> verter_semantic::resolver_core::ModuleResolverCore {
-        verter_semantic::resolver_core::ModuleResolverCore::new(
+    pub fn to_native_project_resolver(&self) -> verter_resolution::ModuleResolverCore {
+        verter_resolution::ModuleResolverCore::new(
             self.projects
                 .iter()
                 .map(ProjectConfig::to_ide_project_config)
@@ -1530,7 +1530,7 @@ export default defineConfig(({ mode }) => ({
                 membership: verter_workspace::ProjectMembership::MatchAll,
                 workspace_aliases: Vec::new(),
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
 
                 lint_config: ResolvedLintConfig::default(),
@@ -1565,7 +1565,7 @@ export default defineConfig(({ mode }) => ({
                     membership: verter_workspace::ProjectMembership::MatchAll,
                     workspace_aliases: Vec::new(),
                     compiler_options:
-                        verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                        verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                     references: Vec::new(),
 
                     lint_config: ResolvedLintConfig {
@@ -1588,7 +1588,7 @@ export default defineConfig(({ mode }) => ({
                     membership: verter_workspace::ProjectMembership::MatchAll,
                     workspace_aliases: Vec::new(),
                     compiler_options:
-                        verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                        verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                     references: Vec::new(),
 
                     lint_config: ResolvedLintConfig::default(),
@@ -1678,7 +1678,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = verter_semantic::resolver_core::normalize_canonical_id(
+        let root = verter_session_query::resolution::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
         let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
@@ -1720,7 +1720,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = verter_semantic::resolver_core::normalize_canonical_id(
+        let root = verter_session_query::resolution::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
         let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
@@ -1770,7 +1770,7 @@ export default defineConfig(({ mode }) => ({
         )
         .unwrap();
 
-        let root = verter_semantic::resolver_core::normalize_canonical_id(
+        let root = verter_session_query::resolution::normalize_canonical_id(
             &tmp.to_string_lossy().replace('\\', "/"),
         );
         let registry = ProjectRegistry::from_canonical_roots(&fs_workspace(), &[&root]);
@@ -1898,7 +1898,7 @@ export default defineConfig(({ mode }) => ({
                 membership: verter_workspace::ProjectMembership::MatchAll,
                 workspace_aliases: Vec::new(),
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
 
                 lint_config: ResolvedLintConfig::default(),

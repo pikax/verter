@@ -55,7 +55,7 @@ Phase linkage:
   rule-correct expected (`kind: "a" | "c"`).
 - Phase 5i §5.11 closes the gap via the new
   `Extract` / `Exclude` arms in `build_builtin_utility`
-  (`crates/verter_session/src/project_semantic_dispatch/build.rs`)
+  (`crates/verter_type_engine/src/project_semantic_dispatch/build.rs`)
   which dispatch each source-union member through `relate_nodes`
   against the filter argument and reconstitute survivors via
   `intern_normalized_union_or_intersection`. The fixture is

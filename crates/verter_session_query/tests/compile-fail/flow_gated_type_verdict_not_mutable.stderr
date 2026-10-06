@@ -1,0 +1,16 @@
+error[E0616]: field `shadowed` of struct `GatedType` is private
+ --> tests/compile-fail/flow_gated_type_verdict_not_mutable.rs:6:11
+  |
+6 |     gated.shadowed = Vec::new().into();
+  |           ^^^^^^^^ private field
+
+error[E0624]: method `add_shadowed` is private
+  --> tests/compile-fail/flow_gated_type_verdict_not_mutable.rs:10:11
+   |
+10 |     gated.add_shadowed(Vec::new());
+   |           ^^^^^^^^^^^^ private method
+   |
+  ::: src/flow/slice.rs
+   |
+   |     fn add_shadowed(&mut self, extra: impl IntoIterator<Item = FrameShadowedName>) {
+   |     ------------------------------------------------------------------------------ private method defined here

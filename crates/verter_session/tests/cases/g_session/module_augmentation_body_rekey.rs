@@ -53,7 +53,7 @@ fn workspace_project(files: &[(&str, &str)]) -> (Arc<MetaProject>, Arc<MemoryWor
 }
 
 fn prop_names(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Vec<String> {
     let mut names: Vec<String> = meta.props.iter().map(|p| p.name.clone()).collect();
     names.sort();
@@ -66,7 +66,7 @@ fn prop_names(
 fn prop_type_repr(
     host: &VerterHost,
     owner: &str,
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) -> Option<String> {
     meta.props.iter().find(|p| p.name == name).map(|p| {

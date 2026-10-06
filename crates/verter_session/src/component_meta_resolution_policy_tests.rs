@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedSurfaceCompleteness, ComponentMetaAnalysis, ComponentMetaFlags, FallthroughSurface,
     NoFallthroughReason, PropAnalysis, ResolvedTypeAnalysis, RootReachability, SlotAnalysis,
     SlotBindingAnalysis,
@@ -24,10 +24,11 @@ use verter_type_expr::locators::{
 
 use crate::component_meta_resolution_policy::apply_component_meta_resolution_policy;
 use crate::resolver_core::component_meta::ResolvedTypeRegistryMeta;
-use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId};
 use crate::types::{HostConfig, UpsertRequest};
 use crate::{FileLanguage, VerterHost};
+use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -57,7 +58,7 @@ fn run_policy(
 ) {
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_0 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         apply_component_meta_resolution_policy(
             meta,
@@ -94,7 +95,7 @@ fn run_policy_with_macro_participation(
     macro_participating_names: &[&str],
 ) {
     use rustc_hash::FxHashSet;
-    use verter_semantic::analysis::type_solver::host::ResolvedRootIdentity;
+    use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
     let mut participating: FxHashSet<ResolvedRootIdentity> = FxHashSet::default();
     for name in macro_participating_names.iter() {
@@ -115,7 +116,7 @@ fn run_policy_with_macro_participation(
     }
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_1 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         crate::component_meta_resolution_policy::apply_component_meta_resolution_policy_with_participation(
             meta,
@@ -272,16 +273,17 @@ fn meta_entry(name: &str, canonical_source: &str) -> ResolvedTypeRegistryMeta {
 fn raise(host: &VerterHost, source: &SemanticTypeSource) -> Option<SemanticNodeId> {
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         out = dispatch
             .raise_semantic_type_source_to_hot(
                 source,
-                crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id: "/owner.vue",
                     scope_owner: verter_type_expr::TopLevelOwnerId::instance(0),
                     context:
-                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                            crate::semantic_query::ProjectionMode::Navigate,
+                        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                            verter_type_engine::semantic_query::ProjectionMode::Navigate,
                         ),
                     interior_failures: None,
                 },
@@ -295,8 +297,9 @@ fn raise(host: &VerterHost, source: &SemanticTypeSource) -> Option<SemanticNodeI
 fn node_data(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        out = crate::project_semantic_dispatch::node_data_for(
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx).graph(),
+        out = verter_type_engine::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+                .graph(),
             node,
         );
     });
@@ -309,9 +312,9 @@ fn ref_head(host: &VerterHost, node: SemanticNodeId) -> Option<(String, usize)> 
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         let fixture_dispatch_2 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
-        out = crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
+        out = verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(
             &fixture_dispatch_2,
             node,
         )
@@ -325,13 +328,14 @@ fn bare_ref_scope_and_resolved_decl(
     node: SemanticNodeId,
 ) -> (
     Arc<str>,
-    Option<crate::semantic_query::NodeScopeId>,
-    crate::semantic_query::DeclIdentity,
+    Option<verter_type_engine::semantic_query::NodeScopeId>,
+    verter_type_engine::semantic_query::DeclIdentity,
 ) {
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
-        let data = crate::project_semantic_dispatch::node_data_for(
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx).graph(),
+        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+                .graph(),
             node,
         )
         .expect("reference node data");
@@ -344,15 +348,21 @@ fn bare_ref_scope_and_resolved_decl(
             }
             SemanticNodeData::BareRef(_) => {
                 let (name, scope) = data.bare_ref_head().expect("BareRef identity");
-                let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+                let dispatch =
+                    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                        ctx,
+                    );
                 let resolved = dispatch.resolve_carrier_subject_node(
                     node,
-                    crate::semantic_query::ProjectionReductionContext::published(
-                        crate::semantic_query::ProjectionMode::Navigate,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
                 );
-                let identity = match crate::project_semantic_dispatch::node_data_for(
-                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx).graph(),
+                let identity = match verter_type_engine::project_semantic_dispatch::node_data_for(
+                    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                        ctx,
+                    )
+                    .graph(),
                     resolved,
                 )
                 .as_deref()
@@ -380,7 +390,9 @@ fn symbolic_projection_eq_for_test(
         let registry = super::core::PolicyRegistry::build(&[], &[]);
 
         let fixture_dispatch_3 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(resolver_ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                resolver_ctx,
+            );
         let mut engine =
             crate::resolver_core::ComponentMetaQueryEngine::new(resolver_ctx, &fixture_dispatch_3);
         let participating = rustc_hash::FxHashSet::default();
@@ -409,7 +421,9 @@ fn proof_reference_maps_match_for_test(
         let registry = super::core::PolicyRegistry::build(&[], &[]);
 
         let fixture_dispatch_4 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(resolver_ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                resolver_ctx,
+            );
         let mut engine =
             crate::resolver_core::ComponentMetaQueryEngine::new(resolver_ctx, &fixture_dispatch_4);
         let participating = rustc_hash::FxHashSet::default();
@@ -1085,13 +1099,13 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
     let host = empty_host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
-    let scope_a = crate::semantic_query::NodeScopeId::File {
+    let scope_a = verter_type_engine::semantic_query::NodeScopeId::File {
         canonical_id: Arc::from("/workspace/a.ts"),
         owner,
         whole_hash: [1; 16],
         local_scope: Some(1),
     };
-    let scope_b = crate::semantic_query::NodeScopeId::File {
+    let scope_b = verter_type_engine::semantic_query::NodeScopeId::File {
         canonical_id: Arc::from("/workspace/b.ts"),
         owner,
         whole_hash: [2; 16],
@@ -1103,7 +1117,7 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
             scope_a,
             Arc::from(Vec::new().into_boxed_slice()),
         ),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
     );
     let bare_b = graph.intern_node_with_scope(
         SemanticNodeData::new_bare_ref(
@@ -1111,7 +1125,7 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
             scope_b,
             Arc::from(Vec::new().into_boxed_slice()),
         ),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
     );
     let bare_array_a = graph.intern_node(SemanticNodeData::Array {
         element: bare_a,
@@ -1128,7 +1142,7 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
     );
 
     let decl_a = graph.intern_node(SemanticNodeData::DeclRef {
-        identity: crate::semantic_query::DeclIdentity {
+        identity: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/workspace/a.ts"),
             owner,
             whole_hash: [1; 16],
@@ -1136,7 +1150,7 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
         },
     });
     let decl_b = graph.intern_node(SemanticNodeData::DeclRef {
-        identity: crate::semantic_query::DeclIdentity {
+        identity: verter_type_engine::semantic_query::DeclIdentity {
             canonical_id: Arc::from("/workspace/b.ts"),
             owner,
             whole_hash: [2; 16],
@@ -1145,11 +1159,11 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
     });
     let indexed_a = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: decl_a,
-        index: crate::semantic_query::IndexKey::String(Arc::from("value")),
+        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("value")),
     });
     let indexed_b = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: decl_b,
-        index: crate::semantic_query::IndexKey::String(Arc::from("value")),
+        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("value")),
     });
     assert_eq!(
         symbolic_projection_eq_for_test(&host, indexed_a, indexed_b),
@@ -1180,7 +1194,7 @@ fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
             .expect("fixture must be indexed")
             .whole_hash;
         graph.intern_node(SemanticNodeData::DeclRef {
-            identity: crate::semantic_query::DeclIdentity {
+            identity: verter_type_engine::semantic_query::DeclIdentity {
                 canonical_id: Arc::from(canonical),
                 owner,
                 whole_hash,
@@ -1190,12 +1204,12 @@ fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
     };
     let a = decl_ref("/workspace/a.ts");
     let b = decl_ref("/workspace/b.ts");
-    let tuple = |values: &[crate::semantic_query::SemanticNodeId]| {
+    let tuple = |values: &[verter_type_engine::semantic_query::SemanticNodeId]| {
         graph.intern_node(SemanticNodeData::Tuple {
             elements: Arc::from(
                 values
                     .iter()
-                    .map(|value| crate::semantic_query::TupleElement {
+                    .map(|value| verter_type_engine::semantic_query::TupleElement {
                         label: None,
                         value: *value,
                         optional: false,
@@ -1243,7 +1257,7 @@ fn symbolic_projection_rejects_swapped_repeated_lexical_scopes() {
             .shallow_file_state(canonical)
             .expect("fixture must be indexed")
             .whole_hash;
-        let scope = crate::semantic_query::NodeScopeId::File {
+        let scope = verter_type_engine::semantic_query::NodeScopeId::File {
             canonical_id: Arc::from(canonical),
             owner,
             whole_hash,
@@ -1260,12 +1274,12 @@ fn symbolic_projection_rejects_swapped_repeated_lexical_scopes() {
     };
     let a = bare_ref("/workspace/scope-a.ts");
     let b = bare_ref("/workspace/scope-b.ts");
-    let tuple = |values: &[crate::semantic_query::SemanticNodeId]| {
+    let tuple = |values: &[verter_type_engine::semantic_query::SemanticNodeId]| {
         graph.intern_node(SemanticNodeData::Tuple {
             elements: Arc::from(
                 values
                     .iter()
-                    .map(|value| crate::semantic_query::TupleElement {
+                    .map(|value| verter_type_engine::semantic_query::TupleElement {
                         label: None,
                         value: *value,
                         optional: false,
@@ -1755,7 +1769,7 @@ fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
                 path: vec!["TOKEN".to_string()],
                 type_args: Vec::new(),
             }),
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
         )
         .expect("the nominal typeof fixture must lower")
     };
@@ -1799,7 +1813,7 @@ fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
     // which the lowered fixtures above cannot guarantee (their heads carry
     // each consumer's own scope).
     {
-        use crate::semantic_query::{ScopeId, SemanticNodeData, ValueRootKey};
+        use verter_type_engine::semantic_query::{ScopeId, ValueRootKey};
         let graph = host.project_type_store().semantic_graph();
         let head = || ValueRootKey {
             scope: ScopeId::file(
@@ -1814,16 +1828,20 @@ fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
             symbol: Arc::from("TOKEN"),
             member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
         };
-        let before_retarget = graph.intern_node(SemanticNodeData::new_nominal_typeof(
-            head(),
-            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-            identity_for("/workspace/a/token.ts"),
-        ));
-        let after_retarget = graph.intern_node(SemanticNodeData::new_nominal_typeof(
-            head(),
-            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-            identity_for("/workspace/b/token.ts"),
-        ));
+        let before_retarget = graph.intern_node(
+            verter_type_engine::semantic_query::new_nominal_typeof_for_tests(
+                head(),
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                identity_for("/workspace/a/token.ts"),
+            ),
+        );
+        let after_retarget = graph.intern_node(
+            verter_type_engine::semantic_query::new_nominal_typeof_for_tests(
+                head(),
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                identity_for("/workspace/b/token.ts"),
+            ),
+        );
         assert_ne!(
             before_retarget, after_retarget,
             "fixture: same head, distinct identities intern apart"

@@ -192,9 +192,9 @@ fn byte_identical_re_upsert_preserves_db_entry_counts() {
 /// regression that disabled the hook entirely would fail.
 #[test]
 fn byte_identical_reupsert_emits_no_cache_drained_at_upsert_events() {
-    use verter_session::component_meta_audit::accumulator::RequestFootprintAccumulator;
     use verter_session::component_meta_audit::StructuredAuditEvent;
-    use verter_session::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 
     let host = build_host_with_one_file();
 

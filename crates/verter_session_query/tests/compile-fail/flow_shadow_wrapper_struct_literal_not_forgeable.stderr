@@ -1,0 +1,9 @@
+error[E0451]: fields `inner` and `shadowed` of struct `FrameShadowedExpr` are private
+ --> tests/compile-fail/flow_shadow_wrapper_struct_literal_not_forgeable.rs:7:9
+  |
+6 |     FrameShadowedExpr {
+  |     ----------------- in this type
+7 |         inner: Box::new(expr.inner().clone()),
+  |         ^^^^^ private field
+8 |         shadowed: Vec::new().into(),
+  |         ^^^^^^^^ private field

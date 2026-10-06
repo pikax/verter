@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::facts::corender::CoRenderabilityStatus;
+use verter_session_query::facts::corender::CoRenderabilityStatus;
 
 /// Co-renderability report between two components.
 #[derive(Debug, Clone, Serialize, Deserialize)]

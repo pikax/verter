@@ -1,13 +1,26 @@
-error[E0603]: module `project_semantic_dispatch` is private
- --> tests/cases/compile-fail/locator_reducing_lowerer_not_nameable.rs:8:21
-  |
-8 | use verter_session::project_semantic_dispatch::ProjectSemanticDispatch;
-  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^  ----------------------- struct `ProjectSemanticDispatch` is not publicly re-exported
-  |                     |
-  |                     private module
-  |
-note: the module `project_semantic_dispatch` is defined here
- --> src/lib.rs
-  |
-  | pub(crate) mod project_semantic_dispatch;
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error[E0624]: method `shallow_lower_type_expr_with_context` is private
+  --> tests/cases/compile-fail/locator_reducing_lowerer_not_nameable.rs:12:22
+   |
+12 |       let _ = dispatch.shallow_lower_type_expr_with_context(
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/lower.rs
+   |
+   | /     pub(crate) fn shallow_lower_type_expr_with_context(
+   | |         &self,
+   | |         expr: &TypeExpr,
+   | |         env: &FxHashMap<String, SemanticNodeId>,
+...  |
+   | |         reduction_context: ProjectionReductionContext,
+   | |     ) -> SemanticNodeId {
+   | |_______________________- private method defined here
+
+warning: unreachable expression
+  --> tests/cases/compile-fail/locator_reducing_lowerer_not_nameable.rs:14:9
+   |
+13 |         todo!(),
+   |         ------- any code following this expression is unreachable
+14 |         todo!(),
+   |         ^^^^^^^ unreachable expression
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default

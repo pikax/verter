@@ -934,7 +934,7 @@ fn raw_paths_json_inherits_base_url_when_child_overrides_paths() {
 
     // baseUrl should come from the base config (resolved to its directory)
     let expected_base =
-        verter_semantic::resolver_core::normalize_canonical_id(&tmp.path().to_string_lossy());
+        verter_session_query::resolution::normalize_canonical_id(&tmp.path().to_string_lossy());
     assert_eq!(
         base_url, expected_base,
         "baseUrl should be inherited from base config, not default to child dir"
@@ -985,7 +985,7 @@ fn raw_paths_json_child_base_url_overrides_inherited_paths() {
 
     // baseUrl should be the child's override (packages/app/)
     let expected_base =
-        verter_semantic::resolver_core::normalize_canonical_id(&sub.to_string_lossy());
+        verter_session_query::resolution::normalize_canonical_id(&sub.to_string_lossy());
     assert_eq!(
         base_url, expected_base,
         "baseUrl should be child's override, not base's"
@@ -1033,7 +1033,7 @@ fn raw_paths_json_array_extends_preserves_undeclared_paths() {
         .replace('\\', "/");
     let (base_url, paths) = raw_paths_json(&ws, &tsconfig_path).expect("should find paths");
     let expected_base =
-        verter_semantic::resolver_core::normalize_canonical_id(&tmp.path().to_string_lossy());
+        verter_session_query::resolution::normalize_canonical_id(&tmp.path().to_string_lossy());
     assert_eq!(
         base_url, expected_base,
         "undeclared later base must keep the earlier baseUrl"
@@ -1495,7 +1495,7 @@ fn has_configured_ts_project_anywhere_still_accepts_root_tsconfig() {
 fn semantic_options_from_files(
     files: &[(&str, &str)],
     leaf: &str,
-) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+) -> verter_session_query::resolution::SemanticCompilerOptions {
     let ws = crate::filesystem::FilesystemWorkspace::new(
         crate::filesystem::FilesystemOptions::default(),
     );
@@ -1520,7 +1520,7 @@ fn semantic_options_default_to_typescript_defaults_when_undeclared() {
     );
     assert_eq!(
         load_compiler_options(&ws, "/nonexistent/tsconfig.json").semantic,
-        verter_semantic::resolver_core::SemanticCompilerOptions::default()
+        verter_session_query::resolution::SemanticCompilerOptions::default()
     );
     assert_eq!(
         semantic_options_from_files(
@@ -1530,7 +1530,7 @@ fn semantic_options_default_to_typescript_defaults_when_undeclared() {
             )],
             "tsconfig.json",
         ),
-        verter_semantic::resolver_core::SemanticCompilerOptions::default()
+        verter_session_query::resolution::SemanticCompilerOptions::default()
     );
 }
 
@@ -1554,7 +1554,7 @@ fn semantic_options_inherit_through_extends_with_leaf_members_winning() {
     assert!(!inherited.no_implicit_any);
     assert_eq!(
         inherited.target,
-        verter_semantic::resolver_core::ScriptTarget::Es2020
+        verter_session_query::resolution::ScriptTarget::Es2020
     );
 
     let leaf_member = semantic_options_from_files(
@@ -1689,7 +1689,7 @@ fn semantic_options_layer_ordered_array_extends() {
     );
     assert_eq!(
         options.target,
-        verter_semantic::resolver_core::ScriptTarget::Es2020,
+        verter_session_query::resolution::ScriptTarget::Es2020,
         "later array base last-wins per key"
     );
 }
@@ -1724,7 +1724,7 @@ fn semantic_options_resolve_package_tsconfig_field() {
     );
     assert_eq!(
         options.target,
-        verter_semantic::resolver_core::ScriptTarget::Es2019
+        verter_session_query::resolution::ScriptTarget::Es2019
     );
 }
 

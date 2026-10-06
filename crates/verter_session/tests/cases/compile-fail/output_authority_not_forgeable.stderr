@@ -1,0 +1,5 @@
+error[E0616]: field `engine` of struct `OutputAuthority` is private
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_forgeable.rs
+  |
+  |         engine: other.engine.clone(),
+  |                       ^^^^^^ private field

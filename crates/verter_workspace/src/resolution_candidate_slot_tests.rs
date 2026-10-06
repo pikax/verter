@@ -20,10 +20,10 @@ use parking_lot::RwLock;
 use super::Engine;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
 use crate::types::{ExactResolution, ExactResolutionResult, ParsedEdge};
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::{
     normalize_canonical_id, AttemptFailure, PathProbe, ResolutionPopulation,
 };
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 const CONTEXT: ResolutionContext = ResolutionContext {
     phase: ResolvePhase::ProviderGraph,
@@ -66,8 +66,8 @@ impl SlotReader {
 impl WorkspaceRead for SlotReader {
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
         crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
     }
@@ -168,7 +168,8 @@ fn engine_for(root: &str) -> Engine {
             extensions: vec![".ts".to_string()],
             workspace_root: root.to_string(),
             workspace_aliases: Vec::new(),
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: Vec::new(),
             membership: crate::membership::configured_membership_match_all_under_root(
                 &crate::CanonicalPath::new(root),
@@ -288,16 +289,16 @@ fn slot_retains_at_most_the_shared_candidate_cap() {
             "each retarget must serve its own exact target"
         );
         assert!(
-            slot_len(&engine) <= crate::CANDIDATE_CAP,
+            slot_len(&engine) <= verter_session_query::facts::fact_cache::CANDIDATE_CAP,
             "the slot must never exceed the shared per-slot candidate cap \
              ({}); got {}",
-            crate::CANDIDATE_CAP,
+            verter_session_query::facts::fact_cache::CANDIDATE_CAP,
             slot_len(&engine)
         );
     }
     assert_eq!(
         slot_len(&engine),
-        crate::CANDIDATE_CAP,
+        verter_session_query::facts::fact_cache::CANDIDATE_CAP,
         "six admissions must leave the slot saturated at the cap, not below it"
     );
 }

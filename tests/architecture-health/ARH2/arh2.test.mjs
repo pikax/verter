@@ -179,7 +179,7 @@ test("ARH2-characterization dirty twin: witness naming a nonexistent test is rej
 
 test("ARH2-characterization dirty twin: a filter that selects nothing is rejected (AC2)", () => {
   const dirty = cloneProducts();
-  const h = hotspot(dirty, "crates/verter_session/src/semantic_query.rs");
+  const h = hotspot(dirty, "crates/verter_type_engine/src/semantic_query.rs");
   h.pins[0].filter = "unrelated_module";
   h.pins[0].command = `cargo nextest run -p verter_session ${h.pins[0].filter}`;
   const result = validate(dirty);
@@ -187,6 +187,41 @@ test("ARH2-characterization dirty twin: a filter that selects nothing is rejecte
   assert.ok(
     result.errors.some(
       (e) => e.caseId === "ARH2-characterization" && e.code === "pin-filter-selects-nothing",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: a pin whose witnesses compile in another package cannot run under the row's crate (AC2)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_type_engine/src/semantic_query.rs");
+  const pin = h.pins.find((p) => p.crate === "verter_type_engine");
+  delete pin.crate;
+  pin.command = `cargo nextest run -p ${h.crate} ${pin.filter}`;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.caseId === "ARH2-characterization" &&
+        e.code === "pin-filter-selects-nothing" &&
+        e.detail.includes(`is not a compiled module of ${h.crate}`),
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: a pin naming a non-member crate is rejected (AC2)", () => {
+  const dirty = cloneProducts();
+  const h = hotspot(dirty, "crates/verter_type_engine/src/semantic_query.rs");
+  const pin = h.pins.find((p) => p.crate === "verter_type_engine");
+  pin.crate = "verter_no_such_crate";
+  pin.command = `cargo nextest run -p ${pin.crate} ${pin.filter}`;
+  const result = validate(dirty);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some(
+      (e) => e.caseId === "ARH2-characterization" && e.code === "hotspot-crate-unknown",
     ),
     JSON.stringify(result.errors),
   );
@@ -311,7 +346,7 @@ test("ARH2-characterization dirty twin: witness without a test attribute is reje
 });
 
 const COVERAGE_WITNESS =
-  "crates/verter_session/src/project_semantic_dispatch/flow_return_coverage_tests.rs";
+  "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs";
 const COVERAGE_FN = "vue_script_setup_functions_serve_under_the_instance_owner_only";
 
 function withReadOverlay(rel, mutate, run) {
@@ -679,7 +714,7 @@ test("ARH2-separation dirty twin: prewarming the target is not a clean prepare (
     (d) => d.id === "clean-warm-build-time",
   );
   dim.mechanisms.find((recipe) => recipe.cacheState === "clean").prepare =
-    "cargo build -p verter_scheduler -p verter_session";
+    "cargo build -p verter_scheduler -p verter_type_engine -p verter_session";
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
@@ -754,7 +789,7 @@ test("ARH2-separation dirty twin: pinned lane missing from the dimension is reje
   const dirty = cloneProducts();
   const dims = dirty["complexity-measurements"].dimensions;
   const lanes = dims.find((d) => d.id === "production-behavior").mechanisms;
-  lanes.splice(lanes.indexOf("cargo nextest run -p verter_session stable_key_tests"), 1);
+  lanes.splice(lanes.indexOf("cargo nextest run -p verter_type_engine stable_key_tests"), 1);
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(

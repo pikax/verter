@@ -60,9 +60,9 @@ use verter_type_expr::TypeExpr;
 use verter_type_expr_oxc::lower_ts_type;
 
 use crate::analysis::jsdoc::extract_jsdoc_type_at_offset;
-use crate::analysis::types::AnalyzedDefaultValue;
-use crate::facts::hashing::{compute_semantic_hash, UnresolvedLens};
-use crate::facts::registry::SymbolSpace;
+use verter_session_query::analysis::types::AnalyzedDefaultValue;
+use verter_session_query::facts::hashing::{compute_semantic_hash, UnresolvedLens};
+use verter_session_query::facts::registry::SymbolSpace;
 
 use super::{
     FrameworkScriptCandidates, FrameworkScriptFactPayload, NegativeEvidence, ResolvedValidationCx,
@@ -845,7 +845,7 @@ fn specifier_resolves_to_svelte(cx: &ResolvedValidationCx<'_>, specifier: &str) 
 fn capture_svelte_candidates(
     source: &str,
     program: &Program<'_>,
-    top_level_owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
+    top_level_owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     module_region: Option<(u32, u32)>,
     forced_runes: Option<bool>,
     template_uses_host_rune: bool,
@@ -1405,7 +1405,9 @@ pub fn lower_svelte_type_argument_at(
     macro_index: u32,
 ) -> SvelteTypeArgumentLowering {
     let owners =
-        crate::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(program.body.len());
+        verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+            program.body.len(),
+        );
     lower_svelte_type_argument_at_with_owners(
         program,
         source,
@@ -1424,7 +1426,7 @@ pub fn lower_svelte_type_argument_at_with_owners(
     program: &Program<'_>,
     source: &str,
     module_region: Option<(u32, u32)>,
-    owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     expected_owner: verter_type_expr::TopLevelOwnerId,
     macro_index: u32,
 ) -> SvelteTypeArgumentLowering {
@@ -1475,7 +1477,9 @@ pub fn lower_props_annotation_at(
     macro_index: u32,
 ) -> PropsAnnotationLowering {
     let owners =
-        crate::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(program.body.len());
+        verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+            program.body.len(),
+        );
     lower_props_annotation_at_with_owners(
         program,
         source,
@@ -1493,7 +1497,7 @@ pub fn lower_props_annotation_at_with_owners(
     program: &Program<'_>,
     source: &str,
     module_region: Option<(u32, u32)>,
-    owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     expected_owner: verter_type_expr::TopLevelOwnerId,
     macro_index: u32,
 ) -> PropsAnnotationLowering {

@@ -429,13 +429,13 @@ fn gate4_absent_position_is_not_degraded() {
 /// carries a degraded leaf. By construction this is a NEGATIVE gate: real
 /// surfaces keep structural carriers shallow-by-default, so a clean
 /// resolve probes `false` everywhere (see the honest contract on
-/// `shallow_semantic_source_is_degraded`); the masking case it pins absent
+/// `semantic_source_probe::shallow_is_degraded`); the masking case it pins absent
 /// is a degraded field riding a published tree while
 /// `synthesis_should_suppress` is `false`.
 fn published_surface_is_degraded(
     host: &VerterHost,
     owner_canonical: &str,
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> bool {
     let degraded = |position| source_position_is_degraded(host, owner_canonical, position);
     let props = meta.props.iter().any(|p| degraded(&p.type_source));
@@ -504,7 +504,7 @@ fn resolve_with_hard_budget(corpus_root: &Path, basename: &str) -> ComponentOutc
 /// authored source (the fold emits unmaterialized leaves only for
 /// reducer-interned `Opaque` nodes, synthetic member misses, or open
 /// keyspace placeholders — none reachable from authored lowering, per the
-/// honest contract on `shallow_semantic_source_is_degraded`), so the gate
+/// honest contract on `semantic_source_probe::shallow_is_degraded`), so the gate
 /// discriminates on its two real arms: `Some(false)` for clean published
 /// fields, and `None`→degraded (fail-closed) for an unraisable source. The
 /// REAL raise-time positive (a demanded reduction that misses) is pinned
@@ -514,7 +514,7 @@ fn resolve_with_hard_budget(corpus_root: &Path, basename: &str) -> ComponentOutc
 /// never admitted as a complete result.
 #[test]
 fn gate4_masking_case_is_unreachable_on_the_typed_rail() {
-    use verter_session::resolver_core::FactReadSetFinalise;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
 
     let project =
         verter_session::meta::MetaProject::new(VerterHost::new_standalone(HostConfig::default()));
@@ -558,7 +558,7 @@ defineProps<{ present?: import('./types').Present, broken?: Deep['a'] }>()
     // returns None — never a clean Some(false)). THE PINNED PLANT CONTRACT:
     // a `.map(|_| false)` plant on the probe passes (no shallow `Some(true)`
     // positive exists BY CONSTRUCTION — the honest contract on
-    // `shallow_semantic_source_is_degraded`), while a plant that masks the
+    // `semantic_source_probe::shallow_is_degraded`), while a plant that masks the
     // `None` as a clean `Some(false)` turns THIS assertion RED (the
     // fail-closed arm is the shallow gate's only discrimination, by design).
     let missing_source = verter_type_expr::facts::SemanticTypeSource::Authored(

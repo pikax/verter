@@ -1,7 +1,7 @@
 // Document links: make import paths and src attributes clickable.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -132,8 +132,9 @@ fn canonical_id_to_uri(canonical_id: &str) -> Uri {
 mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
-    use verter_semantic::analysis::types::ImportBindingKind;
-    use verter_semantic::analysis::*;
+    use verter_session_query::analysis::types::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedImportBinding;
+    use verter_session_query::analysis::types::ImportBindingKind;
 
     #[test]
     fn test_import_source_span() {

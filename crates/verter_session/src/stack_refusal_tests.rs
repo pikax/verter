@@ -179,7 +179,7 @@ fn flow_return_of_pf(
     host: &VerterHost,
     id: &str,
 ) -> Result<
-    Option<crate::semantic_query::FlowReturnDegradation>,
+    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
     crate::host_flow_return_audit::FlowReturnError,
 > {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
@@ -194,7 +194,7 @@ fn flow_return_of_pf(
     };
     host.get_flow_return_type_with_audit(
         &identity,
-        crate::semantic_query::ReturnProjectionDemand::whole_return(),
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
     )
     .into_result()
     .map(|result| result.degradation())

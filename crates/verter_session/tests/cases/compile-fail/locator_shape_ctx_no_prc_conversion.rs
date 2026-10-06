@@ -6,8 +6,8 @@
 //! added, the matching line would COMPILE and trybuild would fail this
 //! fixture.
 
-use verter_session::semantic_query::ProjectionReductionContext;
-use verter_session::LocatorShapeCtx;
+use verter_type_engine::semantic_query::ProjectionReductionContext;
+use verter_type_engine::project_semantic_dispatch::locator_shape::LocatorShapeCtx;
 
 fn requires_into_prc<T: Into<ProjectionReductionContext>>() {}
 fn requires_asref_prc<T: AsRef<ProjectionReductionContext>>() {}

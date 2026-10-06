@@ -5,7 +5,7 @@
 use crate::resolver_store::HostStoreView;
 use rustc_hash::FxHashMap;
 
-use crate::resolver_core::StoreView;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Files loaded as dependencies DURING resolution (after the store view
 /// snapshot was taken) are not tracked in `whole_hashes`. The validated
@@ -19,27 +19,29 @@ fn validates_accepts_untracked_file_whole_hash() {
     )]));
 
     // Tracked file with matching hash — should validate.
-    assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(view.validates(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/src/Accordion.vue".to_string(),
             hash: [1u8; 16],
-        })
-    );
+        }
+    ));
 
     // Tracked file with mismatching hash — should reject.
-    assert!(
-        !view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(!view.validates(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/src/Accordion.vue".to_string(),
             hash: [2u8; 16],
-        })
-    );
+        }
+    ));
 
     // Untracked dependency file — should accept (loaded after view snapshot).
     assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
-            hash: [42u8; 16],
-        }),
+        view.validates(
+            &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                hash: [42u8; 16],
+            }
+        ),
         "untracked dependency files should be accepted by the store view"
     );
 }
@@ -55,21 +57,25 @@ fn validates_derived_fact_hash_semantics() {
 
     // DirectSource for untracked file — should accept (content-hash alias).
     assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::DirectSource,
-            hash: [99u8; 16],
-        }),
+        view.validates(
+            &verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
+                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
+                kind: verter_session_query::facts::fact_cache::DerivedFactKind::DirectSource,
+                hash: [99u8; 16],
+            }
+        ),
         "DirectSource for untracked file should be accepted"
     );
 
     // Route for untracked file — should NOT accept (invalidation signal).
     assert!(
-        !view.validates(&crate::resolver_core::FactVersionRef::DerivedFactHash {
-            canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
-            kind: crate::resolver_core::DerivedFactKind::Route,
-            hash: [99u8; 16],
-        }),
+        !view.validates(
+            &verter_session_query::facts::fact_cache::FactVersionRef::DerivedFactHash {
+                canonical_id: "/node_modules/reka-ui/dist/index.d.ts".to_string(),
+                kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
+                hash: [99u8; 16],
+            }
+        ),
         "Route derived fact for untracked file should NOT be accepted"
     );
 }
@@ -89,29 +95,31 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
     )]));
 
     // Tracked file — matches.
-    assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(view.validates(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/src/tracked.ts".to_string(),
             hash: [1u8; 16],
-        })
-    );
+        }
+    ));
 
     // Tracked file — mismatched hash rejected.
-    assert!(
-        !view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
+    assert!(!view.validates(
+        &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/src/tracked.ts".to_string(),
             hash: [2u8; 16],
-        })
-    );
+        }
+    ));
 
     // Untracked file — accepted (multi-candidate
     // substrate relies on the candidate's own `fact_dep_signature`
     // to discriminate concurrent generations).
     assert!(
-        view.validates(&crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
-            hash: [42u8; 16],
-        }),
+        view.validates(
+            &verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/node_modules/vue/dist/vue.d.mts".to_string(),
+                hash: [42u8; 16],
+            }
+        ),
         "untracked files are accepted by primary validation in the multi-candidate substrate"
     );
 }
@@ -120,10 +128,10 @@ fn primary_validates_accepts_untracked_file_whole_hash() {
 
 mod file_source_env_validation {
     use super::*;
-    use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
-    use crate::resolver_core::FactVersionRef;
-    use crate::resolver_store::SourceEnvIdentity;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::source::artifact_key::FileArtifactKey;
+    use verter_session_query::source::env_identity::SourceEnvIdentity;
 
     const CONTRIB: &str = "/contrib.d.ts";
     const CONTRIB_HASH: [u8; 16] = [5u8; 16];
@@ -131,7 +139,7 @@ mod file_source_env_validation {
     fn live_identity() -> SourceEnvIdentity {
         SourceEnvIdentity {
             parse_env_hash: ParseEnvHash::from_env_hash([3u8; 16]),
-            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(CONTRIB, 2),
+            parse_key: verter_session_query::source::toolchain::parse_key_for_test(CONTRIB, 2),
             file_language_id: FileArtifactKey::synthetic_file_language_for_test(CONTRIB),
         }
     }
@@ -145,7 +153,7 @@ mod file_source_env_validation {
         FactVersionRef::FileSourceEnv {
             canonical_id: canonical.to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
-            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(
+            parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                 language_of,
                 parse_marker,
             ),
@@ -283,12 +291,11 @@ mod file_source_env_validation {
 // ── `hash_route_surface` — purity pin + per-state memoization ──
 
 mod route_surface_hash {
-    use crate::resolver_core::shallow_file_state::{
-        ExportTarget, ImportTarget, ShallowFileState, WildcardReexport,
-    };
+    use crate::resolver_core::shallow_file_state::ShallowFileState;
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
-    use verter_semantic::analysis::Hash16;
+    use verter_session_query::analysis::types::Hash16;
+    use verter_session_query::inputs::shallow::{ExportTarget, ImportTarget, WildcardReexport};
 
     fn parsed_state(
         canonical: &str,
@@ -361,7 +368,7 @@ mod route_surface_hash {
             import_locals,
             import_targets,
             Arc::new(
-                verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+                verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
             ),
         )
     }
@@ -640,8 +647,8 @@ mod route_surface_hash {
             canonical,
             vec![verter_workspace::ExactResolution {
                 specifier: "./dep".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 resolved_canonical_id: Some("/src/other.ts".to_string()),
                 possible_canonical_ids: vec!["/src/other.ts".to_string()],
             }],
@@ -663,7 +670,7 @@ mod route_surface_hash {
 // the same `routed_state` fixture.
 mod route_surface_hash_memo {
     use super::route_surface_hash::routed_state;
-    use crate::resolver_core::shallow_file_state::ExportTarget;
+    use verter_session_query::inputs::shallow::ExportTarget;
 
     /// The memo populates on the state's FIRST hash and every later call
     /// returns the identical value; a CLONE starts with an EMPTY memo
@@ -723,11 +730,14 @@ mod route_surface_hash_memo {
 
 mod syntactic_route_interface_fact {
     use super::route_surface_hash::routed_state;
-    use crate::resolver_core::{FactReadSetFinalise, FactVersionRef, StoreView};
     use crate::types::{FileLanguage, HostConfig, UpsertRequest};
     use crate::VerterHost;
     use std::sync::Arc;
-    use verter_semantic::facts::{FactKey, FactLane};
+    use verter_session_query::facts::store_view::StoreView;
+    use verter_session_query::facts::{
+        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
+    };
+    use verter_session_query::facts::{FactKey, FactLane};
 
     fn upsert(host: &VerterHost, source: &str) {
         let _ = host
@@ -784,10 +794,10 @@ mod syntactic_route_interface_fact {
         let host = VerterHost::new_standalone(HostConfig::default());
         upsert(&host, "export const value = 1;\n");
 
-        let (_, read_set) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                host.ensure_indexed_ready("/src/route.ts")
-            });
+        let (_, read_set) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || host.ensure_indexed_ready("/src/route.ts"),
+        );
         let FactReadSetFinalise::Ok(facts) = read_set.finalise() else {
             panic!("a published indexed serve must finalize its route-only read set");
         };
@@ -802,7 +812,7 @@ mod syntactic_route_interface_fact {
             fact,
             FactVersionRef::DerivedFactHash {
                 canonical_id,
-                kind: crate::resolver_core::DerivedFactKind::Route,
+                kind: verter_session_query::facts::fact_cache::DerivedFactKind::Route,
                 ..
             } if canonical_id == "/src/route.ts"
         )));

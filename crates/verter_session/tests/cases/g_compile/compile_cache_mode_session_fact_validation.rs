@@ -19,9 +19,10 @@
 //! fail against that tree and pass against the corrected one.
 
 use verter_session::{
-    CompileCacheMode, CompileProfile, FileLanguage, ReadSetSignature, UpsertRequest, VerterHost,
-    VirtualNodeKind, VirtualQuery,
+    CompileCacheMode, CompileProfile, FileLanguage, UpsertRequest, VerterHost, VirtualNodeKind,
+    VirtualQuery,
 };
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
     let _ = host

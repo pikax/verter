@@ -9,7 +9,7 @@ fn config_discovery_priority_order() {
         crate::filesystem::FilesystemOptions::default(),
     );
     let tmp = tempfile::TempDir::new().unwrap();
-    let project_root = verter_semantic::resolver_core::normalize_canonical_id(
+    let project_root = verter_session_query::resolution::normalize_canonical_id(
         &tmp.path().to_string_lossy().replace('\\', "/"),
     );
 
@@ -28,7 +28,7 @@ fn config_discovery_priority_order() {
 
     // Remove .ts, should fall back to .js
     std::fs::remove_file(tmp.path().join("vite.config.ts")).unwrap();
-    let deleted_path = verter_semantic::resolver_core::normalize_canonical_id(
+    let deleted_path = verter_session_query::resolution::normalize_canonical_id(
         &tmp.path()
             .join("vite.config.ts")
             .to_string_lossy()

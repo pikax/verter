@@ -24,15 +24,18 @@
 //! (not re-pinned here with a heavy direct unit test); this file's direct
 //! coverage is the artifact/sink parity plus the `defineModel` demand round-trip.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 use super::{materialize_admitted_expansion_node, AdmittedExpansionNode};
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{DepVersion, PrimitiveKind, SemanticNodeData, SemanticNodeId};
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    DepVersion, PrimitiveKind, SemanticNodeData, SemanticNodeId,
+};
 
 /// A caller-side fallback source clearly DISTINCT from every leaf fact the
 /// sink can project, so an assertion on the sink output discriminates
@@ -48,7 +51,7 @@ fn distinct_fallback_source() -> SemanticTypeSource {
 /// shell raise). Used to CONFIRM a node's resolved shape while asserting the
 /// sink's content-free SOURCE projection.
 fn shell_raise_oracle(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<TypeExpr> {
     dispatch.materialize_output_type_expr_for_test(node)
@@ -73,7 +76,7 @@ fn sink_preserves_fallback_source_for_non_leaf_carrier_node() {
     // produces. It is a NON-leaf, so the sink preserves the fallback source.
     let node = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("ModelValue"),
-        crate::semantic_query::NodeScopeId::Global,
+        verter_type_engine::semantic_query::NodeScopeId::Global,
         Arc::from(Vec::new().into_boxed_slice()),
     ));
     // Confirm the node resolves to a bare ref (fixture premise).
@@ -116,7 +119,7 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![string_id, number_id].into_boxed_slice(),
         )),
     ));
@@ -125,7 +128,7 @@ fn sink_projects_leaf_fact_or_preserves_fallback_across_carrier_shapes() {
         readonly: false,
     });
     let mixed_union = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![string_id, array].into_boxed_slice(),
         )),
     ));
@@ -218,7 +221,7 @@ fn node_bearing_artifact_preserves_node_and_metadata() {
     // constructor that DROPS / zeroes `dep_signature` (rather than storing the
     // arg verbatim) FAILS — an empty-signature round-trip would not discriminate
     // a field-dropping ctor.
-    let dep: crate::semantic_query::DepSignature = Arc::from(vec![(
+    let dep: verter_type_engine::semantic_query::DepSignature = Arc::from(vec![(
         Arc::<str>::from("dep-a"),
         DepVersion::WholeHash([7u8; 16]),
     )]);
@@ -303,7 +306,9 @@ const model = defineModel<ModelValue>()
     let macro_index = snapshot
         .macros
         .iter()
-        .position(|m| m.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+        .position(|m| {
+            m.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel
+        })
         .expect("the SFC declares a defineModel macro");
 
     // The model's fallback SOURCE is its own T — the macro type-argument
@@ -324,7 +329,7 @@ const model = defineModel<ModelValue>()
     // the authored fallback source — no node crosses in. The sink resolves the
     // carrier head internally.
     let outcome = expand_define_model_output(
-        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host),
+        &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host),
         "/Model.vue",
         macro_index,
         &model_fallback,
@@ -347,12 +352,13 @@ const model = defineModel<ModelValue>()
     // structurally, then pin that the published source demand-materialises
     // BYTE-EQUAL to the demand of that same identity through the one engine
     // (the parity the former Expanded-time shell-raise oracle pinned).
-    let produced_data = crate::project_semantic_dispatch::node_data_for(
+    let produced_data = verter_type_engine::project_semantic_dispatch::node_data_for(
         host.project_type_store().semantic_graph(),
         produced_node_id,
     )
     .expect("the produced carrier-head node is present in the graph");
-    let crate::semantic_query::SemanticNodeData::DeclRef { identity } = produced_data.as_ref()
+    let verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity } =
+        produced_data.as_ref()
     else {
         panic!(
             "the Navigate-published defineModel carrier head must be the model type's \
@@ -432,7 +438,7 @@ const x = 1
     let _ = host.get_raw_analysis_snapshot("/Empty.vue");
 
     let outcome = expand_define_model_output(
-        &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host),
+        &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host),
         "/Empty.vue",
         9999,
         &distinct_fallback_source(),

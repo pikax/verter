@@ -27,9 +27,9 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::ReturnProjectionDemand;
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::ReturnProjectionDemand;
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 

@@ -1,0 +1,5 @@
+error[E0599]: no method named `map_ty` found for struct `GatedLeaf` in the current scope
+ --> tests/compile-fail/flow_gated_leaf_has_no_arbitrary_rewrite.rs:7:10
+  |
+7 |     leaf.map_ty(|ty| ty)
+  |          ^^^^^^ method not found in `GatedLeaf`

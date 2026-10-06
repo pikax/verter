@@ -2,14 +2,13 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_solver::{PreparedTypeDecl, PreparedValueDecl};
+use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
+use crate::resolver_core::request_bound::{RequestBoundAdapter, RequestBoundLifecycle};
 use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-use crate::resolver_core::resolver_context::{
-    RequestBoundAdapter, RequestBoundLifecycle, ResolverContext,
-};
 use crate::resolver_store::HostStoreView;
+use verter_type_engine::resolver_core::resolver_context::ResolverContext;
 
 pub struct HostRequestLifecycle<'a> {
     inner: &'a crate::VerterHost,
@@ -97,7 +96,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_decl_bundle(
         &self,
-        _ctx: &dyn ResolverContext,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
     ) -> Option<Arc<PreparedDeclBundle>> {
         self.inner.prepared_decl_bundle_with_store_view(
@@ -109,13 +108,13 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_type_decl(
         &self,
-        _ctx: &dyn ResolverContext,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedTypeDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.inner.prepared_type_decl_in_with_store_view(
             &self.view,
@@ -128,13 +127,13 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_value_decl(
         &self,
-        _ctx: &dyn ResolverContext,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
         Option<Arc<PreparedValueDecl>>,
-        crate::resolver_core::prepared_decl::PreparationFailure,
+        verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.inner.prepared_value_decl_in_with_store_view(
             &self.view,
@@ -149,7 +148,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_bare_host_ctx_for_test<R>(
     host: &crate::VerterHost,
-    f: impl FnOnce(&(dyn ResolverContext + Sync)) -> R,
+    f: impl FnOnce(&(dyn crate::resolver_core::HostRequestContext + Sync)) -> R,
 ) -> R {
     let view = crate::VerterHost::resolver_store_view(host).into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());

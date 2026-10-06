@@ -3,16 +3,23 @@ use std::cell::Cell;
 use std::sync::{Arc, OnceLock};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::type_solver::prepared::PreparedExternalDep;
-use verter_semantic::analysis::type_solver::{
+use verter_session_query::type_solver::prepared::PreparedExternalDep;
+use verter_session_query::type_solver::{
     PreparedTypeDecl, PreparedValueDecl, ResolvedRootIdentity,
 };
 use verter_type_expr::TopLevelOwnerId;
 
-use super::shallow_file_state::ClassifiedTypeDeps;
-use super::{ExportTarget, ShallowFileState};
-use crate::decl_body_memo::{DemandOutcome, LoweredTypeDecl, LoweredValueDecl};
-use crate::identity_interner::IdentityInterner;
+use super::ShallowFileState;
+use verter_semantic_source::decl_body_memo::{LoweredTypeDecl, LoweredValueDecl};
+use verter_session_query::inputs::prepared::{
+    ImportBinding, PreparationFailure, PreparedDeclOutcome, PreparedOwnerScope,
+    PreparedTypeDeclResolution, TypeParamBinding,
+};
+use verter_session_query::inputs::shallow::ClassifiedTypeDeps;
+use verter_session_query::inputs::shallow::ExportTarget;
+use verter_session_query::source::demand::DemandOutcome;
+use verter_type_engine::fact_tracing::PreparedDeclOutcomeFold;
+use verter_type_engine::identity_interner::IdentityInterner;
 
 #[path = "prepared_decl_type_prep.rs"]
 mod type_prep;
@@ -60,84 +67,6 @@ type OwnerNameResolutionBases =
 /// `PreparedTypeDecl::name_resolution` for the sharing + interning contract.
 type SharedNameResolutionBase = Arc<FxHashMap<Arc<str>, ResolvedRootIdentity>>;
 
-/// Outcome of a lease-aware prepared-decl build. A genuine `Ready(None)` (the
-/// symbol is not inventoried, is an import-local, or lowered to no decl) is a
-/// cacheable absence; a `LeaseMiss` (a broken decl-body lease pin — the
-/// demanded body lowering ReturnOnly'd, lowering NOTHING) is a TRANSIENT
-/// no-warm signal a cache-admitting consumer must NOT persist as absence, so a
-/// later demand under a live lease recovers. Never collapse the two at a
-/// warm-admission boundary (the write-once prepared-decl slot).
-pub(crate) use super::request_inputs::PreparedDeclOutcome;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PreparationFailure {
-    MissingExternalOwner { local_name: String },
-    AuthoredOrdinalOverflow { count: usize },
-}
-
-/// Projection-facing prepared-declaration lookup.
-///
-/// Strict prepared declarations are the only values admitted to the shared
-/// cache. When strict preparation fails solely because an exact authored
-/// declaration references an unresolved import, projection may consume an
-/// ephemeral declaration that retains the known authored shape while carrying
-/// typed unresolved-owner debt. The declaration is never written into a slot;
-/// the projection must run the normal resolver and classify the result partial
-/// only if that exact debt remains unresolved at query exit.
-#[derive(Debug, Clone)]
-pub enum PreparedTypeDeclResolution {
-    Complete(Arc<PreparedTypeDecl>),
-    AuthoredPartial {
-        root_identity: ResolvedRootIdentity,
-        declaration: Arc<PreparedTypeDecl>,
-        failure: PreparationFailure,
-    },
-    Missing,
-    Failed {
-        root_identity: ResolvedRootIdentity,
-        failure: PreparationFailure,
-    },
-}
-
-impl PreparedTypeDeclResolution {
-    #[must_use]
-    pub fn is_missing(&self) -> bool {
-        matches!(self, Self::Missing)
-    }
-}
-
-impl<T> PreparedDeclOutcome<T> {
-    /// Collapse to the plain `Option` for direct/standalone callers
-    /// (`prepare_exported_*`, tests) that do NOT admit into the write-once
-    /// slot cache: a lease-miss reads as `None` there (they recompute on the
-    /// next call, warm-poisoning nothing).
-    ///
-    /// The `LeaseMiss` arm marks the generalized non-cacheability rail so an
-    /// enclosing traced compute that folds this transient miss refuses its
-    /// own shared-cache admission; a `Ready(None)` cacheable absence marks
-    /// nothing.
-    pub(crate) fn into_result(self) -> Result<Option<T>, PreparationFailure> {
-        match self {
-            PreparedDeclOutcome::Ready(value) => Ok(value),
-            PreparedDeclOutcome::LeaseMiss => {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
-                );
-                Ok(None)
-            }
-            PreparedDeclOutcome::Failed(failure) => Err(failure),
-        }
-    }
-}
-
-/// Import binding: maps a local import name to its resolved target.
-/// Used by the declaration-scope solver host to resolve cross-file references.
-#[derive(Debug, Clone)]
-pub struct ImportBinding {
-    pub canonical_id: String,
-    pub exported_name: String,
-}
-
 /// FINAL defining-file canonicalization of a file's import targets, computed
 /// at bundle materialization through the SAME route authority the carrier
 /// fallback / dispatch fallthrough use, so the eager/prepared `name_resolution`
@@ -158,38 +87,6 @@ pub struct ImportCanonicalization {
     /// every resolvable import, canonicalized through the authoritative type or
     /// value route rail.
     pub final_resolution: FxHashMap<verter_type_expr::DeclBindingKey, ResolvedRootIdentity>,
-}
-
-/// Script-setup generic type-parameter binding for
-/// `<script setup lang="ts" generic="T extends Item = Item">`
-/// parameters.
-///
-/// The binding carries ONLY the parameter name plus its 0-based clause
-/// ordinal — the content-free FACT pair. The declaration-site `extends`
-/// constraint and `=` default are NEVER stored: at query time the ONE
-/// dispatch lowering helper re-borrows the full parameter clause lease-only
-/// from the pinned [`crate::project_type_store::IndexedReady`] (raw source +
-/// framework parse) and selects + validates the transient parameter by
-/// `(ordinal, name)`, interning its bounds into
-/// [`SemanticNodeData::TypeParam`](crate::semantic_query::SemanticNodeData::TypeParam)
-/// via `shallow_lower_type_expr`. `PreparedTypeDecl` would be the
-/// wrong category for this data — type parameters do not have alias
-/// bodies, scope-local `name_resolution`, or the rest of the
-/// prepared-decl surface.
-///
-/// `ordinal` carries the 0-based clause position into the lowered
-/// `SemanticNodeData::TypeParam.param_index`, disambiguating same-name
-/// parameters across multiple script-setup declarations within one
-/// file.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
-pub struct TypeParamBinding {
-    pub name: Arc<str>,
-    /// 0-based position in the
-    /// `<script setup generic="T, U, V">` clause, used as
-    /// [`SemanticNodeData::TypeParam.param_index`](crate::semantic_query::SemanticNodeData::TypeParam)
-    /// so multiple script-setup parameters in one file get distinct
-    /// identity tuples.
-    pub ordinal: u16,
 }
 
 /// Canonicalize ONE import target to the FINAL defining-file identity for the
@@ -307,7 +204,7 @@ fn prepare_local_type_decl_outcome_with_base(
     shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
 ) -> PreparedDeclOutcome<PreparedTypeDecl> {
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
     // A name absent from the file surface but present in the file's own
     // `declare global { ... }` inventory resolves to the merged global
     // declaration. Global augmentations are visible from any scope, so a bare
@@ -401,7 +298,7 @@ fn prepare_local_type_decl_outcome_with_base(
 pub fn prepare_augmentation_type_decl(
     canonical_id: &str,
     state: &ShallowFileState,
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
     import_canonicalization: &ImportCanonicalization,
@@ -422,7 +319,7 @@ pub fn prepare_augmentation_type_decl(
 pub fn prepare_augmentation_type_decl_in(
     canonical_id: &str,
     state: &ShallowFileState,
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
@@ -448,7 +345,7 @@ pub fn prepare_augmentation_type_decl_in(
 pub(crate) fn prepare_augmentation_type_decl_outcome_in(
     canonical_id: &Arc<str>,
     state: &ShallowFileState,
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
     dep_edges: Option<&FxHashMap<String, String>>,
@@ -915,7 +812,7 @@ impl PreparedTypeDeclCache {
 
     fn prepare_augmentation_type_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedDeclOutcome<PreparedTypeDecl> {
@@ -960,7 +857,7 @@ impl PreparedTypeDeclCache {
     /// `prepared_decl_bundle_with_context`) carries the overlay's
     /// `ShallowFileState`, so the hash reflects whatever view the
     /// bundle was built from.
-    pub fn defining_content_hash(&self) -> verter_semantic::analysis::Hash16 {
+    pub fn defining_content_hash(&self) -> verter_session_query::analysis::types::Hash16 {
         self.state.whole_hash
     }
 
@@ -1038,8 +935,8 @@ impl PreparedTypeDeclCache {
                 // (retry on the next live-lease demand) AND mark the
                 // generalized non-cacheability rail so an enclosing traced
                 // compute refuses admission.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)
             }
@@ -1154,7 +1051,7 @@ impl PreparedValueDeclCache {
     /// per-owner base every value declaration of the file shares).
     fn prepare_augmentation_value_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedDeclOutcome<PreparedValueDecl> {
@@ -1295,8 +1192,8 @@ impl PreparedValueDeclCache {
                 // (retry on the next live-lease demand) AND mark the
                 // generalized non-cacheability rail so an enclosing traced
                 // compute refuses admission.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss,
                 );
                 Ok(None)
             }
@@ -1326,23 +1223,6 @@ impl PreparedValueDeclCache {
     }
 }
 
-/// Owner-exact declaration-scope surfaces retained by a prepared bundle.
-///
-/// The lexical owner is the key in [`PreparedDeclBundle::owner_scopes`], so
-/// every map here can stay string-keyed without aliasing a same-name binding
-/// from another script region.
-#[derive(Clone, Default)]
-pub struct PreparedOwnerScope {
-    /// Resolved imports visible in this lexical owner.
-    pub import_bindings: FxHashMap<String, ImportBinding>,
-    /// Same-file type names visible in this lexical owner.
-    pub scope_type_names: FxHashSet<String>,
-    /// Same-file value names visible in this lexical owner.
-    pub scope_value_names: FxHashSet<String>,
-    /// Script-setup generic parameters visible in this lexical owner.
-    pub script_setup_type_bindings: FxHashMap<String, TypeParamBinding>,
-}
-
 /// Atomic declaration-surface bundle for one canonical file.
 ///
 /// Valid as long as its `ImportRoute` and `FileWholeHash` facts match the
@@ -1350,15 +1230,16 @@ pub struct PreparedOwnerScope {
 /// import graph or file content changes.
 #[derive(Clone)]
 pub struct PreparedDeclBundle {
-    input_projection:
-        super::request_inputs::CachedProjection<super::request_inputs::PreparedInputRecord>,
+    input_projection: super::request_inputs::CachedProjection<
+        verter_session_query::inputs::prepared::PreparedInputRecord,
+    >,
     /// The content version (`ShallowFileState::whole_hash`) of the
     /// canonical file this bundle was built from. A consumer that
     /// resolves a declaration through this bundle and roots a cache
     /// entry on the bundle's declaring file reads this — an OBSERVED
     /// identity captured when the bundle was materialised, never a
     /// current-content re-read at the consumer's signature-build time.
-    pub owner_whole_hash: crate::resolver_core::ResolverHash16,
+    pub owner_whole_hash: verter_session_query::facts::store_view::ResolverHash16,
     pub prepared_type_decls: PreparedTypeDeclCache,
     pub prepared_value_decls: PreparedValueDeclCache,
     /// The dep_edges snapshot used to build this bundle.
@@ -1372,9 +1253,11 @@ pub struct PreparedDeclBundle {
 }
 
 impl PreparedDeclBundle {
-    pub(crate) fn input_record(&self) -> Arc<super::request_inputs::PreparedInputRecord> {
-        self.input_projection
-            .get_or_init(|| super::request_inputs::PreparedInputRecord {
+    pub(crate) fn input_record(
+        &self,
+    ) -> Arc<verter_session_query::inputs::prepared::PreparedInputRecord> {
+        self.input_projection.get_or_init(|| {
+            verter_session_query::inputs::prepared::PreparedInputRecord {
                 observation_id: {
                     static NEXT_OBSERVATION: std::sync::atomic::AtomicU64 =
                         std::sync::atomic::AtomicU64::new(1);
@@ -1382,7 +1265,8 @@ impl PreparedDeclBundle {
                 },
                 owner_whole_hash: self.owner_whole_hash,
                 owner_scopes: Arc::clone(&self.owner_scopes),
-            })
+            }
+        })
     }
 
     /// Exact declaration scope for `owner`.
@@ -1395,7 +1279,7 @@ impl PreparedDeclBundle {
     /// dependency edges, and exact import canonicalization as this bundle.
     pub(crate) fn prepare_augmentation_type_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedDeclOutcome<PreparedTypeDecl> {
@@ -1408,7 +1292,7 @@ impl PreparedDeclBundle {
     /// environment as this bundle's own value declarations.
     pub(crate) fn prepare_augmentation_value_decl_outcome_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         symbol_name: &str,
     ) -> PreparedDeclOutcome<PreparedValueDecl> {
@@ -1424,7 +1308,7 @@ impl PreparedDeclBundle {
     #[cfg(test)]
     pub(crate) fn prepare_augmentation_type_decl_in(
         &self,
-        scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        scope: &verter_session_query::declarations::AugmentationScopeKind,
         owner: TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<Option<PreparedTypeDecl>, PreparationFailure> {
@@ -1560,8 +1444,8 @@ pub fn build_prepared_type_decl_cache(
     // fallback when it is the one block declaring the name.
     for (scope, key) in state.augmentation_type_decl_keys() {
         let addressable = match scope {
-            verter_semantic::analysis::type_eval::AugmentationScopeKind::Global => true,
-            verter_semantic::analysis::type_eval::AugmentationScopeKind::Module(_) => {
+            verter_session_query::declarations::AugmentationScopeKind::Global => true,
+            verter_session_query::declarations::AugmentationScopeKind::Module(_) => {
                 state.type_fallback_augmentation_scope(key.owner, key.name.as_ref())
                     == Some(scope.clone())
             }

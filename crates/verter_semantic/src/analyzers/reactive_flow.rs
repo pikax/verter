@@ -6,8 +6,10 @@
 use serde::{Deserialize, Serialize};
 use verter_span::Span;
 
-use crate::facts::binding::BindingDeclaration;
-use crate::facts::reactivity::{ProvenanceStepKind, ReactivityFact, ReactivityStatus};
+use verter_session_query::facts::binding::BindingDeclaration;
+use verter_session_query::facts::reactivity::{
+    ProvenanceStepKind, ReactivityFact, ReactivityStatus,
+};
 
 /// A reactive flow issue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,15 +68,15 @@ pub fn analyze_reactive_flow(
             let has_template_usage = decl
                 .usages
                 .iter()
-                .any(|u| u.block == crate::facts::binding::UsageBlock::Template);
+                .any(|u| u.block == verter_session_query::facts::binding::UsageBlock::Template);
             let has_style_usage = decl
                 .usages
                 .iter()
-                .any(|u| u.block == crate::facts::binding::UsageBlock::Style);
+                .any(|u| u.block == verter_session_query::facts::binding::UsageBlock::Style);
             let has_script_usage = decl
                 .usages
                 .iter()
-                .any(|u| u.block == crate::facts::binding::UsageBlock::Script);
+                .any(|u| u.block == verter_session_query::facts::binding::UsageBlock::Script);
 
             if !has_template_usage && !has_style_usage && !has_script_usage {
                 issues.push(ReactiveFlowIssue {
@@ -94,7 +96,7 @@ pub fn analyze_reactive_flow(
             let used_in_template = decl
                 .usages
                 .iter()
-                .any(|u| u.block == crate::facts::binding::UsageBlock::Template);
+                .any(|u| u.block == verter_session_query::facts::binding::UsageBlock::Template);
 
             if used_in_template {
                 issues.push(ReactiveFlowIssue {
@@ -116,8 +118,8 @@ pub fn analyze_reactive_flow(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facts::binding::{BindingKind, BindingUsage, UsageBlock, UsageKind};
-    use crate::facts::reactivity::{ProvenanceStep, ReactivitySource};
+    use verter_session_query::facts::binding::{BindingKind, BindingUsage, UsageBlock, UsageKind};
+    use verter_session_query::facts::reactivity::{ProvenanceStep, ReactivitySource};
 
     fn make_decl(name: &str, usages: Vec<BindingUsage>) -> BindingDeclaration {
         BindingDeclaration {

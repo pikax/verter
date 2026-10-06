@@ -33,10 +33,10 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+use verter_session_query::resolution::IdeProjectCompilerOptions;
+use verter_session_query::resolution::ProjectId;
 use verter_workspace::{
-    MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectId, ProjectRank, VfsProjectConfig,
-    WorkspaceAccess,
+    MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
 fn build_multi_project_workspace() -> Arc<MemoryWorkspace> {

@@ -17,7 +17,7 @@
 //! between them proves the crate-root surface is a re-export of the membership
 //! module's nominal type rather than a second vocabulary.
 
-use verter_workspace::fact_read_set::FactReadSet;
+use verter_session_query::facts::fact_read_set::FactReadSet;
 use verter_workspace::membership::FallbackMembership;
 use verter_workspace::membership::ProjectMembership as MembershipModuleProjectMembership;
 use verter_workspace::membership::SupportedExtensions;
@@ -45,7 +45,7 @@ fn stay_class_definitions_remain_owned_by_the_workspace_crate() {
     // `CANDIDATE_CAP` is a value, not a type: reading it proves the constant is
     // still exported here, and asserting its value would be asserting policy
     // this file does not own, so only its presence and type are checked.
-    let cap: usize = verter_workspace::fact_cache::CANDIDATE_CAP;
+    let cap: usize = verter_session_query::facts::fact_cache::CANDIDATE_CAP;
     assert!(
         cap > 0,
         "CANDIDATE_CAP must remain a positive workspace-owned bound"

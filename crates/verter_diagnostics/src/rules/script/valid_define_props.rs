@@ -1,4 +1,4 @@
-﻿//! Rule: valid-define-props
+//! Rule: valid-define-props
 //!
 //! Validates that `defineProps` is used correctly:
 //! - Only one `defineProps` call per component
@@ -7,7 +7,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct ValidDefineProps;
 
@@ -50,8 +51,8 @@ impl LintRule for ValidDefineProps {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::types::AnalyzedMacro;
 
-    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

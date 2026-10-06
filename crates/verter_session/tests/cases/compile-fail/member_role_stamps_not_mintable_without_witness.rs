@@ -8,7 +8,7 @@
 //! convention. If an inner field were ever made public, these lines would
 //! COMPILE and trybuild would fail this fixture.
 
-use verter_session::semantic_query::{MacroOwnBodyStamp, MemberMergeRole, MergeRoleStamp};
+use verter_type_engine::semantic_query::{MacroOwnBodyStamp, MemberMergeRole, MergeRoleStamp};
 
 fn main() {
     let _ = MacroOwnBodyStamp(true);

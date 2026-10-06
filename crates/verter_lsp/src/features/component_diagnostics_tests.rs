@@ -1,10 +1,10 @@
 use super::*;
-use verter_semantic::analysis::template::{
+use verter_session_query::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };
-use verter_semantic::analysis::types::AnalyzedMacro;
-use verter_semantic::analysis::types::VueApiCallSite;
+use verter_session_query::analysis::types::AnalyzedMacro;
+use verter_session_query::analysis::types::VueApiCallSite;
 
 /// Wrap a hand-built analysis snapshot as a child that inherits NOTHING.
 ///
@@ -834,35 +834,40 @@ fn make_child_with_prop_emit_pair(props: &[&str], emits: &[&str]) -> FileAnalysi
     let mut define_props = macro_shell(AnalyzedMacroKind::DefineProps);
     define_props.prop_fields = props
         .iter()
-        .map(|name| verter_semantic::analysis::AnalyzedPropField {
-            name: (*name).to_string(),
-            span: verter_span::Span::new(0, 0),
-            type_annotation: Some("string".into()),
-            is_optional: false,
-            description: None,
-            tags: vec![],
-            resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
-            resolution_error: None,
-            payload: None,
-            type_expr_scope: None,
-            declared_in_macro_type_arg: true,
-            constructor_bindings: Vec::new(),
-        })
+        .map(
+            |name| verter_session_query::analysis::types::AnalyzedPropField {
+                name: (*name).to_string(),
+                span: verter_span::Span::new(0, 0),
+                type_annotation: Some("string".into()),
+                is_optional: false,
+                description: None,
+                tags: vec![],
+                resolution_source:
+                    verter_session_query::analysis::types::TypeResolutionSource::Rust,
+                resolution_error: None,
+                payload: None,
+                type_expr_scope: None,
+                declared_in_macro_type_arg: true,
+                constructor_bindings: Vec::new(),
+            },
+        )
         .collect();
 
     let mut define_emits = macro_shell(AnalyzedMacroKind::DefineEmits);
     define_emits.emit_fields = emits
         .iter()
-        .map(|name| verter_semantic::analysis::AnalyzedEmitField {
-            name: (*name).to_string(),
-            span: verter_span::Span::new(0, 0),
-            call_signature_span: None,
-            payload_type: None,
-            description: None,
-            tags: vec![],
-            payload: None,
-            payload_expr_scope: None,
-        })
+        .map(
+            |name| verter_session_query::analysis::types::AnalyzedEmitField {
+                name: (*name).to_string(),
+                span: verter_span::Span::new(0, 0),
+                call_signature_span: None,
+                payload_type: None,
+                description: None,
+                tags: vec![],
+                payload: None,
+                payload_expr_scope: None,
+            },
+        )
         .collect();
 
     FileAnalysisSnapshot {
@@ -1379,7 +1384,7 @@ fn attr_reaching_the_dom_through_a_component_root_is_not_unknown() {
 
 /// Helper: child with DefineProps macro prop_fields, NO template.prop_definitions.
 fn make_child_with_macro_props(prop_names: &[&str]) -> FileAnalysisSnapshot {
-    use verter_semantic::analysis::types::{AnalyzedPropField, TypeResolutionSource};
+    use verter_session_query::analysis::types::{AnalyzedPropField, TypeResolutionSource};
 
     FileAnalysisSnapshot {
         macros: vec![AnalyzedMacro {
@@ -1468,7 +1473,7 @@ fn macro_fallback_unknown_prop_flagged() {
 #[test]
 fn macro_fallback_with_defaults_pattern() {
     // withDefaults wraps defineProps — the inner DefineProps macro has the real props
-    use verter_semantic::analysis::types::{AnalyzedPropField, TypeResolutionSource};
+    use verter_session_query::analysis::types::{AnalyzedPropField, TypeResolutionSource};
 
     let child = FileAnalysisSnapshot {
         macros: vec![
@@ -1636,7 +1641,7 @@ fn make_child_with_required_slots(slot_names: &[(&str, bool)]) -> FileAnalysisSn
             slot_fields: slot_names
                 .iter()
                 .map(
-                    |(name, required)| verter_semantic::analysis::AnalyzedSlotField {
+                    |(name, required)| verter_session_query::analysis::types::AnalyzedSlotField {
                         props_anchor: Default::default(),
                         name: name.to_string(),
                         is_required: *required,

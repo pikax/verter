@@ -51,7 +51,7 @@ fn workspace_project(files: &[(&str, &str)]) -> Arc<MetaProject> {
 
 /// Sorted prop names from a component-meta result.
 fn prop_names(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Vec<String> {
     let mut names: Vec<String> = meta.props.iter().map(|p| p.name.clone()).collect();
     names.sort();

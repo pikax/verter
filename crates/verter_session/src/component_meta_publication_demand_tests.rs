@@ -46,12 +46,12 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::{CaptureToken, DispatchEntry};
-use crate::semantic_query::{
-    ProjectionMode, ProjectionReductionContext, ReductionDemand, SemanticQueryKey,
-};
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::capture_token::{CaptureToken, DispatchEntry};
+use verter_type_engine::semantic_query::{
+    ProjectionMode, ProjectionReductionContext, ReductionDemand, SemanticQueryKey,
+};
 use verter_type_expr::TypeExpr;
 
 /// Tight per-test projection budget: small enough that the eager
@@ -70,7 +70,7 @@ fn make_workspace_project_config(root: &str) -> verter_workspace::VfsProjectConf
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
@@ -148,7 +148,7 @@ fn published_expanded_dispatches(log: &[DispatchEntry]) -> Vec<String> {
 /// the typeof-lane guards unreported).
 #[test]
 fn published_expanded_classifier_sees_every_context_bearing_family() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         InstantiateContext, ScopeId, SemanticNodeId, TypeOfContext, ValueRootKey,
         ValueRootSlotIdentity,
     };
@@ -181,13 +181,13 @@ fn published_expanded_classifier_sees_every_context_bearing_family() {
         "a Navigate-demand TypeOf key must NOT be flagged"
     );
 
-    let instantiate = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        crate::semantic_query::DeclIdentity::synthetic("X").to_type_slot_unscoped(),
+    let instantiate = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::DeclIdentity::synthetic("X").to_type_slot_unscoped(),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         InstantiateContext::non_file(
             published_expanded,
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
     assert!(key_is_published_expanded(&instantiate));
@@ -819,7 +819,7 @@ defineProps<SelectorProps>()
 "#;
 
 fn assert_authored_selector_fixture_exercised(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) {
     let actions = meta
         .props
@@ -1014,13 +1014,14 @@ fn key_is_published_any_mode(key: &SemanticQueryKey) -> bool {
 /// under the transit demand.
 #[test]
 fn relation_oracle_record_target_normalisation_records_no_published_context() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         DeclIdentity, LiteralValue, PrimitiveKind, QueryResult, RelationResult, SemanticNodeData,
         SemanticQueryApi, SemanticQueryOutput,
     };
 
     let host = build_host(&[("/workspace/src/schema.ts", ORACLE_SCHEMA_TS)]);
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let graph = std::sync::Arc::clone(host.project_type_store().semantic_graph());
 
     // Pre-capture setup: index the file and resolve the AppConfig
@@ -1030,8 +1031,8 @@ fn relation_oracle_record_target_normalisation_records_no_published_context() {
     host.shallow_file_state("/workspace/src/schema.ts")
         .expect("schema.ts must have shallow file state");
     let app_config = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(
-        crate::semantic_query::ResolveDeclKey {
-            scope: crate::semantic_query::ScopeId::file(
+        verter_type_engine::semantic_query::ResolveDeclKey {
+            scope: verter_type_engine::semantic_query::ScopeId::file(
                 Arc::from("/workspace/src/schema.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
@@ -1118,25 +1119,28 @@ export type NestedCond<T> = { [K in 'a' | 'b']: T extends { meta: infer M } ? Op
 /// for an open generic), returning the instantiated body node.
 fn skeleton_instantiate(
     host: &Arc<VerterHost>,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     decl_name: &str,
-) -> crate::semantic_query::SemanticNodeId {
-    use crate::semantic_query::{
+) -> verter_type_engine::semantic_query::SemanticNodeId {
+    use verter_type_engine::semantic_query::{
         InstantiateContext, QueryResult, SemanticQueryApi, SemanticQueryOutput,
     };
     host.shallow_file_state("/workspace/src/sel.ts")
         .expect("sel.ts must have shallow file state");
-    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+    let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         dispatch.type_slot_for(
             Arc::from("/workspace/src/sel.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from(decl_name),
         ),
-        Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+        Arc::from(Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
         InstantiateContext::non_file(
             ProjectionReductionContext::published(ProjectionMode::Skeleton),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
     match dispatch.execute_type_node(key) {
@@ -1155,7 +1159,7 @@ fn skeleton_instantiate(
 /// and surfaces both expanded bodies as a Union.
 #[test]
 fn root_conditional_still_distributes() {
-    use crate::semantic_query::{
+    use verter_type_engine::semantic_query::{
         QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryApi,
         SemanticQueryOutput,
     };
@@ -1168,7 +1172,8 @@ fn root_conditional_still_distributes() {
         ("/workspace/node_modules/ttable/index.d.ts", WEB_TYPES_TS),
         ("/workspace/src/sel.ts", SEL_TYPES_TS),
     ]);
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     // The Skeleton instantiation supplies the unbound-`TypeParam`
     // check / extends pair; the branch anchors come from ResolveDecl
     // (the declaration-anchor shape the seed's eager payload lowering
@@ -1183,13 +1188,13 @@ fn root_conditional_still_distributes() {
         SemanticNodeData::Conditional { check, extends, .. } => (*check, *extends),
         other => panic!("Sel skeleton body must be a Conditional shell, got {other:?}"),
     };
-    let branch_anchor = |name: &str| -> crate::semantic_query::SemanticNodeId {
+    let branch_anchor = |name: &str| -> verter_type_engine::semantic_query::SemanticNodeId {
         match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
                 canonical_id: Arc::from("/workspace/src/sel.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -1212,7 +1217,9 @@ fn root_conditional_still_distributes() {
 
     let read = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: cond_node,
-        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        path: Arc::from(
+            Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
     let result = match read {
@@ -1260,8 +1267,8 @@ fn root_conditional_still_distributes() {
             expander walks top-level composition only and the open-mapped carrier-stop owns \
             the mapped-value entrance; un-ignore when a genuine-Expanded nested route lands"]
 fn nested_open_conditional_not_distributed_under_expanded() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryOutput};
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryOutput};
 
     let host = build_host(&[
         (
@@ -1271,7 +1278,8 @@ fn nested_open_conditional_not_distributed_under_expanded() {
         ("/workspace/node_modules/ttable/index.d.ts", WEB_TYPES_TS),
         ("/workspace/src/sel.ts", SEL_TYPES_TS),
     ]);
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     let mapped_node = skeleton_instantiate(&host, &dispatch, "NestedCond");
 
     // Tight projection budget on the direct-dispatch request: a
@@ -1290,7 +1298,9 @@ fn nested_open_conditional_not_distributed_under_expanded() {
 
     let read = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: mapped_node,
-        path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+        path: Arc::from(
+            Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
+        ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
     let result = match read {
@@ -1550,8 +1560,8 @@ defineProps<Props>();
 /// projection budget.
 #[test]
 fn typeof_value_graph_lowers_at_requested_demand() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::semantic_query::{
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::{
         InstantiateContext, QueryResult, SemanticQueryApi, SemanticQueryOutput,
     };
 
@@ -1567,7 +1577,8 @@ fn typeof_value_graph_lowers_at_requested_demand() {
         ),
         ("/workspace/src/factory.ts", TYPEOF_HELPER_TS),
     ]);
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
     host.shallow_file_state("/workspace/src/factory.ts")
         .expect("factory.ts must have shallow file state");
 
@@ -1587,17 +1598,17 @@ fn typeof_value_graph_lowers_at_requested_demand() {
 
     let guard = CaptureToken::start_for_query("typeof_demand_skeleton");
     let read = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
                 Arc::from("/workspace/src/factory.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("FactoryBag"),
             ),
-            Arc::from(Vec::<crate::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
+            Arc::from(Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice()),
             InstantiateContext::non_file(
                 ProjectionReductionContext::published(ProjectionMode::Skeleton),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     ));

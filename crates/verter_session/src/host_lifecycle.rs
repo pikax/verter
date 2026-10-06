@@ -25,12 +25,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::id::canonicalize_id;
-use crate::instant::Instant;
 use crate::shared::{read_lock, write_lock};
-use crate::types::{
-    HostMetricsSnapshot, HostRetentionSnapshot, MetaProvenance, MetaProvenanceSnapshot,
-};
 use crate::VerterHost;
+use crate::{
+    meta_provenance::{MetaProvenance, MetaProvenanceSnapshot},
+    types::{HostMetricsSnapshot, HostRetentionSnapshot},
+};
+use verter_type_engine::instant::Instant;
 
 impl VerterHost {
     /// Swap the workspace backing this host.
@@ -44,9 +45,7 @@ impl VerterHost {
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         workspace.set_default_resolve_extensions(self.config.resolve_extensions.clone());
         workspace.install_resolution_retention(Arc::new(
-            crate::semantic_retention_account::ResolutionRetention(Arc::clone(
-                self.project_type_store.retention_account(),
-            )),
+            verter_session_query::retention::ResolutionRetention::process_local(),
         ));
         *self.workspace.write() = workspace;
         // SWAP-FIRST, then clear — the order is load-bearing. Clearing
@@ -200,9 +199,9 @@ impl VerterHost {
         let outcome = self.ws().resolve_import_outcome(
             parent_canonical_id,
             import_source,
-            verter_semantic::resolver_core::ResolutionContext {
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+            verter_session_query::resolution::ResolutionContext {
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             },
         );
         #[cfg(test)]
@@ -263,7 +262,7 @@ impl VerterHost {
         &self,
         parent_canonical_id: &str,
         import_source: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication<String> {
         self.resolve_for_persistent_state(parent_canonical_id, import_source, ctx)
             .map_result(|result| result.source_id)
@@ -278,7 +277,7 @@ impl VerterHost {
         &self,
         parent_canonical_id: &str,
         import_source: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
         self.resolve_for_persistent_state_in(None, parent_canonical_id, import_source, ctx)
     }
@@ -292,7 +291,7 @@ impl VerterHost {
         overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         parent_canonical_id: &str,
         import_source: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
         // Typeinfo scratch files inline the active request scope and therefore
         // resolve their synthetic imports in that real scope's project
@@ -301,7 +300,7 @@ impl VerterHost {
         // Engine refuses publication.
         let importer =
             if crate::resolver_core::vue_default_synth::is_typeinfo_scratch(parent_canonical_id) {
-                crate::request_context::current_request_context()
+                verter_type_engine::request_context::current_request_context()
                     .map(|request| Arc::clone(&request.canonical_id))
                     .unwrap_or_else(|| Arc::from(parent_canonical_id))
             } else {
@@ -484,7 +483,7 @@ impl VerterHost {
     pub fn clear_compile_cache(&self) {
         // ProfileState (D48 — compile_cache_db): per-profile compile
         // outputs are flushed through the typed session node.
-        let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+        let session_node = crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
         for mut entry in self.compile_cache().iter_mut() {
             session_node.clear_compile_outputs_for_file(&mut entry);
         }
@@ -612,7 +611,7 @@ impl VerterHost {
     /// atomically. Pass an empty slice to clear the resolver.
     pub fn configure_projects(
         &self,
-        projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
     ) {
         self.ws().configure_resolver(projects);
         // Project-config change drops resolution-derived state:
@@ -684,7 +683,7 @@ impl VerterHost {
     /// the authoritative content-change pipeline (`host.upsert`) runs —
     /// `notify_upsert` is the overlay-signal hook only.
     pub fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
-        verter_workspace::probe_scope!(NOTIFY_UPSERT);
+        verter_session_query::probe_scope!(NOTIFY_UPSERT);
         self.ws().notify_upsert(canonical_id, source);
         self.evict_artifact_only_canonical(canonical_id);
     }
@@ -1067,7 +1066,8 @@ impl VerterHost {
         // outputs. ProfileState has no `evicted` flag; the eviction
         // marker lives on DerivedRawState.
         if let Some(mut profile) = self.compile_cache().get_mut(canonical_id) {
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let session_node =
+                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut profile);
             profile.latest_diagnostics.clear();
             // Clearing `latest_diagnostics` is a diagnostics change that moves
@@ -1179,7 +1179,7 @@ impl VerterHost {
                 priority: verter_scheduler::stage::Priority::Interactive,
                 source: None,
                 file_language: None,
-                request_context: verter_scheduler::request_context::current_context(),
+                request_context: verter_execution::request_context::current_context(),
             },
         ) {
             crate::cooperative_scheduler::CooperativeSubmit::Submitted(handle) => handle,

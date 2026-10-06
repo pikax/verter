@@ -29,7 +29,7 @@
 //!
 //! - [`RequestStoreView`]: a wrapper that owns the overlay and borrows
 //!   the request-entry [`HostStoreView`]. Implements
-//!   [`crate::resolver_core::StoreView`] with **shadowing-first**
+//!   [`verter_session_query::facts::store_view::StoreView`] with **shadowing-first**
 //!   semantics — if the overlay has a canonical/fact key, the overlay
 //!   value is authoritative and a mismatch is REJECTED (not retried
 //!   against the base view). If the overlay is absent for a key, reads
@@ -38,11 +38,11 @@
 //! ## Identity / epoch contract
 //!
 //! The completion overlay does NOT participate in
-//! [`crate::resolver_core::StoreView::compat_token`]: the wrapper
+//! [`verter_session_query::facts::store_view::StoreView::compat_token`]: the wrapper
 //! reports the base's compat token unchanged. Two concurrent requests
 //! with the same base epoch must still coalesce on singleflight lanes,
 //! while fact signatures distinguish completion states through their
-//! [`verter_workspace::ViewPopulation`]. This separation is deliberate:
+//! [`verter_session_query::facts::fact_cache::ViewPopulation`]. This separation is deliberate:
 //! the compat token is the frozen base/session lane identity, whereas the
 //! completion population may advance inside one request.
 //!
@@ -80,18 +80,18 @@ use std::sync::atomic::AtomicUsize;
 
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
-use verter_workspace::{CompletionOverlayState, OverlayId};
+use verter_session_query::facts::fact_cache::{CompletionOverlayState, OverlayId};
 
 use crate::file_artifact_store::FileFacts;
 use crate::resolver_core::bracketed_generation::BracketedGeneration;
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
-use crate::resolver_core::reuse::ReuseClass;
-use crate::resolver_core::{
-    DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, ResolverHash16,
-    RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
-};
 use crate::resolver_store::HostStoreView;
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::fact_cache::{
+    DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
+};
+use verter_session_query::facts::reuse::ReuseClass;
+use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
 /// Per-request shadowing side maps recording additive loads that the
 /// request-entry [`HostStoreView`] does not track. Keys are retained for
@@ -265,8 +265,9 @@ impl RequestBundleMemo {
     /// already materialised it under exactly this view identity.
     ///
     /// Returns the bundle together with its [`ReuseClass`]; the caller
-    /// must [`ReuseClass::replay_refusal`] before returning the value, or
-    /// the reuse launders the taint the cold return carried.
+    /// must replay its refusal ([`verter_type_engine::fact_tracing::replay_reuse_refusal`])
+    /// before returning the value, or the reuse launders the taint the cold
+    /// return carried.
     pub(crate) fn get(
         &self,
         canonical: &str,
@@ -681,7 +682,7 @@ impl CanonicalCompletionOverlay {
         host: &crate::VerterHost,
         view: &dyn crate::session_view::SessionView,
         canonical: &str,
-        overlay_hash: crate::types::Hash16,
+        overlay_hash: verter_session_query::analysis::types::Hash16,
     ) {
         let overlay_identity = host.overlay_artifact_identity(canonical);
         let file_artifacts = overlay_identity.lookup_overlay_artifacts(host, view);
@@ -696,7 +697,7 @@ impl CanonicalCompletionOverlay {
         &self,
         host: &crate::VerterHost,
         canonical: &str,
-        whole_hash: crate::types::Hash16,
+        whole_hash: verter_session_query::analysis::types::Hash16,
         file_artifacts: Option<Arc<crate::file_artifact_store::FileArtifacts>>,
     ) {
         // Per-canonical `IndexedReady` projection — populates `file_facts`
@@ -887,7 +888,7 @@ impl CanonicalCompletionOverlay {
 /// The wrapper owns the overlay via `Arc` and borrows the base view.
 /// Constructed once at request entry; the
 /// `HostResolverContext` / `SessionResolverContext` owns the wrapper as
-/// a private field. The [`super::fact_validation_port::FactValidation`] adapter
+/// a private field. The [`verter_type_engine::resolver_core::fact_validation_port::FactValidation`] adapter
 /// validates against that field without building a temporary view per call.
 ///
 /// ### Shadowing semantics
@@ -938,7 +939,7 @@ pub(crate) struct RequestStoreView<'a> {
 /// and the completion state it was validated at.
 #[derive(PartialEq, Eq, Hash)]
 struct ValidatedReceipt {
-    receipt: verter_workspace::ResultReceipt,
+    receipt: verter_session_query::facts::fact_cache::ResultReceipt,
     strict: Box<[Arc<str>]>,
     state: CompletionOverlayState,
 }
@@ -961,7 +962,7 @@ struct ValidatedReceipts(parking_lot::Mutex<rustc_hash::FxHashSet<ValidatedRecei
 
 impl ValidatedReceipts {
     fn key(
-        receipt: &verter_workspace::ResultReceipt,
+        receipt: &verter_session_query::facts::fact_cache::ResultReceipt,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
     ) -> ValidatedReceipt {
@@ -982,7 +983,7 @@ impl ValidatedReceipts {
 
     fn contains(
         &self,
-        receipt: &verter_workspace::ResultReceipt,
+        receipt: &verter_session_query::facts::fact_cache::ResultReceipt,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
     ) -> bool {
@@ -993,7 +994,7 @@ impl ValidatedReceipts {
 
     fn insert_all(
         &self,
-        receipts: Vec<verter_workspace::ResultReceipt>,
+        receipts: Vec<verter_session_query::facts::fact_cache::ResultReceipt>,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
     ) {
@@ -1091,8 +1092,8 @@ impl<'a> RequestStoreView<'a> {
     fn population_for(
         &self,
         state: CompletionOverlayState,
-    ) -> Option<verter_workspace::ViewPopulation> {
-        use verter_workspace::{ViewPopulation, ViewPopulationParent};
+    ) -> Option<verter_session_query::facts::fact_cache::ViewPopulation> {
+        use verter_session_query::facts::fact_cache::{ViewPopulation, ViewPopulationParent};
 
         let parent = match self.base.view_population() {
             ViewPopulation::Base => ViewPopulationParent::Base,
@@ -1115,10 +1116,10 @@ impl<'a> RequestStoreView<'a> {
     fn validates_with_receipts_at_completion_state(
         &self,
         fact: &FactVersionRef,
-        walk: &mut verter_workspace::ReceiptWalk,
+        walk: &mut verter_session_query::facts::fact_cache::ReceiptWalk,
         self_root_canonicals: &[&str],
         state: CompletionOverlayState,
-        walked: &mut Vec<verter_workspace::ResultReceipt>,
+        walked: &mut Vec<verter_session_query::facts::fact_cache::ResultReceipt>,
     ) -> bool {
         let FactVersionRef::Receipt(receipt) = fact else {
             return self.validates_leaf_or_self_root(fact, self_root_canonicals, state);
@@ -1217,7 +1218,7 @@ impl<'a> RequestStoreView<'a> {
             ),
             FactVersionRef::ProjectGeneration { .. } => self.base.validates(fact),
             FactVersionRef::DomainGeneration(aggregate) => {
-                use verter_workspace::CompactionDomain;
+                use verter_session_query::facts::fact_cache::CompactionDomain;
                 match aggregate.domain {
                     // These populations are independent of per-canonical
                     // completion shadowing.
@@ -1253,7 +1254,7 @@ impl<'a> RequestStoreView<'a> {
     fn strict_self_root_world_at_completion_state(
         &self,
         state: CompletionOverlayState,
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         let mut world = self.base.strict_self_root_world_identity()?;
         world.population = self.population_for(state)?;
         Some(world)
@@ -1298,20 +1299,20 @@ impl<'a> StoreView for RequestStoreView<'a> {
     /// the parent, shadowing overlays carry their own id and revision,
     /// and an in-flight writer supplies no population.
     #[inline]
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
+    fn aggregate_basis_seed(&self) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
         if !self.base_is_current {
-            return verter_workspace::AggregateBasisSeed::Unvouched;
+            return verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched;
         }
-        let verter_workspace::AggregateBasisSeed::Vouched {
+        let verter_session_query::facts::fact_cache::AggregateBasisSeed::Vouched {
             view_domains,
             semantic_imports,
             route_surface,
             ..
-        } = crate::resolver_core::StoreView::aggregate_basis_seed(self.base)
+        } = verter_session_query::facts::store_view::StoreView::aggregate_basis_seed(self.base)
         else {
-            return verter_workspace::AggregateBasisSeed::Unvouched;
+            return verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched;
         };
-        verter_workspace::AggregateBasisSeed::Vouched {
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Vouched {
             view_population: self.population_for(self.overlay.completion_state()),
             view_domains,
             semantic_imports,
@@ -1333,7 +1334,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         if state == CompletionOverlayState::InFlight {
             return false;
         }
-        let mut walk = verter_workspace::ReceiptWalk::default();
+        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
         let mut walked = Vec::new();
         let valid = self.validates_with_receipts_at_completion_state(
             fact,
@@ -1362,27 +1363,28 @@ impl<'a> StoreView for RequestStoreView<'a> {
 
         // The aggregated domains of one entry, a consumed result's receipt
         // answering for every aggregate its evidence reaches.
-        let aggregates = |fact: &FactVersionRef| -> Vec<verter_workspace::CompactionDomain> {
+        let aggregates = |fact: &FactVersionRef| -> Vec<verter_session_query::facts::fact_cache::CompactionDomain> {
             match fact {
                 FactVersionRef::Receipt(receipt) => receipt.aggregated_domains().to_vec(),
                 other => match other.attribution() {
-                    verter_workspace::FactAttribution::DomainAggregate(domain) => vec![domain],
+                    verter_session_query::facts::fact_cache::FactAttribution::DomainAggregate(domain) => vec![domain],
                     _ => Vec::new(),
                 },
             }
         };
-        let carries_resolution_aggregate = sig
-            .iter()
-            .any(|fact| aggregates(fact).contains(&verter_workspace::CompactionDomain::Resolution));
+        let carries_resolution_aggregate = sig.iter().any(|fact| {
+            aggregates(fact)
+                .contains(&verter_session_query::facts::fact_cache::CompactionDomain::Resolution)
+        });
         if carries_resolution_aggregate {
             if let Some(index) = sig.iter().position(|fact| {
                 aggregates(fact).iter().any(|domain| {
                     matches!(
                         domain,
-                        verter_workspace::CompactionDomain::Content
-                            | verter_workspace::CompactionDomain::SourceEnv
-                            | verter_workspace::CompactionDomain::SemanticImports
-                            | verter_workspace::CompactionDomain::RouteSurface
+                        verter_session_query::facts::fact_cache::CompactionDomain::Content
+                            | verter_session_query::facts::fact_cache::CompactionDomain::SourceEnv
+                            | verter_session_query::facts::fact_cache::CompactionDomain::SemanticImports
+                            | verter_session_query::facts::fact_cache::CompactionDomain::RouteSurface
                     )
                 })
             }) {
@@ -1395,7 +1397,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
             return Err(0);
         }
 
-        let mut walk = verter_workspace::ReceiptWalk::default();
+        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
         let mut walked = Vec::new();
         for (index, fact) in sig.iter().enumerate() {
             self.note_validation_step();
@@ -1459,7 +1461,9 @@ impl<'a> StoreView for RequestStoreView<'a> {
             && self.overlay.completion_state() == state
     }
 
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         if !self.base_is_current {
             return None;
         }
@@ -1478,7 +1482,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
     fn mint_strict_self_root_world(
         &self,
         roots: &[(&str, ResolverHash16)],
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         if !self.base_is_current {
             return None;
         }
@@ -1507,7 +1511,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
     fn validates_file_source_env(
         &self,
         canonical_id: &str,
-        parse_env_hash: crate::locator_identity::ParseEnvHash,
+        parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
         parse_key: &verter_language::ParseKey,
         file_language_id: &verter_language::FileLanguage,
     ) -> bool {
@@ -1534,10 +1538,12 @@ impl<'a> StoreView for RequestStoreView<'a> {
             match overlay_facts.lookup_or_compute(&fact.key) {
                 Some(stored) => {
                     let stored_hash = match fact.lane {
-                        verter_semantic::facts::registry::FactLane::Semantic => {
+                        verter_session_query::facts::registry::FactLane::Semantic => {
                             stored.semantic_hash
                         }
-                        verter_semantic::facts::registry::FactLane::Display => stored.display_hash,
+                        verter_session_query::facts::registry::FactLane::Display => {
+                            stored.display_hash
+                        }
                     };
                     return stored_hash == fact.expected_hash;
                 }
@@ -1609,7 +1615,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
 
     fn validates_program_analysis_domain(
         &self,
-        fact: &crate::resolver_core::ProgramAnalysisFactRef,
+        fact: &verter_session_query::facts::fact_cache::ProgramAnalysisFactRef,
     ) -> bool {
         if !self.base_is_current {
             return false;

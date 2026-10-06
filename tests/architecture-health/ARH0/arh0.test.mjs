@@ -33,7 +33,7 @@ test("ARH0-ratification: clean products validate and cover every mandatory case 
   assert.ok(clean["debt-register"].emptyDeletionSetRationale.length > 0);
   // Fan-in/fan-out evidence really round-trips through the inventory product.
   const span = clean["codebase-inventory"].crates.find((c) => c.module === "crates/verter_span");
-  assert.equal(span.fanIn, 24);
+  assert.equal(span.fanIn, 25);
   const session = clean["codebase-inventory"].crates.find(
     (c) => c.module === "crates/verter_session",
   );
@@ -123,7 +123,7 @@ test("ARH0-god-evidence dirty twin: size-only god module is rejected (AC2)", () 
 test("ARH0-god-evidence dirty twin: touches-only coupling evidence is rejected (AC2)", () => {
   const dirty = cloneProducts();
   const row = dirty["responsibility-map"].godModuleCandidates.find(
-    (r) => r.path === "crates/verter_session/src/flow_slice_content.rs",
+    (r) => r.path === "crates/verter_semantic_source/src/flow_slice_content.rs",
   );
   // Touch count is churn, not coupling: strip fanIn/shared-commits, keep touches.
   row.couplingEvidence = { touchesSinceJune: row.couplingEvidence.touchesSinceJune };
@@ -143,7 +143,7 @@ test("ARH0-god-evidence dirty twin: touches-only coupling evidence is rejected (
 test("ARH0-god-evidence dirty twin: zero coupling count is not coupling evidence (AC2)", () => {
   const dirty = cloneProducts();
   const row = dirty["responsibility-map"].godModuleCandidates.find(
-    (r) => r.path === "crates/verter_session/src/semantic_query.rs",
+    (r) => r.path === "crates/verter_type_engine/src/semantic_query.rs",
   );
   // Measured evidence of NO coupling must not qualify as a god module.
   row.couplingEvidence = { fanIn: 0, touchesSinceJune: row.couplingEvidence.touchesSinceJune };

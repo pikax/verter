@@ -8,8 +8,8 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use verter_semantic::facts::receipt::ResultReceipt;
-use verter_semantic::facts::version::FactVersionRef;
+use verter_session_query::facts::receipt::ResultReceipt;
+use verter_session_query::facts::version::FactVersionRef;
 
 struct Counting;
 

@@ -52,7 +52,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::resolver_core::FactVersionRef;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// Returns `true` if `fact` references `canonical_id` (as a
 /// `FileWholeHash`, `DerivedFactHash`, `FileSourceEnv`, or one of the
@@ -80,9 +80,10 @@ fn fact_references_canonical(fact: &FactVersionRef, canonical_id: &str) -> bool 
             canonical_id: c, ..
         } => c.as_str() == canonical_id,
         FactVersionRef::ProgramAnalysis(fact) => match fact {
-            crate::resolver_core::ProgramAnalysisFactRef::FlowBody { function, .. } => {
-                function.canonical_id.as_ref() == canonical_id
-            }
+            verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {
+                function,
+                ..
+            } => function.canonical_id.as_ref() == canonical_id,
         },
         // None is file-scoped: each is a whole-project scalar, a
         // whole-domain aggregate, or a strict self-root world witness —
@@ -110,14 +111,14 @@ pub type AppConfigNoOverrideProofKey = (Arc<str>, Arc<str>);
 ///
 /// The entry carries `fact_dep_signature: Arc<[FactVersionRef]>`
 /// directly: the path-precise fact-signature substrate
-/// ([`crate::resolver_core::StoreView::validates`]) is the sole
+/// ([`verter_session_query::facts::store_view::StoreView::validates`]) is the sole
 /// cache-validity oracle.
 #[derive(Clone)]
 pub struct AppConfigNoOverrideProofEntry {
     /// R3/R26/R28 path-precise dep signature. Captured by the
     /// production producer's `install_fact_tracer` scope; bubbles
     /// into outer fact tracers via
-    /// [`crate::fact_signature_helpers::bubble_fact_signature`] on
+    /// [`verter_type_engine::fact_signature_helpers::bubble_fact_signature`] on
     /// warm hit. Validated against the live store view on every
     /// warm-hit read.
     pub fact_dep_signature: Arc<[FactVersionRef]>,
@@ -146,14 +147,14 @@ impl AppConfigNoOverrideProofDb {
     /// caller declines and the slow path runs.
     ///
     /// Validation is path-precise only. Each warm-hit read calls
-    /// [`crate::fact_signature_helpers::validate_fact_signature`]
+    /// [`verter_type_engine::fact_signature_helpers::validate_fact_signature`]
     /// against the live store view through `ctx`. A single
     /// mismatched fact returns `None` and the caller cold-recomputes.
     /// On a successful warm hit, the path-precise observation set
     /// bubbles into any active outer fact tracer.
     ///
     /// Called from the producer
-    /// (`component_meta_caches::app_config_no_override_proof_get_or_compute`)
+    /// (`app_config_no_override_proof_get_or_compute`)
     /// on the cold path; the warm-hit fast path inside the
     /// component-meta ComponentConfig resolver consumes the proof
     /// via the same `peek` surface. That producer is reached today only
@@ -174,7 +175,7 @@ impl AppConfigNoOverrideProofDb {
     /// `install_fact_tracer` scope finalised successfully.
     ///
     /// `fact_dep_signature` MUST be the
-    /// [`crate::resolver_core::FactReadSetFinalise::Ok`] payload
+    /// [`verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok`] payload
     /// produced by the producer's tracer. Legacy `DepSignature`
     /// derivation is no longer performed at publish time — the
     /// producer is the single authority for the entry's
@@ -242,9 +243,11 @@ impl Default for AppConfigNoOverrideProofDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for AppConfigNoOverrideProofDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation
+    for AppConfigNoOverrideProofDb
+{
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         // `AppConfigNoOverrideProofDb` participates in
         // [FileContent, AppConfigInterfaceMerge]. The proof's dep
         // signature includes the merge-generation; either a content
@@ -252,19 +255,173 @@ impl crate::invalidation_domain::ParticipatesInInvalidation for AppConfigNoOverr
         // `interface AppConfig` shape change must invalidate it.
         &[FileContent, AppConfigInterfaceMerge]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, AppConfigInterfaceMerge | ProjectGeneration) {
             self.invalidate_all();
         }
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for AppConfigNoOverrideProofDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical
+    for AppConfigNoOverrideProofDb
+{
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         let before = self.live_count();
         self.invalidate_canonical(canonical_id);
         let after = self.live_count();
         before.saturating_sub(after)
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// AppConfigNoOverrideProofDb production producer
+// ═══════════════════════════════════════════════════════════════════════════
+/// Production producer for [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
+///
+/// Given a key `(decl_canonical, component_key_literal)`, returns
+/// the cached proof entry if one is valid under the live store
+/// view, OR runs a cold compute (wrapped in `install_fact_tracer`)
+/// and publishes a fresh proof.
+///
+/// The cold compute checks the `IndexedReady.declares_interface_app_config`
+/// flag for `decl_canonical` and observes its `FileWholeHash` fact
+/// through the active tracer. The proof's `fact_dep_signature`
+/// therefore captures (a) the decl-canonical's whole-hash so an
+/// edit to the file invalidates the proof, and (b) any transitive
+/// observations the call-chain made through the resolver substrate.
+///
+/// `publish()` accepts `Arc<[FactVersionRef]>` directly — the
+/// path-precise fact-signature substrate (`HostStoreView::validates`)
+/// is the sole cache-validity oracle.
+///
+/// **Cold-build outcome semantics:**
+/// - `Some(entry)` published — proof is valid. The fast-path
+///   consumer can rely on the fact-signature for warm-hit revalidation.
+/// - On `FactReadSetFinalise::Overflow` — refuse cache admission;
+///   the next call cold-recomputes. The provenance counter
+///   `app_config_proof_overflow_refusals` advances.
+///
+/// Resolver-tier producer that takes `&dyn ResolverContext` to stay
+/// inside the request-port contract (the six ports in
+/// `resolver_core::request_ports`, whose compile-contract fixtures prove a
+/// request cannot reach ambient host state). Integration tests reach this
+/// via the crate-public wrapper
+/// [`crate::for_tests::app_config_no_override_proof_get_or_compute_for_tests`].
+///
+/// The ComponentConfig theme-variant fast-path resolver (a future
+/// re-introduction of the retired rescue cascade) and the
+/// app-config no-override deferred-proof test both reach this
+/// producer.
+///
+/// Reached today only through tests and the `for_tests` wrapper (both
+/// gated by the explicit `test-support` feature); gated to match so the
+/// producer is absent from every ordinary production build.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn app_config_no_override_proof_get_or_compute<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    proofs: &crate::app_config_proof_db::AppConfigNoOverrideProofDb,
+    provenance: &crate::meta_provenance::MetaProvenance,
+    key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
+) -> Option<Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
+    // Warm-hit peek — validate the cached fact_dep_signature against
+    // the live store view. The peek bubbles the signature into any
+    // active outer tracer on success.
+    if let Some(entry) = proofs.candidate(key) {
+        if ctx.validates_fact_signature(&entry.fact_dep_signature) {
+            ctx.observe_borrowed_signature(&entry.fact_dep_signature);
+            return Some(entry);
+        }
+    }
+
+    // Cold compute. The closure observes the decl-canonical's whole
+    // hash so an edit invalidates the proof.
+    let (decl_canonical, _component_key_literal) = key;
+    let decl_canonical_for_compute = Arc::clone(decl_canonical);
+    let cold_body = move || -> bool {
+        // Look up the IndexedReady for the decl canonical. The
+        // tracer fan-out picks up any indirect observations the
+        // resolver substrate emits.
+        //
+        // Content-pinned: the observed `FileWholeHash` fact becomes
+        // part of this proof entry's `read_set_signature`. A permissive
+        // `get_any` could observe a stale artifact's `whole_hash`,
+        // sealing the proof against a content hash that is no longer
+        // current. A stale candidate is treated identically to "file
+        // removed" — `current_content_pinned_indexed` returns `None`,
+        // the sentinel-zero hash is observed, and the validator
+        // re-derives the proof on the next read.
+        let ir = ctx.indexed_for_current_content(decl_canonical_for_compute.as_ref());
+        // Observe the file's whole-hash explicitly. If no IndexedReady
+        // is present (file removed), record a sentinel zero hash so
+        // the validator picks up the absence on the next read.
+        let whole_hash = ir.as_ref().map(|ir| ir.whole_hash).unwrap_or_default();
+        ctx.observe(
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: decl_canonical_for_compute.as_ref().to_string(),
+                hash: whole_hash,
+            },
+        );
+        // The "no override" determination is a structural query
+        // into the interface members. For the producer's
+        // substrate-correctness contract, the
+        // `declares_interface_app_config` flag short-circuits the
+        // walk: a file without `interface AppConfig` cannot
+        // contribute an override.
+        //
+        // Files that DO declare `interface AppConfig` participate in
+        // the proof's fact_dep_signature via the file_whole_hash
+        // observation above; any edit to the interface body shifts
+        // the whole-hash and invalidates the proof. This is the
+        // R3/R26/R28 substrate contract — the producer does NOT
+        // need to walk the interface body to decide the proof's
+        // validation oracle.
+        ir.as_ref()
+            .map(|ir| !ir.declares_interface_app_config)
+            .unwrap_or(true)
+    };
+    let (no_override, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        cold_body,
+    );
+    provenance
+        .app_config_proof_fact_tracer_installs
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // ReturnOnly never publishes — fenced-serve arm: a proof derived
+    // from a served-without-publication artifact must not seal a
+    // shared no-override entry whose facts validate against the live
+    // view. Decline to publish; the consumer takes the slow path.
+    match finalise {
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(fact_dep_signature) => {
+            if !no_override {
+                // The file declares `interface AppConfig` — we
+                // cannot prove "no override" without walking the
+                // member set. Decline to publish; the fast-path
+                // consumer must take the slow path.
+                return None;
+            }
+            proofs.publish(key.clone(), Arc::clone(&fact_dep_signature));
+            Some(Arc::new(
+                crate::app_config_proof_db::AppConfigNoOverrideProofEntry { fact_dep_signature },
+            ))
+        }
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
+            provenance
+                .app_config_proof_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        }
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
+            provenance
+                .app_config_proof_overflow_refusals
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        }
+        // Refuses like an overflow and is counted as neither: the
+        // overflow counter is a SIZE observable and a stability refusal
+        // must not inflate it.
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => None,
     }
 }

@@ -11,12 +11,12 @@
 // @ai-generated
 
 use verter_diagnostics::LintDiagnostic;
-use verter_semantic::analysis::template::{
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::template::{
     TemplateAnalysisSnapshot, TemplateElement, TemplateTextSegment,
 };
-use verter_semantic::analysis::types::{
-    AnalyzedMacroKind, BindingInitializer, ReactivityKind, ScriptAnalysisSnapshot,
-    VueApiClassification,
+use verter_session_query::analysis::types::{
+    AnalyzedMacroKind, BindingInitializer, ReactivityKind, VueApiClassification,
 };
 use verter_span::Span;
 
@@ -253,7 +253,9 @@ fn generate_name(el: &TemplateElement, source: &str) -> String {
 }
 
 /// Check if an `AnalyzedBinding` came from `defineProps` via its initializer.
-fn is_define_props_binding(binding: &verter_semantic::analysis::types::AnalyzedBinding) -> bool {
+fn is_define_props_binding(
+    binding: &verter_session_query::analysis::types::AnalyzedBinding,
+) -> bool {
     matches!(
         &binding.initializer,
         Some(BindingInitializer::FunctionCall {
@@ -283,7 +285,7 @@ fn find_props_accessor(script: &ScriptAnalysisSnapshot) -> Option<PropsInfo> {
 
     let primary = with_defaults.or(define_props)?;
 
-    if let Some(name) = verter_semantic::analysis::props_root_binding(&script.macros) {
+    if let Some(name) = verter_session_query::analysis::macros::props_root_binding(&script.macros) {
         Some(PropsInfo {
             accessor_name: name.to_string(),
             needs_wrapping: false,

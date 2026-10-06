@@ -19,13 +19,10 @@ use smallvec::SmallVec;
 
 use crate::canonical_path::CanonicalPath;
 use crate::membership::FallbackMembership;
-use verter_semantic::resolver_core::{
-    ConfiguredMembership, IdeProjectCompilerOptions, ModuleResolverCore, WorkspaceAlias,
+use verter_resolution::ModuleResolverCore;
+use verter_session_query::resolution::{
+    ConfiguredMembership, IdeProjectCompilerOptions, ProjectId, WorkspaceAlias,
 };
-
-/// Index into [`WorkspaceSnapshot::projects`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ProjectId(pub u32);
 
 /// Monotonic generation counter for published snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -465,7 +462,7 @@ impl WorkspaceSnapshot {
     ) -> Option<ProjectId> {
         // computeConfigFileName: nearest literal-config solution to the file dir.
         let start_dir =
-            CanonicalPath::new(&verter_semantic::resolver_core::parent_dir(path.as_str()));
+            CanonicalPath::new(&verter_session_query::resolution::parent_dir(path.as_str()));
         let mut entry = self.nearest_solution_config(&start_dir);
         // Ordered visited set over solutions — the strictly-decreasing climb
         // already terminates, this makes cycle-freedom explicit and bulletproof.
@@ -491,7 +488,7 @@ impl WorkspaceSnapshot {
             }
 
             // Climb to the nearest solution STRICTLY above this solution's root.
-            let parent = verter_semantic::resolver_core::parent_dir(
+            let parent = verter_session_query::resolution::parent_dir(
                 self.projects[solution.0 as usize].root.as_str(),
             );
             if parent.is_empty() {
@@ -585,14 +582,14 @@ impl WorkspaceSnapshot {
     pub fn semantic_compiler_options(
         &self,
         id: ProjectId,
-    ) -> Option<verter_semantic::resolver_core::SemanticCompilerOptions> {
+    ) -> Option<verter_session_query::resolution::SemanticCompilerOptions> {
         let project = self.projects.get(id.0 as usize)?;
         Some(match &project.payload {
             ProjectPayload::Configured {
                 compiler_options, ..
             } => compiler_options.semantic.clone(),
             ProjectPayload::Fallback { .. } => {
-                verter_semantic::resolver_core::SemanticCompilerOptions::default()
+                verter_session_query::resolution::SemanticCompilerOptions::default()
             }
         })
     }

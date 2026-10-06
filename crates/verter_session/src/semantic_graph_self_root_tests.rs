@@ -2,7 +2,7 @@
 //! query-node memo.
 //!
 //! Every `SemanticGraphStore` query-node memo entry is
-//! self-version-rooted: its [`crate::fact_signature_helpers::ReadSetSignature`]
+//! self-version-rooted: its [`verter_session_query::facts::fact_cache::ReadSetSignature`]
 //! carrier leads with a `FileWholeHash` fact for each canonical the
 //! cold build's value depends on for its own identity (the keyed
 //! canonical for `ResolveDecl` / `TypeOf` / `Instantiate` /
@@ -38,22 +38,27 @@
 //! physically present (the discrimination is the validator rejecting
 //! it, not the entry being absent).
 
-use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
-use verter_semantic::facts::{FactKey, FactLane};
+use verter_session_query::facts::{FactKey, FactLane};
 
-use crate::fact_signature_helpers::{ReadSetSignature, ReadSetSignatureExt};
-use crate::resolver_core::{
-    FactReadSetFinalise, FactVersionRef, ResolverContext, StoreView, StoreViewCompatToken,
-    FACT_SIGNATURE_CAP,
+use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
+use verter_session_query::facts::{
+    fact_cache::FactVersionRef,
+    fact_read_set::{FactReadSetFinalise, FACT_SIGNATURE_CAP},
 };
-use crate::semantic_query::{
+use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{
     DepSignature, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey,
 };
-use crate::semantic_query_memo::{semantic_graph_read_set_signature, SemanticGraphStore};
-use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query_memo::{
+    semantic_graph_read_set_signature, SemanticGraphStore,
+};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -64,19 +69,19 @@ fn host() -> VerterHost {
 }
 
 pub(crate) struct StrictWorldTestView {
-    pub(crate) world: verter_workspace::StrictSelfRootWorld,
+    pub(crate) world: verter_session_query::facts::fact_cache::StrictSelfRootWorld,
     pub(crate) rejected_root: Option<Arc<str>>,
 }
 
 impl Default for StrictWorldTestView {
     fn default() -> Self {
         Self {
-            world: verter_workspace::StrictSelfRootWorld {
+            world: verter_session_query::facts::fact_cache::StrictSelfRootWorld {
                 authority_id: 1,
                 authority_generation: 7,
                 source_epoch: 11,
                 artifact_epoch: 13,
-                population: verter_workspace::ViewPopulation::Base,
+                population: verter_session_query::facts::fact_cache::ViewPopulation::Base,
             },
             rejected_root: None,
         }
@@ -103,7 +108,9 @@ impl StoreView for StrictWorldTestView {
         self.rejected_root.as_deref() != Some(canonical_id)
     }
 
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+    fn strict_self_root_world_identity(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
         Some(self.world)
     }
 
@@ -115,13 +122,15 @@ impl StoreView for StrictWorldTestView {
 pub(crate) fn exact_cap_terminal_witness_facts() -> Vec<FactVersionRef> {
     (0..FACT_SIGNATURE_CAP)
         .map(|generation| {
-            FactVersionRef::StrictSelfRootWorld(verter_workspace::StrictSelfRootWorld {
-                authority_id: 1,
-                authority_generation: generation as u64,
-                source_epoch: 1,
-                artifact_epoch: 1,
-                population: verter_workspace::ViewPopulation::Base,
-            })
+            FactVersionRef::StrictSelfRootWorld(
+                verter_session_query::facts::fact_cache::StrictSelfRootWorld {
+                    authority_id: 1,
+                    authority_generation: generation as u64,
+                    source_epoch: 1,
+                    artifact_epoch: 1,
+                    population: verter_session_query::facts::fact_cache::ViewPopulation::Base,
+                },
+            )
         })
         .collect()
 }
@@ -151,7 +160,7 @@ fn resolve_decl_key(canonical: &str, name: &str) -> ResolveDeclKey {
             canonical_id: Arc::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -183,7 +192,10 @@ fn resolve_decl_same_canonical_edit_rejects_warm_entry() {
     // Prime the warm memo entry.
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "ResolveDecl must resolve before the edit"
     );
     let graph = host.project_type_store().semantic_graph();
@@ -197,7 +209,7 @@ fn resolve_decl_same_canonical_edit_rejects_warm_entry() {
     // the entry's self-root validation directly.
     upsert(&host, c, "export type Foo = { a: string; b: number };\n");
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical memo entry must still be present after the same-canonical edit \
@@ -223,25 +235,28 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
     upsert(&host, c, "export const val = { a: 1 };\n");
     let dispatch = host.semantic_dispatch();
     let key = dispatch.typeof_key_for(
-        crate::semantic_query::ValueRootKey {
+        verter_type_engine::semantic_query::ValueRootKey {
             scope: ScopeId {
                 canonical_id: Arc::from(c),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
             name: Arc::from("val"),
         },
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     );
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "TypeOf must resolve before the edit"
     );
     let graph = host.project_type_store().semantic_graph();
@@ -257,7 +272,7 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
 
     upsert(&host, c, "export const val = { a: 1, b: 2 };\n");
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical TypeOf memo entry must still be present after the same-canonical edit"
@@ -292,27 +307,30 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         .map(|indexed| indexed.whole_hash)
         .expect("declaring file IndexedReady materialises");
     let string_arg = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
-    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(c),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Box"),
         ),
         Arc::from(vec![string_arg].into_boxed_slice()),
-        crate::semantic_query::InstantiateContext::non_file(
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "Instantiate must resolve before the edit"
     );
     assert!(
@@ -327,7 +345,7 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         "export type Box<T> = { value: T; tag: string };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical Instantiate memo entry must still be present after the same-canonical edit"
@@ -363,26 +381,29 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
         .map(|indexed| indexed.whole_hash)
         .expect("owner SFC IndexedReady materialises");
     let arg = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let key = SemanticQueryKey::ResolveMacroPayload {
-        owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        owner: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(c),
             verter_type_expr::TopLevelOwnerId::instance(0),
             Arc::from("<sfc-script-setup>"),
         ),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
-            crate::semantic_query::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     };
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "ResolveMacroPayload must resolve before the edit"
     );
     assert!(
@@ -397,7 +418,7 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
         "<script setup lang=\"ts\">defineProps<{ x: string; y: number }>()</script>\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical ResolveMacroPayload memo entry must still be present after the edit"
@@ -472,12 +493,14 @@ fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
 #[test]
 fn read_set_signature_merges_traced_cross_file_facts() {
     let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
-    let traced = vec![FactVersionRef::Parse(crate::resolver_core::ParseFactRef {
-        canonical_id: "/w/dep.ts".to_string(),
-        key: FactKey::SyntacticExportSet,
-        lane: FactLane::Semantic,
-        expected_hash: [0x44; 16],
-    })];
+    let traced = vec![FactVersionRef::Parse(
+        verter_session_query::facts::fact_cache::ParseFactRef {
+            canonical_id: "/w/dep.ts".to_string(),
+            key: FactKey::SyntacticExportSet,
+            lane: FactLane::Semantic,
+            expected_hash: [0x44; 16],
+        },
+    )];
     let carrier =
         semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
             .expect("carrier builds");
@@ -567,7 +590,7 @@ fn oversized_self_root_compaction_strictly_checks_every_root() {
 
     assert_eq!(
         semantic_graph_read_set_signature(&view, &observed, &[]).unwrap_err(),
-        crate::cache_runtime::NonAdmissionReason::UnresolvedProvenance,
+        verter_audit::NonAdmissionReason::UnresolvedProvenance,
         "one rejecting root must prevent a strict-world witness even when every later root validates",
     );
 }
@@ -583,9 +606,10 @@ fn strict_world_witness_discriminates_without_a_precise_root_list() {
     assert!(view.validates_fact_signature(&carrier.facts));
 
     let other = StrictWorldTestView {
-        world: verter_workspace::StrictSelfRootWorld {
-            population: verter_workspace::ViewPopulation::SessionOverlay(
-                verter_workspace::SessionOverlayFingerprint::new(99).unwrap(),
+        world: verter_session_query::facts::fact_cache::StrictSelfRootWorld {
+            population: verter_session_query::facts::fact_cache::ViewPopulation::SessionOverlay(
+                verter_session_query::facts::fact_cache::SessionOverlayFingerprint::new(99)
+                    .unwrap(),
             ),
             ..view.world
         },
@@ -601,12 +625,12 @@ fn strict_world_witness_discriminates_without_a_precise_root_list() {
 fn generic_content_aggregate_is_not_a_strict_self_root_witness() {
     let content_aggregate =
         ReadSetSignature::new(Arc::from(vec![FactVersionRef::DomainGeneration(
-            verter_workspace::DomainGenerationFact {
-                domain: verter_workspace::CompactionDomain::Content,
-                population: verter_workspace::AggregatePopulation::View(
-                    verter_workspace::ViewPopulation::Base,
+            verter_session_query::facts::fact_cache::DomainGenerationFact {
+                domain: verter_session_query::facts::fact_cache::CompactionDomain::Content,
+                population: verter_session_query::facts::fact_cache::AggregatePopulation::View(
+                    verter_session_query::facts::fact_cache::ViewPopulation::Base,
                 ),
-                stamp: verter_workspace::AggregateStamp::Generation(1),
+                stamp: verter_session_query::facts::fact_cache::AggregateStamp::Generation(1),
             },
         )]));
     assert!(
@@ -662,7 +686,7 @@ fn validate_with_self_roots_rejects_untracked_self_root() {
     let host = host();
     // One unrelated tracked file so a live store view exists.
     upsert(&host, "/sg_self_root/anchor.ts", "export const z = 1;\n");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let untracked = "/sg_self_root/never_loaded.ts";
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
@@ -689,7 +713,7 @@ fn validate_with_self_roots_accepts_matching_tracked_self_root() {
         .ensure_indexed_ready(c)
         .map(|indexed| indexed.whole_hash)
         .expect("IndexedReady materialises");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
 
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
         canonical_id: c.to_string(),
@@ -709,7 +733,7 @@ fn validate_with_self_roots_accepts_matching_tracked_self_root() {
 fn validate_with_self_roots_rejects_overflow_carrier() {
     let host = host();
     upsert(&host, "/sg_self_root/anchor2.ts", "export const z = 1;\n");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let carrier = ReadSetSignature::overflow();
     let self_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
     assert!(
@@ -729,7 +753,7 @@ fn validate_with_self_roots_rejects_overflow_carrier() {
 fn execute_cooperative_fast_path_validates_self_root() {
     let host = host();
     upsert(&host, "/sg_self_root/anchor3.ts", "export const z = 1;\n");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let store = SemanticGraphStore::new();
     let key =
         SemanticQueryKey::ResolveDecl(resolve_decl_key("/sg_self_root/never_loaded2.ts", "Probe"));
@@ -738,7 +762,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
     // canonical via an explicit `QueryBuildOutput` carrier.
     let untracked = "/sg_self_root/never_loaded2.ts";
     let stale_node = store.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
         canonical_id: untracked.to_string(),
@@ -747,7 +771,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
     store.publish_with_carrier_for_tests(
         key.clone(),
-        crate::semantic_query::QueryResult::Value(stale_node),
+        verter_type_engine::semantic_query::QueryResult::Value(stale_node),
         carrier,
         self_roots,
     );
@@ -757,20 +781,20 @@ fn execute_cooperative_fast_path_validates_self_root() {
     // the recomputed node surfaces.
     let mut cold_ran = false;
     let recompute_node = store.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let read = store.execute_cooperative(
         ctx,
         key.clone(),
         || {
             store.intern_node(SemanticNodeData::Opaque(
-                crate::semantic_query::QueryError::Miss,
+                verter_type_engine::semantic_query::QueryError::Miss,
             ))
         },
         || {
             cold_ran = true;
             (
-                crate::semantic_query::QueryResult::Value(recompute_node),
+                verter_type_engine::semantic_query::QueryResult::Value(recompute_node),
                 Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
             )
         },
@@ -781,7 +805,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
          it warm — an entry self-rooted on an untracked canonical must miss and re-run cold",
     );
     match read.value {
-        crate::semantic_query::QueryResult::Value(node) => assert_eq!(
+        verter_type_engine::semantic_query::QueryResult::Value(node) => assert_eq!(
             node, recompute_node,
             "the recomputed node must surface, not the stale entry",
         ),
@@ -800,13 +824,13 @@ fn execute_cooperative_fast_path_validates_self_root() {
 fn relation_memo_warm_read_validates_self_root() {
     let host = host();
     upsert(&host, "/sg_self_root/anchor4.ts", "export const z = 1;\n");
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let store = SemanticGraphStore::new();
     let source = store.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let target = store.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
 
     // Publish a relation judgement whose carrier self-roots on an
@@ -817,16 +841,18 @@ fn relation_memo_warm_read_validates_self_root() {
         hash: [0xEF; 16],
     }]));
     let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(untracked)]);
-    let key = crate::semantic_query::RelateMemoKey::assignable(
+    let key = verter_type_engine::semantic_query::RelateMemoKey::assignable(
         source,
         target,
-        crate::semantic_query::RelationContext::default(),
+        verter_type_engine::semantic_query::RelationContext::default(),
     );
     store.insert_relation_payload_for_tests(
         key.clone(),
         carrier,
         self_roots,
-        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        store.relation_payload_for_tests(
+            verter_type_engine::semantic_query::RelationOutcome::Assignable,
+        ),
         host.project_type_store().current_project_generation(),
     );
 
@@ -842,26 +868,28 @@ fn relation_memo_warm_read_validates_self_root() {
 #[test]
 fn relation_memo_warm_read_serves_validated_entry() {
     let host = host();
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let store = SemanticGraphStore::new();
     let source = store.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let target = store.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
 
     // An empty carrier with no self-roots validates vacuously.
-    let key = crate::semantic_query::RelateMemoKey::assignable(
+    let key = verter_type_engine::semantic_query::RelateMemoKey::assignable(
         source,
         target,
-        crate::semantic_query::RelationContext::default(),
+        verter_type_engine::semantic_query::RelationContext::default(),
     );
     store.insert_relation_payload_for_tests(
         key.clone(),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new()),
-        store.relation_payload_for_tests(crate::semantic_query::RelationOutcome::Assignable),
+        store.relation_payload_for_tests(
+            verter_type_engine::semantic_query::RelationOutcome::Assignable,
+        ),
         host.project_type_store().current_project_generation(),
     );
 
@@ -869,7 +897,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
     assert!(
         matches!(
             cached.as_ref().map(|payload| &payload.outcome),
-            Some(crate::semantic_query::RelationOutcome::Assignable)
+            Some(verter_type_engine::semantic_query::RelationOutcome::Assignable)
         ),
         "the relation memo must serve a warm judgement whose carrier validates \
          (got {cached:?})",
@@ -912,18 +940,18 @@ fn relation_memo_warm_read_serves_validated_entry() {
 /// allowed to recompute under the new generation.
 #[test]
 fn family_memo_validate_rejects_stale_project_generation() {
-    use crate::semantic_query::{PrimitiveKind, QueryError, SemanticNodeData};
+    use verter_type_engine::semantic_query::{PrimitiveKind, QueryError, SemanticNodeData};
 
     let host = host();
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
     let prim = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let key = SemanticQueryKey::KeyOf {
         base: prim,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     };
     let _ = dispatch.execute_type_node(key.clone());
@@ -1015,19 +1043,19 @@ fn family_memo_validate_rejects_stale_project_generation() {
 #[test]
 fn structural_node_kind_publishes_no_file_self_root() {
     let host = host();
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     let dispatch = host.semantic_dispatch();
     let graph = host.project_type_store().semantic_graph();
 
     // `keyof` of a structural primitive: the base is `Global`-scoped,
     // so the published `KeyOf` entry has no file self-root.
     let prim = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let key = SemanticQueryKey::KeyOf {
         base: prim,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     };
     let _ = dispatch.execute_type_node(key.clone());
@@ -1073,26 +1101,25 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
         .ensure_indexed_ready(canonical)
         .map(|indexed| indexed.whole_hash)
         .expect("file IndexedReady materialises");
-    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Foo"),
         ),
         Arc::from(Vec::new().into_boxed_slice()),
-        crate::semantic_query::InstantiateContext::non_file(
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
     match dispatch.execute_type_node(key) {
-        crate::semantic_query::QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
-            value: node,
-            ..
-        }) => node,
+        verter_type_engine::semantic_query::QueryResult::Value(
+            verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
+        ) => node,
         other => panic!("Instantiate of a non-generic type must yield a Value, got {other:?}"),
     }
 }
@@ -1121,13 +1148,16 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
 
     let key = SemanticQueryKey::KeyOf {
         base,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     };
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "KeyOf over a file-derived Object base must resolve before the edit"
     );
     // Hard fixture invariant: `KeyOf` over the file-derived Object node
@@ -1149,7 +1179,7 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
         "export type Foo = { a: number; b: string; c: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical KeyOf memo entry must still be present after the same-canonical edit"
@@ -1221,16 +1251,19 @@ fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
     let dispatch = host.semantic_dispatch();
     let key = SemanticQueryKey::KeyOf {
         base: merged,
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     };
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "KeyOf over a cross-file merged declaration must resolve before the edit"
     );
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     // Fixture invariant: the warm `KeyOf` entry exists AND validates BEFORE
     // any edit — the discrimination is the validator rejecting it after the
     // augmenter edit, not its absence.
@@ -1289,18 +1322,21 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
     let key = SemanticQueryKey::ProjectPath {
         base,
         path: Arc::from(
-            vec![crate::semantic_query::PathSegment::Member(
-                crate::semantic_query::PropertyKey::identifier("a"),
+            vec![verter_type_engine::semantic_query::PathSegment::Member(
+                verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             )]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Navigate,
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Navigate,
         ),
     };
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "ProjectPath `.a` over a file-derived Object base must resolve before the edit"
     );
     // Hard fixture invariant: projecting member `a` of the file-derived
@@ -1320,7 +1356,7 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
         "export type Foo = { a: number; b: string; c: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical ProjectPath memo entry must still be present after the same-canonical edit"
@@ -1379,13 +1415,13 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
     // The cold-owner publish path must bubble the freshly-built carrier
     // (whose facts rail leads with the self-root `FileWholeHash` for `c`)
     // into this outer tracer.
-    let ((), cold_finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    let ((), cold_finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || {
             let dispatch = host.semantic_dispatch();
             let r = dispatch.execute_type_node(key.clone());
             assert!(
-                matches!(r, crate::semantic_query::QueryResult::Value(_)),
+                matches!(r, verter_type_engine::semantic_query::QueryResult::Value(_)),
                 "the cold ResolveDecl dispatch must resolve to a Value"
             );
         },
@@ -1421,8 +1457,8 @@ fn cold_owner_bubbles_carrier_into_outer_tracer() {
     // warm-hit-child coverage MUST equal the cold-built-child coverage:
     // a parent's dep set is path-independent regardless of whether the
     // child was cold or warm.
-    let ((), warm_finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+    let ((), warm_finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || {
             let dispatch = host.semantic_dispatch();
             let _ = dispatch.execute_type_node(key.clone());
@@ -1487,21 +1523,24 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     // no self-root); the source object node is file-derived.
     let members = vec![Arc::<str>::from("a")];
     let key_set = dispatch.intern_string_literal_union(&members);
-    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        crate::project_semantic_dispatch::pick_builtin_decl_identity(),
+    let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+        verter_type_engine::project_semantic_dispatch::pick_builtin_decl_identity(),
         Arc::from(vec![source, key_set].into_boxed_slice()),
-        crate::semantic_query::InstantiateContext::non_file(
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "the Pick<Foo, 'a'> built-in utility instantiation must resolve before the edit"
     );
     // Hard fixture invariant: the `Pick` utility instantiation MUST warm
@@ -1541,7 +1580,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
         "export type Foo = { a: number; b: string; d: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical Pick utility memo entry must still be present after the same-canonical edit"
@@ -1600,25 +1639,28 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
         .expect("declaring file IndexedReady materialises");
     // `Box<Foo>` — the single arg is the file-derived `Foo` Object node
     // scoped to `arg`'s file. The declaring file is `gen`.
-    let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-        crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+    let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(gen),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from("Box"),
         ),
         Arc::from(vec![arg_node].into_boxed_slice()),
-        crate::semantic_query::InstantiateContext::non_file(
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
             ),
             Default::default(),
-            crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
         ),
     ));
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "the Box<Foo> non-builtin instantiation must resolve before the edit"
     );
     // Hard fixture invariant: the non-builtin `Instantiate` MUST warm a
@@ -1660,7 +1702,7 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
         "export type Foo = { a: number; b: string; c: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical non-builtin Instantiate memo entry must still be present after the edit"
@@ -1723,23 +1765,26 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
     // file-derived `Foo` Object node scoped to `arg`'s file. The owning
     // canonical is `sfc`.
     let key = SemanticQueryKey::ResolveMacroPayload {
-        owner: crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        owner: verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(sfc),
             verter_type_expr::TopLevelOwnerId::instance(0),
             Arc::from("<sfc-script-setup>"),
         ),
         macro_index: 0,
-        macro_kind: verter_semantic::analysis::AnalyzedMacroKind::DefineProps,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
         type_args: Arc::from(vec![arg_node].into_boxed_slice()),
-        context: crate::semantic_query::MacroPayloadContext::new(
+        context: verter_type_engine::semantic_query::MacroPayloadContext::new(
             Default::default(),
-            crate::semantic_query::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     };
 
     let primed = dispatch.execute_type_node(key.clone());
     assert!(
-        matches!(primed, crate::semantic_query::QueryResult::Value(_)),
+        matches!(
+            primed,
+            verter_type_engine::semantic_query::QueryResult::Value(_)
+        ),
         "the ResolveMacroPayload over a file-derived type argument must resolve before the edit"
     );
     // Hard fixture invariant: the `ResolveMacroPayload` MUST warm a memo
@@ -1780,7 +1825,7 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
         "export type Foo = { a: number; b: string; c: boolean };\n",
     );
 
-    let ctx: &dyn ResolverContext = &host;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
     assert!(
         graph.get_unvalidated(&key).is_some(),
         "the physical ResolveMacroPayload memo entry must still be present after the edit"
@@ -1844,9 +1889,9 @@ fn resolve_macro_payload_roots_on_type_argument_file() {
 #[test]
 fn session_overlay_warm_validation_matrix() {
     use crate::resolver_core::SessionResolverContext;
-    use crate::semantic_query::QueryResult;
     use crate::session_view::{OverlaidView, SessionView};
     use rustc_hash::FxHashMap;
+    use verter_type_engine::semantic_query::QueryResult;
 
     let canonical = "/sg_overlay/probe.ts";
     // Base file: materialised on the host under the base content hash.
@@ -1894,7 +1939,7 @@ fn session_overlay_warm_validation_matrix() {
     // hash of an older overlay source. Distinct from both the current
     // overlay hash and the base hash, so the overlay-stale case is a
     // real stale-version mismatch, not a synthetic sentinel.
-    let stale_overlay_hash = crate::hash::hash_16(
+    let stale_overlay_hash = verter_semantic_source::source_hash::hash_16(
         b"export interface Probe { overlay: boolean; }\nexport const probe = 0;\n",
     );
     assert_ne!(stale_overlay_hash, overlay_hash);
@@ -1910,7 +1955,7 @@ fn session_overlay_warm_validation_matrix() {
     // `FileWholeHash`, and `self_root_canonicals` lists that canonical.
     let publish_entry_rooted_on = |graph: &SemanticGraphStore, root_hash: [u8; 16]| {
         let node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
+            verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         let carrier = ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
             canonical_id: canonical.to_string(),
@@ -1935,29 +1980,31 @@ fn session_overlay_warm_validation_matrix() {
     // caller can tell a warm hit (returns the published node) from a
     // cold recompute (returns the recompute node) independently of the
     // `cold_ran` flag.
-    let drive = |graph: &SemanticGraphStore, ctx: &dyn ResolverContext| {
-        let mut cold_ran = false;
-        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let read = graph.execute_cooperative(
-            ctx,
-            key.clone(),
-            || {
-                graph.intern_node(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss,
-                ))
-            },
-            || {
-                cold_ran = true;
-                (
-                    QueryResult::Value(recompute_node),
-                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
-                )
-            },
-        );
-        (cold_ran, read.value, recompute_node)
-    };
+    let drive =
+        |graph: &SemanticGraphStore,
+         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>| {
+            let mut cold_ran = false;
+            let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ));
+            let read = graph.execute_cooperative(
+                ctx,
+                key.clone(),
+                || {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        verter_type_engine::semantic_query::QueryError::Miss,
+                    ))
+                },
+                || {
+                    cold_ran = true;
+                    (
+                        QueryResult::Value(recompute_node),
+                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                    )
+                },
+            );
+            (cold_ran, read.value, recompute_node)
+        };
 
     // --- Case 1: overlay-current → warm HIT ------------------------
     {
@@ -2064,7 +2111,7 @@ fn session_overlay_warm_validation_matrix() {
         let graph = SemanticGraphStore::new();
         let published = publish_entry_rooted_on(&graph, base_hash);
         // Plain base host context — no session overlay.
-        let base_ctx: &dyn ResolverContext = host.as_ref();
+        let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let (cold_ran, value, _recompute) = drive(&graph, base_ctx);
         assert!(
             !cold_ran,
@@ -2124,9 +2171,9 @@ fn session_overlay_warm_validation_matrix() {
 #[test]
 fn session_overlay_parse_fact_carrier_warm_validation() {
     use crate::resolver_core::SessionResolverContext;
-    use crate::semantic_query::QueryResult;
     use crate::session_view::{OverlaidView, SessionView};
     use rustc_hash::FxHashMap;
+    use verter_type_engine::semantic_query::QueryResult;
 
     let canonical = "/sg_overlay_parse/probe.ts";
     let host = host();
@@ -2170,7 +2217,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     // Establish the same request-bound authorities production uses. A plain
     // host sees the base content; the SessionResolverContext sees the overlay
     // and owns its exact source/language/parse identity.
-    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     let session_store_view = host
         .resolver_store_view_read()
         .into_owned_view()
@@ -2193,7 +2240,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         .syntactic_export_set
         .expect("base SyntacticExportSet parse fact must resolve");
     assert!(
-        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+        verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
             base_ctx,
             canonical,
             overlay_hash,
@@ -2227,7 +2274,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     );
 
     let exact_overlay_parse_fact =
-        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+        verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
             &session_ctx,
             canonical,
             overlay_indexed.whole_hash,
@@ -2246,53 +2293,56 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     // `Parse(SyntacticExportSet)` fact pinned to `parse_fact`. This is
     // the carrier shape a cold build produces when its tracer observed a
     // syntactic-export-set parse fact for the keyed canonical.
-    let publish_entry = |graph: &SemanticGraphStore,
-                         root_hash: [u8; 16],
-                         parse_fact: &crate::resolver_core::ParseFactRef| {
-        let node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
-        ));
-        let carrier = ReadSetSignature::new(Arc::from(vec![
-            FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_string(),
-                hash: root_hash,
-            },
-            FactVersionRef::Parse(parse_fact.clone()),
-        ]));
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
-        let published = graph.publish_with_carrier_for_tests(
-            key.clone(),
-            QueryResult::Value(node),
-            carrier,
-            self_roots,
-        );
-        assert!(published > 0, "fixture invariant: the warm entry publishes");
-        node
-    };
+    let publish_entry =
+        |graph: &SemanticGraphStore,
+         root_hash: [u8; 16],
+         parse_fact: &verter_session_query::facts::fact_cache::ParseFactRef| {
+            let node = graph.intern_node(SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::String,
+            ));
+            let carrier = ReadSetSignature::new(Arc::from(vec![
+                FactVersionRef::FileWholeHash {
+                    canonical_id: canonical.to_string(),
+                    hash: root_hash,
+                },
+                FactVersionRef::Parse(parse_fact.clone()),
+            ]));
+            let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(canonical)]);
+            let published = graph.publish_with_carrier_for_tests(
+                key.clone(),
+                QueryResult::Value(node),
+                carrier,
+                self_roots,
+            );
+            assert!(published > 0, "fixture invariant: the warm entry publishes");
+            node
+        };
 
-    let drive = |graph: &SemanticGraphStore, ctx: &dyn ResolverContext| {
-        let mut cold_ran = false;
-        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let read = graph.execute_cooperative(
-            ctx,
-            key.clone(),
-            || {
-                graph.intern_node(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss,
-                ))
-            },
-            || {
-                cold_ran = true;
-                (
-                    QueryResult::Value(recompute_node),
-                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
-                )
-            },
-        );
-        (cold_ran, read.value, recompute_node)
-    };
+    let drive =
+        |graph: &SemanticGraphStore,
+         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>| {
+            let mut cold_ran = false;
+            let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ));
+            let read = graph.execute_cooperative(
+                ctx,
+                key.clone(),
+                || {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        verter_type_engine::semantic_query::QueryError::Miss,
+                    ))
+                },
+                || {
+                    cold_ran = true;
+                    (
+                        QueryResult::Value(recompute_node),
+                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                    )
+                },
+            );
+            (cold_ran, read.value, recompute_node)
+        };
 
     // --- Case 1: overlay-current (Parse fact) → warm HIT -----------
     {
@@ -2328,7 +2378,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
         // Self-root on the current overlay hash, but the Parse fact
         // carries the BASE version's SyntacticExportSet hash — a
         // genuine superseded-version mismatch.
-        let stale_parse_fact = crate::resolver_core::ParseFactRef {
+        let stale_parse_fact = verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: canonical.to_string(),
             key: FactKey::SyntacticExportSet,
             lane: FactLane::Semantic,
@@ -2360,7 +2410,7 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
     {
         let graph = SemanticGraphStore::new();
         let published = publish_entry(&graph, base_hash, &base_parse_fact);
-        let base_ctx: &dyn ResolverContext = host.as_ref();
+        let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
         let (cold_ran, value, _recompute) = drive(&graph, base_ctx);
         assert!(
             !cold_ran,
@@ -2428,9 +2478,9 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
 #[test]
 fn session_tombstone_rejects_base_rooted_warm_entry() {
     use crate::resolver_core::SessionResolverContext;
-    use crate::semantic_query::QueryResult;
     use crate::session_view::{OverlaidViewRef, SessionView};
     use rustc_hash::FxHashMap;
+    use verter_type_engine::semantic_query::QueryResult;
 
     let deleted_canonical = "/sg_tombstone/probe.ts";
     let sibling_canonical = "/sg_tombstone/sibling.ts";
@@ -2463,7 +2513,8 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
     // tombstone for the probe canonical — the session deleted the
     // file and did not re-upsert it.
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-    let overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     let mut overlay_tombstones: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     overlay_tombstones.insert(deleted_canonical.to_string());
@@ -2490,9 +2541,9 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
 
     // The base parse fact for the deleted canonical's SyntacticExportSet
     // — the carrier shape a cold build produced while the file was alive.
-    let base_ctx: &dyn ResolverContext = host.as_ref();
+    let base_ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     let deleted_parse_fact =
-        crate::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
+        verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
             base_ctx,
             deleted_canonical,
             deleted_base_hash,
@@ -2515,7 +2566,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
                    facts: Vec<FactVersionRef>,
                    self_root: &str| {
         let node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
+            verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         let carrier = ReadSetSignature::new(Arc::from(facts));
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(self_root)]);
@@ -2529,29 +2580,32 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
         node
     };
 
-    let drive = |graph: &SemanticGraphStore, key: &SemanticQueryKey, ctx: &dyn ResolverContext| {
-        let mut cold_ran = false;
-        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let read = graph.execute_cooperative(
-            ctx,
-            key.clone(),
-            || {
-                graph.intern_node(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss,
-                ))
-            },
-            || {
-                cold_ran = true;
-                (
-                    QueryResult::Value(recompute_node),
-                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
-                )
-            },
-        );
-        (cold_ran, read.value, recompute_node)
-    };
+    let drive =
+        |graph: &SemanticGraphStore,
+         key: &SemanticQueryKey,
+         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>| {
+            let mut cold_ran = false;
+            let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ));
+            let read = graph.execute_cooperative(
+                ctx,
+                key.clone(),
+                || {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        verter_type_engine::semantic_query::QueryError::Miss,
+                    ))
+                },
+                || {
+                    cold_ran = true;
+                    (
+                        QueryResult::Value(recompute_node),
+                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                    )
+                },
+            );
+            (cold_ran, read.value, recompute_node)
+        };
 
     // --- Case 1: deleted (FileWholeHash self-root) → MISS ----------
     {
@@ -2698,7 +2752,7 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
 /// validator (`validates_self_root_whole_hash`) then rejects an entry
 /// *self-rooted* on the deleted file — correct. But a plain cross-file
 /// `FileWholeHash` dependency fact routes through
-/// [`crate::resolver_core::StoreView::validates`], whose `FileWholeHash`
+/// [`verter_session_query::facts::store_view::StoreView::validates`], whose `FileWholeHash`
 /// arm keeps the lazy `None => true` "untracked → optimistically
 /// accept" rule (cross-file permissiveness). A tombstoned canonical,
 /// removed from `whole_hashes`, looks UNTRACKED to that arm — so a
@@ -2729,9 +2783,9 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
 #[test]
 fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
     use crate::resolver_core::SessionResolverContext;
-    use crate::semantic_query::QueryResult;
     use crate::session_view::OverlaidViewRef;
     use rustc_hash::FxHashMap;
+    use verter_type_engine::semantic_query::QueryResult;
 
     let parent_canonical = "/sg_tombstone_dep/parent.ts";
     let child_canonical = "/sg_tombstone_dep/child.ts";
@@ -2768,7 +2822,7 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
     // path, not the strict self-root path.
     let publish = |graph: &SemanticGraphStore, key: &SemanticQueryKey| {
         let node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
+            verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         let carrier = ReadSetSignature::new(Arc::from(vec![
             FactVersionRef::FileWholeHash {
@@ -2792,32 +2846,36 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
         node
     };
 
-    let drive = |graph: &SemanticGraphStore, key: &SemanticQueryKey, ctx: &dyn ResolverContext| {
-        let mut cold_ran = false;
-        let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::Number,
-        ));
-        let read = graph.execute_cooperative(
-            ctx,
-            key.clone(),
-            || {
-                graph.intern_node(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss,
-                ))
-            },
-            || {
-                cold_ran = true;
-                (
-                    QueryResult::Value(recompute_node),
-                    Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
-                )
-            },
-        );
-        (cold_ran, read.value, recompute_node)
-    };
+    let drive =
+        |graph: &SemanticGraphStore,
+         key: &SemanticQueryKey,
+         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>| {
+            let mut cold_ran = false;
+            let recompute_node = graph.intern_node(SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Number,
+            ));
+            let read = graph.execute_cooperative(
+                ctx,
+                key.clone(),
+                || {
+                    graph.intern_node(SemanticNodeData::Opaque(
+                        verter_type_engine::semantic_query::QueryError::Miss,
+                    ))
+                },
+                || {
+                    cold_ran = true;
+                    (
+                        QueryResult::Value(recompute_node),
+                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                    )
+                },
+            );
+            (cold_ran, read.value, recompute_node)
+        };
 
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();
-    let overlay_hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let overlay_hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
 
     // --- Case 1: child-deleted → parent warm read MISSES -----------
     {

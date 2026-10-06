@@ -1,8 +1,12 @@
 use super::*;
 use crate::documents::carrier_structure::test_carrier_blocks;
-use verter_semantic::analysis::template;
-use verter_semantic::analysis::types::ImportBindingKind;
-use verter_semantic::analysis::*;
+use verter_session_query::analysis::template;
+use verter_session_query::analysis::types::AnalyzedBinding;
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImportBinding;
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::analysis::types::ReactivityKind;
 
 fn make_analysis(
     bindings: Vec<AnalyzedBinding>,
@@ -146,7 +150,7 @@ fn test_classify_css_class_in_template_is_css() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -178,7 +182,7 @@ fn test_rename_css_class_across_template_and_style() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -205,40 +209,44 @@ fn make_element_with_attrs(
     tag: &str,
     classes: &[&str],
     id: Option<&str>,
-) -> verter_semantic::analysis::TemplateElement {
+) -> verter_session_query::analysis::template::TemplateElement {
     let mut attrs = Vec::new();
     if !classes.is_empty() {
         let class_val = classes.join(" ");
         let pattern = format!("class=\"{}\"", class_val);
         let start = source.find(&pattern).unwrap_or(0) as u32;
         let end = start + pattern.len() as u32;
-        attrs.push(verter_semantic::analysis::TemplateAttribute {
-            name: "class".into(),
-            value: Some(class_val),
-            is_dynamic: false,
-            span: verter_span::Span::new(start, end),
-            name_end: 0,
-            value_span: None,
-        });
+        attrs.push(
+            verter_session_query::analysis::template::TemplateAttribute {
+                name: "class".into(),
+                value: Some(class_val),
+                is_dynamic: false,
+                span: verter_span::Span::new(start, end),
+                name_end: 0,
+                value_span: None,
+            },
+        );
     }
     if let Some(id_val) = id {
         let pattern = format!("id=\"{}\"", id_val);
         let start = source.find(&pattern).unwrap_or(0) as u32;
         let end = start + pattern.len() as u32;
-        attrs.push(verter_semantic::analysis::TemplateAttribute {
-            name: "id".into(),
-            value: Some(id_val.into()),
-            is_dynamic: false,
-            span: verter_span::Span::new(start, end),
-            name_end: 0,
-            value_span: None,
-        });
+        attrs.push(
+            verter_session_query::analysis::template::TemplateAttribute {
+                name: "id".into(),
+                value: Some(id_val.into()),
+                is_dynamic: false,
+                span: verter_span::Span::new(start, end),
+                name_end: 0,
+                value_span: None,
+            },
+        );
     }
-    verter_semantic::analysis::TemplateElement {
+    verter_session_query::analysis::template::TemplateElement {
         tag: tag.into(),
         is_component: false,
         is_self_closing: false,
-        namespace: verter_semantic::analysis::ElementNamespace::Html,
+        namespace: verter_session_query::analysis::template::ElementNamespace::Html,
         attributes: attrs,
         directives: vec![],
         v_for: None,
@@ -266,7 +274,7 @@ fn make_element_with_attrs(
 fn build_style(
     source: &str,
     blocks: &[CarrierBlockView],
-) -> verter_semantic::analysis::StyleBlockAnalysis {
+) -> verter_session_query::analysis::style::StyleBlockAnalysis {
     let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
     let (content_start, content_end) = style_block.content_range();
     let css_content = &source[content_start as usize..content_end as usize];
@@ -296,7 +304,7 @@ fn test_rename_css_id_across_template_and_style() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })
@@ -342,7 +350,7 @@ fn test_rename_css_class_doesnt_affect_other_names() {
     let analysis = FileAnalysisSnapshot {
         styles: (vec![css]).into(),
         template: Some(
-            (verter_semantic::analysis::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![el],
                 ..Default::default()
             })

@@ -5,6 +5,7 @@
 # part of the shipped addon.
 members = [
   "crates/*",
+  "crates/verter_resolution",
   "crates/verter_napi/tests/fixture_addon",
   "xtask",
 ]
@@ -50,6 +51,7 @@ syn = { version = "2.0", features = ["full", "visit"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 verter_css_syntax = { path = "crates/verter_css_syntax" }
+verter_analyzer_mint = { path = "crates/verter_analyzer_mint" }
 verter_debug_assert = { path = "crates/verter_debug_assert" }
 verter_macro_dto = { path = "crates/verter_macro_dto" }
 verter_ecma = { path = "crates/verter_ecma" }
@@ -58,7 +60,10 @@ verter_no_typeexpr = { path = "crates/verter_no_typeexpr" }
 verter_no_typeexpr_derive = { path = "crates/verter_no_typeexpr_derive" }
 verter_no_storedspan = { path = "crates/verter_no_storedspan" }
 verter_no_storedspan_derive = { path = "crates/verter_no_storedspan_derive" }
+verter_resolution = { path = "crates/verter_resolution" }
+verter_semantic_source = { path = "crates/verter_semantic_source" }
 verter_session_query = { path = "crates/verter_session_query" }
+verter_type_engine = { path = "crates/verter_type_engine" }
 verter_type_expr = { path = "crates/verter_type_expr" }
 verter_type_expr_oxc = { path = "crates/verter_type_expr_oxc" }
 

@@ -36,7 +36,7 @@ fn binding() -> ProjectBinding {
         "7.0.1",
         env_dims(),
         Vec::new(),
-        verter_workspace::ProjectId(0),
+        verter_session_query::resolution::ProjectId(0),
         verter_workspace::SnapshotGeneration(1),
     )
 }

@@ -1,5 +1,6 @@
 //! Informational arch-guard — inventory of production
-//! `install_fact_tracer` call sites in `crates/verter_session/src/`.
+//! `install_fact_tracer` call sites in `crates/verter_session/src/` and
+//! `crates/verter_type_engine/src/`.
 //!
 //! This guard is INFORMATIONAL, not fail-loud. Its purpose is to give
 //! reviewers a single audit point that lists every place the
@@ -236,7 +237,8 @@ fn format_inventory(sites: &[Site]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Inventory of every production `install_fact_tracer(host, ...)` call
-/// site in `crates/verter_session/src/`. Printed to stdout via
+/// site in `crates/verter_session/src/` and `crates/verter_type_engine/src/`.
+/// Printed to stdout via
 /// `--nocapture`; the test passes as long as the scanner found at
 /// least one site.
 ///
@@ -245,10 +247,17 @@ fn format_inventory(sites: &[Site]) -> String {
 /// targeted guard alongside this informational one.
 #[test]
 fn fact_tracer_install_sites_inventory() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut sites = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
-        scan_file(&file, &mut sites);
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let crate_root = workspace_root().join(krate);
+        assert!(
+            crate_root.is_dir(),
+            "production source root {} is missing",
+            crate_root.display()
+        );
+        for file in walk_production_rs_files(&crate_root) {
+            scan_file(&file, &mut sites);
+        }
     }
 
     let inventory = format_inventory(&sites);
@@ -274,7 +283,8 @@ fn fact_tracer_install_sites_inventory() {
     assert!(
         !sites.is_empty(),
         "no production `install_fact_tracer` call sites found in \
-         `crates/verter_session/src/`. Either the helper was renamed \
+         `crates/verter_session/src/` or `crates/verter_type_engine/src/`. \
+         Either the helper was renamed \
          or retired; reconcile this inventory guard with the current \
          tracer surface."
     );

@@ -19,12 +19,13 @@
 //! `host_methods.rs` impl block keeps calling them via the
 //! shell's `pub(crate) use jsdoc_resolve::*;` re-export.
 
-use crate::host_manage::{component_meta_debug, component_meta_debug_enabled};
 use crate::resolver_core::ComponentMetaEvalOutputs;
-use crate::types::{FileAnalysisSnapshot, ProjectionMode};
 use crate::VerterHost;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
+use verter_type_engine::semantic_query::ProjectionMode;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
 // file moved from `meta_resolve/jsdoc_resolve.rs` to
 // `host_manage/jsdoc_resolve.rs`. The original `super::dispatch_helpers`
@@ -32,21 +33,27 @@ use crate::instant::Instant;
 // move, `super` is `host_manage`, so the rewrite goes via the
 // `crate::meta_resolve` re-export surface.
 use crate::host_manage::component_meta_request_impl::{
-    CapturedComponentMetaInputs, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedTypeDeclaration,
+    CapturedComponentMetaInputs, ResolvedJsdocBlock, ResolvedJsdocTag,
 };
 use crate::meta_resolve::project_expr_class_a_via_dispatch;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 /// Declaration-only uses carry `()`; semantic callbacks require the caller's
 /// existing facade and captured private view at the type level.
 pub(crate) struct HostComponentMetaResolver<'a, E = ()> {
     pub(crate) host: &'a VerterHost,
-    pub(crate) ctx: &'a dyn crate::resolver_core::resolver_context::ResolverContext,
+    pub(crate) ctx: &'a dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     pub(crate) engine: E,
 }
 
 pub(crate) struct ComponentMetaSemanticServices<'dispatch, 'request> {
     pub(crate) dispatch:
-        &'dispatch crate::project_semantic_dispatch::ProjectSemanticDispatch<'request>,
+        &'dispatch verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            'request,
+            crate::resolver_core::HostCapabilities,
+        >,
     pub(crate) session_view: Option<&'request dyn crate::session_view::SessionView>,
 }
 
@@ -56,16 +63,18 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         dep_canonical: &str,
         _dep_owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         let (resolved, route_facts) = self
             .ctx
             .resolve_imported_type_root_with_facts(dep_canonical, requested_name);
         self.ctx.observe_borrowed_signature(&route_facts);
-        resolved.map(|identity| crate::resolver_core::ResolvedExportTarget {
-            source_canonical_id: (identity.canonical_id.as_ref() != dep_canonical)
-                .then(|| identity.canonical_id.to_string()),
-            source_owner: identity.owner,
-            source_name: identity.symbol_name.to_string(),
+        resolved.map(|identity| {
+            verter_session_query::declarations::metadata::ResolvedExportTarget {
+                source_canonical_id: (identity.canonical_id.as_ref() != dep_canonical)
+                    .then(|| identity.canonical_id.to_string()),
+                source_owner: identity.owner,
+                source_name: identity.symbol_name.to_string(),
+            }
         })
     }
 
@@ -84,7 +93,7 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_session_query::declarations::DeclarationId> {
         (owner == verter_type_expr::TopLevelOwnerId::ordinary_file())
             .then(|| {
                 self.host
@@ -107,7 +116,7 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         dep_canonical: &str,
         dep_owner: verter_type_expr::TopLevelOwnerId,
         requested_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         self.resolve_export_target(dep_canonical, dep_owner, requested_name)
     }
 
@@ -116,7 +125,7 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         dep_canonical: &str,
         dep_owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedExportTarget> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedExportTarget> {
         // Overlay-aware: the owner file (and its import surface) may
         // exist only in a session overlay, so the shallow import
         // lookup must read through the resolver context's view — the
@@ -133,11 +142,13 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
             .resolve_imported_type_root_with_facts(&next_canonical, &import_target.imported_name);
         self.ctx.observe_borrowed_signature(&route_facts);
         let resolved = resolved?;
-        Some(crate::resolver_core::ResolvedExportTarget {
-            source_canonical_id: Some(resolved.canonical_id.to_string()),
-            source_owner: resolved.owner,
-            source_name: resolved.symbol_name.to_string(),
-        })
+        Some(
+            verter_session_query::declarations::metadata::ResolvedExportTarget {
+                source_canonical_id: Some(resolved.canonical_id.to_string()),
+                source_owner: resolved.owner,
+                source_name: resolved.symbol_name.to_string(),
+            },
+        )
     }
 
     fn resolve_local_export_symbol_target(
@@ -148,10 +159,10 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
     ) -> Option<(verter_type_expr::TopLevelOwnerId, String)> {
         let state = self.ctx.shallow_file_state(canonical_source)?;
         match state.export_target(exported_name)? {
-            crate::resolver_core::ExportTarget::Local { owner, symbol_name } => {
+            verter_session_query::inputs::shallow::ExportTarget::Local { owner, symbol_name } => {
                 Some((*owner, symbol_name.clone()))
             }
-            crate::resolver_core::ExportTarget::Reexport { .. } => None,
+            verter_session_query::inputs::shallow::ExportTarget::Reexport { .. } => None,
         }
     }
 
@@ -160,13 +171,14 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> Option<crate::resolver_core::ResolvedLocalTypeSymbolMetadata> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata> {
         let serve = self.ctx.ensure_indexed_ready_serve(canonical_source)?;
-        self.ctx
-            .observe(crate::resolver_core::FactVersionRef::FileWholeHash {
+        self.ctx.observe(
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                 canonical_id: canonical_source.to_owned(),
                 hash: serve.indexed.whole_hash,
-            });
+            },
+        );
         // Record the declaration file before the symbol lookup so a genuine
         // miss is invalidated when a later edit adds the requested symbol.
         let header = serve
@@ -175,20 +187,22 @@ impl<E> crate::resolver_core::DeclarationMetadataResolver for HostComponentMetaR
             .headers
             .type_header_in(owner, resolved_name)?;
         let kind = match header.kind {
-            verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
-                crate::resolver_core::ResolvedDeclarationKind::TypeAlias
+            verter_session_query::declarations::TypeDeclKind::Alias => {
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias
             }
-            verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
-                crate::resolver_core::ResolvedDeclarationKind::Interface
+            verter_session_query::declarations::TypeDeclKind::Interface => {
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface
             }
-            verter_semantic::analysis::type_eval::TypeDeclKind::Class => {
-                crate::resolver_core::ResolvedDeclarationKind::Class
+            verter_session_query::declarations::TypeDeclKind::Class => {
+                verter_session_query::declarations::metadata::ResolvedDeclarationKind::Class
             }
         };
-        Some(crate::resolver_core::ResolvedLocalTypeSymbolMetadata {
-            kind,
-            span: header.span,
-        })
+        Some(
+            verter_session_query::declarations::metadata::ResolvedLocalTypeSymbolMetadata {
+                kind,
+                span: header.span,
+            },
+        )
     }
 }
 
@@ -214,9 +228,9 @@ impl HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>> {
         owner_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         root_name: &str,
-        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
     ) -> bool {
-        use verter_semantic::analysis::AnalyzedMacroKind;
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
 
         let root_ref = verter_type_expr::TypeExpr::Ref {
             name: std::sync::Arc::from(root_name),
@@ -227,14 +241,14 @@ impl HostComponentMetaResolver<'_, ComponentMetaSemanticServices<'_, '_>> {
             owner_canonical,
             owner,
             &root_ref,
-            crate::semantic_query::ProjectionMode::Navigate,
+            verter_type_engine::semantic_query::ProjectionMode::Navigate,
         ) else {
             return false;
         };
         let Some(view) = dispatch.resolve_typeinfo_surface_view(
             base,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Shallow,
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Shallow,
             ),
         ) else {
             return false;
@@ -293,21 +307,21 @@ impl crate::resolver_core::ComponentMetaResolverHost
     fn snapshot_imports<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_semantic::analysis::types::AnalyzedImport] {
+    ) -> &'a [verter_session_query::analysis::types::AnalyzedImport] {
         snapshot.imports.as_slice()
     }
 
     fn snapshot_macros<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_semantic::analysis::types::AnalyzedMacro] {
+    ) -> &'a [verter_session_query::analysis::types::AnalyzedMacro] {
         snapshot.macros.as_slice()
     }
 
     fn snapshot_macro_type_deps<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_semantic::analysis::types::MacroTypeDep] {
+    ) -> &'a [verter_session_query::analysis::types::MacroTypeDep] {
         snapshot.macro_type_deps.as_slice()
     }
 
@@ -390,7 +404,7 @@ impl crate::resolver_core::ComponentMetaResolverHost
     fn macro_type_arg_has_direct_reference(
         &self,
         owner_canonical: &str,
-        mac: &verter_semantic::analysis::types::AnalyzedMacro,
+        mac: &verter_session_query::analysis::types::AnalyzedMacro,
         type_name: &str,
     ) -> Option<bool> {
         let locator = mac.parsed_type_argument.as_ref()?;
@@ -400,8 +414,8 @@ impl crate::resolver_core::ComponentMetaResolverHost
                 &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
                     absolutize_macro_payload_locator(locator, owner_canonical),
                 ),
-                crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                    crate::semantic_query::ProjectionMode::Navigate,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
             )
             .at_optional_boundary()?;
@@ -416,21 +430,21 @@ impl crate::resolver_core::ComponentMetaResolverHost
     fn projectable_owner_local_macro_roots(
         &self,
         owner_canonical: &str,
-        mac: &verter_semantic::analysis::types::AnalyzedMacro,
+        mac: &verter_session_query::analysis::types::AnalyzedMacro,
     ) -> Vec<String> {
         fn macro_lacks_direct_local_surface(
-            mac: &verter_semantic::analysis::types::AnalyzedMacro,
+            mac: &verter_session_query::analysis::types::AnalyzedMacro,
         ) -> bool {
             match mac.kind {
-                verter_semantic::analysis::AnalyzedMacroKind::DefineProps
-                | verter_semantic::analysis::AnalyzedMacroKind::WithDefaults
-                | verter_semantic::analysis::AnalyzedMacroKind::DefineModel => {
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+                | verter_session_query::analysis::types::AnalyzedMacroKind::WithDefaults
+                | verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel => {
                     mac.prop_fields.is_empty()
                 }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => {
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits => {
                     mac.emit_fields.is_empty()
                 }
-                verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => {
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots => {
                     mac.slot_fields.is_empty()
                 }
                 // `expose_fields` holds only the object-literal fields and
@@ -440,8 +454,10 @@ impl crate::resolver_core::ComponentMetaResolverHost
                 // discover its owner-local root. Presence gate on the type
                 // argument (mirrors `raw_macro_surface_is_authoritative`),
                 // not on the literal's absence.
-                verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => mac.is_type_based,
-                verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => false,
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose => {
+                    mac.is_type_based
+                }
+                verter_session_query::analysis::types::AnalyzedMacroKind::DefineOptions => false,
             }
         }
 
@@ -508,7 +524,7 @@ impl crate::resolver_core::ComponentMetaResolverHost
         owner_canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         root_name: &str,
-        macro_kind: verter_semantic::analysis::types::AnalyzedMacroKind,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
     ) -> bool {
         // Authority gate for the cold resolver's owner-local arm: does the
         // owner-local type `root_name` resolve to a non-empty macro surface?
@@ -613,7 +629,7 @@ impl crate::resolver_core::ComponentMetaResolverHost
         &self,
         canonical: &str,
         tracked_deps: &std::collections::BTreeSet<String>,
-    ) -> Vec<crate::resolver_core::FactVersionRef> {
+    ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
         self.host
             .current_dependency_fact_versions(canonical, tracked_deps)
     }
@@ -648,12 +664,15 @@ fn absolutize_macro_payload_locator(
 /// Object MEMBERS, which encode "nested" deps. Visited-guarded (graph nodes
 /// may be shared or cyclic).
 fn node_has_direct_macro_reference(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    node: crate::semantic_query::SemanticNodeId,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
     needle: &str,
 ) -> bool {
-    use crate::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
+    use verter_type_engine::semantic_query::{IndexKey, SemanticNodeData, SemanticNodeId};
 
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
     let mut worklist: Vec<SemanticNodeId> = vec![node];
@@ -662,7 +681,7 @@ fn node_has_direct_macro_reference(
             continue;
         }
         if let Some((name, args)) =
-            crate::resolver_core::component_meta_registry::component_meta_registry_node_ref_head(
+            verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(
                 dispatch, node,
             )
         {
@@ -672,7 +691,8 @@ fn node_has_direct_macro_reference(
             worklist.extend(args);
             continue;
         }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(graph, node) else {
+        let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(graph, node)
+        else {
             continue;
         };
         match data.as_ref() {
@@ -756,7 +776,9 @@ pub(crate) fn resolve_type_declaration(
     dep_canonical: &str,
     requested_name: &str,
 ) -> ResolvedTypeDeclaration {
-    let base_ctx: &dyn crate::resolver_core::resolver_context::ResolverContext = host;
+    let base_ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
     resolve_type_declaration_with_context(
         host,
         base_ctx,
@@ -772,7 +794,9 @@ pub(crate) fn resolve_type_declaration(
 /// declaration walker dereferences cross-file types.
 pub(crate) fn resolve_type_declaration_with_context(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     dep_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     requested_name: &str,
@@ -791,7 +815,9 @@ pub(crate) fn resolve_type_declaration_with_context(
 }
 
 pub(crate) fn read_full_source(
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_source: &str,
 ) -> Option<String> {
     // JSDoc is semantic output derived from the declaration file's exact
@@ -800,17 +826,24 @@ pub(crate) fn read_full_source(
     // version tear-free, `ensure_indexed_ready_serve` is overlay-aware and
     // propagates a fenced serve as non-cacheable through the active tracer.
     let serve = ctx.ensure_indexed_ready_serve(canonical_source)?;
-    ctx.observe(crate::resolver_core::FactVersionRef::FileWholeHash {
-        canonical_id: canonical_source.to_owned(),
-        hash: serve.indexed.whole_hash,
-    });
+    ctx.observe(
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: canonical_source.to_owned(),
+            hash: serve.indexed.whole_hash,
+        },
+    );
     Some(serve.indexed.raw_source.to_string())
 }
 
 pub(crate) fn resolve_jsdoc_block(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_source: &str,
     span: verter_span::Span,
     mode: ProjectionMode,
@@ -848,12 +881,17 @@ pub(crate) fn resolve_jsdoc_block(
 
 pub(crate) fn map_jsdoc_tag(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_source: &str,
     mode: ProjectionMode,
     tracked_deps: &mut std::collections::BTreeSet<String>,
-    tag: verter_semantic::analysis::types::JsdocTag,
+    tag: verter_session_query::analysis::types::JsdocTag,
 ) -> ResolvedJsdocTag {
     let (text, raw_type, subject_name) = parse_jsdoc_tag_payload(tag.name.as_str(), tag.text);
     let resolved_type = if mode == ProjectionMode::Expanded {
@@ -959,13 +997,18 @@ fn sanitize_jsdoc_unknown_raw(raw_type: &str) -> String {
 /// legacy-family predicate owned by `semantic_query::compat_spelling` (one
 /// home, no inline duplicate list). Never consulted for control flow.
 fn jsdoc_payload_spells_legacy_sentinel(raw: &str) -> bool {
-    crate::semantic_query::compat_spelling::spells_legacy_sentinel_family(raw)
+    verter_type_engine::semantic_query::compat_spelling::spells_legacy_sentinel_family(raw)
 }
 
 pub(crate) fn resolve_jsdoc_tag_type(
     _host: &VerterHost,
-    ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     canonical_source: &str,
     raw_type: &str,
     tracked_deps: &mut std::collections::BTreeSet<String>,
@@ -990,10 +1033,12 @@ pub(crate) fn resolve_jsdoc_tag_type(
     // Classify the parser-authored paths against the exact request-bound
     // shallow state. No lowered-TypeExpr dependency re-walk is permitted.
     let serve = ctx.ensure_indexed_ready_serve(canonical_source)?;
-    ctx.observe(crate::resolver_core::FactVersionRef::FileWholeHash {
-        canonical_id: canonical_source.to_owned(),
-        hash: serve.indexed.whole_hash,
-    });
+    ctx.observe(
+        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+            canonical_id: canonical_source.to_owned(),
+            hash: serve.indexed.whole_hash,
+        },
+    );
     let shallow = &serve.indexed.shallow_state;
     let classified = shallow.classify_dependency_paths(
         verter_type_expr::TopLevelOwnerId::ordinary_file(),

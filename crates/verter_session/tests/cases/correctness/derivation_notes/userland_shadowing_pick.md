@@ -53,7 +53,7 @@ Phase linkage:
 - `phase-00-tier1-mismatches.md` row 5 documented the deferred
   rule-correct expected (`[alpha, beta, gamma]`).
 - Phase 5h §5.10 introduced the resolver-context `ScopeShadowing`
-  struct (`crates/verter_session/src/resolver_core/scope_shadowing.rs`)
+  struct (`crates/verter_type_engine/src/resolver_core/scope_shadowing.rs`)
   and threaded it through both the dispatch-lowering entry
   (`shallow_lower_type_expr`) and the materialise-path registry
   route fast-path (`project_expr_class_a_via_dispatch_threaded`),

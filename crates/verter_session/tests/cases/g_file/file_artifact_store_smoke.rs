@@ -5,8 +5,9 @@
 
 use std::sync::Arc;
 
-use verter_session::file_artifact_store::{FileArtifactKey, FileArtifactStore, FileArtifacts};
+use verter_session::file_artifact_store::{FileArtifactStore, FileArtifacts};
 use verter_session::project_type_store::IndexedReady;
+use verter_session_query::source::artifact_key::FileArtifactKey;
 
 fn make_artifacts(hash_marker: u8) -> Arc<FileArtifacts> {
     Arc::new(FileArtifacts::with_indexed(Arc::new(

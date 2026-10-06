@@ -5,7 +5,7 @@
 //! a cache length, or a counter; none resolves types or touches the dispatch.
 
 use super::ComponentMetaQueryEngine;
-use crate::resolver_core::FuseTrip;
+use verter_type_engine::resolver_core::FuseTrip;
 
 impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn enter_member_surface(&mut self) -> bool {

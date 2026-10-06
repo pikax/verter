@@ -23,7 +23,7 @@
 //!
 //! 1. Verifies the audit file exists at the expected location.
 //! 2. Asserts that no production-source `is_facts_irrelevant: true`
-//!    literal appears in `crates/verter_session/src/**/*.rs` —
+//!    literal appears in `crates/{verter_session,verter_type_engine}/src/**/*.rs` —
 //!    today no cache carries the flag. A future block that adds it
 //!    must extend `ELIGIBLE_CACHES` AND keep the audit file in sync.
 //! 3. Asserts that every cache listed in `ELIGIBLE_CACHES` (the
@@ -138,9 +138,19 @@ fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
 /// the audit) before landing the flag.
 #[test]
 fn no_is_facts_irrelevant_flag_landed_yet() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut hits: Vec<(PathBuf, usize, String)> = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
+    // Caches live in the session crate and in the type engine it builds on.
+    let mut files = Vec::new();
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let crate_root = workspace_root().join(krate);
+        assert!(
+            crate_root.is_dir(),
+            "production source root {} is missing",
+            crate_root.display()
+        );
+        files.extend(walk_production_rs_files(&crate_root));
+    }
+    for file in files {
         let Ok(src) = std::fs::read_to_string(&file) else {
             continue;
         };

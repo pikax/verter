@@ -1,0 +1,17 @@
+error[E0616]: field `ordinal` of struct `CaptureParameterLocator` is private
+  --> tests/compile-fail/flow_frame_records_not_mutable.rs:10:13
+   |
+10 |     locator.ordinal = 0;
+   |             ^^^^^^^ private field
+
+error[E0616]: field `gate` of struct `SliceCaptureAuthorityLocator` is private
+  --> tests/compile-fail/flow_frame_records_not_mutable.rs:14:13
+   |
+14 |     locator.gate = gate;
+   |             ^^^^ private field
+
+error[E0616]: field `parameter_ordinal` of struct `SliceCaptureAuthorityLocator` is private
+  --> tests/compile-fail/flow_frame_records_not_mutable.rs:15:13
+   |
+15 |     locator.parameter_ordinal = None;
+   |             ^^^^^^^^^^^^^^^^^ private field

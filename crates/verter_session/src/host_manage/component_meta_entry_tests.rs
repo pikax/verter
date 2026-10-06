@@ -27,9 +27,9 @@
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
-use crate::resolver_core::FactVersionRef;
 use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// `/src/types.ts` — a cross-file dep imported by the owner. Its
 /// export route is a genuine cross-file route dependency of the
@@ -88,7 +88,7 @@ fn has_syntactic_route_fact(facts: &[FactVersionRef], owner: &str) -> bool {
             f,
             FactVersionRef::Parse(parse)
                 if parse.canonical_id == owner
-                    && parse.key == verter_semantic::facts::FactKey::SyntacticRouteInterface
+                    && parse.key == verter_session_query::facts::FactKey::SyntacticRouteInterface
         )
     })
 }
@@ -797,8 +797,8 @@ fn meta_payload_under_recorded_signature_misses_after_project_mutation() {
 /// seed-fence token recheck cannot be what declines the publish.
 fn arm_force_fenced_serve_flag(host: &VerterHost) {
     *host.materialize_seam_hook.lock() = Some(Arc::new(|| {
-        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-            crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
         );
     }));
 }

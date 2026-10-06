@@ -13,16 +13,16 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_session::resolver_core::{
-    BarrelRouteSurface, FactVersionRef, RouteDb, RouteResult, StoreView, StoreViewCompatToken,
-};
+use verter_session::resolver_core::{BarrelRouteSurface, RouteDb, RouteResult};
 use verter_session::VerterHost;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
 fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
     verter_session::resolver_core::RouteNameKey::new(
         provider,
         name,
-        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session_query::facts::registry::SymbolSpace::Type,
         verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
         [0u8; 16],
         [0u8; 16],
@@ -160,7 +160,7 @@ fn lib_env_hash_change_does_not_invalidate_resolved_import_facts() {
     };
 
     use verter_session::resolver_core::PermissiveStoreView;
-    use verter_workspace::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
 
     let db = ResolvedImportFactsDb::new();
     let key = ResolvedImportFactsKey {

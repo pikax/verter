@@ -36,16 +36,16 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::MacroExpansionDiagnostics;
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::component_meta::MacroExpansionDiagnostics;
+use verter_session_query::analysis::type_expand::{
     ExpandedComponentTypes, ExpandedMacroObjectShape, ExpandedMacroProps, ExpandedObjectShape,
     ExpandedProperty, ExpansionExecutionStatus, ExpansionResult,
 };
-use verter_semantic::analysis::type_solver::result::{ExecutionStatus, SolverExactness};
-use verter_semantic::analysis::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
+use verter_session_query::type_solver::result::{ExecutionStatus, SolverExactness};
 
-use crate::resolver_core::ResolverContext;
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::resolver_core::ResolverContext;
 
 /// Top-level driver: publish the `define_props` / `define_emits` /
 /// `define_slots` shapes for every type-based macro in `snapshot`.
@@ -150,8 +150,11 @@ pub(crate) fn project_define_macro_shapes(
 /// macro resolved to no props" rather than "no macro". This distinguishes
 /// resolved-but-empty from unresolved/missing.
 fn define_props_shape(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
@@ -169,7 +172,8 @@ fn define_props_shape(
         ctx,
         dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineProps),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     // Fold a genuine partial macro surface into the request-result
     // completeness so the enclosing component-meta result is refused warm
     // promotion (the no-poison invariant).
@@ -242,8 +246,11 @@ fn define_props_shape(
 /// No secondary evaluated/analyzer row participates: every occurrence owns
 /// its payload source and publication evidence.
 fn define_emits_shape(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
@@ -262,7 +269,8 @@ fn define_emits_shape(
         ctx,
         dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineEmits),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     dtos_read.observe_partial();
     let dtos = dtos_read.dtos;
 
@@ -314,8 +322,11 @@ fn define_emits_shape(
 /// as the slot's `(props: { ... }) => RT` function expression. Per-slot
 /// bindings are published separately by `resolve_slot_bindings_graph_native`.
 fn define_slots_shape(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
@@ -334,7 +345,8 @@ fn define_slots_shape(
         ctx,
         dispatch,
         &dto_request(owner_canonical, macro_index, AnalyzedMacroKind::DefineSlots),
-    );
+    )
+    .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
     dtos_read.observe_partial();
     let dtos = dtos_read.dtos;
 
@@ -372,8 +384,11 @@ fn define_slots_shape(
 /// flows through `ctx`, and the underlying dispatch queries are memoised in the
 /// shared `SemanticGraphStore`, so this shares the DTO path's reduction work.
 fn macro_surface_resolves(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,
@@ -415,7 +430,7 @@ fn dto_request(
 /// `SemanticNodeData::Signature` carrier — node synthesis is demand-driven at
 /// the consuming dispatch, never eager here. No source-text reparse.
 pub(crate) fn slot_field_function_source(
-    slot: &verter_semantic::analysis::AnalyzedSlotField,
+    slot: &verter_session_query::analysis::types::AnalyzedSlotField,
 ) -> verter_type_expr::facts::SemanticTypeSource {
     use verter_type_expr::facts::{
         ClosedTypeFact, FunctionParamFact, FunctionSignatureFact, SemanticTypeSource,
@@ -475,7 +490,7 @@ pub(crate) fn slot_field_function_source(
 /// typed `RequiredSourceUnavailable` error).
 fn fail_shape_result_on_failed_member(
     properties: &[ExpandedProperty],
-    index_signatures: &[verter_semantic::analysis::type_expand::ExpandedIndexSignature],
+    index_signatures: &[verter_session_query::analysis::type_expand::ExpandedIndexSignature],
     exactness: &mut SolverExactness,
     execution_status: &mut ExecutionStatus,
 ) {
@@ -492,7 +507,7 @@ fn fail_shape_result_on_failed_member(
     }
     *exactness = SolverExactness::Incomplete;
     *execution_status = merge_execution_status(*execution_status, ExecutionStatus::HardStop);
-    crate::request_context::mark_request_result_partial();
+    verter_type_engine::request_context::mark_request_result_partial();
 }
 
 /// Severity-ordered merge of two expansion execution statuses (the worse status

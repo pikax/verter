@@ -27,7 +27,7 @@ fn rk(provider: &str, name: &str) -> crate::resolver_core::RouteNameKey {
     crate::resolver_core::RouteNameKey::new(
         provider,
         name,
-        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session_query::facts::registry::SymbolSpace::Type,
         crate::file_artifact_store::ProjectIdentity([0u8; 16]),
         [0u8; 16],
         [0u8; 16],
@@ -225,7 +225,7 @@ impl verter_workspace::WorkspaceRead for CountingWs {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         self.inner
             .resolve_import_outcome(importer_id, specifier, ctx)
@@ -287,7 +287,10 @@ impl WorkspaceAccess for CountingWs {
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
     }
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
@@ -390,7 +393,10 @@ impl WorkspaceAccess for BumpOrderProbeWs {
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
     }
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
@@ -421,8 +427,8 @@ fn set_exact_resolutions_preserves_project_generation_and_advances_route_witness
         canonical,
         vec![verter_workspace::ExactResolution {
             specifier: "./dep".to_string(),
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-            kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             resolved_canonical_id: Some("/lib/dep.ts".to_string()),
             possible_canonical_ids: vec!["/lib/dep.ts".to_string()],
         }],
@@ -560,7 +566,10 @@ impl WorkspaceAccess for RouteSyncProbeWs {
     fn set_default_resolve_extensions(&self, host_extensions: Vec<String>) {
         self.inner.set_default_resolve_extensions(host_extensions)
     }
-    fn configure_resolver(&self, projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>) {
+    fn configure_resolver(
+        &self,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
+    ) {
         self.inner.configure_resolver(projects)
     }
     fn notify_upsert(&self, canonical_id: &str, source: Arc<str>) {
@@ -694,14 +703,14 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
         crate::resolver_core::shallow_file_state::ShallowFileState::routing_tables_only_for_test(
             [9u8; 16],
             FxHashMap::default(),
-            vec![crate::resolver_core::shallow_file_state::WildcardReexport {
+            vec![verter_session_query::inputs::shallow::WildcardReexport {
                 source_specifier: "./real_aug".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             }],
             rustc_hash::FxHashSet::default(),
             FxHashMap::default(),
             StdArc::new(
-                verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
+                verter_session_query::analysis::route_inventory::ScriptRouteInventory::default(),
             ),
         );
     let indexed = crate::project_type_store::IndexedReady::new_for_test_with_state(
@@ -1285,7 +1294,8 @@ fn route_export_resolution_terminates_on_barrel_cycle() {
 /// an immutable tracked/untracked classification for its whole life.
 #[test]
 fn a_withdrawn_artifact_only_canonical_rejects_instead_of_accepting_a_stale_hash() {
-    use crate::resolver_core::{DerivedFactKind, FactVersionRef, StoreView};
+    use verter_session_query::facts::fact_cache::{DerivedFactKind, FactVersionRef};
+    use verter_session_query::facts::store_view::StoreView;
 
     let canonical = "/seeded/withdrawn.d.ts";
     let never_seen = "/seeded/never_seen.d.ts";

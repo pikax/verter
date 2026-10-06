@@ -1,0 +1,19 @@
+error[E0599]: no associated function or constant named `default` found for struct `OutputAuthority` in the current scope
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_duplicable.rs
+  |
+  |     OutputAuthority::default()
+  |                      ^^^^^^^ associated function or constant not found in `OutputAuthority`
+
+error[E0308]: mismatched types
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_duplicable.rs
+  |
+  | fn duplicate(authority: &OutputAuthority) -> OutputAuthority {
+  |                                              --------------- expected `OutputAuthority` because of return type
+  |     authority.clone()
+  |     ^^^^^^^^^^^^^^^^^ expected `OutputAuthority`, found `&OutputAuthority`
+  |
+note: `OutputAuthority` does not implement `Clone`, so `&OutputAuthority` was cloned instead
+ --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_duplicable.rs
+  |
+  |     authority.clone()
+  |     ^^^^^^^^^

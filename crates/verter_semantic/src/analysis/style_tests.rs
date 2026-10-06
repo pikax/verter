@@ -1,4 +1,12 @@
 use super::*;
+use verter_session_query::analysis::style::AnalyzedColorCandidate;
+use verter_session_query::analysis::style::AnalyzedCssClass;
+use verter_session_query::analysis::style::AnalyzedDeclaration;
+use verter_session_query::analysis::style::AttributeOperator;
+use verter_session_query::analysis::style::ColorCandidateKind;
+use verter_session_query::analysis::style::NumericArg;
+use verter_session_query::analysis::style::SelectorCombinator;
+use verter_span::Span;
 
 fn analyze_css(css: &str) -> StyleBlockAnalysis {
     build_css_style_analysis(css, VueStyleInput::default(), false, false, None, 0)

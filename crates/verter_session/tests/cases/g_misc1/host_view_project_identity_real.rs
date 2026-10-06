@@ -12,9 +12,9 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_session::file_artifact_store::ProjectIdentity;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 use verter_workspace::{
     MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };

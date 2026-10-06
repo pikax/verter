@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::{
+use verter_session::file_artifact_store::InternedName;
+use verter_session_query::facts::{
     compute_semantic_hash, FactLane, ObservedFact, SymbolSpace, UnresolvedLens,
 };
-use verter_semantic::facts::{Fact, FactKey};
-use verter_session::file_artifact_store::InternedName;
+use verter_session_query::facts::{Fact, FactKey};
 use verter_type_expr::{
     FunctionExpr, FunctionParam, ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr,
     TypeParam,

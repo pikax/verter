@@ -15,12 +15,12 @@
 
 use std::sync::Arc;
 
-use crate::semantic_query::{
+use crate::types::HostConfig;
+use crate::VerterHost;
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey, SurfaceMember,
 };
-use crate::types::HostConfig;
-use crate::VerterHost;
 
 /// Build a fresh host with the default config (depth_budget == MAX
 /// so the walker completes the full path).
@@ -40,7 +40,7 @@ fn build_test_host() -> Arc<VerterHost> {
 fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
     let graph = host.project_type_store().semantic_graph();
     let leaf = graph.intern_node(SemanticNodeData::Object(
-        crate::semantic_query::surface_view! {
+        verter_type_engine::surface_view! {
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
             construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -54,19 +54,20 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
         let member = SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             visibility: verter_type_expr::MemberVisibility::Public,
-            key: crate::semantic_query::AuthoredPropertyKey::string(name),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(name),
             value: current,
             optional: false,
             readonly: false,
             method_kind: None,
             has_implementation_body: false,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
             spans: Default::default(),
             declaration_origin: None,
         };
         current = graph.intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+            verter_type_engine::surface_view! {
                 members: Arc::from(vec![member].into_boxed_slice()),
                 call_signatures: Arc::from(Vec::new().into_boxed_slice()),
                 construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -91,14 +92,22 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit(
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "b",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "full",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "bar",
+                )),
             ]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -143,14 +152,22 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "b",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "full",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "bar",
+                )),
             ]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -202,14 +219,22 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "b",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "full",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "bar",
+                )),
             ]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -263,14 +288,22 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reducti
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "b",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "full",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "bar",
+                )),
             ]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -325,14 +358,22 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "b",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "full",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "bar",
+                )),
             ]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -387,14 +428,22 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "b",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "full",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "bar",
+                )),
             ]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };
@@ -446,14 +495,22 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_engine_state_promotion(
         base,
         path: Arc::from(
             vec![
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("a")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("b")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("full")),
-                PathSegment::Member(crate::semantic_query::PropertyKey::identifier("bar")),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "a",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "b",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "full",
+                )),
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                    "bar",
+                )),
             ]
             .into_boxed_slice(),
         ),
-        context: crate::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };

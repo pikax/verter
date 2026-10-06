@@ -355,7 +355,10 @@ fn value<'a>(
         }
         Expression::Identifier(ident) => {
             if let Some(read_root) = read_root {
-                *read_root = IndexedValueReadRoot::Identifier(ident.span.into());
+                *read_root = IndexedValueReadRoot::Identifier(verter_span::Span::new(
+                    ident.span.start,
+                    ident.span.end,
+                ));
             }
             TypeExpr::TypeOf(ValueRef {
                 path: vec![ident.name.as_str().to_string()],
@@ -859,8 +862,14 @@ fn data_member(
     readonly: bool,
 ) -> ObjectMember {
     let spans = MemberSpans {
-        declaration: Some(property.span.into()),
-        name: Some(property.key.span().into()),
+        declaration: Some(verter_span::Span::new(
+            property.span.start,
+            property.span.end,
+        )),
+        name: Some(verter_span::Span::new(
+            property.key.span().start,
+            property.key.span().end,
+        )),
         // Value-inferred property: there is no source type annotation to
         // anchor.
         type_annotation: None,
@@ -879,8 +888,14 @@ fn method_member(
     signature: LoweredSignatureParts,
 ) -> ObjectMember {
     let spans = MemberSpans {
-        declaration: Some(property.span.into()),
-        name: Some(property.key.span().into()),
+        declaration: Some(verter_span::Span::new(
+            property.span.start,
+            property.span.end,
+        )),
+        name: Some(verter_span::Span::new(
+            property.key.span().start,
+            property.key.span().end,
+        )),
         type_annotation: None,
     };
     let mut method = MethodSignature::with_key_spans_public(
@@ -890,11 +905,16 @@ fn method_member(
             signature.return_type.map(Arc::new),
             signature.type_parameters,
             FunctionSpans {
-                signature: Some(function.span.into()),
-                return_type: function
-                    .return_type
-                    .as_ref()
-                    .map(|return_type| return_type.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(
+                    function.span.start,
+                    function.span.end,
+                )),
+                return_type: function.return_type.as_ref().map(|return_type| {
+                    verter_span::Span::new(
+                        return_type.type_annotation.span().start,
+                        return_type.type_annotation.span().end,
+                    )
+                }),
             },
         )
         .with_predicate(signature.predicate),
@@ -1155,11 +1175,13 @@ impl<'a> ArrowFrame<'a> {
             return Value::Signature(signature);
         }
         let spans = FunctionSpans {
-            signature: Some(arrow.span.into()),
-            return_type: arrow
-                .return_type
-                .as_ref()
-                .map(|rt| rt.type_annotation.span().into()),
+            signature: Some(verter_span::Span::new(arrow.span.start, arrow.span.end)),
+            return_type: arrow.return_type.as_ref().map(|rt| {
+                verter_span::Span::new(
+                    rt.type_annotation.span().start,
+                    rt.type_annotation.span().end,
+                )
+            }),
         };
         Value::Type(TypeExpr::Function(Arc::new(
             FunctionExpr::with_spans(
@@ -1269,7 +1291,7 @@ impl<'a> ParamsFrame<'a> {
             ty,
             param.optional || param.initializer.is_some(),
             false,
-            Some(param.span.into()),
+            Some(verter_span::Span::new(param.span.start, param.span.end)),
             param.type_annotation.is_some(),
         );
         lowered.is_parameter_property =
@@ -1332,7 +1354,7 @@ impl<'a> Frame<'a> for ParamsFrame<'a> {
                 ty,
                 false,
                 true,
-                Some(rest.span.into()),
+                Some(verter_span::Span::new(rest.span.start, rest.span.end)),
                 rest.type_annotation.is_some(),
             ));
         }

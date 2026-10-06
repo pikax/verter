@@ -8,12 +8,15 @@
 use std::sync::Arc;
 
 use crate::resolver_core::{
-    FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity, ResolverContext,
-    ResolverCounters, ResolverDiagnostic, StoreView, ValidatedFactCache,
+    FallthroughNodeKey, FallthroughOverrideIdentity, ResolverCounters, ResolverDiagnostic,
+    ValidatedFactCache,
 };
-use verter_semantic::analysis::component_meta::{
+use verter_session_query::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedSurfaceCompleteness, FallthroughSurface,
 };
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::resolver_core::ResolverContext;
 
 #[derive(Debug, Clone)]
 pub enum FallthroughNodeValue {
@@ -41,7 +44,7 @@ impl Default for RootFollowResult {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::LowerBound,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
+                reason: verter_session_query::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
             },
             has_single_root: false,
             branches: Vec::new(),
@@ -96,7 +99,7 @@ impl Default for ChildSurfaceResult {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::LowerBound,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
+                reason: verter_session_query::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
             },
             inherited_prop_names: Vec::new(),
             inherited_event_names: Vec::new(),
@@ -111,7 +114,7 @@ pub struct ConsumedBindingsResult {
     pub listeners: Vec<String>,
     pub has_dynamic_attr_name: bool,
     pub has_dynamic_listener_name: bool,
-    pub partial_reasons: Vec<verter_semantic::analysis::component_meta::PartialBranchReason>,
+    pub partial_reasons: Vec<verter_session_query::analysis::component_meta::PartialBranchReason>,
     pub consumed_names: Vec<String>,
 }
 
@@ -132,7 +135,7 @@ impl Default for BranchUnionResult {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::LowerBound,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
+                reason: verter_session_query::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot,
             },
             branches: Vec::new(),
             all_resolved: false,
@@ -183,7 +186,8 @@ impl FallthroughNodeResult {
 
 /// The most keys the fallthrough node cache keeps: the bound the semantic
 /// memo keeps on its families.
-pub(crate) const FALLTHROUGH_NODE_CAP: usize = crate::bounded_query_retention::DEFAULT_BUDGET_CAP;
+pub(crate) const FALLTHROUGH_NODE_CAP: usize =
+    verter_type_engine::bounded_query_retention::DEFAULT_BUDGET_CAP;
 
 /// What the node cache keeps, and why. The cache itself answers reads; this
 /// is its single write-side consistency domain: every admission and removal
@@ -206,7 +210,8 @@ struct NodeResidency {
 struct KeptNode {
     seq: u64,
     charges: smallvec::SmallVec<
-        [crate::semantic_retention_account::RetentionCharge; crate::resolver_core::CANDIDATE_CAP],
+        [verter_session_query::retention::RetentionCharge;
+            verter_session_query::facts::fact_cache::CANDIDATE_CAP],
     >,
 }
 
@@ -244,7 +249,7 @@ impl NodeResidency {
 /// after it was last admitted (oldest first); the reader retires a superseded
 /// intrinsic surface. An edit does not retire a key: the edited component's
 /// next resolution admits a fresh candidate beside the stale ones, at most
-/// [`crate::resolver_core::CANDIDATE_CAP`] per key.
+/// [`verter_session_query::facts::fact_cache::CANDIDATE_CAP`] per key.
 ///
 /// **Accounting.** Every candidate holds a `Retained` charge on the process's
 /// retention account for its bytes; a candidate the account refuses is served
@@ -253,7 +258,7 @@ impl NodeResidency {
 pub struct FallthroughResolverState {
     cache: ValidatedFactCache<FallthroughNodeKey, FallthroughNodeResult>,
     residency: parking_lot::Mutex<NodeResidency>,
-    retention_account: crate::semantic_retention_account::StoreAccount,
+    retention_account: verter_session_query::retention::StoreAccount,
     counters: Arc<ResolverCounters>,
 }
 
@@ -262,7 +267,7 @@ impl FallthroughResolverState {
         Self {
             cache: ValidatedFactCache::default(),
             residency: parking_lot::Mutex::new(NodeResidency::default()),
-            retention_account: crate::semantic_retention_account::StoreAccount::default(),
+            retention_account: verter_session_query::retention::StoreAccount::default(),
             counters,
         }
     }
@@ -434,13 +439,13 @@ impl FallthroughResolverState {
     /// write surface is involved.
     pub(crate) fn compute_and_maybe_admit<R>(
         &self,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         compute: impl FnOnce() -> (R, Option<(FallthroughNodeKey, FallthroughNodeResult)>),
     ) -> R {
         let supersession_before = ctx.current_external_supersession_fingerprint();
         let ((value, candidate), non_cacheable) =
-            crate::fact_signature_helpers::with_cacheability_scope(
-                &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+            verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+                &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
                 |_probe| compute(),
             );
 
@@ -458,8 +463,8 @@ impl FallthroughResolverState {
         if !key.is_cacheable() {
             return;
         }
-        if crate::cache_runtime::refuse_result_cache_admission_if_partial(
-            crate::request_context::current_cold_compute_completeness().is_partial(),
+        if verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
+            verter_type_engine::request_context::current_cold_compute_completeness().is_partial(),
         ) {
             return;
         }
@@ -487,7 +492,7 @@ impl FallthroughResolverState {
             .retention_account
             .get()
             .reserve(
-                crate::semantic_retention_account::ChargeClass::Retained,
+                verter_session_query::retention::ChargeClass::Retained,
                 result.retained_bytes(&key),
             )
             .admitted()
@@ -509,7 +514,7 @@ impl FallthroughResolverState {
                     let over = kept
                         .charges
                         .len()
-                        .saturating_sub(crate::resolver_core::CANDIDATE_CAP);
+                        .saturating_sub(verter_session_query::facts::fact_cache::CANDIDATE_CAP);
                     evicted.extend(kept.charges.drain(..over));
                 }
                 None => {
@@ -572,11 +577,13 @@ impl FallthroughResolverState {
     ///    cold-compute completeness scope. The typed completeness signal is the
     ///    no-poison rail shared with the component-meta materialiser, not a
     ///    fallthrough-private predicate.
-    pub(crate) fn admit_stable_node(
+    pub(crate) fn admit_stable_node<
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: FallthroughNodeKey,
         result: FallthroughNodeResult,
-        admission: &crate::resolver_core::FallthroughStableAdmission<'_>,
+        admission: &crate::resolver_core::FallthroughStableAdmission<'_, W>,
     ) {
         if admission.non_cacheable() {
             return;
@@ -707,8 +714,8 @@ mod tests {
 
         state.clear_cache();
         let served = state.compute_and_maybe_admit(&host, || {
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::FencedServe,
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
             );
             (
                 11usize,

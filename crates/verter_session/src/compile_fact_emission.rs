@@ -5,8 +5,8 @@
 //! installed by `VerterHost::with_fact_tracer`. Producers wire one
 //! call to [`observe_compile_tier_dependencies`] around the
 //! `compile_entry` invocation; the producer finalises the tracer
-//! through [`crate::cache_runtime::SignatureAdmission::from_finalise`]
-//! and stores the `Cacheable` arm's [`crate::fact_signature_helpers::ReadSetSignature`]
+//! through [`verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise`]
+//! and stores the `Cacheable` arm's [`verter_session_query::facts::fact_cache::ReadSetSignature`]
 //! as the `fact_dep_signature` of the new [`crate::types::CompileSlot`].
 //! An overflowed tracer routes the freshly computed virtual file
 //! back to the caller without admitting a slot.
@@ -67,16 +67,17 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::types::AnalyzedImport;
-use verter_semantic::analysis::MacroTypeDep;
-use verter_semantic::facts::registry::{
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::MacroTypeDep;
+use verter_session_query::facts::registry::{
     AugmentationTargetKindTag, FactKey, InternedName, InternedSpecifier, SymbolSpace,
 };
-use verter_semantic::facts::FactLane;
+use verter_session_query::facts::FactLane;
 
-use crate::resolver_core::{FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
-use crate::types::{ExternalSourceRequest, Hash16};
+use crate::types::ExternalSourceRequest;
 use crate::VerterHost;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef, RouteSurfaceFactRef};
 
 /// Observe the compile-tier fact-dependency set for a single SFC
 /// cold compute and route every observation through the active
@@ -293,10 +294,12 @@ fn observe_file_whole_hash(host: &VerterHost, canonical_id: &str) {
     let Some(whole_hash) = host.current_or_read_whole_hash(canonical_id) else {
         return;
     };
-    crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::FileWholeHash {
-        canonical_id: canonical_id.to_string(),
-        hash: whole_hash,
-    });
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+        FactVersionRef::FileWholeHash {
+            canonical_id: canonical_id.to_string(),
+            hash: whole_hash,
+        },
+    );
 }
 
 /// Emit a `ParseFactRef` observation against the producer's current
@@ -325,12 +328,14 @@ fn observe_parse_fact_present(host: &VerterHost, canonical_id: &str, key: FactKe
     let Some(expected_hash) = lookup_parse_fact_hash(host, canonical_id, &key, lane) else {
         return;
     };
-    crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::Parse(ParseFactRef {
-        canonical_id: canonical_id.to_string(),
-        key,
-        lane,
-        expected_hash,
-    }));
+    verter_type_engine::resolver_core::resolver_context::observe_fan_out(FactVersionRef::Parse(
+        ParseFactRef {
+            canonical_id: canonical_id.to_string(),
+            key,
+            lane,
+            expected_hash,
+        },
+    ));
 }
 
 /// Enumerate every `MemberPresence(exporter, *, space)` fact in the
@@ -517,14 +522,14 @@ fn observe_augmentation_fingerprints(host: &VerterHost, script_imports: &[Analyz
                 resolved_relative_canonical: None,
                 wildcard_pattern: None,
             };
-            crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::RouteSurface(
-                RouteSurfaceFactRef {
+            verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                FactVersionRef::RouteSurface(RouteSurfaceFactRef {
                     canonical_id: import.source.clone(),
                     key: fact_key,
                     lane: FactLane::Semantic,
                     expected_hash: *fingerprint,
-                },
-            ));
+                }),
+            );
 
             // Per-augmenter `FileWholeHash`: the header-level fingerprint
             // above is invariant under a member-VALUE-type edit, so the

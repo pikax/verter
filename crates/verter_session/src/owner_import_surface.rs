@@ -28,9 +28,9 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
-use verter_semantic::analysis::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
-use crate::semantic_query::{DepSignature, DepVersion};
+use verter_type_engine::semantic_query::{DepSignature, DepVersion};
 
 /// A single resolved direct import from the owner file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,7 +61,7 @@ pub struct OwnerImportSurface {
     /// every transitively read canonical, including the owner's own
     /// `FileWholeHash`). Warm reads validate this carrier against the
     /// live `StoreView` BEFORE bubbling.
-    pub read_set_signature: crate::fact_signature_helpers::ReadSetSignature,
+    pub read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
     /// Project generation this surface was built under, snapshotted by
     /// the producer before its materialisation walk dispatched any
     /// work. The `read_set_signature` carrier validates only
@@ -83,8 +83,8 @@ pub struct OwnerImportSurfaceDb {
     entries: DashMap<Arc<str>, Arc<OwnerImportSurface>>,
     live_counter: Arc<AtomicU64>,
     /// Cache-cluster schema version this Db was constructed under. See
-    /// [`crate::cache_schema`] for the contract. Production paths always use
-    /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]; test fixtures
+    /// [`verter_type_engine::cache_schema`] for the contract. Production paths always use
+    /// [`verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]; test fixtures
     /// may construct a Db with an explicit older version to exercise the
     /// stale-entry eviction invariant.
     schema_version: u32,
@@ -102,7 +102,7 @@ impl OwnerImportSurfaceDb {
     pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
         Self::with_counter_and_schema_version(
             live_counter,
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
         )
     }
 
@@ -130,7 +130,7 @@ impl OwnerImportSurfaceDb {
     /// gates the entry on its observed chain facts (R3/R26/R28).
     ///
     /// Lookups against a Db whose `schema_version` does not match the current
-    /// [`crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
+    /// [`verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`] return `None`
     /// without consulting the entry map. Use [`Self::evict_if_schema_mismatch`]
     /// to drain the storage; it is exposed so test fixtures can verify the
     /// stale-eviction invariant deterministically.
@@ -140,7 +140,7 @@ impl OwnerImportSurfaceDb {
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
     ) -> Option<Arc<OwnerImportSurface>> {
-        if self.schema_version != crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
+        if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = match self.entries.get(owner_canonical) {
@@ -149,7 +149,7 @@ impl OwnerImportSurfaceDb {
             }
             _ => None,
         };
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .owner_import
@@ -194,7 +194,7 @@ impl OwnerImportSurfaceDb {
     /// — a `bump_project_generation_and_evict` racing a cold publish
     /// can otherwise strand a stale surface.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn get_with_view<V: crate::resolver_core::StoreView + ?Sized>(
+    pub fn get_with_view<V: verter_session_query::facts::store_view::StoreView + ?Sized>(
         &self,
         host: &crate::VerterHost,
         owner: &str,
@@ -279,7 +279,7 @@ impl OwnerImportSurfaceDb {
             owner_canonical: Arc::clone(&canonical),
             owner_whole_hash: [0u8; 16],
             bindings: Arc::new(FxHashMap::default()),
-            read_set_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+            read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             validated_at_generation: 0,
         });
         self.insert(canonical, surface);
@@ -292,7 +292,7 @@ impl Default for OwnerImportSurfaceDb {
     }
 }
 
-impl crate::cache_schema::CacheSchemaVersioned for OwnerImportSurfaceDb {
+impl verter_type_engine::cache_schema::CacheSchemaVersioned for OwnerImportSurfaceDb {
     fn schema_version(&self) -> u32 {
         self.schema_version
     }
@@ -310,20 +310,20 @@ impl crate::cache_schema::CacheSchemaVersioned for OwnerImportSurfaceDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for OwnerImportSurfaceDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for OwnerImportSurfaceDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ResolverState, ProjectGeneration]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
             self.entries_drain_for_generation_bump();
         }
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for OwnerImportSurfaceDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for OwnerImportSurfaceDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         let before = self.len();
         self.remove(canonical_id);
@@ -348,7 +348,7 @@ pub fn build_owner_import_surface<I>(
     owner_canonical: Arc<str>,
     owner_whole_hash: Hash16,
     resolved_imports: I,
-    chain_facts: Vec<crate::resolver_core::FactVersionRef>,
+    chain_facts: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     validated_at_generation: u64,
 ) -> Arc<OwnerImportSurface>
 where
@@ -396,29 +396,31 @@ where
     // fence, and silently substituting an empty signature would publish
     // an unrooted `OwnerImportSurface` cache entry that warm validation
     // could never invalidate.
-    let base_facts =
-        crate::fact_signature_helpers::fact_signature_from_fence(owner_target_fence.as_ref())
-            .expect(
-                "OwnerImportSurface owner_target_fence is built exclusively from \
+    let base_facts = verter_type_engine::fact_signature_helpers::fact_signature_from_fence(
+        owner_target_fence.as_ref(),
+    )
+    .expect(
+        "OwnerImportSurface owner_target_fence is built exclusively from \
                  DepVersion::WholeHash entries, so fact_signature_from_fence — which \
                  refuses only on RouteGeneration — must yield Some",
-            );
-    let mut combined: Vec<crate::resolver_core::FactVersionRef> =
+    );
+    let mut combined: Vec<verter_session_query::facts::fact_cache::FactVersionRef> =
         base_facts.iter().cloned().collect();
-    let mut seen: rustc_hash::FxHashSet<crate::resolver_core::FactVersionRef> =
+    let mut seen: rustc_hash::FxHashSet<verter_session_query::facts::fact_cache::FactVersionRef> =
         combined.iter().cloned().collect();
     for fact in chain_facts {
         if seen.insert(fact.clone()) {
             combined.push(fact);
         }
     }
-    let fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]> = Arc::from(combined);
+    let fact_dep_signature: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> =
+        Arc::from(combined);
 
     Arc::new(OwnerImportSurface {
         owner_canonical,
         owner_whole_hash,
         bindings: Arc::new(bindings),
-        read_set_signature: crate::fact_signature_helpers::ReadSetSignature::new(
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
             fact_dep_signature,
         ),
         validated_at_generation,
@@ -435,15 +437,18 @@ mod tests {
         let db = OwnerImportSurfaceDb::new();
         let view = crate::resolver_core::PermissiveStoreView;
         let owner_hash = [7u8; 16];
-        let transitive_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/w/dependency.ts".to_string(),
-            hash: [8u8; 16],
-        };
+        let transitive_fact =
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/w/dependency.ts".to_string(),
+                hash: [8u8; 16],
+            };
 
         let admitted = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
             .get_or_compute(&host, "/w/owner.ts", owner_hash, &view, || {
-                crate::resolver_core::resolver_context::observe_fan_out(transitive_fact.clone());
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    transitive_fact.clone(),
+                );
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     build_owner_import_surface(
                         Arc::from("/w/owner.ts"),
                         owner_hash,
@@ -466,10 +471,10 @@ mod tests {
         let refused_hash = [9u8; 16];
         let refused = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
             .get_or_compute(&host, "/w/refused.ts", refused_hash, &view, || {
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     build_owner_import_surface(
                         Arc::from("/w/refused.ts"),
                         refused_hash,
@@ -509,7 +514,7 @@ mod tests {
         let view = crate::resolver_core::PermissiveStoreView;
         let owner_hash = [7u8; 16];
         let generation = host.project_type_store().current_project_generation();
-        let leaf_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
+        let leaf_fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
             canonical_id: "/w/leaf.ts".to_string(),
             hash: [9u8; 16],
         };
@@ -517,8 +522,10 @@ mod tests {
         // Cold-admit a surface whose signature carries the leaf chain fact.
         let admitted = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
             .get_or_compute(&host, "/w/owner.ts", owner_hash, &view, || {
-                crate::resolver_core::resolver_context::observe_fan_out(leaf_fact.clone());
-                crate::cache_runtime::singleflight::ComputeAdmission::Cacheable(
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    leaf_fact.clone(),
+                );
+                verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Cacheable(
                     build_owner_import_surface(
                         Arc::from("/w/owner.ts"),
                         owner_hash,
@@ -536,15 +543,15 @@ mod tests {
 
         // Warm hit under an OUTER tracer: the surface's chain facts must
         // fan into it. The compute closure must NOT run (warm hit).
-        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        let ((), finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
             || {
                 let warm = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db).get_or_compute(
                 &host,
                 "/w/owner.ts",
                 owner_hash,
                 &view,
-                || -> crate::cache_runtime::singleflight::ComputeAdmission<
+                || -> verter_type_engine::cache_runtime::singleflight::ComputeAdmission<
                     Arc<OwnerImportSurface>,
                     Arc<OwnerImportSurface>,
                 > { panic!("second call must warm-hit, not recompute") },
@@ -552,7 +559,9 @@ mod tests {
                 assert!(warm.is_some(), "second call must serve the warm surface");
             },
         );
-        let crate::resolver_core::FactReadSetFinalise::Ok(outer_facts) = finalise else {
+        let verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(outer_facts) =
+            finalise
+        else {
             panic!("outer tracer must finalise Ok, got a non-cacheable/overflow finalise");
         };
         assert!(
@@ -621,7 +630,7 @@ mod tests {
 
     #[test]
     fn fact_signature_includes_owner_and_known_targets() {
-        use crate::resolver_core::FactVersionRef;
+        use verter_session_query::facts::fact_cache::FactVersionRef;
         let surface = mk_surface([7u8; 16]);
         // Owner + Foo (known hash) become `FileWholeHash` facts; Bar has
         // no hash and is not included.
@@ -646,7 +655,7 @@ mod tests {
 
     #[test]
     fn empty_imports_produces_owner_only_signature() {
-        use crate::resolver_core::FactVersionRef;
+        use verter_session_query::facts::fact_cache::FactVersionRef;
         let surface =
             build_owner_import_surface(Arc::from("/w/o.ts"), [1u8; 16], vec![], Vec::new(), 0);
         assert_eq!(surface.bindings.len(), 0);

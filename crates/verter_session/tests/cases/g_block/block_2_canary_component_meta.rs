@@ -41,7 +41,7 @@ use super::canary_harness::{meta_hits, meta_misses, upsert, workspace_host};
 fn demand_prop_type(
     host: &verter_session::VerterHost,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> verter_type_expr::TypeExpr {
     let source = prop
         .publication
@@ -60,7 +60,7 @@ fn demand_prop_type(
 /// Sorted slot-binding names for the named slot of a
 /// `get_component_meta` result.
 fn slot_binding_names(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     slot: &str,
 ) -> Vec<String> {
     let mut names: Vec<String> = meta

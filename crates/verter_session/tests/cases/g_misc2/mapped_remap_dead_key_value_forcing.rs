@@ -61,13 +61,13 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::FactKey;
-use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef};
-use verter_session::semantic_query::{
+use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::FactKey;
+use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
+use verter_type_engine::semantic_query::{
     IndexKey, PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 /// A WIDE source (six keys) behind a `Computed` mapper whose value body
@@ -1057,7 +1057,7 @@ const CANCEL_AT_SUBSTITUTION: u64 = 3;
 
 struct CancelOnFirstSubstitution {
     seen: std::sync::atomic::AtomicU64,
-    ctx: Arc<verter_session::request_context::RequestContext>,
+    ctx: Arc<verter_type_engine::request_context::RequestContext>,
 }
 
 impl verter_audit::AuditObserver for CancelOnFirstSubstitution {
@@ -1170,7 +1170,7 @@ fn a_cancelled_mapped_build_stops_substituting_keys() {
     upsert(&host, INLINE_REMAP_TS);
     let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
 
-    let ctx = verter_session::request_context::RequestContext::new(
+    let ctx = verter_type_engine::request_context::RequestContext::new(
         1,
         Arc::from("/source.ts"),
         false,
@@ -1182,7 +1182,7 @@ fn a_cancelled_mapped_build_stops_substituting_keys() {
     });
     let result = {
         let _request =
-            verter_session::request_context::RequestContextGuard::install(Arc::clone(&ctx));
+            verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&ctx));
         // Installed AFTER the request guard so this observer, not the
         // request context's own, owns the substrate slot.
         let _obs = verter_audit::observer::install_observer(
@@ -1599,7 +1599,7 @@ fn a_cancelled_mapped_key_loop_stops_forcing_values_on_both_rails() {
         upsert(&host, PLAIN_MAPPED_TS);
         let base = carrier(&host, "PlainMapped", mode);
 
-        let ctx = verter_session::request_context::RequestContext::new(
+        let ctx = verter_type_engine::request_context::RequestContext::new(
             1,
             Arc::from("/source.ts"),
             false,
@@ -1612,7 +1612,7 @@ fn a_cancelled_mapped_key_loop_stops_forcing_values_on_both_rails() {
         let before = per_k_materializations(&host);
         let result = {
             let _request =
-                verter_session::request_context::RequestContextGuard::install(Arc::clone(&ctx));
+                verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&ctx));
             // Installed AFTER the request guard so this observer, not the
             // request context's own, owns the substrate slot.
             let _obs = verter_audit::observer::install_observer(

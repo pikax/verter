@@ -6,19 +6,21 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
+use verter_session_query::analysis::types::{AnalyzedSlotField, AnalyzedSlotFieldBinding};
 use verter_type_expr::{LiteralValue, TypeExpr, UnknownValue};
 
 use super::{member_jsdoc_from_spans, raise_member_value, slice_canonical_span};
-use crate::meta_resolve::callable_view::{ArmCombineNode, CallableNodeView};
-use crate::project_semantic_dispatch::output_materialization::OutputProjector;
-use crate::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use crate::output_sinks::OutputProjector;
 use crate::resolver_core::surface_projector::render_type_expr_display;
-use crate::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
-};
 use crate::typeinfo::framework_surface::resolved_surface_access::ResolvedSurfaceAccess;
 use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
+use verter_type_engine::project_semantic_dispatch::callable_view::{
+    ArmCombineNode, CallableNodeView,
+};
+use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use verter_type_engine::semantic_query::{
+    PathSegment, ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
+};
 
 /// Normalize a `.vue` slots macro surface into the published
 /// [`AnalyzedSlotField`] set.
@@ -40,9 +42,9 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 /// otherwise drop the failed arm and publish the resolvable sibling's
 /// callable as a completed concrete slot.
 #[must_use]
-pub(crate) fn slots_from_typeinfo_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionCapabilities>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedSlotField> {
     let macro_surface = resolved.macro_surface();
@@ -81,7 +83,7 @@ pub(crate) fn slots_from_typeinfo_surface(
                 )
                 .is_none()
             {
-                crate::request_context::mark_request_result_partial();
+                verter_type_engine::request_context::mark_request_result_partial();
                 return None;
             }
             // The slot callable decisions are made ENTIRELY in the node domain
@@ -103,14 +105,14 @@ pub(crate) fn slots_from_typeinfo_surface(
             // missing slot is a PARTIAL surface, never byte-identical to a
             // surface that legitimately has no such slot.
             let realized_root = match view.realized_callable_root(context) {
-                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
-                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
+                | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
                 }
-                crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
                     return None
                 }
-                crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
                     let _ = incomplete.into_recorded_partial();
                     return None;
                 }
@@ -157,8 +159,8 @@ pub(crate) fn slots_from_typeinfo_surface(
                 // A resolved-surface slot has no authored props-object member
                 // list at an addressable position in the consuming file — the
                 // honest typed miss, paired with the `None` payload below.
-                props_anchor: verter_semantic::analysis::types::MacroAnchor::Unsupported(
-                    verter_semantic::analysis::types::MacroAnchorUnsupported::NoMemberList,
+                props_anchor: verter_session_query::analysis::types::MacroAnchor::Unsupported(
+                    verter_session_query::analysis::types::MacroAnchorUnsupported::NoMemberList,
                 ),
                 return_type,
                 // A resolved-surface slot has no flat authored macro-payload
@@ -176,8 +178,10 @@ pub(crate) fn slots_from_typeinfo_surface(
 /// Classify each published slot member's callable into the sealed shallow
 /// vocabulary for the zero-dispatch graph encoder.
 #[must_use]
-pub(crate) fn slot_member_types_from_typeinfo_surface(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn slot_member_types_from_typeinfo_surface<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     resolved: &impl ResolvedSurfaceAccess,
     slots: &[AnalyzedSlotField],
 ) -> Vec<crate::typeinfo::framework_surface::results::NamedTypeMember> {
@@ -192,8 +196,8 @@ pub(crate) fn slot_member_types_from_typeinfo_surface(
             })?;
             let view = CallableNodeView::new(dispatch, member.value);
             let node = match view.realized_callable_root(context) {
-                crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(id)
-                | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(id) => {
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
+                | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
                 }
                 _ => member.value,
@@ -202,7 +206,7 @@ pub(crate) fn slot_member_types_from_typeinfo_surface(
                 crate::typeinfo::framework_surface::results::NamedTypeMember {
                     name: slot.name.clone(),
                     is_optional: member.optional,
-                    value: crate::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+                    value: verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                         dispatch,
                         node,
                     )
@@ -219,8 +223,10 @@ pub(crate) fn slot_member_types_from_typeinfo_surface(
 /// Build the producer-owned return publication aligned with every normalized
 /// slot row. The replay address is the stamped macro type argument plus the
 /// slot member name; a missing base is a typed required-source failure.
-pub(crate) fn slot_return_publications_from_typeinfo_surface(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+pub(crate) fn slot_return_publications_from_typeinfo_surface<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
     resolved: &impl ResolvedSurfaceAccess,
     slots: &[AnalyzedSlotField],
 ) -> Vec<Option<verter_type_expr::TypePublication>> {
@@ -283,8 +289,8 @@ pub(crate) fn slot_return_publications_from_typeinfo_surface(
 /// through the sealed output cap; it makes NO decision on the materialized value
 /// and takes NO `&TypeExpr` param (a node id + the active `ctx`). The mint cap is
 /// constructed INTERNALLY from `ctx` (the `raise_member_value` pattern).
-fn materialize_slot_return_node(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn materialize_slot_return_node<C: crate::session_attachment::SessionCapabilities>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     return_node: SemanticNodeId,
 ) -> TypeExpr {
     let cap = super::TypeinfoVueSurfaceOutputCap::new(dispatch);
@@ -294,7 +300,7 @@ fn materialize_slot_return_node(
     // realized slot's return node always mints, so the fallback is robustness
     // only.
     cap.materialize_output_type_expr(return_node)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
         .unwrap_or(TypeExpr::Unknown(UnknownValue::missing_output()))
 }
 
@@ -325,9 +331,9 @@ fn materialize_slot_return_node(
 /// surface yields no bindings. Each per-member binding `TypeExpr` is minted ONCE
 /// at the registered terminal [`slot_binding_field`]; this navigator holds NO
 /// mint.
-fn binding_fields_from_param_node(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilities>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     first_param: SemanticNodeId,
 ) -> Vec<AnalyzedSlotFieldBinding> {
     // Open-generic gate: a symbolic-only param root (an open Conditional / mapped
@@ -338,16 +344,22 @@ fn binding_fields_from_param_node(
     // reason: zero bindings over a type whose imported dependency did not
     // resolve is a PARTIAL surface, not a binding-less slot. A LOCAL
     // authored-reference mirror passes through — the projection resolves it.
-    if let Some(reasons) = crate::typeinfo::surface_resolution::stable_member_carrier_partiality(
-        ctx,
-        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), first_param).as_deref(),
-    ) {
-        crate::request_context::fold_result_completeness(
-            crate::semantic_query::ResultCompleteness::partial(reasons.get()),
+    if let Some(reasons) =
+        verter_type_engine::semantic_query::surface_resolution::stable_member_carrier_partiality(
+            ctx,
+            verter_type_engine::project_semantic_dispatch::node_data_for(
+                dispatch.graph(),
+                first_param,
+            )
+            .as_deref(),
+        )
+    {
+        verter_type_engine::request_context::fold_result_completeness(
+            verter_type_engine::semantic_query::ResultCompleteness::partial(reasons.get()),
         );
         return Vec::new();
     }
-    if crate::meta_resolve::slot_binding_graph::slot_param_root_is_symbolic_only(
+    if verter_type_engine::project_semantic_dispatch::symbolic_root::slot_param_root_is_symbolic_only(
         dispatch,
         first_param,
     ) {
@@ -369,17 +381,21 @@ fn binding_fields_from_param_node(
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     ) {
-        crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
-        | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
-            surface.into_inner()
+        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(
+            surface,
+        )
+        | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
+            surface,
+        ) => surface.into_inner(),
+        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
+            return Vec::new()
         }
-        crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => return Vec::new(),
-        crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
-            match incomplete.into_recorded_partial() {
-                Some(surface) => surface,
-                None => return Vec::new(),
-            }
-        }
+        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+            incomplete,
+        ) => match incomplete.into_recorded_partial() {
+            Some(surface) => surface,
+            None => return Vec::new(),
+        },
     };
     // Shallow-by-default Pick member publication: when the slot param is a
     // `Pick<NamedRoot, K>` the picked members stay SYMBOLIC at the published
@@ -434,8 +450,8 @@ fn binding_fields_from_param_node(
 /// source-root shape) — NOT a `"Pick<"` text sniff and NOT a
 /// materialise-then-decide. Any other shape (a literal object, a multi-arm
 /// `Intersection` first param, a userland or non-Pick alias) returns `None`.
-fn pick_source_root_node(
-    dispatch: &ProjectSemanticDispatch<'_>,
+fn pick_source_root_node<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
     first_param: SemanticNodeId,
 ) -> Option<SemanticNodeId> {
     // A PARTIAL peel yields `None` — the existing safe concrete-materialization
@@ -500,8 +516,8 @@ fn pick_source_root_node(
 /// NODE-DOMAIN `Option` match, never a `TypeExpr` decide; the display renders
 /// through the by-name `.and_then` form. The mint cap is constructed
 /// INTERNALLY from `ctx` (the `raise_member_value` pattern).
-fn slot_binding_field(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+fn slot_binding_field<C: crate::session_attachment::SessionCapabilities>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
     member_name: &str,
     pick_root: Option<SemanticNodeId>,
@@ -532,7 +548,7 @@ fn slot_binding_field(
     let cap = super::TypeinfoVueSurfaceOutputCap::new(dispatch);
     let named_root = cap
         .materialize_output_type_expr(root_node)
-        .map(|raised| raised.into_type_expr(&cap))
+        .map(|raised| raised.into_type_expr(cap.authority()))
         .unwrap_or(TypeExpr::Unknown(UnknownValue::missing_output()));
     let symbolic = TypeExpr::IndexedAccess {
         object: Arc::new(named_root),
@@ -557,11 +573,11 @@ mod raise_miss_normalization_tests {
     use verter_type_expr::MemberVisibility;
 
     use super::slot_binding_field;
-    use crate::request_context::current_cold_compute_completeness;
-    use crate::semantic_query::{MemberMergeRole, SemanticNodeId};
     use crate::typeinfo::surface::{JsdocTagSpan, SurfaceMemberOrigin, TypeInfoSurfaceMember};
     use crate::types::HostConfig;
     use crate::VerterHost;
+    use verter_type_engine::request_context::current_cold_compute_completeness;
+    use verter_type_engine::semantic_query::{MemberMergeRole, SemanticNodeId};
 
     fn make_host() -> Arc<VerterHost> {
         Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -572,7 +588,7 @@ mod raise_miss_normalization_tests {
     /// (`materialize_output_type_expr` returns `None` for an absent node).
     fn raise_miss_member() -> TypeInfoSurfaceMember {
         TypeInfoSurfaceMember {
-            key: crate::semantic_query::AuthoredPropertyKey::string("item"),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("item"),
             name_span: None,
             value: SemanticNodeId(u64::MAX),
             type_annotation_span: None,
@@ -602,14 +618,15 @@ mod raise_miss_normalization_tests {
     #[test]
     fn slot_binding_raise_miss_fabricates_no_display_and_suppresses_warm_admission() {
         let host = make_host();
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
 
         let member = raise_miss_member();
 
-        let (binding, facts) = host
-            .with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
-                slot_binding_field(dispatch, &member, "item", None)
-            });
+        let (binding, facts) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || slot_binding_field(dispatch, &member, "item", None),
+        );
 
         assert!(
             binding.type_annotation.is_none(),
@@ -622,7 +639,7 @@ mod raise_miss_normalization_tests {
         assert!(
             matches!(
                 facts.finalise(),
-                crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+                verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
             ),
             "a raise miss must finalise NON-CACHEABLE so the torn result is never admitted warm"
         );
@@ -660,9 +677,9 @@ mod raise_miss_normalization_tests {
     /// FAILS pre-change, PASSES post-change.
     #[test]
     fn pick_source_root_node_on_partial_peel_returns_none_for_concrete_fallback() {
-        use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-        use crate::semantic_query::{DeclIdentity, NodeScopeId, SemanticNodeData};
         use crate::types::{FileLanguage, UpsertRequest};
+        use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+        use verter_type_engine::semantic_query::{DeclIdentity, NodeScopeId, SemanticNodeData};
 
         let host = make_host();
         let _ = host
@@ -702,10 +719,12 @@ mod raise_miss_normalization_tests {
         // on another host cannot be contaminated.
         let armed_root = {
             host.test_force
+                .engine
                 .force_result_partial_for_tests
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             let root = super::pick_source_root_node(&dispatch, first_param);
             host.test_force
+                .engine
                 .force_result_partial_for_tests
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             root

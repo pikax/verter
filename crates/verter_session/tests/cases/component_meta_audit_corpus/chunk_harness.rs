@@ -8,11 +8,10 @@
 
 use std::{sync::Arc, time::Instant};
 
+use verter_execution::pool_size::PoolSize;
 use verter_scheduler::scheduler::SchedulerConfig;
 use verter_session::audited_request::{AuditedRequest, AuditedRequestError};
-use verter_session::{
-    HostConfig, HostResourcePolicy, PoolPolicy, PoolSize, PoolSpawn, TestHostWorkerPools,
-};
+use verter_session::{HostConfig, HostResourcePolicy, PoolPolicy, PoolSpawn, TestHostWorkerPools};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct CorpusCase {

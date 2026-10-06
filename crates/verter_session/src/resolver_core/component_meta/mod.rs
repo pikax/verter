@@ -1,14 +1,14 @@
 use std::collections::BTreeSet;
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::component_meta::ResolvedTypeAnalysis;
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::component_meta::ResolvedTypeAnalysis;
+use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
 
-use crate::resolver_core::{
-    resolve_type_declaration, DeclarationMetadataResolver, FactVersionRef, ResolvedTypeDeclaration,
-};
+use crate::resolver_core::{resolve_type_declaration, DeclarationMetadataResolver};
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 mod cold_resolver;
 mod direct_macro;
@@ -74,7 +74,7 @@ pub fn collect_requested_binding_demands(
 /// for a question this index already answered authoritatively.
 pub fn collect_local_constructor_binding_keys(
     macros: &[AnalyzedMacro],
-    options_api: Option<&verter_semantic::analysis::AnalyzedOptionsApi>,
+    options_api: Option<&verter_session_query::analysis::types::AnalyzedOptionsApi>,
 ) -> BTreeSet<verter_type_expr::DeclBindingKey> {
     fn local_key(
         entry: &verter_type_expr::ConstructorBindingEntry,
@@ -102,7 +102,7 @@ pub fn collect_local_constructor_binding_keys(
 mod collect_local_constructor_binding_keys_tests {
     use super::collect_local_constructor_binding_keys;
     use std::collections::BTreeSet;
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, AnalyzedOptionsApi, AnalyzedOptionsProp,
         AnalyzedPropField, TypeResolutionSource,
     };
@@ -227,7 +227,8 @@ mod collect_local_constructor_binding_keys_tests {
 
 #[derive(Debug, Clone, Default)]
 pub struct ComponentMetaEvalOutputs {
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types:
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     pub tracked_dependencies: BTreeSet<String>,
     /// Step 9.1 / D32: surface-id sidecar captured during the
     /// `expand_macro_types_impl_with_expander` closure run. None when
@@ -303,7 +304,8 @@ pub struct ResolvedComponentMetaParts {
     pub resolved_macros: Vec<ResolvedMacroMeta>,
     pub resolved_type_registry: Vec<ResolvedTypeAnalysis>,
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types:
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     pub tracked_dependencies: BTreeSet<String>,
     pub fact_versions: Vec<FactVersionRef>,
     /// Step 9.1 / D32: surface-id sidecar. Populated when audit is on
@@ -345,14 +347,17 @@ pub enum ComponentMetaResolutionPurpose {
 /// the ACTIVE context, so an overlay session reads its overlay content (an
 /// overlay-added prop surfaces here; it never leaks into a base-view read,
 /// which keys a distinct `whole_hash`). The DTO core validates its own cached
-/// entry against `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and bubbles the entry's fact signature into
+/// entry against `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and bubbles the entry's fact signature into
 /// any active outer fact tracer (so an outer component-meta cold trace inherits
 /// the DTO's cross-file carrier facts on a warm DTO hit), keeping the outer
 /// component-meta cache entry correctly keyed — all inside the single
 /// resolution engine.
 pub(crate) fn component_meta_resolved_macros(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
@@ -371,7 +376,8 @@ pub(crate) fn component_meta_resolved_macros(
                 root_identity: ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]),
                 level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
             },
-        );
+        )
+        .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
         // Fold a genuine partial macro surface into the request-result
         // completeness so the enclosing component-meta result is refused warm
         // promotion (the no-poison invariant).
@@ -468,7 +474,7 @@ pub(crate) fn component_meta_resolved_macros(
                 outcome,
                 crate::typeinfo::framework_surface::ResolvedOutcome::Partial { .. }
             ) {
-                crate::request_context::mark_request_result_partial();
+                verter_type_engine::request_context::mark_request_result_partial();
             }
             let Some(dtos) = outcome.value() else {
                 continue;
@@ -513,8 +519,8 @@ pub(crate) fn component_meta_resolved_macros(
 }
 
 pub fn component_meta_type_registry(
-    resolved_type_registry: &[verter_semantic::analysis::component_meta::ResolvedTypeAnalysis],
-) -> Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis> {
+    resolved_type_registry: &[verter_session_query::analysis::component_meta::ResolvedTypeAnalysis],
+) -> Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis> {
     let mut seen = FxHashSet::default();
     let mut registry = Vec::new();
 
@@ -713,7 +719,7 @@ fn placeholder_type_declaration(
         canonical_source: String::new(),
         owner,
         span: verter_span::Span::default(),
-        kind: crate::resolver_core::ResolvedDeclarationKind::Unknown,
+        kind: verter_session_query::declarations::metadata::ResolvedDeclarationKind::Unknown,
         text: None,
     }
 }

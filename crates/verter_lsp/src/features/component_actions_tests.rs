@@ -1,12 +1,12 @@
 use super::*;
 use crate::documents::carrier_structure::{test_carrier_blocks, test_structure};
 use crate::documents::line_index::LineIndex;
-use verter_semantic::analysis::template::{
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::template::{
     AnalyzedPropDefinition, PropValueConstness, TemplateAnalysisSnapshot, TemplateComponentUsage,
     TemplateComponentVModel, TemplatePropUsage,
 };
-use verter_semantic::analysis::types::ImportBindingKind;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::ImportBindingKind;
 
 fn make_parent_analysis(components: Vec<TemplateComponentUsage>) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
@@ -61,7 +61,7 @@ fn make_prop(name: &str) -> TemplatePropUsage {
 /// Macros (with their edit anchors) minted by the REAL analyzer over `source`.
 fn producer_backed_macros(
     source: &str,
-) -> std::sync::Arc<Vec<verter_semantic::analysis::types::AnalyzedMacro>> {
+) -> std::sync::Arc<Vec<verter_session_query::analysis::types::AnalyzedMacro>> {
     crate::features::macro_fixture::analyze_sfc_script(source)
         .macros
         .into()
@@ -114,7 +114,10 @@ fn add_prop_to_type_based_define_props() {
         // `resolve_component_context` produces. A hand-forged anchor could not
         // discriminate a mint bug.
         macros: producer_backed_macros(child_source),
-        anchor_revision: verter_session::AnalysisSourceRevision::of_source(child_source),
+        anchor_revision:
+            verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+                child_source,
+            ),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);
@@ -171,7 +174,7 @@ fn add_prop_generates_define_props_when_missing() {
     let child_source =
         "<script setup lang=\"ts\">\nimport { ref } from 'vue'\nconst x = ref(0)\n</script>";
     let child_analysis = FileAnalysisSnapshot {
-        imports: vec![verter_semantic::analysis::AnalyzedImport {
+        imports: vec![verter_session_query::analysis::types::AnalyzedImport {
             source: "vue".into(),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
@@ -238,7 +241,10 @@ fn no_action_for_runtime_based_define_props() {
     let child_source = "<script setup>\ndefineProps(['msg'])\n</script>";
     let child_analysis = FileAnalysisSnapshot {
         macros: producer_backed_macros(child_source),
-        anchor_revision: verter_session::AnalysisSourceRevision::of_source(child_source),
+        anchor_revision:
+            verter_session_query::analysis::file_analysis::AnalysisSourceRevision::of_source(
+                child_source,
+            ),
         ..Default::default()
     };
     let child_ctx = make_child_context(child_source, child_analysis);
@@ -293,7 +299,7 @@ fn add_define_model_to_child() {
 
     let child_source = "<script setup lang=\"ts\">\nimport { ref } from 'vue'\n</script>";
     let child_analysis = FileAnalysisSnapshot {
-        imports: vec![verter_semantic::analysis::AnalyzedImport {
+        imports: vec![verter_session_query::analysis::types::AnalyzedImport {
             source: "vue".into(),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
@@ -411,8 +417,8 @@ fn no_vmodel_action_without_script_setup() {
 
 fn make_parent_with_bindings_and_components(
     components: Vec<TemplateComponentUsage>,
-    bindings: Vec<verter_semantic::analysis::AnalyzedBinding>,
-    imports: Vec<verter_semantic::analysis::AnalyzedImport>,
+    bindings: Vec<verter_session_query::analysis::types::AnalyzedBinding>,
+    imports: Vec<verter_session_query::analysis::types::AnalyzedImport>,
 ) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         template: Some(
@@ -428,12 +434,12 @@ fn make_parent_with_bindings_and_components(
     }
 }
 
-fn make_binding(name: &str) -> verter_semantic::analysis::AnalyzedBinding {
-    verter_semantic::analysis::AnalyzedBinding {
+fn make_binding(name: &str) -> verter_session_query::analysis::types::AnalyzedBinding {
+    verter_session_query::analysis::types::AnalyzedBinding {
         name: name.to_string(),
-        kind: verter_semantic::analysis::types::AnalyzedBindingKind::Const,
+        kind: verter_session_query::analysis::types::AnalyzedBindingKind::Const,
         is_reactive: false,
-        reactivity_kind: verter_semantic::analysis::types::ReactivityKind::None,
+        reactivity_kind: verter_session_query::analysis::types::ReactivityKind::None,
         type_annotation: None,
         initializer: None,
         span: verter_span::Span::new(0, 0),
@@ -669,18 +675,20 @@ fn suggest_matching_props_from_imports() {
     let parent = make_parent_with_bindings_and_components(
         vec![make_component("Child", "./Child.vue", vec![])],
         vec![], // no local bindings
-        vec![verter_semantic::analysis::AnalyzedImport {
+        vec![verter_session_query::analysis::types::AnalyzedImport {
             source: "./data".into(),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
-            bindings: vec![verter_semantic::analysis::types::AnalyzedImportBinding {
-                name: "title".into(),
-                kind: ImportBindingKind::Named,
-                imported_name: None,
-                is_type_only: false,
-                vue_api: None,
-                span: verter_span::Span::new(0, 0),
-            }],
+            bindings: vec![
+                verter_session_query::analysis::types::AnalyzedImportBinding {
+                    name: "title".into(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
+                    is_type_only: false,
+                    vue_api: None,
+                    span: verter_span::Span::new(0, 0),
+                },
+            ],
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: None,
         }],
@@ -707,18 +715,20 @@ fn suggest_matching_props_type_only_import_excluded() {
     let parent = make_parent_with_bindings_and_components(
         vec![make_component("Child", "./Child.vue", vec![])],
         vec![],
-        vec![verter_semantic::analysis::AnalyzedImport {
+        vec![verter_session_query::analysis::types::AnalyzedImport {
             source: "./types".into(),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: true,
-            bindings: vec![verter_semantic::analysis::types::AnalyzedImportBinding {
-                name: "title".into(),
-                kind: ImportBindingKind::Named,
-                imported_name: None,
-                is_type_only: true,
-                vue_api: None,
-                span: verter_span::Span::new(0, 0),
-            }],
+            bindings: vec![
+                verter_session_query::analysis::types::AnalyzedImportBinding {
+                    name: "title".into(),
+                    kind: ImportBindingKind::Named,
+                    imported_name: None,
+                    is_type_only: true,
+                    vue_api: None,
+                    span: verter_span::Span::new(0, 0),
+                },
+            ],
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: None,
         }],

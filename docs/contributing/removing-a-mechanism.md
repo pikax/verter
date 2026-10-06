@@ -38,7 +38,7 @@ by renaming:
 
 | Invariant | Surviving owner | Preserved proof |
 | --- | --- | --- |
-| A hot carrier never hands out a materialized type body | The `NoTypeExpr` marker trait plus the sealed `OutputProjector` capabilities | The `assert_not_impl_any!` canary in `crates/verter_session/src/project_semantic_dispatch/output_materialization_guards.rs`; compile-time witnesses in `crates/verter_source_policy_gate/tests/cases/semantic_capability_witnesses.rs`; trybuild fixtures via `node scripts/compile-contracts.mjs` |
+| A hot carrier never hands out a materialized type body | The `NoTypeExpr` marker trait plus the sealed `OutputProjector` capabilities | The `assert_not_impl_any!` canary in `crates/verter_type_engine/src/project_semantic_dispatch/output_materialization_guards.rs`; compile-time witnesses in `crates/verter_source_policy_gate/tests/cases/semantic_capability_witnesses.rs`; trybuild fixtures via `node scripts/compile-contracts.mjs` |
 | One integration-test binary per crate | `scripts/check-integration-test-layout.mjs` plus its exact, stale-failing allowlist | The tool's live `cargo metadata` run, invoked once by `scripts/gate.mjs` and once by CI's `rust-test-build` job; discrimination fixtures in `scripts/check-integration-test-layout.test.mjs` |
 | The browser surface never resurrects an external type engine | `capabilityForWasm` and the URL-state deserializer | `packages/playground/src/editor/wasmTsgoFailClosed.spec.ts` — asserts the capability record for every TypeScript major and that a persisted legacy selection deserializes to no engine at all |
 | Every `(CRITICAL)` rule is enforced | The guards each rule names inline in `CLAUDE.md` | Those guards' own assertions. There is no rule-to-guard registry: membership in a list was never proof, and a registry that scanned doc headings only enforced spelling |
@@ -65,7 +65,7 @@ before consolidating something similar:
 - `crates/verter_lsp/src/provider_sync.rs` owns stale-provider path closing.
   Callers pass their own logging context instead of keeping duplicate loops,
   and no forwarding wrapper was left behind.
-- `crates/verter_session/src/semantic_query_memo/` keeps one family memo, one
+- `crates/verter_type_engine/src/semantic_query_memo/` keeps one family memo, one
   production owner (`FlightCell`), and one batched admission path
   (`scc_publish`); the per-domain memo modules are payload read/write only.
 - `crates/verter_compiler/src/template/code_gen/ssr/props_object.rs` holds

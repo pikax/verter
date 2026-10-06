@@ -24,6 +24,9 @@ use super::super::test_harness::real_provider_test;
 use tower_lsp_server::ls_types::*;
 
 /// Retry hover at a position until it returns content (provider warm-up).
+///
+/// A `ContentModified` answer is re-requested, as an editor does; any other
+/// RPC error (the harness deadline, a cancellation) fails the test.
 async fn hover_with_retry(
     session: &crate::test_harness::RealProviderTestSession,
     uri: &Uri,
@@ -31,10 +34,16 @@ async fn hover_with_retry(
 ) -> Option<String> {
     for attempt in 0..8 {
         session.ensure_synced(uri).await;
-        if let Some(text) = session.hover_text(uri, position).await {
-            if !text.trim().is_empty() {
-                return Some(text);
-            }
+        match session.hover_result(uri, position).await {
+            Ok(Some(text)) if !text.trim().is_empty() => return Some(text),
+            Ok(_) => {}
+            Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified => {}
+            Err(error) => panic!(
+                "hover request at {}:{} in {} failed: {error}",
+                position.line,
+                position.character,
+                uri.as_str()
+            ),
         }
         if attempt < 7 {
             tokio::time::sleep(std::time::Duration::from_millis(400)).await;

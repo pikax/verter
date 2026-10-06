@@ -12,8 +12,8 @@
 use oxc_ast::ast::{ArrowFunctionExpression, Expression, Function, PropertyKey, Statement};
 use oxc_ast_visit::{walk, Visit};
 
-use crate::analysis::function_program::FunctionParamRecord;
-use crate::analysis::types::{hash_16, Hash16};
+use verter_session_query::analysis::types::{hash_16, Hash16};
+use verter_session_query::function_program::FunctionParamRecord;
 
 // ---------------------------------------------------------------------------
 // Whole-function stable hash
@@ -310,7 +310,10 @@ impl HashVisitor<'_> {
     /// non-JSDoc comments are cosmetic and never enter the fold.
     fn fold_type_affecting_jsdoc(&mut self, source: &str, function_start: u32) {
         let Some((start, end)) =
-            crate::analysis::jsdoc::find_leading_jsdoc_block_offsets(source, function_start)
+            verter_session_query::analysis::jsdoc_spans::find_leading_jsdoc_block_offsets(
+                source,
+                function_start,
+            )
         else {
             self.fold_u8(0);
             return;

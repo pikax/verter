@@ -5,6 +5,7 @@
 //! those tests still run in separate processes.
 
 mod framework_known_bug_manifest;
+mod production_dependency_closure;
 mod scanners_replacement;
 mod semantic_capability_witnesses;
 mod tracked_paths_are_portable;

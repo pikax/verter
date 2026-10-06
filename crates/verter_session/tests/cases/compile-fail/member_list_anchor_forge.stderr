@@ -1,10 +1,7 @@
-error[E0624]: associated function `new` is private
- --> tests/cases/compile-fail/member_list_anchor_forge.rs:9:71
-  |
-9 |     let _forged = verter_semantic::analysis::types::MemberListAnchor::new(4, false);
-  |                                                                       ^^^ private associated function
-  |
- ::: $WORKSPACE/crates/verter_semantic/src/analysis/types.rs
-  |
-  |     pub(crate) fn new(insert_offset: u32, is_empty: bool) -> Self {
-  |     ------------------------------------------------------------- private associated function defined here
+error[E0433]: cannot find module or crate `verter_analyzer_mint` in this scope
+  --> tests/cases/compile-fail/member_list_anchor_forge.rs:12:9
+   |
+12 |         verter_analyzer_mint::MemberListAnchorMint::grant(),
+   |         ^^^^^^^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `verter_analyzer_mint`
+   |
+   = help: if you wanted to use a crate named `verter_analyzer_mint`, use `cargo add verter_analyzer_mint` to add it to your `Cargo.toml`

@@ -32,9 +32,7 @@ pub mod enum_constant;
 #[path = "decl_dependencies_tests.rs"]
 mod decl_dependencies_tests;
 mod exports;
-mod fact_projection;
 #[doc(hidden)]
-pub use fact_projection::macro_payload_reference_head_fact;
 pub mod file_usage;
 pub mod flow;
 pub mod framework_facts;
@@ -74,13 +72,7 @@ pub mod selector_match;
 pub mod style;
 mod style_syntax;
 pub mod template;
-pub mod template_class_facts;
-pub mod top_level_owners;
-pub mod type_eval;
 pub mod type_eval_build;
-pub mod type_expand;
-pub mod type_solver;
-pub mod types;
 
 #[cfg(test)]
 #[path = "type_expr_tests.rs"]
@@ -107,7 +99,7 @@ pub use file_usage::{
 };
 pub use imports::extract_import_sources;
 pub use macros::collect_type_references;
-pub use macros::props_root_binding;
+
 pub use project_index::{
     ComponentEdge, ComponentUsageSummary, CssVarFlow, DynamicInjectEntry, FileInjectValidation,
     InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,
@@ -129,41 +121,6 @@ pub use style::{
     build_css_style_analysis, build_external_src_style_analysis, build_incomplete_style_analysis,
     build_preprocessor_style_analysis, build_scanned_style_analysis,
     build_scanned_style_analysis_from_ir, compute_structured_specificity, parse_selector,
-    parse_style_ir_for_analysis, AnalyzedSelector, AttributeOperator, AttributeSelector,
-    BlockContentAvailability, CompoundSelector, SelectorCombinator, SelectorPseudoClass,
-    SpecialPseudoInput, SpecialPseudoKind, StructuredSelector, StyleAnalysisFlags,
-    StyleAnalysisLang, StyleBlockAnalysis, VBindInput, VueStyleInput,
+    parse_style_ir_for_analysis, SpecialPseudoInput, StyleLangDialect, VBindInput, VueStyleInput,
 };
-pub use template::{
-    extract_dynamic_class_names, extract_dynamic_class_names_rich, AnalyzedEmitDefinition,
-    AnalyzedMacroUsage, AnalyzedPropDefinition, BindingUsageKind, CommentDirective,
-    CommentDirectiveKind, DefinedSlot, DynamicClassName, ElementNamespace, IfChain, MacroKind,
-    MarkupClassToken, PropValueConstness, SnippetDefinition, SvelteDirectiveInfo,
-    TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence, TemplateComponentUsage,
-    TemplateDirective, TemplateElement, TemplateEventHandler, TemplatePropUsage, TemplateRef,
-    TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding, VForDirective, VModelDirective,
-};
-pub use template_class_facts::{
-    ReactiveWrapperProof, TemplateClassFactsCompleteness, TemplateClassSemanticFactRow,
-    TemplateClassSemanticFacts, TemplateClassSubject,
-};
-pub use top_level_owners::{
-    DeclMap, DeclMapKey, TopLevelAttachedOwner, TopLevelOwnerRegion, TopLevelOwnerRegionError,
-    TopLevelOwnerTable, TopLevelOwnerTableError, TopLevelStatementOwner,
-};
-pub use types::hash_16;
-pub use types::{
-    AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedDefaultValue, AnalyzedEmitField,
-    AnalyzedExportedFunction, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro,
-    AnalyzedMacroKind, AnalyzedModuleReference, AnalyzedOptionsApi, AnalyzedOptionsComponent,
-    AnalyzedOptionsField, AnalyzedOptionsProp, AnalyzedPropField, AnalyzedSlotField,
-    AnalyzedSlotFieldBinding, BindingInitializer, ComposableInfo, ComposableReturn,
-    ComposableReturnField, CssVarManipulation, CssVarManipulationKind, DomQueryCallSite,
-    DomQueryKind, ExportSignature, FunctionParam, Hash16, ImportSourceInfo, LiteralKind,
-    LocalDeclarationEntry, LocalDeclarationKind, MacroAnchor, MacroAnchorUnsupported,
-    MacroEditAnchors, MacroTypeDep, MacroTypeDepUsage, MemberListAnchor,
-    ModuleReferenceAnalyzability, ModuleReferenceSemantics, ModuleReferenceSyntax, NestedMacroCall,
-    ReactivityKind, ResolvedLocalType, ResolvedTypeInfo, ScriptAnalysisSnapshot,
-    ScriptTypeEnhancements, StableDeclarationId, StoreApiClassification, StoreDefinition,
-    StoreUsage, TypeResolutionSource, VueApiClassification,
-};
+pub use template::{extract_dynamic_class_names, extract_dynamic_class_names_rich};

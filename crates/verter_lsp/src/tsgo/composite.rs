@@ -36,13 +36,13 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use verter_semantic::resolver_core::normalize_canonical_id;
 use verter_session::external_ts::{
     AmbiguityCause, CarrierOwnershipResolution, GeneratedUnitAdmissionFact, ProjectBinding,
     ServeMode,
 };
 use verter_session::framework::descriptor::classify_carrier_companion;
 use verter_session::VerterHost;
+use verter_session_query::resolution::normalize_canonical_id;
 use verter_workspace::traits::WorkspaceRead;
 use verter_workspace::workspace_snapshot::ProjectPayload;
 use verter_workspace::{CanonicalPath, GeneratedUnitAdmission, GeneratedUnitNonAdmissionReason};

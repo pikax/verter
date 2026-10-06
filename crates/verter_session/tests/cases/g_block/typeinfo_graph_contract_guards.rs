@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use verter_audit::OriginEdgeKind as AuditOriginEdgeKind;
-use verter_session::semantic_query::OriginEdgeKind as SessionOriginEdgeKind;
+use verter_type_engine::semantic_query::OriginEdgeKind as SessionOriginEdgeKind;
 
 fn workspace_root() -> PathBuf {
     let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

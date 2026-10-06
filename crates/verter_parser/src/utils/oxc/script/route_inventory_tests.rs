@@ -1,12 +1,14 @@
 use super::route_inventory::{
-    build_script_route_inventory, build_script_route_inventory_with_owners, RouteCapability,
-    RouteImportForm, RouteImportedName, ScriptExportAssignmentRoute, ScriptImportRoute,
-    ScriptLocalExportRoute, ScriptReexportRoute, ScriptRouteCounts, ScriptSideEffectImport,
-    ScriptWildcardRoute,
+    build_script_route_inventory, build_script_route_inventory_with_owners,
 };
 use crate::oxc_parse::Parser;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
+use verter_session_query::analysis::route_inventory::{
+    RouteCapability, RouteImportForm, RouteImportedName, ScriptExportAssignmentRoute,
+    ScriptImportRoute, ScriptLocalExportRoute, ScriptReexportRoute, ScriptRouteCounts,
+    ScriptSideEffectImport, ScriptWildcardRoute,
+};
 use verter_type_expr::TopLevelOwnerId;
 
 fn parse(source: &str) -> oxc_parser::ParserReturn<'_> {

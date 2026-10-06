@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use verter_semantic::analysis::StyleLangDialect;
 
 use sha2::{Digest, Sha256};
 use verter_compiler::style_planner::{
@@ -375,7 +376,7 @@ impl SuppliedBlockScope<'_> {
 }
 
 pub(crate) struct CompilerStyleContentCapture {
-    pub(crate) analyses: Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
+    pub(crate) analyses: Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
     pub(crate) v_bind_vars: Vec<String>,
     pub(crate) usage_complete: bool,
     analyses_changed: bool,
@@ -698,7 +699,8 @@ pub(crate) fn native_language(content_class: BlockContentClass, lang: &str) -> b
         // Stylus to the carrier parse and the rewrite pipeline alike — was
         // classified as needing an external tool by this route alone.
         BlockContentClass::Style => {
-            verter_semantic::analysis::StyleAnalysisLang::from_lang(lang).is_natively_parsed()
+            verter_session_query::analysis::style::StyleAnalysisLang::from_lang(lang)
+                .is_natively_parsed()
         }
         BlockContentClass::Custom => false,
     }
@@ -713,7 +715,7 @@ pub(crate) fn optional_native_style_preprocessor(
     lang: &str,
 ) -> bool {
     matches!(role, SectionRole::Style { .. })
-        && verter_semantic::analysis::StyleAnalysisLang::from_lang(lang)
+        && verter_session_query::analysis::style::StyleAnalysisLang::from_lang(lang)
             .requires_external_preprocessing()
         && named_attr(inventory, syntax, "src").is_none()
 }
@@ -865,9 +867,9 @@ impl VerterHost {
                     let resolved = match self.resolve_for_persistent_state(
                         &canonical_id,
                         specifier,
-                        verter_semantic::resolver_core::ResolutionContext {
-                            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                            kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
+                        verter_session_query::resolution::ResolutionContext {
+                            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                            kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                         },
                     ) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
@@ -1334,7 +1336,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         scope: SuppliedBlockScope<'_>,
-        captured_whole_hash: verter_semantic::analysis::types::Hash16,
+        captured_whole_hash: verter_session_query::analysis::types::Hash16,
         captured_stamp: &BlockContentHashToken,
     ) -> bool {
         let owner_is_current = self
@@ -1354,8 +1356,8 @@ impl VerterHost {
     pub(crate) fn hydrate_style_content(
         &self,
         canonical_id: &str,
-        styles: &Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>>,
-    ) -> Arc<Vec<verter_semantic::analysis::StyleBlockAnalysis>> {
+        styles: &Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
+    ) -> Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>> {
         let default_profile = CompileProfile::default();
         let captured = self.capture_compiler_style_content(
             canonical_id,
@@ -1372,7 +1374,7 @@ impl VerterHost {
     pub(crate) fn capture_compiler_style_content(
         &self,
         canonical_id: &str,
-        styles: &[verter_semantic::analysis::StyleBlockAnalysis],
+        styles: &[verter_session_query::analysis::style::StyleBlockAnalysis],
         scope: SuppliedBlockScope<'_>,
     ) -> CompilerStyleContentCapture {
         let mut hydrated = styles.to_vec();
@@ -1945,7 +1947,8 @@ impl VerterHost {
         }
         drop(state);
         if let Some(mut compile_cache) = self.compile_cache().get_mut(&canonical_id) {
-            let session_node = crate::cache_runtime::CompileOutputNodeFactValidatedSession::new();
+            let session_node =
+                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
             session_node.clear_compile_outputs_for_file(&mut compile_cache);
         }
         self.compile_output_pure_content()

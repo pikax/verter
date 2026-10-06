@@ -59,15 +59,35 @@ use syn::visit::Visit;
 use syn::{Expr, ExprCall, ImplItemFn, ItemFn, Local, ReturnType, Type};
 
 /// Walk every `.rs` file under `crates/verter_session/src/` and
-/// assert no file references `finalise_signature_or_empty` (deleted)
-/// and no file syntactically constructs an empty
-/// `Arc<[FactVersionRef]>` outside the substrate helper
-/// `fact_signature_helpers::empty_fact_signature()`.
+/// `crates/verter_type_engine/src/` and assert no file references
+/// `finalise_signature_or_empty` (deleted) and no file syntactically
+/// constructs an empty `Arc<[FactVersionRef]>` outside the substrate
+/// helper `fact_signature_helpers::empty_fact_signature()`.
 #[test]
 fn no_call_site_constructs_empty_signature_from_overflow() {
-    let crate_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut entries: Vec<PathBuf> = Vec::new();
-    collect_rs_files(&crate_src, &mut entries);
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let crate_srcs = [
+        ("verter_session", manifest_dir.join("src")),
+        (
+            "verter_type_engine",
+            manifest_dir
+                .join("..")
+                .join("verter_type_engine")
+                .join("src"),
+        ),
+    ];
+    // `(crate, crate src root, file)` for every walked file.
+    let mut entries: Vec<(&str, &Path, PathBuf)> = Vec::new();
+    for (krate, crate_src) in &crate_srcs {
+        assert!(
+            crate_src.is_dir(),
+            "source root {} is missing",
+            crate_src.display()
+        );
+        let mut files = Vec::new();
+        collect_rs_files(crate_src, &mut files);
+        entries.extend(files.into_iter().map(|f| (*krate, crate_src.as_path(), f)));
+    }
     assert!(
         !entries.is_empty(),
         "fixture invariant: at least some .rs files MUST be walked"
@@ -77,18 +97,30 @@ fn no_call_site_constructs_empty_signature_from_overflow() {
     let mut bypass_findings: Vec<BypassFinding> = Vec::new();
 
     // The sole allowlisted site: the substrate helper itself
-    // (`empty_fact_signature` in `fact_signature_helpers.rs`).
-    // No other production callsite may bypass the helper.
-    let allowed_files = ["fact_signature_helpers.rs"];
+    // (`empty_fact_signature` in the type engine's
+    // `fact_signature_helpers.rs`). No other production callsite may
+    // bypass the helper. Entries are `<crate>/<path under src>`.
+    let allowed_files = ["verter_type_engine/fact_signature_helpers.rs"];
+    let walked_rel = |krate: &str, crate_src: &Path, path: &Path| {
+        format!(
+            "{krate}/{}",
+            path.strip_prefix(crate_src).unwrap_or(path).display()
+        )
+        .replace('\\', "/")
+    };
+    for allowed in allowed_files {
+        assert!(
+            entries
+                .iter()
+                .any(|(krate, crate_src, path)| walked_rel(krate, crate_src, path) == allowed),
+            "the allowlisted substrate helper `{allowed}` must be part of the walked file set"
+        );
+    }
 
-    for path in &entries {
+    for (krate, crate_src, path) in &entries {
         let src = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let rel = path
-            .strip_prefix(&crate_src)
-            .unwrap_or(path)
-            .display()
-            .to_string();
+        let rel = walked_rel(krate, crate_src, path);
 
         // Banned identifier: the function name itself. No residual
         // references in production source.

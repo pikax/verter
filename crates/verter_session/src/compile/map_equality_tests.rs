@@ -2290,7 +2290,7 @@ fn compile_fixture(fixture: &str, axes: CompileAxes) -> RealCompile {
     let source = source.replace("\r\n", "\n");
 
     let canonical_id = format!("fixtures/vue/{fixture}");
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let (snapshot, artifact) = crate::parse::parse_vue_snapshot(
         &canonical_id,
         &source,
@@ -2634,7 +2634,7 @@ fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_t
         .replace("\r\n", "\n");
 
     let canonical_id = "fixtures/vue/basic-interpolation.vue".to_string();
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let (snapshot, artifact) = crate::parse::parse_vue_snapshot(
         &canonical_id,
         &source,

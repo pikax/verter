@@ -12,17 +12,17 @@ use std::sync::Arc;
 
 use super::{collect_dynamic_root_candidates_from_node, known_spread_keys_from_node};
 use crate::meta::MetaProject;
-use crate::request_context::{
-    current_cold_compute_completeness, ColdComputeCompletenessScope, RequestContext,
-    RequestContextGuard,
-};
 use crate::resolver_core::{
     DynamicRootCandidate, FallthroughOverrideIdentity, FallthroughPropOverride,
     FallthroughPropOverrideSet,
 };
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SurfaceView};
 use crate::types::{AnalysisLevel, HostConfig};
 use crate::VerterHost;
+use verter_type_engine::request_context::{
+    current_cold_compute_completeness, ColdComputeCompletenessScope, RequestContext,
+    RequestContextGuard,
+};
+use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId, SurfaceView};
 use verter_type_expr::LiteralValue;
 
 fn open_project() -> Arc<MetaProject> {
@@ -34,7 +34,7 @@ fn open_project() -> Arc<MetaProject> {
 }
 
 fn empty_surface() -> SurfaceView {
-    crate::semantic_query::surface_view! {
+    verter_type_engine::surface_view! {
         members: Arc::from(Vec::new()),
         call_signatures: Arc::from(Vec::new()),
         construct_signatures: Arc::from(Vec::new()),
@@ -66,7 +66,7 @@ fn install_budget(cap: usize) -> (Arc<RequestContext>, RequestContextGuard) {
 /// D(n-1)`). Distinct nodes are O(n); a path-scoped (non-memoized) walk
 /// re-traverses O(2^n).
 fn build_diamond(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     leaf: SemanticNodeId,
     n: u32,
 ) -> SemanticNodeId {
@@ -74,9 +74,9 @@ fn build_diamond(
     for _ in 0..n {
         let alias = graph.intern_node(SemanticNodeData::Alias(cur));
         cur = graph.intern_node(SemanticNodeData::Union(
-            crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(vec![
-                alias, alias,
-            ])),
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                vec![alias, alias],
+            )),
         ));
     }
     cur
@@ -97,7 +97,9 @@ fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
     let project = open_project();
     let host = project.host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
 
     let n: u32 = 14;
 
@@ -115,7 +117,8 @@ fn diamond_dag_walkers_are_memo_bounded_and_charge_shared_budget() {
 
     let before_ks = rctx.projection_budget.projection_ops_executed_count();
 
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let spread = known_spread_keys_from_node(&fixture_dispatch_0, ks_top);
     let after_ks = rctx.projection_budget.projection_ops_executed_count();
     let ks_delta = after_ks - before_ks;
@@ -172,7 +175,9 @@ fn diamond_dynamic_root_result_is_bounded_by_unique_leaves_not_exponential() {
     let project = open_project();
     let host = project.host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
 
     let n: u32 = 14;
     let leaf = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -182,7 +187,8 @@ fn diamond_dynamic_root_result_is_bounded_by_unique_leaves_not_exponential() {
 
     let (_rctx, _guard) = install_budget(100_000);
 
-    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let fixture_dispatch_1 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let candidates = collect_dynamic_root_candidates_from_node(&fixture_dispatch_1, top, &[]);
 
     assert_eq!(
@@ -286,11 +292,14 @@ defineProps<{ root: Tree }>()
     let started = std::time::Instant::now();
     let resolved = project
         .host()
-        .resolve_component_meta("/src/App.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/App.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("resolved component meta should exist");
     let meta = crate::resolver_core::with_bare_host_ctx_for_test(project.host(), |ctx| {
         let fixture_dispatch_2 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         crate::host_manage::extract_component_meta_from_resolved(
             project.host(),
@@ -349,7 +358,9 @@ fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
     let project = open_project();
     let host = project.host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
     let n: u32 = 14;
 
     // known_spread walker: leaf is an (empty) object surface.
@@ -362,7 +373,7 @@ fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
         let _scope = ColdComputeCompletenessScope::enter();
 
         let fixture_dispatch_3 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let spread = known_spread_keys_from_node(&fixture_dispatch_3, top);
         assert!(
             spread.is_none(),
@@ -384,7 +395,7 @@ fn over_cap_walker_trip_folds_partial_into_cold_compute_scope() {
         let (_rctx, _budget_guard) = install_budget(4);
         let _scope = ColdComputeCompletenessScope::enter();
         let fixture_dispatch_3 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let candidates = collect_dynamic_root_candidates_from_node(&fixture_dispatch_3, top, &[]);
         assert!(
             candidates.is_empty(),
@@ -419,7 +430,9 @@ fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
     let project = open_project();
     let host = project.host();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
 
     let n: usize = 24;
     // `wide` yields N DISTINCT native-tag candidates.
@@ -431,13 +444,17 @@ fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
         })
         .collect();
     let wide = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(leaves)),
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            leaves,
+        )),
     ));
     // `top` re-merges `wide`'s memoized set through ONE arm: the merge loop then
     // carries all N candidates with NO intervening `enter_node` charge, so the
     // per-insert halt is the only thing that can bound it.
     let top = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(vec![wide])),
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+            vec![wide],
+        )),
     ));
 
     // Measure the full cost `total` under a generous budget (separate install).
@@ -448,7 +465,7 @@ fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
         let before = rctx.projection_budget.projection_ops_executed_count();
 
         let fixture_dispatch_4 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let full = collect_dynamic_root_candidates_from_node(&fixture_dispatch_4, top, &[]);
         let after = rctx.projection_budget.projection_ops_executed_count();
         assert_eq!(
@@ -466,7 +483,8 @@ fn wide_unique_union_result_is_bounded_by_halt_not_grown_to_n() {
     let cap = total - n / 2;
     let (_rctx, _guard) = install_budget(cap);
     let _scope = ColdComputeCompletenessScope::enter();
-    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+    let fixture_dispatch_4 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
     let bounded = collect_dynamic_root_candidates_from_node(&fixture_dispatch_4, top, &[]);
 
     assert!(

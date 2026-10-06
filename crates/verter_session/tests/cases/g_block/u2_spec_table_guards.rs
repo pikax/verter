@@ -1,5 +1,5 @@
 //! Diff-test for the generated `SemanticQueryKeySpec` table
-//! (`crates/verter_session/src/semantic_query/query_key_spec_table.txt`).
+//! (`crates/verter_type_engine/src/semantic_query/query_key_spec_table.txt`).
 //!
 //! The artifact is written ONLY by the generator binary
 //! `gen-query-key-spec` (`pnpm gen:query-key-spec`); this test NEVER writes —
@@ -34,8 +34,10 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use verter_session::semantic_query::query_key_spec::{render_spec_table, semantic_query_key_specs};
-use verter_session::semantic_query::SemanticQueryKeyTag;
+use verter_type_engine::semantic_query::query_key_spec::{
+    render_spec_table, semantic_query_key_specs,
+};
+use verter_type_engine::semantic_query::SemanticQueryKeyTag;
 
 /// The crate root (`crates/verter_session`). The generator resolves the same
 /// path from `CARGO_MANIFEST_DIR` at run time, so the test and the generator
@@ -93,10 +95,11 @@ pub(crate) fn semantic_query_key_spec_table_equals_enum() {
 
     // (1) FRESHNESS — in-memory render byte-equals the committed artifact.
     let rendered = render_spec_table(&specs);
-    let committed = read_crate_file("src/semantic_query/query_key_spec_table.txt");
+    let committed =
+        read_crate_file("../verter_type_engine/src/semantic_query/query_key_spec_table.txt");
     assert_eq!(
         rendered, committed,
-        "`crates/verter_session/src/semantic_query/query_key_spec_table.txt` \
+        "`crates/verter_type_engine/src/semantic_query/query_key_spec_table.txt` \
          is STALE: the in-memory render of `semantic_query_key_specs()` no \
          longer byte-equals the committed artifact. Run \
          `pnpm gen:query-key-spec` (or `cargo run -p verter_session --bin \
@@ -105,7 +108,7 @@ pub(crate) fn semantic_query_key_spec_table_equals_enum() {
 
     // (2) ENUM-EQUALITY — spec variant-name set == live enum variant set.
     let spec_names: BTreeSet<String> = specs.iter().map(|s| s.variant.name().to_string()).collect();
-    let semantic_src = read_crate_file("src/semantic_query.rs");
+    let semantic_src = read_crate_file("../verter_type_engine/src/semantic_query.rs");
     let enum_names = scan_enum_variants(&semantic_src);
 
     assert!(
@@ -148,8 +151,8 @@ pub(crate) fn semantic_query_key_spec_table_equals_enum() {
     // mislabeled back to `TypeNode`, if `ResolveOverloadSet` is mislabeled
     // `TypeNode` (or anything other than `OverloadSet`), OR if any other row
     // drifts off `TypeNode`.
-    use verter_session::semantic_query::query_key_spec::KeyLifecycle;
-    use verter_session::semantic_query::SemanticQueryValueTag;
+    use verter_type_engine::semantic_query::query_key_spec::KeyLifecycle;
+    use verter_type_engine::semantic_query::SemanticQueryValueTag;
     for spec in &specs {
         assert_eq!(
             spec.lifecycle,
@@ -396,9 +399,9 @@ fn live_set_contains_forward_planned(live: &BTreeSet<String>, forward_planned: &
 /// `DeclarationAnalysis` value domain? Shared by the main assertion and the
 /// non-vacuity proof.
 fn any_spec_resolves_to_declaration_analysis(
-    specs: &[verter_session::semantic_query::query_key_spec::SemanticQueryKeySpec],
+    specs: &[verter_type_engine::semantic_query::query_key_spec::SemanticQueryKeySpec],
 ) -> bool {
-    use verter_session::semantic_query::SemanticQueryValueTag;
+    use verter_type_engine::semantic_query::SemanticQueryValueTag;
     specs
         .iter()
         .any(|s| s.value_domain == SemanticQueryValueTag::DeclarationAnalysis)
@@ -408,9 +411,9 @@ fn any_spec_resolves_to_declaration_analysis(
 /// cloning a real row and rewriting its value domain. Used only to feed the
 /// non-vacuity proof a known violation for check (2).
 fn specs_with_synthetic_declaration_analysis_row(
-    real: &[verter_session::semantic_query::query_key_spec::SemanticQueryKeySpec],
-) -> Vec<verter_session::semantic_query::query_key_spec::SemanticQueryKeySpec> {
-    use verter_session::semantic_query::SemanticQueryValueTag;
+    real: &[verter_type_engine::semantic_query::query_key_spec::SemanticQueryKeySpec],
+) -> Vec<verter_type_engine::semantic_query::query_key_spec::SemanticQueryKeySpec> {
+    use verter_type_engine::semantic_query::SemanticQueryValueTag;
     let mut specs = real.to_vec();
     if let Some(first) = specs.first_mut() {
         first.value_domain = SemanticQueryValueTag::DeclarationAnalysis;

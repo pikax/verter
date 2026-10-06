@@ -16,7 +16,7 @@
 //! - warm read = STRICT same-generation gate (`validated_at_generation ==
 //!   live generation`) AND `ReadSetSignature.facts` validation against the
 //!   caller's live view;
-//! - publication only via [`crate::cache_runtime::SignatureAdmission::Cacheable`];
+//! - publication only via [`verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable`];
 //! - NO env dims, NO digest, NO version column — a normalizer change is a
 //!   registry reset that clears the store.
 //!
@@ -33,9 +33,9 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
-use verter_semantic::analysis::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
-use crate::fact_signature_helpers::ReadSetSignature;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 use crate::typeinfo::types::TypeInfoQueryLevel;
 
@@ -316,6 +316,32 @@ where
     }
 }
 
+/// Read a selected framework surface only after its generation and facts
+/// validate, then mark the owner version as recently used.
+///
+/// `validates` is the request's fact validation over the entry's recorded
+/// signature; `generation` is the live project generation the caller sampled.
+pub(crate) fn read_framework_surface<K, B, F>(
+    store: &FrameworkSurfaceStore<K, B>,
+    key: &FullKey<K>,
+    validates: F,
+    generation: u64,
+) -> Option<Arc<StoredSurfaceDto<B>>>
+where
+    K: Clone + Eq + std::hash::Hash + Send + Sync + 'static,
+    B: Send + Sync + 'static,
+    F: FnOnce(&[verter_session_query::facts::fact_cache::FactVersionRef]) -> bool,
+{
+    let candidate = store.candidate(key)?;
+    if candidate.validated_at_generation != generation
+        || !validates(&candidate.read_set_signature.facts)
+    {
+        return None;
+    }
+    store.touch(&key.canonical, key.owner_whole_hash);
+    Some(candidate)
+}
+
 impl<K, B> ErasedFrameworkSurfaceStore for FrameworkSurfaceStore<K, B>
 where
     K: Clone + PartialEq + Eq + std::hash::Hash + Send + Sync + 'static,
@@ -460,29 +486,29 @@ mod tests {
 
         let live_view = crate::resolver_core::PermissiveStoreView;
         // Same generation + empty facts ⇒ warm hit.
-        assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
-                &store,
-                &key,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
-                5
-            )
-            .is_some()
-        );
+        assert!(super::read_framework_surface(
+            &store,
+            &key,
+            |facts| {
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                    &live_view, facts,
+                )
+            },
+            5
+        )
+        .is_some());
         // Generation bump ⇒ miss (strict same-generation gate).
-        assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
-                &store,
-                &key,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
-                6
-            )
-            .is_none()
-        );
+        assert!(super::read_framework_surface(
+            &store,
+            &key,
+            |facts| {
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                    &live_view, facts,
+                )
+            },
+            6
+        )
+        .is_none());
     }
 
     /// A `StoreView` that REJECTS every non-empty fact signature — used to
@@ -538,39 +564,41 @@ mod tests {
         }
         let live_view = crate::resolver_core::PermissiveStoreView;
         assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
+            super::read_framework_surface(
                 &store,
                 &neighbour,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 0
             )
             .is_some(),
             "editing one owner never evicts another owner's surfaces"
         );
-        assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
-                &store,
-                &version_key("/a.vue", 8, 1),
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
-                0
-            )
-            .is_some()
-        );
-        assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
-                &store,
-                &version_key("/a.vue", 5, 0),
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
-                0
-            )
-            .is_none()
-        );
+        assert!(super::read_framework_surface(
+            &store,
+            &version_key("/a.vue", 8, 1),
+            |facts| {
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                    &live_view, facts,
+                )
+            },
+            0
+        )
+        .is_some());
+        assert!(super::read_framework_surface(
+            &store,
+            &version_key("/a.vue", 5, 0),
+            |facts| {
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                    &live_view, facts,
+                )
+            },
+            0
+        )
+        .is_none());
     }
 
     /// A version that keeps being READ stays in the window while newer
@@ -588,10 +616,10 @@ mod tests {
         publish(&store, &disk);
         for edit in 2..=10u8 {
             assert!(
-                crate::project_semantic_dispatch::memo::read_framework_surface(
+                super::read_framework_surface(
                     &store,
                     &disk,
-                    |facts| crate::resolver_core::StoreView::validates_fact_signature(
+                    |facts| verter_session_query::facts::store_view::StoreView::validates_fact_signature(
                         &live_view, facts
                     ),
                     0
@@ -601,17 +629,17 @@ mod tests {
             );
             publish(&store, &version_key("/a.vue", edit, 0));
         }
-        assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
-                &store,
-                &disk,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
-                0
-            )
-            .is_some()
-        );
+        assert!(super::read_framework_surface(
+            &store,
+            &disk,
+            |facts| {
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                    &live_view, facts,
+                )
+            },
+            0
+        )
+        .is_some());
         assert_eq!(store.len(), CONTENT_VERSIONS_PER_OWNER);
     }
 
@@ -659,12 +687,14 @@ mod tests {
         });
         let live_view = crate::resolver_core::PermissiveStoreView;
         assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
+            super::read_framework_surface(
                 &store,
                 &stale,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
-                    &live_view, facts
-                ),
+                |facts| {
+                    verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                        &live_view, facts,
+                    )
+                },
                 0
             )
             .is_none(),
@@ -678,15 +708,18 @@ mod tests {
     }
 
     struct RejectingStoreView;
-    impl crate::resolver_core::StoreView for RejectingStoreView {
-        fn compat_token(&self) -> crate::resolver_core::StoreViewCompatToken {
-            crate::resolver_core::StoreViewCompatToken {
+    impl verter_session_query::facts::store_view::StoreView for RejectingStoreView {
+        fn compat_token(&self) -> verter_session_query::facts::store_view::StoreViewCompatToken {
+            verter_session_query::facts::store_view::StoreViewCompatToken {
                 epoch: 0,
                 session: None,
                 validity_fingerprint: 0,
             }
         }
-        fn validates(&self, _fact: &crate::resolver_core::FactVersionRef) -> bool {
+        fn validates(
+            &self,
+            _fact: &verter_session_query::facts::fact_cache::FactVersionRef,
+        ) -> bool {
             false
         }
     }
@@ -703,10 +736,11 @@ mod tests {
         };
         // A NON-EMPTY cross-file fact signature: the entry observed a carrier
         // dependency's whole hash. The fact rail must be consulted on warm read.
-        let cross_file_fact = crate::resolver_core::FactVersionRef::FileWholeHash {
-            canonical_id: "/Carrier.ts".to_string(),
-            hash: [9u8; 16],
-        };
+        let cross_file_fact =
+            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                canonical_id: "/Carrier.ts".to_string(),
+                hash: [9u8; 16],
+            };
         store.insert(
             key.clone(),
             StoredSurfaceDto {
@@ -720,32 +754,32 @@ mod tests {
 
         // Right generation but a view that rejects the tracked fact ⇒ MISS.
         // (If the fact-rail gate were deleted, this would WRONGLY warm-hit.)
-        assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
-                &store,
-                &key,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
+        assert!(super::read_framework_surface(
+            &store,
+            &key,
+            |facts| {
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
                     &RejectingStoreView,
-                    facts
-                ),
-                5
-            )
-            .is_none()
-        );
+                    facts,
+                )
+            },
+            5
+        )
+        .is_none());
         // The permissive view accepts the same tracked fact ⇒ warm hit, proving
         // the miss above is the fact rail and not the generation gate.
         let permissive = crate::resolver_core::PermissiveStoreView;
-        assert!(
-            crate::project_semantic_dispatch::memo::read_framework_surface(
-                &store,
-                &key,
-                |facts| crate::resolver_core::StoreView::validates_fact_signature(
+        assert!(super::read_framework_surface(
+            &store,
+            &key,
+            |facts| {
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
                     &permissive,
-                    facts
-                ),
-                5
-            )
-            .is_some()
-        );
+                    facts,
+                )
+            },
+            5
+        )
+        .is_some());
     }
 }

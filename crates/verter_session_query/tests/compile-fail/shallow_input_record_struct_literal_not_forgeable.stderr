@@ -1,0 +1,9 @@
+error[E0451]: fields `observation_id` and `facts` of struct `ShallowInputRecord` are private
+ --> tests/compile-fail/shallow_input_record_struct_literal_not_forgeable.rs:8:9
+  |
+7 |     ShallowInputRecord {
+  |     ------------------ in this type
+8 |         observation_id: 7,
+  |         ^^^^^^^^^^^^^^ private field
+9 |         facts,
+  |         ^^^^^ private field

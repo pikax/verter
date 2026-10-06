@@ -15,8 +15,8 @@
 #![allow(dead_code)] // The bridge is reachable only from unit tests until an audited producer consumes the projection.
 
 use verter_audit::{AuditDiagnosticEntry, AuditDiagnosticKind};
-use verter_semantic::analysis::component_meta::MacroExpansionDiagnostics;
-use verter_semantic::analysis::type_expand::{ExpansionDiagnostic, ExpansionStopReason};
+use verter_session_query::analysis::component_meta::MacroExpansionDiagnostics;
+use verter_session_query::analysis::type_expand::{ExpansionDiagnostic, ExpansionStopReason};
 
 /// Project a slice of [`MacroExpansionDiagnostics`] onto the
 /// audit-substrate's [`AuditDiagnosticEntry`] vector. One audit
@@ -81,8 +81,8 @@ fn format_message(diag: &ExpansionDiagnostic) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::component_meta::MacroExpansionKind;
-    use verter_semantic::analysis::type_expand::{
+    use verter_session_query::analysis::component_meta::MacroExpansionKind;
+    use verter_session_query::analysis::type_expand::{
         ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
     };
 

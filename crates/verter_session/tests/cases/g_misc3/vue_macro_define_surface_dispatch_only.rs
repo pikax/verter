@@ -32,7 +32,9 @@
 
 use super::harness;
 
-use verter_semantic::analysis::type_expand::{ExpandedComponentTypes, ExpandedMacroObjectShape};
+use verter_session_query::analysis::type_expand::{
+    ExpandedComponentTypes, ExpandedMacroObjectShape,
+};
 use verter_type_expr::{LiteralValue, TypeExpr};
 
 /// Collect the member names published on the `define_props` mirror for
@@ -712,8 +714,8 @@ defineProps<UnionAlias>();
 
 #[test]
 fn p2a_aliased_union_define_props_enumerates_both_arms() {
-    use verter_semantic::analysis::AnalyzedMacroKind;
     use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let host = harness::build_hermetic_host_with_lib(
         &[("/AliasedUnionProps.vue", ALIASED_UNION_PROPS_VUE)],
@@ -721,13 +723,15 @@ fn p2a_aliased_union_define_props_enumerates_both_arms() {
     );
 
     // (a) Direct `vue_macro_dtos` (FullMetadata) — the aliased-union surface.
-    let dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
-        owner_canonical: std::sync::Arc::from("/AliasedUnionProps.vue"),
-        macro_index: 0,
-        macro_kind: AnalyzedMacroKind::DefineProps,
-        root_identity: [0u8; 16],
-        level: TypeInfoQueryLevel::FullMetadata,
-    });
+    let dtos = host
+        .vue_macro_dtos(&VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/AliasedUnionProps.vue"),
+            macro_index: 0,
+            macro_kind: AnalyzedMacroKind::DefineProps,
+            root_identity: [0u8; 16],
+            level: TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let dto_names: Vec<&str> = dtos
         .prop_fields()
         .iter()
@@ -811,8 +815,8 @@ defineProps<Props<T>>();
 
 #[test]
 fn open_conditional_props_root_enumerates_both_branches() {
-    use verter_semantic::analysis::AnalyzedMacroKind;
     use verter_session::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let host = harness::build_hermetic_host_with_lib(
         &[("/OpenConditionalProps.vue", OPEN_CONDITIONAL_PROPS_VUE)],
@@ -821,13 +825,15 @@ fn open_conditional_props_root_enumerates_both_branches() {
 
     // (a) Direct `vue_macro_dtos` (FullMetadata) — the macro object
     // surface enumerates BOTH conditional branches' members.
-    let dtos = host.vue_macro_dtos(&VueMacroSurfaceRequest {
-        owner_canonical: std::sync::Arc::from("/OpenConditionalProps.vue"),
-        macro_index: 0,
-        macro_kind: AnalyzedMacroKind::DefineProps,
-        root_identity: [0u8; 16],
-        level: TypeInfoQueryLevel::FullMetadata,
-    });
+    let dtos = host
+        .vue_macro_dtos(&VueMacroSurfaceRequest {
+            owner_canonical: std::sync::Arc::from("/OpenConditionalProps.vue"),
+            macro_index: 0,
+            macro_kind: AnalyzedMacroKind::DefineProps,
+            root_identity: [0u8; 16],
+            level: TypeInfoQueryLevel::FullMetadata,
+        })
+        .expect("the Vue adapter is admitted");
     let dto_names: Vec<&str> = dtos
         .prop_fields()
         .iter()

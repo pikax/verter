@@ -1,4 +1,4 @@
-﻿//! Quick fix: convert a runtime `defineProps(...)` to type-based `defineProps<{...}>()`.
+//! Quick fix: convert a runtime `defineProps(...)` to type-based `defineProps<{...}>()`.
 //!
 //! Handles: `define-props-declaration`
 //!
@@ -17,7 +17,7 @@
 use crate::provider::{ActionContext, ActionProvider};
 use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct ConvertToTypedProps;
 
@@ -105,9 +105,9 @@ mod tests {
         Certainty, DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity,
     };
     use verter_semantic::analysis::build_script_analysis;
-    use verter_semantic::analysis::types::{
-        AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, ScriptAnalysisSnapshot,
-        TypeResolutionSource,
+    use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::types::{
+        AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, TypeResolutionSource,
     };
     use verter_span::Span;
     use verter_type_expr::TopLevelOwnerId;

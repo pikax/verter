@@ -24,13 +24,13 @@ pub(super) enum InlineTlsGuard {
     /// Winner has its own request context; install it for the
     /// inner stage. Drop restores the prior TLS via the trait
     /// object's underlying guard.
-    Install(#[allow(dead_code)] Box<dyn crate::request_context::TlsUninstall + Send>),
+    Install(#[allow(dead_code)] Box<dyn verter_execution::request_context::TlsUninstall + Send>),
     /// Winner has no context; clear ALL install_tls slots (scheduler
     /// opaque, session request context + accumulator, audit observer)
     /// so the inner stage observes `None` everywhere the outer
     /// stage's `install_tls` would have planted state. Drop restores
     /// every prior outer TLS slot via `AllSlotsClearGuard::Drop`.
-    ClearAll(#[allow(dead_code)] crate::request_context::AllSlotsClearGuard),
+    ClearAll(#[allow(dead_code)] verter_execution::request_context::AllSlotsClearGuard),
 }
 
 /// Re-reads the handle's current state and current target slot,

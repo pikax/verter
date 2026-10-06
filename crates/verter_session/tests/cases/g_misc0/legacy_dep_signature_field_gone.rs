@@ -9,7 +9,7 @@
 //! field under any visibility class except for the single sanctioned
 //! sibling `dispatch_dep_signature` field on `MemoEntry`.
 //!
-//! This guard scans `crates/verter_session/src/**/*.rs` (production
+//! This guard scans `crates/{verter_session,verter_type_engine}/src/**/*.rs` (production
 //! source) for any `<vis> <name>: DepSignature` field declaration
 //! inside a struct whose role is "cache carrier" — concretely, any
 //! struct named `ReadSetSignature` (the carrier type) or any
@@ -187,6 +187,22 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
             }
         }
     }
+}
+
+/// Production files of the session crate and of the type engine it builds
+/// on. Cache carriers live in both crates, so both are in scope.
+fn session_and_engine_production_rs_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let crate_root = workspace_root().join(krate);
+        assert!(
+            crate_root.is_dir(),
+            "production source root {} is missing",
+            crate_root.display()
+        );
+        files.extend(walk_production_rs_files(&crate_root));
+    }
+    files
 }
 
 fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
@@ -457,9 +473,8 @@ fn scan_file_rails(path: &Path, hits: &mut Vec<RailHit>) {
 /// Re-introducing one resurrects the retired bundled rail.
 #[test]
 fn no_legacy_dep_signature_field_in_cache_carriers() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut violations = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
+    for file in session_and_engine_production_rs_files() {
         scan_file(&file, &mut violations);
     }
     assert!(
@@ -489,9 +504,8 @@ fn no_legacy_dep_signature_field_in_cache_carriers() {
 /// definition / call, or a `.legacy` read, is a regression.
 #[test]
 fn no_legacy_dep_signature_validation_rail_in_production() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut hits = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
+    for file in session_and_engine_production_rs_files() {
         scan_file_rails(&file, &mut hits);
     }
     let mut by_file: BTreeMap<&Path, Vec<&RailHit>> = BTreeMap::new();

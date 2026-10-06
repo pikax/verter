@@ -30,6 +30,16 @@ fn read_session_source(relative: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
 }
 
+/// Read a `verter_type_engine` source file relative to its `src/`.
+fn read_engine_source(relative: &str) -> String {
+    let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let mut path = PathBuf::from(cargo_manifest_dir);
+    path.push("../verter_type_engine/src");
+    path.push(relative);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+}
+
 /// Assert `ty` carries the carrier `read_set_signature: ReadSetSignature`
 /// and NO separate public `dep_signature` / `fact_dep_signature`
 /// validity field — the fact carrier is the sole cache-validity rail.
@@ -51,17 +61,19 @@ fn assert_struct_carries_fact_carrier(src: &str, ty: &str) {
     // oracle.
     assert!(
         window.contains("read_set_signature: ReadSetSignature")
-            || window
-                .contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature",),
+            || window.contains(
+                "read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature",
+            ),
         "{ty} must carry the carrier `read_set_signature: ReadSetSignature` — its `facts` rail \
          is the sole cache-validity oracle. Window:\n{window}"
     );
-    // Negative assertion: no separate public `dep_signature:
-    // DepSignature` validity rail. The legacy bundled rail is retired.
+    // Negative assertion: no separate public `dep_signature` validity
+    // rail, under any path spelling of its type. The legacy bundled rail
+    // is retired.
     assert!(
-        !window.contains("    pub dep_signature: DepSignature")
-            && !window.contains("    pub dep_signature: crate::semantic_query::DepSignature")
-            && !window.contains("    pub(super) dep_signature: DepSignature"),
+        !window.contains("    pub dep_signature:")
+            && !window.contains("    pub(crate) dep_signature:")
+            && !window.contains("    pub(super) dep_signature:"),
         "{ty} must NOT carry a separate `dep_signature: DepSignature` validity field — the \
          legacy bundled cache-validity rail is retired; `read_set_signature.facts` is the sole \
          oracle. Window:\n{window}"
@@ -70,7 +82,10 @@ fn assert_struct_carries_fact_carrier(src: &str, ty: &str) {
     // path-precise signature lives inside `read_set_signature.facts`.
     assert!(
         !window.contains("fact_dep_signature: Arc<[FactVersionRef]>")
-            && !window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>"),
+            && !window.contains("fact_dep_signature: Arc<[crate::resolver_core::FactVersionRef]>")
+            && !window.contains(
+                "fact_dep_signature: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>",
+            ),
         "{ty} must NOT carry a separate `fact_dep_signature: Arc<[FactVersionRef]>` field — the \
          path-precise signature lives inside `read_set_signature.facts`. Window:\n{window}"
     );
@@ -80,7 +95,7 @@ fn assert_struct_carries_fact_carrier(src: &str, ty: &str) {
 /// its sole cache-validity rail. Source-grep arch guard.
 #[test]
 fn family_b_entries_carry_fact_carrier() {
-    let memo = read_session_source("semantic_query_memo/family.rs");
+    let memo = read_engine_source("semantic_query_memo/family.rs");
     assert_struct_carries_fact_carrier(&memo, "MemoEntry");
 }
 
@@ -114,8 +129,9 @@ fn family_d_app_config_proof_entry_uses_fact_signature_only() {
          as its path-precise cache-validity rail. Window:\n{window}"
     );
     assert!(
-        !window.contains("dep_signature: DepSignature")
-            && !window.contains("dep_signature: crate::semantic_query::DepSignature"),
+        // A bare `dep_signature` field under any path spelling of its type;
+        // the leading space keeps `fact_dep_signature` out of the match.
+        !window.contains(" dep_signature:"),
         "AppConfigNoOverrideProofEntry must NOT carry a legacy `dep_signature: DepSignature` \
          field — the path-precise fact signature is the sole cache-validity rail. \
          Window:\n{window}"
@@ -127,9 +143,9 @@ fn family_d_app_config_proof_entry_uses_fact_signature_only() {
 /// the Family B/C/D entry constructors.
 #[test]
 fn fact_signature_from_fence_helper_exists() {
-    let src = read_session_source("fact_signature_helpers.rs");
+    let src = read_engine_source("fact_signature_helpers.rs");
     assert!(
-        src.contains("pub(crate) fn fact_signature_from_fence("),
+        src.contains("pub fn fact_signature_from_fence("),
         "fact_signature_helpers must expose `fact_signature_from_fence(fence: &[(Arc<str>, \
          DepVersion)]) -> Option<Arc<[FactVersionRef]>>` for the Family B/C/D producers."
     );

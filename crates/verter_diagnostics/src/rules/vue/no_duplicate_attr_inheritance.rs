@@ -9,7 +9,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
-use verter_semantic::analysis::types::AnalysisFlags;
+use verter_session_query::analysis::types::AnalysisFlags;
 
 pub struct NoDuplicateAttrInheritance;
 
@@ -70,8 +70,11 @@ mod tests {
     use crate::config::LintConfig;
     use crate::rules::FileContext;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::script_snapshot::*;
+    use verter_session_query::analysis::template::BindingUsageKind;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateBindingOccurrence;
+
     use verter_span::Span;
 
     fn run_file(

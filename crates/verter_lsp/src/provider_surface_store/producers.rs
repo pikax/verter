@@ -14,8 +14,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tower_lsp_server::ls_types::Uri;
 
-use verter_semantic::analysis::types::Hash16;
 use verter_session::VerterHost;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::carrier_cache::{EngineRecheckState, RegenKey};
 use crate::carrier_provider_projection::PreparedCarrierProviderContent;

@@ -7,7 +7,8 @@
 //! single key field violates R21 (the five env-hash dimensions must
 //! remain split) and is statically rejected here.
 //!
-//! The guard walks every `.rs` file under `crates/verter_session/src/`
+//! The guard walks every `.rs` file under `crates/verter_session/src/` and
+//! `crates/verter_type_engine/src/`
 //! (excluding test files, `tests/`, `benches/`, `examples/`, and
 //! `target/`), parses each one with `syn::parse_file`, finds every
 //! struct whose name ends `Key` or `Identity` (top-level or nested
@@ -274,15 +275,19 @@ fn type_text_mentions_world_snapshot(ty: &str) -> bool {
 
 #[test]
 fn no_cache_layer_keys_on_world_snapshot_as_a_whole() {
-    let src_dir = workspace_root()
-        .join("crates")
-        .join("verter_session")
-        .join("src");
-    let files = walk_production_rs(&src_dir);
-    assert!(
-        !files.is_empty(),
-        "must find at least one production .rs file under `crates/verter_session/src/`"
-    );
+    // The session crate and the type engine it builds on (which owns
+    // `WorldSnapshot` and most cache keys).
+    let mut files = Vec::new();
+    for krate in ["verter_session", "verter_type_engine"] {
+        let src_dir = workspace_root().join("crates").join(krate).join("src");
+        let crate_files = walk_production_rs(&src_dir);
+        assert!(
+            !crate_files.is_empty(),
+            "must find at least one production .rs file under `{}`",
+            src_dir.display()
+        );
+        files.extend(crate_files);
+    }
 
     let mut violations: Vec<(String, String, String, String)> = Vec::new();
     for file in files {

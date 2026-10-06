@@ -100,7 +100,7 @@ fn test_binding(identity: ProjectIdentity) -> CarrierOwnershipResolution {
         "7.0.1-rc",
         env_dims(identity),
         Vec::new(),
-        verter_workspace::ProjectId(0),
+        verter_session_query::resolution::ProjectId(0),
         verter_workspace::SnapshotGeneration(1),
     ))
 }

@@ -9,13 +9,14 @@ use rustc_hash::FxHashSet;
 use crate::canonical_path::CanonicalPath;
 use crate::membership::{FallbackMembership, SupportedExtensions};
 use crate::workspace_snapshot::{
-    compare_project_precedence, OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+    compare_project_precedence, OwnershipProject, ProjectPayload, SnapshotGeneration,
     WorkspaceSnapshot,
 };
 use crate::ProjectMembership;
-use verter_semantic::resolver_core::{
-    typescript_default_excludes, ConfiguredMembership, IdeProjectConfig, ModuleResolverCore,
-    StaticMembershipSpec,
+use verter_resolution::ModuleResolverCore;
+use verter_session_query::resolution::ProjectId;
+use verter_session_query::resolution::{
+    typescript_default_excludes, ConfiguredMembership, IdeProjectConfig, StaticMembershipSpec,
 };
 
 /// Result of building a workspace snapshot from workspace roots.
@@ -62,7 +63,7 @@ pub fn build_workspace_snapshot(
         let reference_targets: FxHashSet<String> = tsconfig_entries
             .iter()
             .flat_map(|entry| load_project_references(ws, &entry.path))
-            .map(|target| verter_semantic::resolver_core::normalize_canonical_id(&target))
+            .map(|target| verter_session_query::resolution::normalize_canonical_id(&target))
             .collect();
 
         for entry in &tsconfig_entries {
@@ -297,7 +298,7 @@ pub fn registry_carrier_extensions() -> Vec<String> {
 /// compiler options (for the `allowJs`/`checkJs` JS-family gate) and the
 /// registered carrier extensions.
 pub fn supported_extensions_for(
-    compiler_options: &verter_semantic::resolver_core::IdeProjectCompilerOptions,
+    compiler_options: &verter_session_query::resolution::IdeProjectCompilerOptions,
 ) -> SupportedExtensions {
     SupportedExtensions::new(
         compiler_options.js_is_member(),
@@ -365,7 +366,7 @@ pub fn membership_to_spec(
 pub fn configured_membership_from_raw(
     root: &str,
     membership: &ProjectMembership,
-    compiler_options: &verter_semantic::resolver_core::IdeProjectCompilerOptions,
+    compiler_options: &verter_session_query::resolution::IdeProjectCompilerOptions,
 ) -> ConfiguredMembership {
     let supported = supported_extensions_for(compiler_options);
     let spec = membership_to_spec(&CanonicalPath::new(root), membership, &supported);

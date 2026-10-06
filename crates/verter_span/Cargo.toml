@@ -11,8 +11,8 @@ keywords = ["vue", "compiler", "span", "position"]
 categories = ["compilers"]
 
 [dependencies]
-oxc_span = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+oxc_span = { workspace = true }
 serde_json = { workspace = true }

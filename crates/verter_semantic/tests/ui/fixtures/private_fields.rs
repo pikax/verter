@@ -15,7 +15,7 @@ fn main() {
     // Reading through the gateway is the sanctioned path.
     let core = TypeInfoCore::from_observation_snapshot(
         Arc::new(verter_semantic::type_info::NonFlowObservationSnapshot::new()),
-        verter_semantic::resolver_core::ResolutionBasis::unbound_placeholder(),
+        verter_session_query::resolution::ResolutionBasis::unbound_placeholder(),
     );
     let _ = core.attempt(&NonFlowOperation::ProjectVueMacroSemantics {
         owner_canonical: Arc::from("/App.vue"),

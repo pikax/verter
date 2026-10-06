@@ -6,7 +6,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 /// `TemplateAnalysisSnapshot::slot_declarations` is populated FAIL-OPEN by the
 /// shared unused-declaration pipeline: members appear only when slot usage
@@ -53,7 +53,9 @@ impl LintRule for NoUnusedSlots {
 mod tests {
     use super::*;
 
-    use verter_semantic::analysis::template::{AnalyzedSlotDeclaration, TemplateAnalysisSnapshot};
+    use verter_session_query::analysis::template::{
+        AnalyzedSlotDeclaration, TemplateAnalysisSnapshot,
+    };
     use verter_span::Span;
 
     fn run(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

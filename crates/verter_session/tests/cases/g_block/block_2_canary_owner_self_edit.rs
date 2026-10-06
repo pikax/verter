@@ -43,7 +43,7 @@ use super::canary_harness::{compile_main, prime_compile, standalone_host, upsert
 fn prop_type(
     host: &verter_session::VerterHost,
     owner: &str,
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) -> TypeExpr {
     let source = meta
@@ -62,7 +62,7 @@ fn prop_type(
 /// Sorted slot-binding names for the named slot of a
 /// `get_component_meta` result.
 fn slot_binding_names(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     slot: &str,
 ) -> Vec<String> {
     let mut names: Vec<String> = meta

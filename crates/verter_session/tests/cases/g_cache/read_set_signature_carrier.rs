@@ -15,7 +15,7 @@
 //! the cacheability bit and that emptiness alone is NOT a
 //! non-cacheable condition.
 
-use verter_session::ReadSetSignature;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 /// Discriminator: `ReadSetSignature::empty()` is cacheable while
 /// `ReadSetSignature::overflow()` is not. The two states must be

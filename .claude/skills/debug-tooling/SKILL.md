@@ -25,7 +25,7 @@ Output: `target/release-dbg/examples/`. Use whenever attaching a debugger or cap
 
 ## 2. In-process watchdog backtrace dumper
 
-`crates/verter_session/src/loop5_instrumentation.rs` — sampling watchdog that captures `std::backtrace::Backtrace::force_capture()` from the running thread. Wired into `shallow_lower_type_expr` (recursive workhorse of TypeExpr → SemanticNodeId lowering). **Inert when not spawned** (single relaxed atomic load per call site).
+`crates/verter_type_engine/src/loop5_instrumentation.rs` — sampling watchdog that captures `std::backtrace::Backtrace::force_capture()` from the running thread. Wired into `shallow_lower_type_expr` (recursive workhorse of TypeExpr → SemanticNodeId lowering). **Inert when not spawned** (single relaxed atomic load per call site).
 
 ### Two modes
 

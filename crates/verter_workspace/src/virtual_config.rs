@@ -37,7 +37,7 @@ use xxhash_rust::xxh3::xxh3_128;
 
 use crate::config::{resolve_tsconfig_extends, strip_json_comments};
 use crate::traits::WorkspaceRead;
-use verter_semantic::resolver_core::parent_dir;
+use verter_session_query::resolution::parent_dir;
 
 /// Salt for the virtual-config identity. Distinct from the five env-hash salts
 /// (and `project_identity`'s) so a virtualized config can never collide with

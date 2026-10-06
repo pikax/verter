@@ -20,14 +20,14 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::{
-    compute_member_presence_hash, compute_semantic_hash, FactKey, MemberKind, SymbolSpace,
-    UnresolvedLens,
-};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
+use verter_session_query::facts::{
+    compute_member_presence_hash, compute_semantic_hash, FactKey, MemberKind, SymbolSpace,
+    UnresolvedLens,
+};
 use verter_type_expr::{ObjectExpr, ObjectMember, ObjectProperty, PrimitiveName, TypeExpr};
 
 /// Build a `Foo` interface from a member list `[(name, type-text)]`

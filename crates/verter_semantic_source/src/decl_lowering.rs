@@ -1,0 +1,1736 @@
+//! Scheduler-side lazy declaration-lowering service.
+//!
+//! The OXC eval-program parse (`ParsedEvalProgram`) is a `self_cell` over
+//! an arena allocator — `!Send`, so it can never enter a host-owned
+//! `Send + Sync` cache. This service gives the lazy declaration-body path
+//! a retained parse WITHOUT violating that rule: a small set of dedicated
+//! worker threads each OWN the parsed snapshots for their key shard, and
+//! callers submit pure lowering jobs that borrow the retained AST on the
+//! worker, returning OWNED typed IR. The snapshot never crosses a thread
+//! boundary; only `Send` job inputs and owned results do.
+//!
+//! Retained snapshots are PINNED BYTES against the process-local
+//! aggregate retention account
+//! ([`SemanticRetentionAccount`](verter_session_query::retention::SemanticRetentionAccount)):
+//! the charge is created by the acquisition that actually PARSED and is
+//! dropped when the last lease for that key releases, so the account's
+//! pinned total tracks exactly the snapshots the process is holding —
+//! one charge per snapshot, never one per lease. A pin is never refused:
+//! refusing one would force a live artifact to silently re-parse, which
+//! the retention contract below forbids. Charging it anyway is the point
+//! — pinned bytes consume headroom, so a process holding many live
+//! snapshots admits fewer discretionary cache entries.
+//!
+//! Retention is LEASE-PINNED, not LRU/budget-evicted. A snapshot is
+//! retained for a [`SnapshotKey`] — `(canonical, whole_hash,
+//! parse_env_hash)`, the file-content generation identity — exactly as
+//! long as a live [`SnapshotLease`] holds it. Each owning [`DeclBodyMemo`]
+//! acquires ONE lease for its key on first body demand and drops it when
+//! the memo (hence its `IndexedReady` artifact) is dropped, so the
+//! retained parse lives precisely as long as the live artifact that reads
+//! from it — a live artifact can never silently re-parse. A lowering job
+//! run while the lease is live reuses the pinned snapshot
+//! (`parsed_now == false`); a run with no live lease for the key parses
+//! transiently and retains nothing. The key is content-addressed by
+//! construction, so a content edit produces a new key (and a fresh memo
+//! with a fresh lease) — a superseded snapshot can never answer a
+//! new-content demand.
+//!
+//! Callers BLOCK on the job result (a rendezvous channel — cooperative
+//! blocking, no spinning). Jobs must be PURE: no host calls, no service
+//! re-entry — a job that submitted a sub-job could deadlock its own
+//! worker. A panicking job is caught on the worker and re-raised on the
+//! calling thread, so one bad job cannot kill a shard.
+//!
+//! On `wasm32` there are no worker threads, and `ParsedEvalProgram` is
+//! `!Send` (it holds an `Rc<…>` self-cell over an arena). The retained
+//! snapshot therefore can never live on a worker, AND it can never be a
+//! field of `DeclLoweringService` — the service is held inside the
+//! host-owned `Send + Sync` artifact structures, so a non-`Sync`
+//! `RefCell<SnapshotShard>` field would poison those bounds (and we do
+//! NOT paper over that with `unsafe impl Send`/`Sync`). Instead, on
+//! `wasm32` the service is FIELDLESS and the retained shard lives in a
+//! wasm-only thread-local (`WASM_DECL_LOWERING_SHARD`). wasm is
+//! single-threaded, so one thread-local shard IS the whole retention
+//! window. The lowering job runs inline on the calling thread against
+//! that thread-local shard — reusing the SAME `SnapshotShard` /
+//! `ShardEntry` / lease-pinned retention logic the native workers use.
+//! Same-key demands under a live lease reuse the retained parse instead
+//! of re-parsing; only the threading/storage substrate differs by
+//! platform (native: worker-owned per shard; wasm: single thread-local
+//! shard).
+use verter_session_query::source::snapshot::SnapshotKey;
+
+use std::sync::Arc;
+
+use rustc_hash::FxHashMap;
+
+/// One lowering-service call's result: the job's owned value plus
+/// whether the service had to parse (vs. serving the retained snapshot).
+/// Test-only, like its sole producer [`DeclLoweringService::run`]:
+/// production accounts parses at the lease boundary
+/// ([`LeaseOutcome::parsed_now`]) and demands bodies through the
+/// lease-only `run_leased`.
+#[cfg(test)]
+pub(crate) struct LoweringOutcome<R> {
+    pub value: R,
+    /// Whether this `run` had to parse — the reuse/transient
+    /// discriminator the `decl_lowering` unit tests assert on to prove
+    /// the lease-pinning retention contract.
+    pub parsed_now: bool,
+}
+
+/// Outcome of acquiring a [`SnapshotLease`]: the lease token (drop it to
+/// release the retained snapshot) plus whether acquiring it had to parse
+/// (vs. bumping the refcount on an already-retained snapshot).
+pub struct LeaseOutcome {
+    pub lease: SnapshotLease,
+    pub parsed_now: bool,
+    /// The retained parse was refused for want of stack: the program is
+    /// not retained, and the flight holding the lease publishes nothing
+    /// for the source.
+    pub refused: Option<verter_parser::oxc_parse::StackUnavailable>,
+}
+
+/// A live pin on the retained parse snapshot for one [`SnapshotKey`].
+///
+/// Holding a lease keeps the worker (native) / thread-local (wasm)
+/// retained snapshot alive; dropping it decrements the key's refcount and
+/// — at zero — drops the retained `Rc<ParsedEvalProgram>`. The lease is
+/// `Send + Sync` (it holds only `Arc<DeclLoweringService>` + the owned
+/// key), so it can live in a host-owned `Send + Sync` artifact (the
+/// `DeclBodyMemo`).
+pub struct SnapshotLease {
+    key: SnapshotKey,
+    service: Arc<DeclLoweringService>,
+}
+
+impl std::fmt::Debug for SnapshotLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotLease")
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for SnapshotLease {
+    fn drop(&mut self) {
+        verter_audit::attribute!(ArtifactPinRelease);
+        self.service.release_key(&self.key);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type WorkerJob = Box<dyn FnOnce(&mut SnapshotShard) + Send>;
+
+#[cfg(target_arch = "wasm32")]
+std::thread_local! {
+    /// wasm-only retained-parse shard. wasm is single-threaded, so this
+    /// one thread-local shard is the entire retention window — it is
+    /// deliberately NOT a field of `DeclLoweringService`, because the
+    /// service must stay `Send + Sync` for the host-owned artifact
+    /// caches and `SnapshotShard` (holding `Rc<ParsedEvalProgram>`) is
+    /// neither.
+    static WASM_DECL_LOWERING_SHARD: std::cell::RefCell<SnapshotShard> =
+        std::cell::RefCell::new(SnapshotShard::new());
+}
+
+/// The `!Send` retained-parse state. On native, one worker thread owns
+/// one shard; on `wasm32`, a single thread-local shard
+/// (`WASM_DECL_LOWERING_SHARD`) holds it — never a service field.
+///
+/// Retention is lease-pinned: an entry exists exactly while at least one
+/// live [`SnapshotLease`] refcounts the key. There is NO count/byte
+/// budget and NO eviction — a live artifact's snapshot can never be
+/// dropped out from under it. The snapshot's bytes are nonetheless
+/// CHARGED as a pin (see the module docs), so the aggregate account sees
+/// them even though nothing may evict them.
+struct SnapshotShard {
+    entries: FxHashMap<SnapshotKey, ShardEntry>,
+}
+
+struct ShardEntry {
+    /// `None` records a FATAL parse (panicked) — retained (while leased)
+    /// so repeated demands against the same broken content do not
+    /// re-parse it.
+    parsed: Option<std::rc::Rc<crate::parsed_eval_program::ParsedEvalProgram>>,
+    /// The stack refusal of a fatal parse that was refused for want of
+    /// stack rather than for its syntax.
+    refused: Option<verter_parser::oxc_parse::StackUnavailable>,
+    /// Live lease count. The entry is removed (and its `Rc` dropped) when
+    /// this reaches zero.
+    refcount: usize,
+    /// This snapshot's pin against the aggregate retention account.
+    ///
+    /// Owned by the ENTRY, not by a lease: a second lease on an
+    /// already-retained snapshot pins bytes that already exist, so
+    /// charging per lease would multiply one arena by its lease count.
+    /// The entry is removed at refcount zero, which drops the charge at
+    /// exactly the moment the arena is freed.
+    _pin: verter_session_query::retention::RetentionCharge,
+}
+
+impl SnapshotShard {
+    fn new() -> Self {
+        Self {
+            entries: FxHashMap::default(),
+        }
+    }
+
+    /// Pin the snapshot for `key`: parse it if not already retained,
+    /// otherwise bump the refcount on the existing entry. Returns
+    /// whether this acquisition had to parse, and the parse's stack refusal.
+    fn acquire(
+        &mut self,
+        account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        key: &SnapshotKey,
+        source: &Arc<str>,
+        source_type: oxc_span::SourceType,
+    ) -> (bool, Option<verter_parser::oxc_parse::StackUnavailable>) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.refcount += 1;
+            return (false, entry.refused);
+        }
+        let (parsed, refused) = match crate::parsed_eval_program::ParsedEvalProgram::parse_outcome(
+            Arc::clone(source),
+            source_type,
+        ) {
+            Ok(parsed) => (Some(std::rc::Rc::new(parsed)), None),
+            Err(refused) => (None, refused),
+        };
+        // Charged from SOURCE bytes rather than by walking the arena:
+        // the lease path is hot, and an arena walk per acquisition would
+        // cost more than the accounting is worth. See
+        // `PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE` for the factor.
+        let pin = account.pin(
+            source.len() * verter_session_query::retention::PARSE_SNAPSHOT_BYTES_PER_SOURCE_BYTE,
+        );
+        self.entries.insert(
+            key.clone(),
+            ShardEntry {
+                parsed,
+                refused,
+                refcount: 1,
+                _pin: pin,
+            },
+        );
+        (true, refused)
+    }
+
+    /// Release `count` pins on `key`. At refcount zero the entry — and its
+    /// retained `Rc` — is dropped.
+    fn release(&mut self, key: &SnapshotKey, count: usize) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.refcount = entry.refcount.saturating_sub(count);
+            if entry.refcount == 0 {
+                self.entries.remove(key);
+            }
+        }
+    }
+
+    /// Snapshot to run a job against: reuse the lease-pinned snapshot if
+    /// one is retained for `key` (`parsed_now == false`), otherwise parse
+    /// transiently and retain NOTHING (retention requires a lease).
+    /// Test-only, like its sole caller [`DeclLoweringService::run`] — the
+    /// parse-capable path exists only to exercise the retention contract.
+    #[cfg(test)]
+    fn snapshot_for_run(
+        &self,
+        key: &SnapshotKey,
+        source: &Arc<str>,
+        source_type: oxc_span::SourceType,
+    ) -> (
+        Option<std::rc::Rc<crate::parsed_eval_program::ParsedEvalProgram>>,
+        bool,
+    ) {
+        if let Some(entry) = self.entries.get(key) {
+            return (entry.parsed.clone(), false);
+        }
+        let parsed =
+            crate::parsed_eval_program::ParsedEvalProgram::parse(Arc::clone(source), source_type)
+                .map(std::rc::Rc::new);
+        (parsed, true)
+    }
+
+    /// Snapshot for a LEASE-ONLY run: the retained snapshot for `key` when a
+    /// live lease pins it, or `None` on a lease MISS. This method NEVER parses —
+    /// it takes no `source` — so a caller that routes through it (span recovery)
+    /// is structurally incapable of triggering a transient re-parse. The outer
+    /// `Option` distinguishes a lease miss (`None`) from a retained-but-fatal
+    /// parse (`Some(None)`).
+    fn snapshot_leased(
+        &self,
+        key: &SnapshotKey,
+    ) -> Option<Option<std::rc::Rc<crate::parsed_eval_program::ParsedEvalProgram>>> {
+        self.entries.get(key).map(|entry| {
+            // Counted on the HIT arm only: a lease miss re-enters the parse
+            // rail, so the two are never both charged for one demand.
+            verter_audit::attribute!(RetainedSnapshotReuse);
+            entry.parsed.clone()
+        })
+    }
+}
+
+/// Env gate for the decl-lowering handoff rendezvous profile. Set to a
+/// non-empty value other than `0` to record, per rendezvous op, the
+/// three-way queue/service/response timing split into a process-global
+/// sink readable through [`dump_decl_handoff_stats`]. Off (the default)
+/// the rendezvous paths are byte-identical to the unprofiled arms — no
+/// clock reads, no payload change, no counter traffic.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const DECL_HANDOFF_PROFILE_ENV: &str = "VERTER_DECL_HANDOFF_PROFILE";
+
+/// Cumulative decl-lowering handoff rendezvous counters — one record per
+/// worker rendezvous, split into the three legs the caller's blocking
+/// `recv` covers:
+///
+/// * **queue** — caller `send` → worker dequeues and starts the job
+///   (message + wakeup latency on the worker side);
+/// * **service** — the job body itself (parse / lowering — the useful
+///   work the caller genuinely has to wait for);
+/// * **response** — worker `send` of the result → caller's `recv`
+///   returns (result message + caller wakeup latency).
+///
+/// Acquire ops ([`DeclLoweringService::acquire_lease`]) and run ops
+/// ([`DeclLoweringService::run_leased`]) aggregate separately: a cold
+/// first body demand pays one of each back-to-back, so the acquire
+/// op's queue+response legs are exactly the overhead a fused
+/// acquire+first-run handoff would reclaim.
+///
+/// Diagnostic accounting only — never a validity or scheduling signal.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub(crate) struct HandoffStats {
+    acquire_ops: std::sync::atomic::AtomicU64,
+    acquire_parses: std::sync::atomic::AtomicU64,
+    acquire_queue_ns: std::sync::atomic::AtomicU64,
+    acquire_service_ns: std::sync::atomic::AtomicU64,
+    acquire_response_ns: std::sync::atomic::AtomicU64,
+    run_ops: std::sync::atomic::AtomicU64,
+    run_queue_ns: std::sync::atomic::AtomicU64,
+    run_service_ns: std::sync::atomic::AtomicU64,
+    run_response_ns: std::sync::atomic::AtomicU64,
+}
+
+/// Cross-thread monotonic span in nanoseconds; a clock inversion (never
+/// observed in practice — `Instant` is process-wide monotonic on every
+/// supported platform) clamps to zero rather than panicking.
+#[cfg(not(target_arch = "wasm32"))]
+fn saturating_ns(from: std::time::Instant, to: std::time::Instant) -> u64 {
+    to.checked_duration_since(from)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HandoffStats {
+    fn record_acquire(
+        &self,
+        submitted: std::time::Instant,
+        started: std::time::Instant,
+        finished: std::time::Instant,
+        received: std::time::Instant,
+        parsed_now: bool,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.acquire_ops.fetch_add(1, Relaxed);
+        if parsed_now {
+            self.acquire_parses.fetch_add(1, Relaxed);
+        }
+        self.acquire_queue_ns
+            .fetch_add(saturating_ns(submitted, started), Relaxed);
+        self.acquire_service_ns
+            .fetch_add(saturating_ns(started, finished), Relaxed);
+        self.acquire_response_ns
+            .fetch_add(saturating_ns(finished, received), Relaxed);
+    }
+
+    fn record_run(
+        &self,
+        submitted: std::time::Instant,
+        started: std::time::Instant,
+        finished: std::time::Instant,
+        received: std::time::Instant,
+    ) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.run_ops.fetch_add(1, Relaxed);
+        self.run_queue_ns
+            .fetch_add(saturating_ns(submitted, started), Relaxed);
+        self.run_service_ns
+            .fetch_add(saturating_ns(started, finished), Relaxed);
+        self.run_response_ns
+            .fetch_add(saturating_ns(finished, received), Relaxed);
+    }
+
+    fn snapshot(&self) -> DeclHandoffSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        DeclHandoffSnapshot {
+            acquire_ops: self.acquire_ops.load(Relaxed),
+            acquire_parses: self.acquire_parses.load(Relaxed),
+            acquire_queue_ns: self.acquire_queue_ns.load(Relaxed),
+            acquire_service_ns: self.acquire_service_ns.load(Relaxed),
+            acquire_response_ns: self.acquire_response_ns.load(Relaxed),
+            run_ops: self.run_ops.load(Relaxed),
+            run_queue_ns: self.run_queue_ns.load(Relaxed),
+            run_service_ns: self.run_service_ns.load(Relaxed),
+            run_response_ns: self.run_response_ns.load(Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.acquire_ops.store(0, Relaxed);
+        self.acquire_parses.store(0, Relaxed);
+        self.acquire_queue_ns.store(0, Relaxed);
+        self.acquire_service_ns.store(0, Relaxed);
+        self.acquire_response_ns.store(0, Relaxed);
+        self.run_ops.store(0, Relaxed);
+        self.run_queue_ns.store(0, Relaxed);
+        self.run_service_ns.store(0, Relaxed);
+        self.run_response_ns.store(0, Relaxed);
+    }
+}
+
+/// One cumulative snapshot of the env-gated decl-lowering handoff
+/// rendezvous profile — see [`HandoffStats`] for leg semantics.
+/// **Diagnostic accessor**, mirroring `dump_from_host_call_sites`:
+/// bench/profiling harnesses read it at pass boundaries; production
+/// code never consults it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DeclHandoffSnapshot {
+    pub acquire_ops: u64,
+    pub acquire_parses: u64,
+    pub acquire_queue_ns: u64,
+    pub acquire_service_ns: u64,
+    pub acquire_response_ns: u64,
+    pub run_ops: u64,
+    pub run_queue_ns: u64,
+    pub run_service_ns: u64,
+    pub run_response_ns: u64,
+}
+
+/// The process-global profile sink: `Some` exactly when the
+/// [`DECL_HANDOFF_PROFILE_ENV`] gate was set (to a non-empty value other
+/// than `0`) at first consultation. Resolved once — services capture the
+/// resolved sink at construction, so the per-op cost when off is one
+/// `Option` check on an already-loaded field.
+#[cfg(not(target_arch = "wasm32"))]
+fn global_handoff_stats() -> Option<&'static Arc<HandoffStats>> {
+    static GLOBAL: std::sync::OnceLock<Option<Arc<HandoffStats>>> = std::sync::OnceLock::new();
+    GLOBAL
+        .get_or_init(|| {
+            let enabled = std::env::var_os(DECL_HANDOFF_PROFILE_ENV)
+                .is_some_and(|v| !v.is_empty() && v != "0");
+            enabled.then(|| Arc::new(HandoffStats::default()))
+        })
+        .as_ref()
+}
+
+/// Snapshot the global handoff rendezvous counters. `None` when the
+/// [`DECL_HANDOFF_PROFILE_ENV`] gate is off — the sink does not exist
+/// and nothing was recorded.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn dump_decl_handoff_stats() -> Option<DeclHandoffSnapshot> {
+    global_handoff_stats().map(|stats| stats.snapshot())
+}
+
+/// Zero the global handoff rendezvous counters — only useful for benches
+/// that want per-pass deltas. No-op when the gate is off.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn reset_decl_handoff_stats() {
+    if let Some(stats) = global_handoff_stats() {
+        stats.reset();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn shard_index(key: &SnapshotKey, worker_count: usize) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = rustc_hash::FxHasher::default();
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % worker_count
+}
+
+/// Capacity of each decl-lowering worker's job queue.
+///
+/// A rendezvous caller occupies at most one slot while it waits for its
+/// own result, so the bound only decides whether an over-subscribed caller
+/// waits for a slot or in the queue; a job is pure and never waits on the
+/// host, so a full queue always drains. Lease releases never take a slot
+/// they would have to wait for (see [`DeclWorker::releases`]).
+#[cfg(not(target_arch = "wasm32"))]
+const DECL_WORKER_QUEUE_CAPACITY: usize = 32;
+
+/// One decl-lowering worker's inbound side: its bounded job queue plus the
+/// lease releases waiting to be applied to its shard.
+#[cfg(not(target_arch = "wasm32"))]
+struct DeclWorker {
+    jobs: crossbeam_channel::Sender<WorkerJob>,
+    /// A coalesced notification, separate from the bounded job queue.
+    wake: crossbeam_channel::Sender<()>,
+    /// Lease releases not yet applied, coalesced per key. Dropping a lease
+    /// must not block, so a release is recorded here instead of queued as
+    /// a job; the worker applies every recorded release before it runs its
+    /// next job, so a release recorded before a job is enqueued is applied
+    /// before that job runs. A key appears at most once, and only while
+    /// its snapshot is retained, so this holds no more entries than the
+    /// shard does.
+    releases: Arc<parking_lot::Mutex<FxHashMap<SnapshotKey, usize>>>,
+}
+
+/// Spawn `worker_count` decl-lowering worker threads, each owning its own
+/// retained-parse [`SnapshotShard`] and looping on a bounded job queue of
+/// `queue_capacity`. The 8 MiB stack matches the host CPU pool:
+/// lowering recursion over deeply nested type bodies must not regress
+/// stack capacity vs. the former inline path. This is the eager-or-lazy
+/// spawn body — called at construction for an eager service, or on first
+/// demand (through [`DeclLoweringService::workers`]) for a lazy one.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWorker> {
+    assert!(
+        worker_count > 0,
+        "decl-lowering worker count must be nonzero"
+    );
+    let mut workers = Vec::with_capacity(worker_count);
+    for index in 0..worker_count {
+        let (jobs, rx) = crossbeam_channel::bounded::<WorkerJob>(queue_capacity);
+        let (wake, wake_rx) = crossbeam_channel::bounded::<()>(1);
+        let releases = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
+        let pending = Arc::clone(&releases);
+        std::thread::Builder::new()
+            .name(format!("verter-decl-lower-{index}"))
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let mut shard = SnapshotShard::new();
+                loop {
+                    let job = crossbeam_channel::select! {
+                        recv(rx) -> job => match job {
+                            Ok(job) => Some(job),
+                            Err(_) => break,
+                        },
+                        recv(wake_rx) -> _ => None,
+                    };
+                    // Drain after receiving a job: a release recorded
+                    // before that job was sent must take effect first.
+                    let released = std::mem::take(&mut *pending.lock());
+                    for (key, count) in released {
+                        shard.release(&key, count);
+                    }
+                    if let Some(job) = job {
+                        job(&mut shard);
+                    }
+                }
+            })
+            .expect("failed to spawn decl-lowering worker");
+        workers.push(DeclWorker {
+            jobs,
+            wake,
+            releases,
+        });
+    }
+    workers
+}
+
+/// The lazy declaration-lowering service. See module docs.
+pub struct DeclLoweringService {
+    /// Resolved worker count, captured at construction and used when the
+    /// worker threads actually spawn (eagerly at construction or lazily on
+    /// the first lowering demand).
+    #[cfg(not(target_arch = "wasm32"))]
+    worker_count: usize,
+    /// Worker job channels, behind a `OnceLock` so the worker threads can
+    /// spawn LAZILY on the first lowering demand (the `batch_typecheck`
+    /// resource policy) instead of EAGERLY at construction (the default /
+    /// `lsp_interactive` policy). The single spawn point is the
+    /// `get_or_init` in [`Self::workers`].
+    #[cfg(not(target_arch = "wasm32"))]
+    workers: std::sync::OnceLock<Vec<DeclWorker>>,
+    /// Per-worker job-queue capacity the workers spawn with
+    /// ([`DECL_WORKER_QUEUE_CAPACITY`] outside tests).
+    #[cfg(not(target_arch = "wasm32"))]
+    queue_capacity: usize,
+    /// Env-gated handoff rendezvous profile sink, resolved ONCE at
+    /// construction from the global gate ([`global_handoff_stats`]).
+    /// `None` (the default) keeps both rendezvous paths byte-identical
+    /// to the unprofiled arms.
+    #[cfg(not(target_arch = "wasm32"))]
+    profile: Option<Arc<HandoffStats>>,
+    /// The aggregate retention account this service's retained parse
+    /// snapshots pin against. Production uses the process-local account;
+    /// a test may inject a private one so pin accounting is observable
+    /// without racing another test's snapshots.
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    /// Number of [`SnapshotLease`]s currently alive across every shard —
+    /// the object-lifetime figure a retention measurement reads alongside
+    /// the byte account. A lease is counted when [`Self::acquire_lease`]
+    /// hands it out and uncounted when its `Drop` releases the key, so the
+    /// figure follows the lease objects themselves, not the shard entries
+    /// (several leases may share one retained snapshot).
+    live_leases: std::sync::atomic::AtomicUsize,
+    // On `wasm32` the shard itself lives in the
+    // `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
+    // service stays `Send + Sync` without any `unsafe impl`; only the
+    // `Send + Sync` account handle is a field.
+}
+
+impl std::fmt::Debug for DeclLoweringService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclLoweringService")
+            .finish_non_exhaustive()
+    }
+}
+
+/// The declaration-lowering work counters: the deterministic, wall-clock-free
+/// observability rail for parse-once / lower-on-demand. Owned by the lowering
+/// side and shared (one `Arc`) by every declaration-body memo a host builds;
+/// the host's provenance facade aggregates it. Relaxed increments, reset only
+/// by the facade.
+#[derive(Debug, Default)]
+pub struct DeclLoweringCounters {
+    /// OXC eval-program parses performed through the single host parse
+    /// entry (`parse_eval_program`). Exactly 1 per cold canonical build.
+    pub eval_program_parses: std::sync::atomic::AtomicU64,
+    /// `EvalEnv` builds initiated by the host (the program-taking
+    /// builder plus any call site that forces an internal fallback
+    /// build). Exactly 1 per cold canonical build.
+    pub eval_env_builds: std::sync::atomic::AtomicU64,
+    /// Declaration BODIES lowered to typed IR on behalf of this host —
+    /// one increment per type/value/augmentation declaration contributor
+    /// whose body (annotation, signature set, object shape, heritage,
+    /// member types) was lowered from OXC syntax. The deterministic
+    /// demand-scoping rail: publishing a file's `IndexedReady` lowers
+    /// ZERO bodies; a semantic query lowers exactly the demanded
+    /// declaration closure; a whole-file env demand (fallthrough /
+    /// runtime values) lowers the file's full declaration set once.
+    pub decl_bodies_lowered: std::sync::atomic::AtomicU64,
+}
+
+/// The default decl-lowering pool size — `clamp(available_parallelism / 4,
+/// 1, 4)` 8 MiB workers, the historical sizing. The single definition both
+/// the session's `HostResourcePolicy::default` and the decl-lowering
+/// service's no-arg constructor key off, so the two can never drift.
+pub const DECL_LOWERING_DEFAULT_POOL_SIZE: verter_execution::pool_size::PoolSize =
+    verter_execution::pool_size::PoolSize::Fraction {
+        divisor: 4,
+        min: 1,
+        max: 4,
+    };
+
+impl DeclLoweringService {
+    /// Eager service at the default decl-lowering pool size — workers
+    /// spawn at construction. Keyed off the same
+    /// [`DECL_LOWERING_DEFAULT_POOL_SIZE`] the default
+    /// the session's `HostResourcePolicy` uses, so the no-arg default and
+    /// the resource policy can never drift.
+    ///
+    /// Production host construction goes through [`Self::new_with`] (the
+    /// resource-policy-driven path); this no-arg eager convenience is used
+    /// only by the crate's `#[cfg(test)]` decl-lowering / memo suites.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self::new_with(
+            /* lazy = */ false,
+            DECL_LOWERING_DEFAULT_POOL_SIZE.resolve(),
+        )
+    }
+
+    /// Build a service under an explicit spawn policy. `lazy == false`
+    /// spawns the `worker_count` worker threads now (the default /
+    /// `lsp_interactive` policy); `lazy == true` defers the spawn to the
+    /// first lowering demand ([`Self::run`] / [`Self::acquire_lease`]) —
+    /// the `batch_typecheck` policy, where cold host construction spawns
+    /// zero decl-lowering threads.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with(lazy: bool, worker_count: usize) -> Self {
+        Self::new_with_account(
+            lazy,
+            worker_count,
+            verter_session_query::retention::SemanticRetentionAccount::process_local(),
+        )
+    }
+
+    /// [`Self::new_with`] against an explicit retention account. Test-only:
+    /// production services pin against the one process-local account.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with_account(
+        lazy: bool,
+        worker_count: usize,
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        assert!(
+            worker_count > 0,
+            "decl-lowering worker count must be nonzero"
+        );
+        let workers = std::sync::OnceLock::new();
+        if !lazy {
+            // Eager policy: spawn the workers now. `set` on a fresh
+            // `OnceLock` always succeeds.
+            let _ = workers.set(spawn_decl_workers(worker_count, DECL_WORKER_QUEUE_CAPACITY));
+        }
+        Self {
+            worker_count,
+            workers,
+            queue_capacity: DECL_WORKER_QUEUE_CAPACITY,
+            profile: global_handoff_stats().cloned(),
+            account,
+            live_leases: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// wasm has no worker threads (the `!Send` parse cannot cross a thread
+    /// boundary and the service must stay `Send + Sync`); the retained
+    /// shard lives in the `WASM_DECL_LOWERING_SHARD` thread-local. The
+    /// spawn policy is inert here — both arguments are ignored.
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_with(_lazy: bool, _worker_count: usize) -> Self {
+        Self::new_with_account(
+            _lazy,
+            _worker_count,
+            verter_session_query::retention::SemanticRetentionAccount::process_local(),
+        )
+    }
+
+    /// [`Self::new_with`] against an explicit retention account. The spawn
+    /// policy is inert on wasm; only the account is retained.
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_with_account(
+        _lazy: bool,
+        _worker_count: usize,
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self {
+            account,
+            live_leases: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Test-only single-worker constructor: forces every key onto one
+    /// shard so retention tests are deterministic regardless of host
+    /// parallelism. Eager (workers spawn immediately).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn new_single_worker() -> Self {
+        Self::new_with(/* lazy = */ false, 1)
+    }
+
+    /// Test-only single-worker constructor with an INJECTED handoff
+    /// profile sink — exercises the profiled rendezvous arms without
+    /// touching the process-global env gate (which would leak across
+    /// tests sharing the process).
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn new_single_worker_with_profile(sink: Arc<HandoffStats>) -> Self {
+        let mut service = Self::new_with(/* lazy = */ false, 1);
+        service.profile = Some(sink);
+        service
+    }
+
+    /// Spawn (once) and return the worker job channels. The first caller
+    /// spawns the 8 MiB worker threads; concurrent callers block on the
+    /// `OnceLock` until that spawn completes. This is the SINGLE spawn
+    /// point — an eager service forces it at construction, a lazy service
+    /// reaches it on the first lowering demand. Spawning only creates OS
+    /// threads + the job channels and never re-enters the host (workers
+    /// run pure lowering jobs), so a lazy spawn under a resolve demand
+    /// cannot deadlock.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn workers(&self) -> &[DeclWorker] {
+        self.workers
+            .get_or_init(|| spawn_decl_workers(self.worker_count, self.queue_capacity))
+    }
+
+    /// Whether the worker threads have spawned yet. `false` for a
+    /// freshly-constructed lazy service; `true` after the first lowering
+    /// demand, and always `true` for an eager service. Test-only signal of
+    /// a REAL thread spawn — the `OnceLock` is populated only by
+    /// `spawn_decl_workers`, never by hand.
+    #[cfg(all(any(test, feature = "test-support"), not(target_arch = "wasm32")))]
+    pub fn workers_spawned(&self) -> bool {
+        self.workers.get().is_some()
+    }
+
+    /// Acquire a [`SnapshotLease`] pinning the retained parse for `key`.
+    /// While the returned lease is live, [`Self::run_leased`] calls for
+    /// `key` serve the retained snapshot (and MISS, never parse, without
+    /// one).
+    pub fn acquire_lease(
+        self: &Arc<Self>,
+        key: &SnapshotKey,
+        source: &Arc<str>,
+        source_type: oxc_span::SourceType,
+    ) -> LeaseOutcome {
+        verter_audit::attribute!(ArtifactPinAcquire);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (parsed_now, refused) = {
+            // First lowering demand spawns the worker threads if the
+            // service was constructed lazily (`batch_typecheck`).
+            let workers = self.workers();
+            let shard_index = shard_index(key, workers.len());
+            let key_for_job = key.clone();
+            let source = Arc::clone(source);
+            match self.profile.as_ref() {
+                None => {
+                    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let account = Arc::clone(&self.account);
+                    let job: WorkerJob = Box::new(move |shard| {
+                        let parsed_now =
+                            shard.acquire(&account, &key_for_job, &source, source_type);
+                        let _ = result_tx.send(parsed_now);
+                    });
+                    workers[shard_index]
+                        .jobs
+                        .send(job)
+                        .expect("decl-lowering worker channel must outlive the service");
+                    result_rx
+                        .recv()
+                        .expect("decl-lowering worker must answer every acquire")
+                }
+                // Profiled arm (env-gated / test-injected): identical
+                // rendezvous semantics; the payload additionally carries the
+                // worker-side job-start/job-end instants so the caller can
+                // record the queue/service/response split.
+                Some(stats) => {
+                    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let submitted = std::time::Instant::now();
+                    let account = Arc::clone(&self.account);
+                    let job: WorkerJob = Box::new(move |shard| {
+                        let started = std::time::Instant::now();
+                        let parsed_now =
+                            shard.acquire(&account, &key_for_job, &source, source_type);
+                        let _ = result_tx.send((parsed_now, started, std::time::Instant::now()));
+                    });
+                    workers[shard_index]
+                        .jobs
+                        .send(job)
+                        .expect("decl-lowering worker channel must outlive the service");
+                    let ((parsed_now, refused), started, finished) = result_rx
+                        .recv()
+                        .expect("decl-lowering worker must answer every acquire");
+                    stats.record_acquire(
+                        submitted,
+                        started,
+                        finished,
+                        std::time::Instant::now(),
+                        parsed_now,
+                    );
+                    (parsed_now, refused)
+                }
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (parsed_now, refused) = WASM_DECL_LOWERING_SHARD.with(|cell| {
+            cell.borrow_mut()
+                .acquire(&self.account, key, source, source_type)
+        });
+
+        self.live_leases
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        LeaseOutcome {
+            lease: SnapshotLease {
+                key: key.clone(),
+                service: Arc::clone(self),
+            },
+            parsed_now,
+            refused,
+        }
+    }
+
+    /// Number of live [`SnapshotLease`]s: the retained-parse object count
+    /// a long-session retention measurement compares across quiesced
+    /// checkpoints. Every lease pins one retained snapshot for as long as
+    /// the artifact holding it lives, so a count that climbs with the
+    /// number of superseded document versions is the signature of
+    /// artifacts that outlive their reachability.
+    #[must_use]
+    pub fn live_lease_count(&self) -> usize {
+        self.live_leases.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Release one pin on `key`. Fire-and-forget: dropping a lease must
+    /// not block, and a worker that has already shut down (service
+    /// teardown) simply drops the release.
+    fn release_key(&self, key: &SnapshotKey) {
+        // Uncounted at the lease drop, not at the shard's refcount decrement:
+        // the count follows lease OBJECTS, and the native release is a
+        // fire-and-forget worker job whose completion nobody observes.
+        self.live_leases
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // A release only happens through a `SnapshotLease` drop, and a
+            // lease is only ever produced by `acquire_lease` (which already
+            // spawned the workers), so `workers()` here is always a cheap
+            // `get` — it never spawns on a release.
+            let workers = self.workers();
+            let worker = &workers[shard_index(key, workers.len())];
+            *worker.releases.lock().entry(key.clone()).or_insert(0) += 1;
+            // Coalesce notifications without taking capacity from real jobs.
+            // A busy worker drains releases before its next job regardless.
+            let _ = worker.wake.try_send(());
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            WASM_DECL_LOWERING_SHARD.with(|cell| cell.borrow_mut().release(key, 1));
+        }
+    }
+
+    /// Run `job` against the (lease-retained or freshly parsed) eval
+    /// program for `key`, blocking until the owned result is back. `job`
+    /// receives `None` when the parse is fatal (panicked). When a live
+    /// lease pins `key`, the retained snapshot is reused
+    /// (`parsed_now == false`); otherwise the parse is transient and
+    /// retained nowhere.
+    ///
+    /// **`job` MUST be a PURE lowering closure**: it borrows the retained
+    /// AST and returns OWNED typed IR, and it must NOT re-enter this
+    /// service (`run` / `acquire_lease` / `release`) nor call back into the
+    /// host. Re-entry is a deadlock/panic hazard on BOTH platforms:
+    /// - native — a job runs ON the worker thread that owns its shard;
+    ///   submitting a sub-job to the same shard from inside the job blocks
+    ///   that worker on a rendezvous it can never service (self-deadlock);
+    /// - `wasm32` — the job runs inline while a shared
+    ///   `WASM_DECL_LOWERING_SHARD.borrow()` is held, so a re-entrant
+    ///   `acquire_lease` / `release` (`borrow_mut`) panics the `RefCell`.
+    ///
+    /// The whole lazy-body design upholds this: `DeclBodyMemo` acquires its
+    /// lease BEFORE the run and the lowering arms only build typed IR, so a
+    /// job never reaches back into the service.
+    ///
+    /// PARSE-CAPABLE by design — and therefore TEST-ONLY: `DeclBodyMemo`
+    /// routes every production demand through the lease-only
+    /// [`Self::run_leased`], and gating this method `#[cfg(test)]` makes
+    /// the transient-parse hole structurally un-reopenable in production
+    /// builds. The unit tests below exercise the transient/retention
+    /// contract through it (a same-key run under a live lease reuses the
+    /// retained snapshot; without one it parses transiently and retains
+    /// nothing).
+    #[cfg(test)]
+    pub(crate) fn run<R, F>(
+        &self,
+        key: &SnapshotKey,
+        source: &Arc<str>,
+        source_type: oxc_span::SourceType,
+        job: F,
+    ) -> LoweringOutcome<R>
+    where
+        F: FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::panic::AssertUnwindSafe;
+
+            // First lowering demand spawns the worker threads if the
+            // service was constructed lazily (`batch_typecheck`).
+            let workers = self.workers();
+            let shard_index = shard_index(key, workers.len());
+            let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+            let key = key.clone();
+            let source = Arc::clone(source);
+            let worker_job: WorkerJob = Box::new(move |shard| {
+                let (parsed, parsed_now) = shard.snapshot_for_run(&key, &source, source_type);
+                // Catch a job panic on the worker and re-raise it on the
+                // caller — the worker thread (and its retained shard)
+                // must survive a bad job.
+                let value = std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())));
+                let _ = result_tx.send(value.map(|value| LoweringOutcome { value, parsed_now }));
+            });
+            workers[shard_index]
+                .jobs
+                .send(worker_job)
+                .expect("decl-lowering worker channel must outlive the service");
+            match result_rx
+                .recv()
+                .expect("decl-lowering worker must answer every job")
+            {
+                Ok(outcome) => outcome,
+                Err(panic_payload) => std::panic::resume_unwind(panic_payload),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Single-threaded platform: no worker threads, and the
+            // `Rc` parse is `!Send`, so the retained shard lives in the
+            // `WASM_DECL_LOWERING_SHARD` thread-local (NOT a service
+            // field). Same lease-pinned retention logic as the native
+            // workers — a same-key run under a live lease reuses the
+            // retained snapshot (`parsed_now == false`) via
+            // `snapshot_for_run` instead of re-parsing. Both `parsed_now`
+            // and `value` come from the real shard hit/miss, never a
+            // hardcoded fresh-parse flag.
+            WASM_DECL_LOWERING_SHARD.with(|cell| {
+                let shard = cell.borrow();
+                let (parsed, parsed_now) = shard.snapshot_for_run(key, source, source_type);
+                let value = job(parsed.as_deref());
+                LoweringOutcome { value, parsed_now }
+            })
+        }
+    }
+
+    /// Test-only out-of-band release of the retained snapshot pin for
+    /// `key`. Used to BREAK the lease invariant (the memo still holds its
+    /// `SnapshotLease`, but the worker-side retained entry is gone) and
+    /// prove the memo's demanded-lowering path fails CLOSED instead of
+    /// transiently re-parsing.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_retained_snapshot_for_test(&self, key: &SnapshotKey) {
+        self.release_key(key);
+    }
+
+    /// Run `job` against the LEASE-RETAINED eval program for `key`, WITHOUT ever
+    /// parsing. On a lease MISS (no retained snapshot) returns `None` and `job`
+    /// does NOT run — this path is structurally incapable of a transient parse,
+    /// so a caller on it (span recovery, the decl-body memo's demanded
+    /// lowering) can never violate the retained-parse invariant. When a
+    /// retained snapshot exists, `job` runs with `Some(&program)`
+    /// (or `None` for a fatal parse) and the result is `Some(job_result)`.
+    ///
+    /// Unlike the test-only parse-capable `run`, this takes NO `source` — a lease miss cannot be
+    /// papered over by re-parsing. `job` MUST still be a PURE lowering closure
+    /// (no host / service re-entry), per the same worker-purity contract.
+    pub fn run_leased<R, F>(&self, key: &SnapshotKey, job: F) -> Option<R>
+    where
+        F: FnOnce(Option<&crate::parsed_eval_program::ParsedEvalProgram>) -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::panic::AssertUnwindSafe;
+
+            // A batch host may construct this service lazily. Lease-only
+            // lowering is still a real first demand, so initialize the worker
+            // set through the same single authority as every other operation.
+            let workers = self.workers();
+            let shard_index = shard_index(key, workers.len());
+            let key = key.clone();
+            let result = match self.profile.as_ref() {
+                None => {
+                    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let worker_job: WorkerJob = Box::new(move |shard| {
+                        // `None` = lease miss (job does not run, nothing is
+                        // parsed); `Some(catch_unwind(..))` = the retained
+                        // snapshot ran the job.
+                        let result = shard.snapshot_leased(&key).map(|parsed| {
+                            std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())))
+                        });
+                        let _ = result_tx.send(result);
+                    });
+                    workers[shard_index]
+                        .jobs
+                        .send(worker_job)
+                        .expect("decl-lowering worker channel must outlive the service");
+                    result_rx
+                        .recv()
+                        .expect("decl-lowering worker must answer every job")
+                }
+                // Profiled arm (env-gated / test-injected): identical
+                // rendezvous + panic semantics; the payload additionally
+                // carries the worker-side job-start/job-end instants. A
+                // lease miss and a panicking job still record their op —
+                // the caller paid the full rendezvous either way.
+                Some(stats) => {
+                    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+                    let submitted = std::time::Instant::now();
+                    let worker_job: WorkerJob = Box::new(move |shard| {
+                        let started = std::time::Instant::now();
+                        let result = shard.snapshot_leased(&key).map(|parsed| {
+                            std::panic::catch_unwind(AssertUnwindSafe(|| job(parsed.as_deref())))
+                        });
+                        let _ = result_tx.send((result, started, std::time::Instant::now()));
+                    });
+                    workers[shard_index]
+                        .jobs
+                        .send(worker_job)
+                        .expect("decl-lowering worker channel must outlive the service");
+                    let (result, started, finished) = result_rx
+                        .recv()
+                        .expect("decl-lowering worker must answer every job");
+                    stats.record_run(submitted, started, finished, std::time::Instant::now());
+                    result
+                }
+            };
+            match result {
+                None => None,
+                Some(Ok(value)) => Some(value),
+                Some(Err(panic_payload)) => std::panic::resume_unwind(panic_payload),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            WASM_DECL_LOWERING_SHARD.with(|cell| {
+                let shard = cell.borrow();
+                shard
+                    .snapshot_leased(key)
+                    .map(|parsed| job(parsed.as_deref()))
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(canonical: &str, hash_byte: u8) -> SnapshotKey {
+        SnapshotKey {
+            canonical: Arc::from(canonical),
+            whole_hash: [hash_byte; 16],
+            parse_env_hash: [0u8; 16],
+        }
+    }
+
+    /// Two jobs against the SAME key under a LIVE LEASE share one
+    /// retained parse: the second call must observe `parsed_now == false`
+    /// and the same program content. A regressed per-call parse would
+    /// report `parsed_now == true` twice.
+    #[test]
+    fn leased_key_jobs_share_one_retained_parse() {
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = { a: 1 };\ntype B = { b: 2 };\n");
+        let k = key("/ws/a.ts", 1);
+        let st = oxc_span::SourceType::ts();
+
+        let lease = service.acquire_lease(&k, &source, st);
+        assert!(lease.parsed_now, "acquiring the lease parses once");
+
+        let first = service.run(&k, &source, st, |program| {
+            program
+                .expect("parse must succeed")
+                .borrow_dependent()
+                .body
+                .len()
+        });
+        assert!(
+            !first.parsed_now,
+            "a run under a live lease reuses the retained snapshot"
+        );
+        assert_eq!(first.value, 2);
+
+        let second = service.run(&k, &source, st, |program| {
+            program
+                .expect("parse must succeed")
+                .borrow_dependent()
+                .body
+                .len()
+        });
+        assert!(
+            !second.parsed_now,
+            "warm call must reuse the retained snapshot — NOT re-parse"
+        );
+        assert_eq!(second.value, 2);
+
+        drop(lease.lease);
+    }
+
+    /// Dropping a lease never waits for its worker, and its release is never
+    /// lost. With the worker busy and its bounded queue full, the drop still
+    /// returns at once — a release queued as a job would block here — and
+    /// the worker applies it before the next job it runs — a release that
+    /// only offered a job to the full queue would be dropped, leaving the
+    /// snapshot retained with no lease.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_lease_drop_neither_waits_on_a_full_queue_nor_is_lost() {
+        use crossbeam_channel::TrySendError;
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let mut service = DeclLoweringService::new_with(/* lazy = */ true, 1);
+        service.queue_capacity = 1;
+        let service = Arc::new(service);
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let st = oxc_span::SourceType::ts();
+        let released = key("/ws/released.ts", 1);
+        let busy = key("/ws/busy.ts", 2);
+        let released_lease = service.acquire_lease(&released, &source, st);
+        let busy_lease = service.acquire_lease(&busy, &source, st);
+
+        let (started_tx, started_rx) = channel::<()>();
+        let (finish_tx, finish_rx) = channel::<()>();
+        let blocker = {
+            let service = Arc::clone(&service);
+            let busy = busy.clone();
+            std::thread::spawn(move || {
+                service.run_leased(&busy, move |_| {
+                    started_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                })
+            })
+        };
+        started_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker starts the blocking job");
+        let worker = &service.workers()[0];
+        loop {
+            match worker.jobs.try_send(Box::new(|_| {})) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => break,
+                Err(TrySendError::Disconnected(_)) => panic!("the worker is alive"),
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = channel::<()>();
+        let dropper = std::thread::spawn(move || {
+            drop(released_lease.lease);
+            dropped_tx.send(()).unwrap();
+        });
+        dropped_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("a lease drop must not wait for a busy worker's full queue");
+        dropper.join().unwrap();
+
+        finish_tx.send(()).unwrap();
+        assert_eq!(blocker.join().unwrap(), Some(()));
+        assert!(
+            service.run_leased(&released, |_| ()).is_none(),
+            "the release must be applied before the worker's next job"
+        );
+        assert!(
+            service.run_leased(&busy, |_| ()).is_some(),
+            "a still-leased snapshot stays retained"
+        );
+        drop(busy_lease.lease);
+    }
+
+    /// Releasing a lease must not consume the one queued slot reserved for
+    /// real work while a worker is occupied.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_lease_release_does_not_enqueue_a_dummy_job() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let mut service = DeclLoweringService::new_with(true, 1);
+        service.queue_capacity = 1;
+        let service = Arc::new(service);
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let busy = key("/ws/busy.ts", 1);
+        let released = key("/ws/released.ts", 2);
+        let busy_lease = service.acquire_lease(&busy, &source, oxc_span::SourceType::ts());
+        let released_lease = service.acquire_lease(&released, &source, oxc_span::SourceType::ts());
+        let (started_tx, started_rx) = channel();
+        let (finish_tx, finish_rx) = channel();
+        let worker = {
+            let service = Arc::clone(&service);
+            std::thread::spawn(move || {
+                service.run_leased(&busy, move |_| {
+                    started_tx.send(()).unwrap();
+                    finish_rx.recv().unwrap();
+                })
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(released_lease.lease);
+        let real_job_enqueued = service.workers()[0].jobs.try_send(Box::new(|_| {})).is_ok();
+        finish_tx.send(()).unwrap();
+        worker.join().unwrap();
+        drop(busy_lease.lease);
+        assert!(
+            real_job_enqueued,
+            "lease release consumed the real job slot"
+        );
+    }
+
+    /// `run_leased` NEVER parses: on a lease miss it returns `None` (the job
+    /// does not run), under a live lease it runs against the retained snapshot,
+    /// and after the lease drops it misses again. A regressed implementation
+    /// that re-parsed on a miss would return `Some(true)` on the first/last
+    /// probe and fail this test.
+    #[test]
+    fn run_leased_never_parses_and_misses_without_a_live_lease() {
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = { a: 1 };\n");
+        let k = key("/ws/leased-only.ts", 1);
+        let st = oxc_span::SourceType::ts();
+
+        // No live lease → miss (NOT a transient parse).
+        let miss = service.run_leased(&k, |program| program.is_some());
+        assert!(
+            miss.is_none(),
+            "run_leased must MISS (never parse) with no live lease"
+        );
+
+        // A live lease pins the snapshot → run_leased runs the job against it.
+        let lease = service.acquire_lease(&k, &source, st);
+        assert!(lease.parsed_now, "acquiring the lease parses once");
+        let hit = service.run_leased(&k, |program| {
+            program
+                .expect("the retained snapshot must be present under a live lease")
+                .borrow_dependent()
+                .body
+                .len()
+        });
+        assert_eq!(
+            hit,
+            Some(1),
+            "run_leased runs against the retained snapshot"
+        );
+
+        // After the lease drops, retention is released → miss again, no reparse.
+        drop(lease.lease);
+        let after = service.run_leased(&k, |program| program.is_some());
+        assert!(
+            after.is_none(),
+            "run_leased misses after the lease drops — it never re-parses"
+        );
+    }
+
+    /// An UN-LEASED run parses transiently and retains nothing: a second
+    /// un-leased run of the same key parses again. Retention requires a
+    /// lease.
+    #[test]
+    fn unleased_run_is_transient() {
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let k = key("/ws/unleased.ts", 9);
+        let st = oxc_span::SourceType::ts();
+
+        let first = service.run(&k, &source, st, |p| p.is_some());
+        let second = service.run(&k, &source, st, |p| p.is_some());
+        assert!(first.parsed_now && first.value);
+        assert!(
+            second.parsed_now,
+            "with no live lease, each run parses transiently — retention \
+             requires a lease"
+        );
+    }
+
+    /// A live lease pins the snapshot across MANY distinct other keys —
+    /// there is no count/byte budget and no eviction, so a re-run of the
+    /// leased key still reuses its retained parse. A reintroduced
+    /// LRU/budget cap would evict the leased key and force a re-parse.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn live_lease_pins_snapshot_across_many_other_keys() {
+        // Single worker so every key shares one shard — deterministic
+        // regardless of host parallelism.
+        let service = Arc::new(DeclLoweringService::new_single_worker());
+        let st = oxc_span::SourceType::ts();
+        let k1 = key("/ws/k1.ts", 1);
+        let src1: Arc<str> = Arc::from("type A = { a: 1 };\n");
+
+        let lease1 = service.acquire_lease(&k1, &src1, st);
+        assert!(lease1.parsed_now, "leasing k1 parses it once");
+
+        // Hold leases on 16 other distinct keys (more than any plausible
+        // former per-worker snapshot cap).
+        let mut others = Vec::new();
+        for i in 0..16u8 {
+            let k = key(&format!("/ws/other{i}.ts"), i.wrapping_add(50));
+            let src: Arc<str> = Arc::from(format!("type T{i} = {{ v: {i} }};\n"));
+            others.push(service.acquire_lease(&k, &src, st));
+        }
+
+        // k1 is still pinned by its live lease — re-running it reuses the
+        // retained snapshot.
+        let outcome = service.run(&k1, &src1, st, |program| program.is_some());
+        assert!(
+            !outcome.parsed_now,
+            "a live lease must pin k1's snapshot across 16 other keys — \
+             no LRU/budget eviction is allowed"
+        );
+        assert!(outcome.value);
+
+        drop(lease1.lease);
+        drop(others);
+    }
+
+    /// The retained snapshot for a live-leased key is released EXCLUSIVELY
+    /// by dropping its own lease (the RAII memo-drop). No production
+    /// eviction, release, or budget path exists: a heavy battery of
+    /// other-key traffic — acquire-and-DROP many other keys (the release
+    /// path runs for each) interleaved with leased runs of those keys (the
+    /// access path) — leaves the leased key pinned across ALL of it, and
+    /// ONLY dropping its lease releases it. A production eviction / release
+    /// / budget path wired into any of that other-key acquire / release /
+    /// access traffic would drop the leased snapshot and force a re-parse,
+    /// failing this test. This is the companion to
+    /// `live_lease_pins_snapshot_across_many_other_keys` (which pins the
+    /// budget/eviction-on-acquire axis): together they close the eviction,
+    /// access, and release axes of the lease-liveness invariant.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn retained_snapshot_release_is_lease_drop_only() {
+        // Single worker so every key shares one shard and job order is
+        // deterministic regardless of host parallelism.
+        let service = Arc::new(DeclLoweringService::new_single_worker());
+        let st = oxc_span::SourceType::ts();
+        let k1 = key("/ws/pinned.ts", 1);
+        let src1: Arc<str> = Arc::from("type Pinned = { a: 1 };\n");
+
+        let lease1 = service.acquire_lease(&k1, &src1, st);
+        assert!(lease1.parsed_now, "leasing k1 parses it once");
+
+        // Churn 32 other keys through the FULL acquire -> access -> release
+        // lifecycle each — every hook a production eviction / release /
+        // budget path could attach to. Each other lease drops before the
+        // next is acquired, so the release path fires 32 times while k1
+        // stays leased.
+        for i in 0..32u8 {
+            let k = key(&format!("/ws/churn{i}.ts"), i.wrapping_add(80));
+            let src: Arc<str> = Arc::from(format!("type C{i} = {{ v: {i} }};\n"));
+            let other = service.acquire_lease(&k, &src, st);
+            // Access the just-leased other key (the access path), then drop
+            // its lease (the release path). Neither must touch k1's entry.
+            let hit = service.run_leased(&k, |program| program.is_some());
+            assert_eq!(hit, Some(true), "the just-leased other key is retained");
+            drop(other.lease);
+        }
+
+        // k1 is STILL pinned by its live lease across all that release and
+        // access traffic — no eviction, release, or budget path released it.
+        let warm = service.run(&k1, &src1, st, |program| program.is_some());
+        assert!(
+            !warm.parsed_now,
+            "the leased snapshot must survive all other-key release/access \
+             traffic — release is reachable ONLY by dropping k1's own lease"
+        );
+        assert!(warm.value);
+
+        // Dropping k1's lease is the SOLE release path: the next run
+        // re-parses fresh.
+        drop(lease1.lease);
+        let after = service.run(&k1, &src1, st, |program| program.is_some());
+        assert!(
+            after.parsed_now,
+            "dropping the last lease is the sole release path — the next run \
+             re-parses"
+        );
+        assert!(after.value);
+    }
+
+    /// Dropping the LAST lease releases the retained snapshot: a later
+    /// run of the same key parses fresh again.
+    #[test]
+    fn dropping_last_lease_releases_snapshot() {
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let k = key("/ws/release.ts", 7);
+        let st = oxc_span::SourceType::ts();
+
+        let lease = service.acquire_lease(&k, &source, st);
+        assert!(lease.parsed_now);
+        let warm = service.run(&k, &source, st, |p| p.is_some());
+        assert!(!warm.parsed_now, "leased run reuses the snapshot");
+
+        drop(lease.lease);
+
+        // After the lease drops, the next run parses transiently again
+        // (the retained snapshot was released).
+        let after = service.run(&k, &source, st, |p| p.is_some());
+        assert!(
+            after.parsed_now,
+            "dropping the last lease releases the retained snapshot — the \
+             next run parses fresh"
+        );
+    }
+
+    /// A moved R21 parse-env dimension is a distinct retention key: a
+    /// snapshot leased under one parse env can never answer a demand
+    /// made under another, even over identical content bytes.
+    #[test]
+    fn moved_parse_env_key_forces_fresh_parse() {
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = { a: 1 };\n");
+        let st = oxc_span::SourceType::ts();
+        let mut env_a = key("/ws/a.ts", 1);
+        let mut env_b = env_a.clone();
+        env_a.parse_env_hash = [1u8; 16];
+        env_b.parse_env_hash = [2u8; 16];
+
+        let lease_a = service.acquire_lease(&env_a, &source, st);
+        assert!(lease_a.parsed_now);
+        let warm_a = service.run(&env_a, &source, st, |program| program.is_some());
+        assert!(!warm_a.parsed_now && warm_a.value);
+
+        // A different parse env under the SAME content bytes is a
+        // different key — no lease pins it, so it parses fresh.
+        let moved = service.run(&env_b, &source, st, |program| program.is_some());
+        assert!(
+            moved.parsed_now,
+            "identical content under a MOVED parse env must parse fresh — \
+             the env is part of the retention identity"
+        );
+        assert!(moved.value);
+
+        drop(lease_a.lease);
+    }
+
+    /// Distinct keys (a content edit) get distinct parses — the old
+    /// content's snapshot never answers the new content's demand.
+    #[test]
+    fn content_edit_key_change_forces_fresh_parse() {
+        let service = Arc::new(DeclLoweringService::new());
+        let st = oxc_span::SourceType::ts();
+        let old_source: Arc<str> = Arc::from("type A = { old: 1 };\n");
+        let new_source: Arc<str> = Arc::from("type A = { edited: 2 };\n");
+
+        let old_lease = service.acquire_lease(&key("/ws/a.ts", 1), &old_source, st);
+        assert!(old_lease.parsed_now);
+        let outcome = service.run(&key("/ws/a.ts", 2), &new_source, st, |program| {
+            program
+                .expect("parse must succeed")
+                .source_str()
+                .contains("edited")
+        });
+        assert!(outcome.parsed_now, "a new whole_hash must parse fresh");
+        assert!(outcome.value, "the new snapshot must carry the NEW content");
+
+        drop(old_lease.lease);
+    }
+
+    /// A fatal (panicking) parse is served as `None` and RETAINED while
+    /// leased — a second demand against the same broken content does not
+    /// re-parse.
+    #[test]
+    fn fatal_parse_is_retained_as_none() {
+        let service = Arc::new(DeclLoweringService::new());
+        // Unterminated template literal panics the parser.
+        let source: Arc<str> = Arc::from("const a = `unterminated\n");
+        let k = key("/ws/broken.ts", 3);
+        let st = oxc_span::SourceType::ts();
+
+        let lease = service.acquire_lease(&k, &source, st);
+        assert!(lease.parsed_now);
+        let first = service.run(&k, &source, st, |program| program.is_none());
+        let second = service.run(&k, &source, st, |program| program.is_none());
+        assert!(first.value, "fatal parse must surface as None");
+        assert!(second.value);
+        assert!(
+            !first.parsed_now && !second.parsed_now,
+            "the fatal outcome is retained while leased — no re-parse of \
+             broken content"
+        );
+
+        drop(lease.lease);
+    }
+
+    /// A panicking JOB is re-raised on the caller and the worker (and
+    /// its retained shard) survives: the next job on the same leased key
+    /// still sees the retained snapshot.
+    #[test]
+    fn job_panic_reraises_on_caller_and_worker_survives() {
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let k = key("/ws/a.ts", 4);
+        let st = oxc_span::SourceType::ts();
+
+        let lease = service.acquire_lease(&k, &source, st);
+        assert!(lease.parsed_now);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.run(&k, &source, st, |_| -> () { panic!("job bug") });
+        }));
+        assert!(panicked.is_err(), "the job panic must reach the caller");
+
+        let after = service.run(&k, &source, st, |program| program.is_some());
+        assert!(after.value);
+        assert!(
+            !after.parsed_now,
+            "the shard must survive the panicking job with its retention intact"
+        );
+
+        drop(lease.lease);
+    }
+
+    /// Concurrent jobs on different keys all complete (no deadlock,
+    /// no lost rendezvous) — the blocking-caller contract. Native-only:
+    /// `wasm32` has no worker threads and runs jobs inline.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn concurrent_demands_complete() {
+        let service = Arc::new(DeclLoweringService::new());
+        let mut handles = Vec::new();
+        for i in 0..16u8 {
+            let service = Arc::clone(&service);
+            handles.push(std::thread::spawn(move || {
+                let source: Arc<str> = Arc::from(format!("type T{i} = {{ v: {i} }};\n"));
+                let outcome = service.run(
+                    &key(&format!("/ws/f{i}.ts"), i),
+                    &source,
+                    oxc_span::SourceType::ts(),
+                    |program| program.is_some(),
+                );
+                outcome.value
+            }));
+        }
+        for handle in handles {
+            assert!(handle.join().expect("no panics"));
+        }
+    }
+
+    /// Discriminating test for the LAZY spawn policy (`new_with(true, …)`):
+    /// the worker threads MUST NOT spawn at construction, and MUST spawn on
+    /// the first lowering demand. A regression that reverted the laziness
+    /// (spawned in `new_with` instead of deferring to `workers()`) would
+    /// observe `workers_spawned() == true` BEFORE the first run.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn lazy_service_defers_worker_spawn_until_first_run() {
+        let service = DeclLoweringService::new_with(/* lazy = */ true, 2);
+        assert!(
+            !service.workers_spawned(),
+            "a lazy service must NOT spawn worker threads at construction"
+        );
+
+        // First lowering demand spawns the workers.
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let k = key("/ws/lazy.ts", 5);
+        let outcome = service.run(&k, &source, oxc_span::SourceType::ts(), |p| p.is_some());
+        assert!(
+            outcome.value,
+            "the lowering job must run on the spawned pool"
+        );
+        assert!(
+            service.workers_spawned(),
+            "the first lowering demand must spawn the lazy service's workers"
+        );
+    }
+
+    /// Pins the EAGER spawn policy: `new()` (the default-host constructor)
+    /// and `new_with(false, …)` spawn workers at construction. Reverting
+    /// the default to lazy would flip these to `false` and fail here.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn eager_service_spawns_workers_at_construction() {
+        let eager_default = DeclLoweringService::new();
+        assert!(
+            eager_default.workers_spawned(),
+            "`new()` must spawn worker threads eagerly at construction"
+        );
+        let eager_explicit = DeclLoweringService::new_with(/* lazy = */ false, 2);
+        assert!(
+            eager_explicit.workers_spawned(),
+            "`new_with(false, …)` must spawn worker threads eagerly"
+        );
+    }
+
+    /// A zero-sized pool is not a valid service configuration. Coercing it
+    /// to one worker would hide a broken resource-policy resolution.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[should_panic(expected = "decl-lowering worker count must be nonzero")]
+    fn service_rejects_zero_worker_count() {
+        let _ = DeclLoweringService::new_with(/* lazy = */ true, 0);
+    }
+
+    /// The handoff-stats aggregation is exact arithmetic over the four
+    /// rendezvous timestamps: queue = submit→job-start, service =
+    /// job-start→job-end, response = job-end→caller-wakeup. Synthetic
+    /// instants make the expected nanosecond sums exact.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn handoff_stats_record_exact_three_way_split() {
+        use std::time::{Duration, Instant};
+
+        let stats = HandoffStats::default();
+        let submitted = Instant::now();
+        let started = submitted + Duration::from_micros(50);
+        let finished = started + Duration::from_micros(300);
+        let received = finished + Duration::from_micros(20);
+
+        stats.record_acquire(submitted, started, finished, received, true);
+        stats.record_acquire(submitted, started, finished, received, false);
+        stats.record_run(submitted, started, finished, received);
+
+        let snap = stats.snapshot();
+        assert_eq!(snap.acquire_ops, 2);
+        assert_eq!(snap.acquire_parses, 1, "only the parsed_now acquire counts");
+        assert_eq!(snap.acquire_queue_ns, 100_000);
+        assert_eq!(snap.acquire_service_ns, 600_000);
+        assert_eq!(snap.acquire_response_ns, 40_000);
+        assert_eq!(snap.run_ops, 1);
+        assert_eq!(snap.run_queue_ns, 50_000);
+        assert_eq!(snap.run_service_ns, 300_000);
+        assert_eq!(snap.run_response_ns, 20_000);
+
+        stats.reset();
+        let cleared = stats.snapshot();
+        assert_eq!(cleared.acquire_ops, 0);
+        assert_eq!(cleared.run_ops, 0);
+        assert_eq!(cleared.acquire_queue_ns + cleared.run_service_ns, 0);
+    }
+
+    /// A profile-sink-carrying service records one acquire op per
+    /// `acquire_lease` rendezvous (parse-discriminated) and one run op per
+    /// `run_leased` rendezvous — hits, lease misses, and panicking jobs
+    /// alike (a miss/panic still pays the full rendezvous). Panic
+    /// re-raise semantics are unchanged on the profiled arm.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn profiled_service_records_acquire_and_run_rendezvous() {
+        let sink = Arc::new(HandoffStats::default());
+        let service = Arc::new(DeclLoweringService::new_single_worker_with_profile(
+            Arc::clone(&sink),
+        ));
+        let source: Arc<str> = Arc::from("type A = { a: 1 };\n");
+        let k = key("/ws/profiled.ts", 1);
+        let st = oxc_span::SourceType::ts();
+
+        let lease = service.acquire_lease(&k, &source, st);
+        assert!(lease.parsed_now);
+        let hit = service.run_leased(&k, |program| program.is_some());
+        assert_eq!(hit, Some(true));
+
+        let snap = sink.snapshot();
+        assert_eq!(snap.acquire_ops, 1);
+        assert_eq!(snap.acquire_parses, 1);
+        assert_eq!(snap.run_ops, 1);
+        assert!(
+            snap.acquire_service_ns > 0,
+            "the acquire service span covers the real parse"
+        );
+        assert!(
+            snap.run_queue_ns + snap.run_service_ns + snap.run_response_ns > 0,
+            "the run rendezvous records a non-zero three-way split"
+        );
+
+        // A second same-key lease is a rendezvous WITHOUT a parse.
+        let lease2 = service.acquire_lease(&k, &source, st);
+        assert!(!lease2.parsed_now);
+        let snap2 = sink.snapshot();
+        assert_eq!(snap2.acquire_ops, 2);
+        assert_eq!(snap2.acquire_parses, 1);
+
+        // A panicking job still re-raises on the caller AND records its op.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            service.run_leased(&k, |_| -> () { panic!("job bug") })
+        }));
+        assert!(panicked.is_err(), "the job panic must reach the caller");
+        assert_eq!(sink.snapshot().run_ops, 2);
+
+        // A lease-miss run is still a full rendezvous — it must count.
+        drop(lease.lease);
+        drop(lease2.lease);
+        let miss = service.run_leased(&k, |program| program.is_some());
+        assert!(miss.is_none());
+        assert_eq!(sink.snapshot().run_ops, 3);
+    }
+
+    /// With no profile sink (and the env gate off), rendezvous ops record
+    /// nothing anywhere: the global diagnostic dump stays `None`. A
+    /// regression that recorded unconditionally into the global sink
+    /// would surface a `Some` snapshot here.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unprofiled_service_records_nothing_and_global_dump_stays_none() {
+        if std::env::var_os(DECL_HANDOFF_PROFILE_ENV).is_some() {
+            // The env gate is process-global; under an externally enabled
+            // profile run this assertion is not meaningful.
+            return;
+        }
+        let service = Arc::new(DeclLoweringService::new());
+        let source: Arc<str> = Arc::from("type A = 1;\n");
+        let k = key("/ws/unprofiled.ts", 2);
+        let st = oxc_span::SourceType::ts();
+
+        let lease = service.acquire_lease(&k, &source, st);
+        let _ = service.run_leased(&k, |program| program.is_some());
+        drop(lease.lease);
+
+        assert!(
+            dump_decl_handoff_stats().is_none(),
+            "with the env gate off, no rendezvous may record into the global sink"
+        );
+    }
+}

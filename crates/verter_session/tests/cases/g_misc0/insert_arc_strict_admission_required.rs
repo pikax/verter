@@ -23,7 +23,7 @@
 //!
 //! ## What this guard does
 //!
-//! Scans `crates/verter_session/src/**/*.rs` (excluding sibling
+//! Scans `crates/{verter_session,verter_type_engine}/src/**/*.rs` (excluding sibling
 //! `*_tests.rs`, `tests/`, `benches/`, `examples/`, and
 //! `#[cfg(test)]` items) for method-call expressions whose method
 //! name is `insert_arc` or `insert` AND whose receiver is a
@@ -421,6 +421,23 @@ fn has_cfg_test(attrs: &[Attribute]) -> bool {
     })
 }
 
+/// Production files of the session crate and of the type engine it builds
+/// on. Fact-validated caches may be admitted from either crate, so both are
+/// in scope.
+fn session_and_engine_production_rs_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let crate_root = workspace_root().join(krate);
+        assert!(
+            crate_root.is_dir(),
+            "production source root {} is missing",
+            crate_root.display()
+        );
+        files.extend(walk_production_rs_files(&crate_root));
+    }
+    files
+}
+
 fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
@@ -531,7 +548,7 @@ fn format_violations(violations: &[Violation]) -> String {
 // Production-tree guard.
 // ---------------------------------------------------------------------------
 
-/// Fact-validated caches in `crates/verter_session/src/**/*.rs` admit
+/// Fact-validated caches in `crates/{verter_session,verter_type_engine}/src/**/*.rs` admit
 /// through `insert_arc_with_kind` only, EXCEPT for the documented
 /// allow-list in `EXPECTED_LOOSE_ADMISSION_COUNTS`. The check is
 /// EXACT — the observed loose-admission call count per
@@ -539,9 +556,8 @@ fn format_violations(violations: &[Violation]) -> String {
 /// deviation (surplus, deficit, or brand-new pair) fails the test.
 #[test]
 fn fact_validated_caches_use_strict_admission_in_production_source() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut violations = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
+    for file in session_and_engine_production_rs_files() {
         scan_file(&file, &mut violations);
     }
 
@@ -629,10 +645,9 @@ fn format_observed(observed: &BTreeMap<(String, String), usize>) -> String {
 /// the two in lockstep.
 #[test]
 fn every_production_cache_kind_is_present_in_source() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut observed_kinds: BTreeSet<String> = BTreeSet::new();
     let mut non_literal_kinds: Vec<(PathBuf, String)> = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
+    for file in session_and_engine_production_rs_files() {
         scan_file_for_cache_kinds(&file, &mut observed_kinds, &mut non_literal_kinds);
     }
 

@@ -38,7 +38,8 @@ use rustc_hash::FxHashMap;
 use verter_scheduler::invalidation::Hash16;
 
 use crate::resolution_currency::PublishedContextSelection;
-use crate::workspace_snapshot::{ProjectId, WorkspaceSnapshot};
+use crate::workspace_snapshot::WorkspaceSnapshot;
+use verter_session_query::resolution::ProjectId;
 
 /// Per-project four-array env-hash layout `[parse, resolve, type_, lib]`.
 ///

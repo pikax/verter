@@ -6,7 +6,7 @@
 //! TLS-observer machinery the component-meta and compile entry-points
 //! use. The caller closure performs the tool's actual work; this
 //! wrapper stamps a request id, constructs a
-//! [`crate::request_context::RequestContext`] keyed by
+//! [`verter_type_engine::request_context::RequestContext`] keyed by
 //! [`verter_audit::RequestKind::Mcp`], installs the matching
 //! TLS observer, runs the closure, and finalises a
 //! [`verter_audit::McpToolPayload`] through the registration.
@@ -16,7 +16,7 @@
 //! `compile_with_audit`, `resolve_type_with_audit`, …) sniffs the
 //! installed TLS slot at construction time and records the MCP
 //! request's id as its `parent_request_id`. The shared scheduler-side
-//! TLS mechanism (`verter_scheduler::request_context::current_request_id`)
+//! TLS mechanism (`verter_execution::request_context::current_request_id`)
 //! is the propagation channel; this wrapper does not need to thread
 //! the id explicitly.
 //!
@@ -38,9 +38,9 @@ use verter_audit::{
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
-use crate::instant::Instant;
-use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::VerterHost;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 /// Success payload a caller closure produces. Carries the tool's value
 /// alongside the one audit-payload fact the wrapper cannot infer on
@@ -120,7 +120,7 @@ impl VerterHost {
             let request_id = self.next_request_id();
             let outcome = f(self);
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             let record = noop_mcp_record(
                 request_id,
                 canonical_id,
@@ -134,7 +134,7 @@ impl VerterHost {
 
         // 1. Stamp request id and bump the harness multi-request guard.
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         // 2. Build the per-request context. Footprint capture is
         //    disabled — MCP tools do not collect semantic-footprint
@@ -158,7 +158,7 @@ impl VerterHost {
         //    closure body. The `Noop` arm returns when the consumer
         //    filter rejects `RequestKind::Mcp`.
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         // 4. Install the matching TLS observer. The active arm uses
         //    the real RequestContextGuard so sub-requests spawned by

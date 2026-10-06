@@ -46,11 +46,11 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
     SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 /// K-INDEPENDENT VALUE — every key's value is `number`. After
@@ -91,7 +91,7 @@ export type KDependentInfer = {
 fn evaluate_alias(
     host: &Arc<VerterHost>,
     alias_name: &str,
-) -> verter_session::semantic_query::SemanticNodeId {
+) -> verter_type_engine::semantic_query::SemanticNodeId {
     let expr = TypeExpr::Ref {
         name: Arc::from(alias_name),
         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
@@ -120,8 +120,8 @@ fn evaluate_alias(
 
 fn surface_member_value_ids(
     host: &Arc<VerterHost>,
-    surface_node: verter_session::semantic_query::SemanticNodeId,
-) -> Vec<(String, verter_session::semantic_query::SemanticNodeId)> {
+    surface_node: verter_type_engine::semantic_query::SemanticNodeId,
+) -> Vec<(String, verter_type_engine::semantic_query::SemanticNodeId)> {
     let graph = host.project_type_store().semantic_graph();
     let data = graph
         .node_data(surface_node)

@@ -28,17 +28,17 @@
 //! The acceptance distinction the tests below pin:
 //!
 //! * the RETURNED refusal carries the exact
-//!   [`NonCacheableReadReason`](crate::resolver_core::resolver_context::NonCacheableReadReason)
-//!   and [`NonCacheablePropagation`](verter_workspace::NonCacheablePropagation);
+//!   [`NonCacheableReadReason`](verter_session_query::facts::reuse::NonCacheableReadReason)
+//!   and [`NonCacheablePropagation`](verter_session_query::facts::fact_read_set::NonCacheablePropagation);
 //! * tracer finalisation exposes only the BOOLEAN — it never records the
 //!   reason.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::resolver_core::resolver_context::NonCacheableReadReason;
-use crate::resolver_core::StoreView;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::reuse::NonCacheableReadReason;
+use verter_session_query::facts::store_view::StoreView;
 
 fn upsert(host: &VerterHost, path: &str, source: &str) {
     let _ = host
@@ -116,8 +116,10 @@ fn request_only_singleflight_follower_replays_identical_taint() {
 
     let before_leader = cold_flight_runs(&host);
     let (leader_bundle, leader_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             |_probe| host.prepared_decl_bundle_with_store_view(&view, None, &owner),
         );
     let leader_flights = cold_flight_runs(&host) - before_leader;
@@ -137,8 +139,10 @@ fn request_only_singleflight_follower_replays_identical_taint() {
 
     let before_follower = cold_flight_runs(&host);
     let (follower_bundle, follower_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             |_probe| host.prepared_decl_bundle_with_store_view(&view, None, &owner),
         );
     let follower_flights = cold_flight_runs(&host) - before_follower;
@@ -194,8 +198,10 @@ fn shared_singleflight_follower_stays_cacheable() {
         .participate(owner.to_string(), view.compat_token());
 
     let (leader_bundle, leader_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             |_probe| host.prepared_decl_bundle_with_store_view(&view, None, owner),
         );
     assert!(leader_bundle.is_some(), "the control leader must be served");
@@ -206,8 +212,10 @@ fn shared_singleflight_follower_stays_cacheable() {
     );
 
     let (follower_bundle, follower_non_cacheable) =
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
             |_probe| host.prepared_decl_bundle_with_store_view(&view, None, owner),
         );
     drop(lane_pin);
@@ -281,7 +289,7 @@ fn request_only_first_and_nth_return_same_refusal_reason_and_propagation() {
     );
     assert_eq!(
         refusals[0].propagation(),
-        verter_workspace::NonCacheablePropagation::Transitive,
+        verter_session_query::facts::fact_read_set::NonCacheablePropagation::Transitive,
         "an unrootable basis taints every enclosing scope that consumes the value"
     );
     for (index, refusal) in refusals.iter().enumerate().skip(1) {
@@ -327,10 +335,13 @@ fn request_only_bundle_never_publishes_shared() {
     assert_eq!(first_flights, 1, "the cold touch runs one flight body");
 
     let before_second = cold_flight_runs(&host);
-    let (second, second_non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host.as_ref()),
-        |_probe| host.prepared_decl_bundle_with_store_view(&view, None, &owner),
-    );
+    let (second, second_non_cacheable) =
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(
+                host.as_ref(),
+            ),
+            |_probe| host.prepared_decl_bundle_with_store_view(&view, None, &owner),
+        );
     let second_flights = cold_flight_runs(&host) - before_second;
     drop(lane_pin);
 
@@ -356,4 +367,340 @@ fn request_only_bundle_never_publishes_shared() {
         "`RM-3`: reuse must NEVER become shared publication. A declined import witness \
          admits no warm bundle candidate. Admitted signatures: {candidates:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Decl-body lease-miss evidence at the collapsing accessors.
+//
+// A broken decl-body lease collapses to `None` at the plain body accessors.
+// The miss is transient, so every traced cold compute that consumed it must
+// refuse shared-cache admission and observe the typed `LeaseMiss` reason —
+// including when a later fallback supplies a value. A genuine absence
+// (`Ready(None)`) stays a cacheable answer.
+// ---------------------------------------------------------------------------
+
+/// What a traced compute observed: shared-cache admission, and the typed
+/// refusal reason its refusal-observation scope recorded.
+struct TracedRead<R> {
+    value: R,
+    admitted: bool,
+    reason: Option<NonCacheableReadReason>,
+}
+
+fn traced_read<R>(host: &VerterHost, work: impl FnOnce() -> R) -> TracedRead<R> {
+    let ((value, reason), read_set) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || {
+            let scope = verter_type_engine::fact_tracing::RefusalObservationScope::enter();
+            let value = work();
+            (value, scope.observed())
+        },
+    );
+    let admission = verter_session_query::facts::fact_cache::SignatureAdmission::from_finalise(
+        read_set.finalise(),
+    );
+    TracedRead {
+        value,
+        admitted: admission.cacheable().is_some(),
+        reason,
+    }
+}
+
+/// Index `path`, lower `A` (pinning the retained parse snapshot), then break
+/// the lease so any not-yet-lowered declaration lease-misses.
+fn indexed_with_broken_lease(
+    host: &VerterHost,
+    path: &str,
+    source: &str,
+    file_language: verter_language::FileLanguage,
+) -> Arc<crate::project_type_store::IndexedReady> {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(path.to_string()),
+            input_id: path.to_string(),
+            source: Arc::from(source),
+            file_language,
+            aliases: Vec::new(),
+        })
+        .unwrap_or_else(|e| panic!("upsert {path} failed: {e:?}"));
+    let indexed = host.ensure_indexed_ready(path).expect("indexed");
+    assert!(
+        indexed.shallow_state.type_decl("A").is_some(),
+        "A lowers under a live lease, pinning the retained snapshot"
+    );
+    indexed
+        .shallow_state
+        .decl_bodies()
+        .release_retained_snapshot_for_test();
+    indexed
+}
+
+const LEASE_FIXTURE: &str = "export type A = { x: number };\n\
+     export type B = { y: string };\n\
+     export declare const v: number;\n\
+     declare global {\n  interface GT { g: number }\n  var gv: boolean;\n}\n";
+
+#[test]
+fn a_lease_miss_at_every_collapsing_body_accessor_refuses_shared_admission() {
+    use verter_session_query::declarations::AugmentationScopeKind;
+
+    type Probe = fn(&crate::resolver_core::ShallowFileState) -> bool;
+    let probes: [(&str, Probe); 5] = [
+        ("type", |state| state.type_decl("B").is_some()),
+        ("value", |state| state.value_decl("v").is_some()),
+        ("owner-qualified value", |state| {
+            state
+                .value_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "v")
+                .is_some()
+        }),
+        ("augmentation type", |state| {
+            state
+                .augmentation_type_decl(&AugmentationScopeKind::Global, "GT")
+                .is_some()
+        }),
+        ("augmentation value", |state| {
+            state
+                .augmentation_value_decl(&AugmentationScopeKind::Global, "gv")
+                .is_some()
+        }),
+    ];
+    for (accessor, probe) in probes {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let indexed = indexed_with_broken_lease(
+            &host,
+            "/lease/d.ts",
+            LEASE_FIXTURE,
+            verter_language::FileLanguage::script_ts(),
+        );
+        let read = traced_read(&host, || probe(&indexed.shallow_state));
+        assert!(
+            !read.value,
+            "{accessor}: a broken-lease demand reads as a miss"
+        );
+        assert!(
+            !read.admitted,
+            "{accessor}: a compute that consumed a broken-lease miss must be refused \
+             shared-cache admission — admitting it would freeze a recoverable miss"
+        );
+        assert_eq!(
+            read.reason,
+            Some(NonCacheableReadReason::LeaseMiss),
+            "{accessor}: the refusal must carry the typed transient reason"
+        );
+    }
+}
+
+#[test]
+fn a_lease_miss_stays_refused_when_a_fallback_supplies_the_value() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let indexed = indexed_with_broken_lease(
+        &host,
+        "/lease/r.svelte.ts",
+        "export declare function $state<T>(initial: T): T;\nexport type A = { x: number };\n",
+        verter_language::FileLanguage::adapter_module(
+            verter_language::ScriptSourceType::Ts,
+            verter_language::FrameworkAdapterId::svelte(),
+            verter_language::LanguageId::new(verter_language::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+        ),
+    );
+    let read = traced_read(&host, || {
+        indexed
+            .shallow_state
+            .effective_value_decl("$state")
+            .is_some()
+    });
+    assert!(
+        read.value,
+        "the user declaration lease-misses, so the rune ambient fallback answers"
+    );
+    assert!(
+        !read.admitted,
+        "the fallback's value does not erase the lease miss the compute consumed first: \
+         the compute must still be refused shared-cache admission"
+    );
+    assert_eq!(read.reason, Some(NonCacheableReadReason::LeaseMiss));
+}
+
+#[test]
+fn a_genuine_absence_stays_cacheable_under_a_broken_lease() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let indexed = indexed_with_broken_lease(
+        &host,
+        "/lease/absent.ts",
+        LEASE_FIXTURE,
+        verter_language::FileLanguage::script_ts(),
+    );
+    let read = traced_read(&host, || {
+        indexed.shallow_state.type_decl("Missing").is_none()
+            && indexed.shallow_state.value_decl("Missing").is_none()
+    });
+    assert!(read.value, "an un-inventoried name is a genuine absence");
+    assert!(
+        read.admitted,
+        "a genuine absence is a reproducible answer: it must stay cacheable even while the \
+         lease is broken"
+    );
+    assert_eq!(read.reason, None);
+}
+
+fn rune_module_language() -> verter_language::FileLanguage {
+    verter_language::FileLanguage::adapter_module(
+        verter_language::ScriptSourceType::Ts,
+        verter_language::FrameworkAdapterId::svelte(),
+        verter_language::LanguageId::new(verter_language::SVELTE_RUNE_MODULE_LANGUAGE_ID),
+    )
+}
+
+fn assert_refused_as_lease_miss<R>(read: &TracedRead<R>, what: &str) {
+    assert!(
+        !read.admitted,
+        "{what}: a compute that consumed a broken-lease miss must be refused shared-cache \
+         admission — admitting it would freeze a recoverable miss"
+    );
+    assert_eq!(
+        read.reason,
+        Some(NonCacheableReadReason::LeaseMiss),
+        "{what}: the refusal must carry the typed transient reason"
+    );
+}
+
+#[test]
+fn a_lease_miss_through_the_effective_type_lookup_stays_refused() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let indexed = indexed_with_broken_lease(
+        &host,
+        "/lease/types.svelte.ts",
+        "export type A = { x: number };\nexport type B = { y: string };\n",
+        rune_module_language(),
+    );
+    let read = traced_read(&host, || {
+        indexed.shallow_state.effective_type_decl("B").is_some()
+    });
+    assert!(
+        !read.value,
+        "the user declaration lease-misses and no rune ambient type answers"
+    );
+    assert_refused_as_lease_miss(&read, "effective type lookup");
+}
+
+/// The lazy body-hash facts (`Export` / `LocalDecl`) read declaration bodies
+/// through the memo. A broken lease there must refuse the observing compute
+/// exactly as a direct body read does, for type and value symbols and for
+/// exports whose backing declaration lives under a component instance-script
+/// owner (the owner-qualified body read).
+#[test]
+fn a_lease_miss_behind_a_lazy_body_fact_refuses_shared_admission() {
+    use verter_session_query::facts::registry::{FactKey, SymbolSpace};
+
+    fn export(symbol: &str, space: SymbolSpace) -> FactKey {
+        FactKey::Export {
+            name: crate::file_artifact_store::InternedName::from(symbol),
+            space,
+        }
+    }
+    fn local(symbol: &str, space: SymbolSpace) -> FactKey {
+        FactKey::LocalDecl {
+            name: crate::file_artifact_store::InternedName::from(symbol),
+            space,
+        }
+    }
+    let cases: [(&str, &str, verter_language::FileLanguage, FactKey, FactKey); 6] = [
+        (
+            "exported type",
+            "/lease/facts.ts",
+            verter_language::FileLanguage::script_ts(),
+            export("A", SymbolSpace::Type),
+            export("B", SymbolSpace::Type),
+        ),
+        (
+            "local type",
+            "/lease/facts.ts",
+            verter_language::FileLanguage::script_ts(),
+            export("A", SymbolSpace::Type),
+            local("L", SymbolSpace::Type),
+        ),
+        (
+            "exported value",
+            "/lease/facts.ts",
+            verter_language::FileLanguage::script_ts(),
+            export("A", SymbolSpace::Type),
+            export("v", SymbolSpace::Value),
+        ),
+        (
+            "local value",
+            "/lease/facts.ts",
+            verter_language::FileLanguage::script_ts(),
+            export("A", SymbolSpace::Type),
+            local("lv", SymbolSpace::Value),
+        ),
+        (
+            "component-script exported type",
+            "/lease/Facts.svelte",
+            verter_language::FileLanguage::svelte(),
+            export("A", SymbolSpace::Type),
+            export("B", SymbolSpace::Type),
+        ),
+        (
+            "component-script exported value",
+            "/lease/Facts.svelte",
+            verter_language::FileLanguage::svelte(),
+            export("A", SymbolSpace::Type),
+            export("v", SymbolSpace::Value),
+        ),
+    ];
+    for (what, path, language, pin, probe) in cases {
+        let source = if path.ends_with(".svelte") {
+            "<script lang=\"ts\">\nexport type A = { x: number };\n\
+             export type B = { y: string };\nexport const v: number = 1;\n</script>\n\
+             <div></div>\n"
+        } else {
+            "export type A = { x: number };\nexport type B = { y: string };\n\
+             type L = { z: boolean };\nexport declare const v: number;\n\
+             declare const lv: string;\n"
+        };
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(path.to_string()),
+                input_id: path.to_string(),
+                source: Arc::from(source),
+                file_language: language,
+                aliases: Vec::new(),
+            })
+            .unwrap_or_else(|e| panic!("upsert {path} failed: {e:?}"));
+        let indexed = host.ensure_indexed_ready(path).expect("indexed");
+        if path.ends_with(".svelte") {
+            for exported in ["B", "v"] {
+                assert!(
+                    matches!(
+                        indexed.shallow_state.exports.get(exported),
+                        Some(verter_session_query::inputs::shallow::ExportTarget::Local { owner, .. })
+                            if *owner != verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    ),
+                    "{what}: `{exported}` must be backed by the instance-script owner, so the \
+                     fact reads its body through the owner-qualified accessor"
+                );
+            }
+        }
+        let artifacts = host
+            .exact_current_artifacts_for_test(path, indexed.whole_hash)
+            .expect("published artifacts must be readable");
+        assert!(
+            artifacts.facts.lookup_or_compute(&pin).is_some(),
+            "{what}: the pin fact lowers under a live lease, pinning the retained snapshot"
+        );
+        indexed
+            .shallow_state
+            .decl_bodies()
+            .release_retained_snapshot_for_test();
+
+        let read = traced_read(&host, || {
+            artifacts.facts.lookup_or_compute(&probe).is_some()
+        });
+        assert!(
+            !read.value,
+            "{what}: a broken-lease body fact reads as absent"
+        );
+        assert_refused_as_lease_miss(&read, what);
+    }
 }

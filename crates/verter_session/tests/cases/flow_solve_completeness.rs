@@ -20,34 +20,41 @@ use std::sync::Arc;
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
 use verter_language::{FileLanguage, ScriptSourceType};
-use verter_semantic::analysis::flow::flow_graph::FlowEdgeClass;
-use verter_semantic::analysis::flow::peeker::{
-    FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded,
-};
 use verter_session::for_tests::{
     degraded_flow_return_result_for_tests, dispatch_flow_demand_footprint_for_tests,
-    finalize_flow_solve, flow_family_route, flow_graph_fixture_for_tests,
-    flow_graph_fixture_for_tests_with_language, flow_operation_contract, flow_result_contract_id,
-    flow_return_result_contract_id, flow_return_result_for_tests, CompleteFlowResult,
-    FlowCaptureDemand, FlowDemandHandle, FlowDemandPlan, FlowDemandPlanError, FlowDemandRequest,
-    FlowDischargeEntry, FlowDischargeReport, FlowDomain, FlowDomainClosure, FlowFactFamily,
-    FlowFailure, FlowFailureClass, FlowFinalizerKind, FlowGraphFixtureForTests,
-    FlowObligationBasis, FlowObligationId, FlowObligationOrigin, FlowObligationSpec,
-    FlowOperationContract, FlowOperationRole, FlowOperationStatus, FlowPartialReason,
-    FlowRequirement, FlowRequirementKind, FlowResourcePolicy, FlowResultContractDescriptor,
-    FlowSealError, FlowSolveOutcome, FlowSuboperationEvidence, FlowTransitionError,
-    ObligationRuntime, ObligationState, PlannedFlowSlice, SealedFlowCompletion, SemanticGraphStore,
-};
-use verter_session::semantic_query::demand::{ProjectionPath, SurfaceFacet, SurfaceFacetSet};
-use verter_session::semantic_query::{
-    CanonicalTypeSubstitution, ContextualTypingKey, FlowFunctionSlotIdentity, FlowGap,
-    FlowInputContext, FlowNarrowingKey, FlowReturnContext, FlowReturnKey, FlowReturnPolicy,
-    FlowReturnResult, NullabilityPolicy, PathSegment, PrimitiveKind, ProgramAnalysisContext,
-    ProgramPointId, PropertyKey, ResolvedDeclSlotIdentity, ReturnProjectionDemand,
-    SemanticNodeData, SemanticQueryKey, SemanticQueryKeyTag, SemanticSymbolSpace,
-    SubstitutionCanonicalHash,
+    flow_graph_fixture_for_tests, flow_graph_fixture_for_tests_with_language,
+    flow_return_result_for_tests, FlowGraphFixtureForTests,
 };
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::flow::flow_graph::FlowEdgeClass;
+use verter_session_query::flow::peeker::{
+    FlowSliceBudget, FlowSliceBudgetAxis, FlowSliceBudgetExceeded,
+};
+use verter_session_query::flow::policy::{FlowGap, FlowReturnPolicy, NullabilityPolicy};
+use verter_type_engine::cache_runtime::flow_slice_node::PlannedFlowSlice;
+use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::{
+    FlowCaptureDemand, FlowDemandHandle, FlowDischargeEntry, FlowDischargeReport,
+    FlowObligationBasis, FlowObligationId, FlowObligationOrigin, FlowObligationSpec, FlowSealError,
+    FlowSuboperationEvidence, FlowTransitionError, ObligationState, SealedFlowCompletion,
+};
+use verter_type_engine::project_semantic_dispatch::dispatch_txn::ObligationRuntime;
+use verter_type_engine::project_semantic_dispatch::flow_solve::{
+    finalize_flow_solve, flow_family_route, flow_operation_contract, flow_result_contract_id,
+    flow_return_result_contract_id, CompleteFlowResult, FlowDemandPlan, FlowDemandPlanError,
+    FlowDemandRequest, FlowDomain, FlowDomainClosure, FlowFactFamily, FlowFailure,
+    FlowFailureClass, FlowFinalizerKind, FlowOperationContract, FlowOperationRole,
+    FlowOperationStatus, FlowPartialReason, FlowRequirement, FlowRequirementKind,
+    FlowResourcePolicy, FlowResultContractDescriptor, FlowSolveOutcome,
+};
+use verter_type_engine::semantic_query::demand::{ProjectionPath, SurfaceFacet, SurfaceFacetSet};
+use verter_type_engine::semantic_query::{
+    CanonicalTypeSubstitution, ContextualTypingKey, FlowFunctionSlotIdentity, FlowInputContext,
+    FlowNarrowingKey, FlowReturnContext, FlowReturnKey, FlowReturnResult, PathSegment,
+    PrimitiveKind, ProgramAnalysisContext, ProgramPointId, PropertyKey, ResolvedDeclSlotIdentity,
+    ReturnProjectionDemand, SemanticNodeData, SemanticQueryKey, SemanticQueryKeyTag,
+    SemanticSymbolSpace, SubstitutionCanonicalHash,
+};
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 /// The fixture body: one parameter, one local, one object-literal return
 /// with a call entry, so the demand plan exercises binding-slot, return-site,
@@ -129,7 +136,7 @@ fn flow_return_query_named(env_tag: u8, name: &str) -> SemanticQueryKey {
             type_env_hash: [env_tag; 16],
             lib_env_hash: [env_tag; 16],
             project_identity: [env_tag; 16],
-            result_evaluation: verter_session::semantic_query::CONTEXT_FREE_EVALUATION,
+            result_evaluation: verter_type_engine::semantic_query::CONTEXT_FREE_EVALUATION,
             type_substitution: CanonicalTypeSubstitution::empty(),
             policy: FlowReturnPolicy {
                 nullability: NullabilityPolicy::Strict,
@@ -1592,7 +1599,7 @@ fn execution_selection_survives_obligation_budget_refusal() {
 /// may execute structurally without entering the whole-return proof contract.
 #[test]
 fn member_navigation_executes_without_expanding_the_proof_contract() {
-    use verter_session::semantic_query::demand::Demand;
+    use verter_type_engine::semantic_query::demand::Demand;
     let fixture = flow_graph_fixture_for_tests(FIXTURE_SOURCE, 7);
     let member = PathSegment::Member(PropertyKey::String(Arc::from("value")));
     let mut projected = base_request();
@@ -1605,9 +1612,9 @@ fn member_navigation_executes_without_expanding_the_proof_contract() {
         .expect("retained member selection");
     for segment in [
         member,
-        PathSegment::Index(verter_session::semantic_query::IndexKey::String(Arc::from(
-            "value",
-        ))),
+        PathSegment::Index(verter_type_engine::semantic_query::IndexKey::String(
+            Arc::from("value"),
+        )),
     ] {
         let mut request = base_request();
         let SemanticQueryKey::FlowReturn(key) = &mut request.query else {
@@ -1694,7 +1701,7 @@ fn unused_flow_runtime_reserves_no_demand_storage() {
         let member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         SemanticQueryKey::ReduceUnion {
             members: Arc::from(vec![member].into_boxed_slice()),
-            nullability: verter_session::semantic_query::NullabilityPolicy::Strict,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
         }
     };
     // The pending typed-gap roots.
@@ -2408,7 +2415,7 @@ fn concrete_captures(
     source: &str,
     body_hash_tag: u8,
     name: &str,
-) -> Vec<verter_semantic::analysis::function_program::FlowBindingIdentity> {
+) -> Vec<verter_session_query::function_program::FlowBindingIdentity> {
     let fixture = flow_graph_fixture_for_tests(source, body_hash_tag);
     let plan = fixture
         .build_plan(request_named(name))
@@ -2428,7 +2435,7 @@ fn concrete_captures(
 /// the old planner "proved" by examining no closure site at all.
 #[test]
 fn closure_expression_captures_are_concrete_subjects() {
-    use verter_semantic::analysis::function_program::FunctionBindingKind;
+    use verter_session_query::function_program::FunctionBindingKind;
 
     // An arrow returning the outer parameter captures exactly `x`.
     let captures = concrete_captures(ARROW_CAPTURE_FIXTURE_SOURCE, 21, "arrow_capture");
@@ -2564,7 +2571,7 @@ fn captured_class_identity_installs_a_pending_evidence_obligation() {
     assert_eq!(identity.name.as_ref(), "C");
     assert_eq!(
         identity.kind,
-        verter_semantic::analysis::function_program::FunctionBindingKind::Class
+        verter_session_query::function_program::FunctionBindingKind::Class
     );
     assert_eq!(
         identity.defining_function.declaration.name.as_ref(),
@@ -2589,9 +2596,9 @@ fn captured_class_identity_installs_a_pending_evidence_obligation() {
 
 #[test]
 fn captured_hubs_and_shadowed_closures_keep_exact_binding_subjects() {
-    use verter_semantic::analysis::flow::flow_graph::FlowNodeKind;
-    use verter_semantic::analysis::flow::FlowBindingRef;
     use verter_session::for_tests::flow_graph_fixture_for_tests_nested;
+    use verter_session_query::flow::binding::FlowBindingRef;
+    use verter_session_query::flow::flow_graph::FlowNodeKind;
 
     let fixture = flow_graph_fixture_for_tests_nested(
         "function root(x) { function middle() { const first = () => x; { let x = 1; return [first, () => x]; } } return middle; }",
@@ -3098,8 +3105,8 @@ fn discharge_report_is_bound_to_the_installed_demands_basis() {
 
 #[test]
 fn effect_only_capture_retains_effect_obligations_without_value_products() {
-    use verter_semantic::analysis::flow::flow_graph::{FlowEdgeClass, FlowNodeKind};
-    use verter_session::for_tests::FlowCaptureDemand;
+    use verter_session_query::flow::flow_graph::{FlowEdgeClass, FlowNodeKind};
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowCaptureDemand;
     let fixture = verter_session::for_tests::flow_graph_fixture_for_tests_nested(
         "function root(x) { function middle() { return () => { x = 1; return 0; }; } return middle; }",
         63,
@@ -3138,7 +3145,7 @@ fn effect_only_capture_retains_effect_obligations_without_value_products() {
 
 #[test]
 fn capture_value_requirements_are_local_to_each_closure_site() {
-    use verter_session::for_tests::FlowCaptureDemand;
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::FlowCaptureDemand;
     let fixture = verter_session::for_tests::flow_graph_fixture_for_tests_nested(
         "function root(x) { function middle() { const writer = () => { x = 1; return 0; }; const reader = () => x; return { writer, reader }; } return middle; }",
         64,

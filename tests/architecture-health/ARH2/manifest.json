@@ -40,7 +40,7 @@
       "twins": [
         "clean products",
         "hotspot-missing",
-        "hotspot-crate-unknown (the lane's crate is a live workspace member)",
+        "hotspot-crate-unknown (the lane's crate, the row's or a pin's own when its witnesses compile in another package, is a live workspace member)",
         "hotspot-without-pins",
         "pin-command-not-canonical (canonical form is cargo nextest run -p <crate> <filter>)",
         "pin-filter-malformed",

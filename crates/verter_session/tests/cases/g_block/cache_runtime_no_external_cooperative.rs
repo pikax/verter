@@ -1,5 +1,5 @@
 //! Architecture guard: the `cooperative_*` cold-compute admission
-//! primitives are cache-runtime-internal. Only `crates/verter_session/
+//! primitives are cache-runtime-internal. Only `crates/verter_type_engine/
 //! src/cache_runtime/**` may name them. Every
 //! query-identity and content-addressed cache routes its cold build
 //! through a cache-runtime node entry point (`lookup` / `query::lookup`)
@@ -9,7 +9,8 @@
 //!
 //! Discipline mirrors `no_carrier_verdict_db.rs`:
 //!
-//!  - scans ONLY `crates/verter_session/src/**/*.rs` (production source),
+//!  - scans ONLY `crates/{verter_session,verter_type_engine}/src/**/*.rs`
+//!    (production source),
 //!  - skips `_tests.rs` / `tests.rs` / files under a `tests/` segment,
 //!  - skips everything under `src/cache_runtime/` (the primitives' home),
 //!  - strips line, block, and `#[cfg(test)] mod` modules before matching
@@ -22,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 /// The cache-runtime-internal primitives. Any occurrence in
-/// `crates/verter_session/src/**` OUTSIDE `src/cache_runtime/` (and
+/// `crates/{verter_session,verter_type_engine}/src/**` OUTSIDE `src/cache_runtime/` (and
 /// outside test files) is a regression.
 const FORBIDDEN_PRIMITIVES: &[&str] = &[
     "cooperative_get_or_insert",
@@ -61,7 +62,7 @@ fn is_test_file(path: &Path) -> bool {
         .any(|c| c.as_os_str().to_str() == Some("tests"))
 }
 
-/// True for any path inside `crates/verter_session/src/cache_runtime/`,
+/// True for any path inside `crates/verter_type_engine/src/cache_runtime/`,
 /// the primitives' own home (where naming them is legitimate).
 fn is_cache_runtime(path: &Path) -> bool {
     let mut prev_was_cache_runtime_parent = false;
@@ -289,11 +290,21 @@ fn line_contains_identifier(line: &str, ident: &str) -> bool {
     false
 }
 
+/// Production sources of the session crate AND the type engine it builds
+/// on: the cooperative primitives live in the engine's `cache_runtime`, so
+/// an engine-side caller outside that module is the same regression.
 fn collect_verter_session_production_sources() -> Vec<PathBuf> {
     let root = workspace_root();
     let mut files: Vec<PathBuf> = Vec::new();
-    let src = root.join("crates").join("verter_session").join("src");
-    collect_production_rs(&src, &mut files);
+    for krate in ["verter_session", "verter_type_engine"] {
+        let src = root.join("crates").join(krate).join("src");
+        assert!(
+            src.is_dir(),
+            "production source root {} is missing",
+            src.display()
+        );
+        collect_production_rs(&src, &mut files);
+    }
     files
 }
 

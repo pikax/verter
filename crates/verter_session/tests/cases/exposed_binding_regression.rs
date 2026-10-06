@@ -688,7 +688,7 @@ defineExpose({ reset })
              annotation, no object shape, and not recovering the lone function \
              signature. Owning producer: the whole-signature recovery in \
              `navigate_value_parts` \
-             (`crates/verter_session/src/decl_body_memo/locator_deref.rs`). \
+             (`crates/verter_semantic_source/src/decl_body_memo/locator_deref.rs`). \
              Observed in full: {error:?}"
         ),
         Ok(None) => panic!(

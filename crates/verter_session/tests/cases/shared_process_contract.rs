@@ -55,7 +55,7 @@ fn upsert(host: &VerterHost, id: &str, src: &str, lang: FileLanguage) {
 }
 
 fn prop_names(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Vec<String> {
     let mut names: Vec<String> = meta.props.iter().map(|p| p.name.clone()).collect();
     names.sort_unstable();
@@ -237,7 +237,7 @@ fn meta_project_shutdown_then_new_project_in_same_process_is_clean() {
     assert_eq!(prop_names(&meta), vec!["live"]);
 }
 
-/// `verter_session::dump_decl_handoff_stats` / `reset_decl_handoff_stats`
+/// `verter_semantic_source::decl_lowering::dump_decl_handoff_stats` / `reset_decl_handoff_stats`
 /// (`decl_lowering.rs`) are backed by a process-global `OnceLock` that
 /// resolves the `VERTER_DECL_HANDOFF_PROFILE` env gate exactly ONCE per
 /// process, at first consultation — services capture the resolved sink at
@@ -251,7 +251,7 @@ fn meta_project_shutdown_then_new_project_in_same_process_is_clean() {
 fn decl_handoff_profile_sink_resolves_once_per_process_not_per_call() {
     // First consultation in this process, gate unset: must resolve OFF.
     assert!(
-        verter_session::dump_decl_handoff_stats().is_none(),
+        verter_semantic_source::decl_lowering::dump_decl_handoff_stats().is_none(),
         "the handoff-profile sink must read OFF on first consultation in a \
          fresh process with VERTER_DECL_HANDOFF_PROFILE unset"
     );
@@ -292,7 +292,7 @@ fn decl_handoff_profile_sink_resolves_once_per_process_not_per_call() {
         .expect("second host's cross-file-free resolve");
 
     assert!(
-        verter_session::dump_decl_handoff_stats().is_none(),
+        verter_semantic_source::decl_lowering::dump_decl_handoff_stats().is_none(),
         "the sink resolved OFF on first consultation in this process; setting \
          the env var afterward must NOT retroactively enable it — proves the \
          gate is a true process-wide OnceLock, not re-read per call/per host"

@@ -9,8 +9,8 @@
 use serde::{Deserialize, Serialize};
 use verter_span::Span;
 
-use crate::facts::boundary::ComponentInstanceEdge;
-use crate::facts::component::ComponentSurface;
+use verter_session_query::facts::boundary::ComponentInstanceEdge;
+use verter_session_query::facts::component::ComponentSurface;
 
 /// A boundary issue found at a component usage site.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,7 +156,9 @@ fn is_always_forwarded_attr(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facts::component::{ComponentSurface, EventFact, ModelFact, PropFact};
+    use verter_session_query::facts::component::{
+        ComponentSurface, EventFact, ModelFact, PropFact,
+    };
 
     fn make_edge(tag: &str, props: Vec<&str>, events: Vec<&str>) -> ComponentInstanceEdge {
         ComponentInstanceEdge {
@@ -487,7 +489,7 @@ mod tests {
 
     #[test]
     fn missing_required_slot_detected() {
-        use crate::facts::component::SlotFact;
+        use verter_session_query::facts::component::SlotFact;
 
         let edge = make_edge("Tabs", vec![], vec![]);
         let mut surface = make_surface(vec![], vec![]);
@@ -507,7 +509,7 @@ mod tests {
 
     #[test]
     fn provided_required_slot_no_issue() {
-        use crate::facts::component::SlotFact;
+        use verter_session_query::facts::component::SlotFact;
 
         let mut edge = make_edge("Tabs", vec![], vec![]);
         edge.passed_slots = vec!["default".into()];
@@ -526,7 +528,7 @@ mod tests {
 
     #[test]
     fn optional_slot_not_required() {
-        use crate::facts::component::SlotFact;
+        use verter_session_query::facts::component::SlotFact;
 
         let edge = make_edge("Card", vec![], vec![]);
         let mut surface = make_surface(vec![], vec![]);
@@ -545,7 +547,7 @@ mod tests {
 
     #[test]
     fn multiple_slots_mixed_required() {
-        use crate::facts::component::SlotFact;
+        use verter_session_query::facts::component::SlotFact;
 
         let mut edge = make_edge("Layout", vec![], vec![]);
         edge.passed_slots = vec!["header".into()]; // only header provided

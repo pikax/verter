@@ -5,22 +5,20 @@
 //! facts + locators minted from those parts (the transient typed IR is
 //! discarded; bodies are lowered again on demand through the shared
 //! resolver's body service).
+use verter_session_query::analysis::field_path::PathSegment;
+use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
+use verter_session_query::analysis::signature_params::narrow_signature_type_params;
 
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
-use crate::analysis::class_field_value::ClassFieldValues;
+use verter_session_query::declarations::class_fields::ClassFieldValues;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use crate::analysis::fact_projection::{
-    signature_return_reference_head_fact, value_type_annotation_fact,
-};
-use crate::analysis::top_level_owners::{TopLevelOwnerTable, TopLevelStatementOwner};
-use crate::analysis::type_eval::*;
 use oxc_ast::ast::{
     ArrowFunctionExpression, BinaryOperator, BindingPattern, Class, ClassElement, Declaration,
     ExportDefaultDeclarationKind, Expression, FormalParameters, Function, MethodDefinition,
@@ -32,10 +30,20 @@ use oxc_ast::ast::{
     VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
+use verter_session_query::analysis::fact_projection::{
+    signature_return_reference_head_fact, value_type_annotation_fact,
+};
+use verter_session_query::analysis::top_level_owners::{
+    TopLevelOwnerTable, TopLevelStatementOwner,
+};
+use verter_session_query::declarations::*;
 
 use crate::analysis::namespace_walk::for_each_namespace;
 use oxc_span::GetSpan;
 use verter_parser::utils::oxc::script::route_inventory::statements_have_export_declarations;
+use verter_session_query::source::transient_parts::{
+    LoweredSignatureOrigin, LoweredSignatureParts,
+};
 use verter_type_expr::facts::{
     AuthoredReferenceHeadFact, ClosedTypeFact, DeclaredLiteralFreshness, EnumMemberEntry,
     EnumMemberFact, EnumMemberNamesFact, EnumPrimitiveDomain, FlowFunctionReturnIdentity,
@@ -56,7 +64,7 @@ use verter_type_expr::{
     AuthoredPropertyKey, FunctionExpr, FunctionParam, FunctionSpans, IndexSignature,
     IndexSignatureSpans, IndexedValueLiteralMode, LiteralValue, MemberSpans, MemberVisibility,
     MethodSignature, ObjectExpr, ObjectMember, ObjectMethodKind, PrimitiveName, TopLevelOwnerId,
-    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate, ValueRef,
+    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, ValueRef,
 };
 use verter_type_expr_oxc::{lower_property_key, lower_return_annotation, lower_ts_type};
 
@@ -66,19 +74,6 @@ mod shallow;
 pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
 };
-
-/// Exact source authority for an indexed value's whole binding input.
-/// Spans use the input AST's coordinate system; composite values have no root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IndexedValueReadRoot {
-    /// No whole identifier read supplied this result. This does not certify
-    /// that names inside a composite or asserted type are free/module names.
-    NonBinding,
-    Identifier(verter_span::Span),
-    /// The result is an authored whole `typeof name` type query. This is
-    /// lexical type authority, never an operand read or freshness signal.
-    SourceTypeQuery(verter_span::Span),
-}
 
 /// One direct input of an indexed call, excluding inputs of nested calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,18 +160,18 @@ fn type_expand_debug(message: impl FnOnce() -> String) {
 }
 
 fn expansion_metadata_hit_budget(
-    exactness: crate::analysis::type_expand::ExpansionExactness,
-    diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
+    diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> bool {
-    exactness == crate::analysis::type_expand::ExpansionExactness::Incomplete
+    exactness == verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete
         && diagnostics.iter().any(|diagnostic| {
-            diagnostic.reason == crate::analysis::type_expand::ExpansionStopReason::BudgetExceeded
+            diagnostic.reason == verter_session_query::analysis::type_expand::ExpansionStopReason::BudgetExceeded
         })
 }
 
 struct ExpandStageLog<'a> {
     macro_index: usize,
-    macro_kind: crate::analysis::types::AnalyzedMacroKind,
+    macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
     stage: &'a str,
     target: &'a str,
     started: Instant,
@@ -185,9 +180,9 @@ struct ExpandStageLog<'a> {
 
 fn log_expand_stage(
     log: ExpandStageLog<'_>,
-    exactness: crate::analysis::type_expand::ExpansionExactness,
-    execution_status: crate::analysis::type_expand::ExpansionExecutionStatus,
-    diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
+    execution_status: verter_session_query::analysis::type_expand::ExpansionExecutionStatus,
+    diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
     env: Option<&EvalEnv>,
 ) {
     type_expand_debug(|| {
@@ -313,52 +308,6 @@ pub struct LoweredTypeDeclParts {
     /// `unique symbol` — object-type-literal and interface property
     /// members, including intersection arms.
     pub unique_symbol_members: Vec<String>,
-}
-
-/// Where a transient signature's authored function node lives, relative to its
-/// owning declaration statement — drives the minted [`FunctionSpansOrigin`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoweredSignatureOrigin {
-    /// The declaration statement's body IS the function (a `function` decl, an
-    /// arrow / function-expression initializer).
-    DeclBody,
-    /// A member of the produced object shape at this ordinal (a class
-    /// constructor / static method in the `typeof C` constructor shape).
-    ShapeMember { ordinal: u32 },
-    /// Genuinely synthesized — no authored function node (a class with no
-    /// declared constructor).
-    Synthetic,
-}
-
-/// TRANSIENT lowered parts of one function/method signature: the typed-IR
-/// parameter / return / type-parameter forms JSDoc enrichment and inference
-/// operate on. The stored form is the minted [`FunctionSignatureFact`].
-#[derive(Debug, Clone)]
-pub struct LoweredSignatureParts {
-    pub parameters: Vec<FunctionParam>,
-    /// The AUTHORED return carrier (a TS annotation or a JSDoc `@returns`
-    /// recovery). An unannotated function's return is body-derived and names
-    /// its served function position instead — never a body scan.
-    pub return_type: Option<TypeExpr>,
-    /// The authored return's type predicate (`x is T`, `asserts x`, …),
-    /// beside a `boolean` / `void` [`Self::return_type`].
-    pub predicate: Option<Arc<TypePredicate>>,
-    pub type_parameters: Vec<TypeParam>,
-    /// Whether this signature is backed by an implementation body (vs. a
-    /// bodiless overload / ambient declaration). Projection-time overload
-    /// visibility reads the stored fact's copy of this flag.
-    pub has_implementation_body: bool,
-    /// Whether the function carried an explicit AUTHORED TS return annotation
-    /// (`(): T`). Only an authored return position mints a `FunctionReturn`
-    /// body locator — an inferred / JSDoc-filled return has no authored
-    /// `TSType` node to address and is recovered whole-signature on demand.
-    pub has_authored_return: bool,
-    /// Whether the return carrier was recovered from a JSDoc `@returns`
-    /// payload (no authored TS annotation present). Set only by the shared
-    /// JSDoc enrichment; distinguishes the declared-recovery provenance.
-    pub jsdoc_return: bool,
-    /// Span-recovery origin of the authored function node.
-    pub origin: LoweredSignatureOrigin,
 }
 
 /// TRANSIENT lowered parts of one VALUE declaration.
@@ -1127,36 +1076,6 @@ fn narrow_decl_header_type_params(
             })
             .collect(),
     }
-}
-
-/// Narrow a SIGNATURE-scoped type-parameter list (a function declaration's /
-/// method's own `<T extends C>` list) to name + ordinal facts. Signature-scoped
-/// bounds live ON the signature's authored position: the closed path vocabulary
-/// addresses type-parameter bounds only on TYPE-space declaration headers
-/// (a value / method signature's bound is recovered whole-signature when the
-/// signature position is demanded), so no independent bound slot exists to
-/// mint — deliberately NOT a fabricated locator.
-pub(crate) fn narrow_signature_type_params(params: &[TypeParam]) -> Arc<[NarrowTypeParam]> {
-    params
-        .iter()
-        .enumerate()
-        .filter_map(|(index, param)| {
-            let ordinal = u32::try_from(index).ok()?;
-            Some(NarrowTypeParam {
-                name: param.name.clone(),
-                ordinal,
-                // `TypeParamBound` is a type-space DECL-HEADER first-step-only
-                // position — not addressable for a signature-scoped parameter.
-                // Honest typed miss: an authored `extends` / `=` bound here is
-                // recovered whole-signature on demand, never through a fabricated
-                // slot.
-                constraint: None,
-                default: None,
-                is_const: param.is_const,
-                variance: TypeParamVariance::Unannotated,
-            })
-        })
-        .collect()
 }
 
 /// Mint the stored [`TypeDeclInfo`] from transient type-decl parts: the
@@ -2791,7 +2710,10 @@ fn collect_named_class(
                             sig.return_type.map(Arc::new),
                             sig.type_parameters,
                             FunctionSpans {
-                                signature: Some(arrow.span.into()),
+                                signature: Some(verter_span::Span::new(
+                                    arrow.span.start,
+                                    arrow.span.end,
+                                )),
                                 return_type: None,
                             },
                         );
@@ -2822,7 +2744,10 @@ fn collect_named_class(
                             sig.return_type.map(Arc::new),
                             sig.type_parameters,
                             FunctionSpans {
-                                signature: Some(func.span.into()),
+                                signature: Some(verter_span::Span::new(
+                                    func.span.start,
+                                    func.span.end,
+                                )),
                                 return_type: None,
                             },
                         );
@@ -2852,7 +2777,14 @@ fn collect_named_class(
                 // `let` does.
                 let field_value = function_value
                     .is_none()
-                    .then(|| out.class_fields.field(decl, prop, source))
+                    .then(|| {
+                        crate::analysis::class_field_value::class_field_value(
+                            &out.class_fields,
+                            decl,
+                            prop,
+                            source,
+                        )
+                    })
                     .flatten()
                     .and_then(|_| class_field_value_name(&name, prop))
                     .map(|field_name| {
@@ -2904,12 +2836,17 @@ fn collect_named_class(
                         .unwrap_or_else(|| implicit_property_type(decl, prop, source))
                 });
                 let spans = MemberSpans {
-                    declaration: Some(prop.span.into()),
-                    name: Some(prop.key.span().into()),
-                    type_annotation: prop
-                        .type_annotation
-                        .as_ref()
-                        .map(|ta| ta.type_annotation.span().into()),
+                    declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
+                    name: Some(verter_span::Span::new(
+                        prop.key.span().start,
+                        prop.key.span().end,
+                    )),
+                    type_annotation: prop.type_annotation.as_ref().map(|ta| {
+                        verter_span::Span::new(
+                            ta.type_annotation.span().start,
+                            ta.type_annotation.span().end,
+                        )
+                    }),
                 };
                 let member =
                     ObjectMember::Property(verter_type_expr::ObjectProperty::with_key_visibility(
@@ -2977,16 +2914,26 @@ fn collect_named_class(
                         &mut member_overload_ordinals,
                     );
                     let fn_spans = FunctionSpans {
-                        signature: Some(method.value.span.into()),
-                        return_type: method
-                            .value
-                            .return_type
-                            .as_ref()
-                            .map(|rt| rt.type_annotation.span().into()),
+                        signature: Some(verter_span::Span::new(
+                            method.value.span.start,
+                            method.value.span.end,
+                        )),
+                        return_type: method.value.return_type.as_ref().map(|rt| {
+                            verter_span::Span::new(
+                                rt.type_annotation.span().start,
+                                rt.type_annotation.span().end,
+                            )
+                        }),
                     };
                     let member_spans = MemberSpans {
-                        declaration: Some(method.span.into()),
-                        name: Some(method.key.span().into()),
+                        declaration: Some(verter_span::Span::new(
+                            method.span.start,
+                            method.span.end,
+                        )),
+                        name: Some(verter_span::Span::new(
+                            method.key.span().start,
+                            method.key.span().end,
+                        )),
                         type_annotation: None,
                     };
                     let mut function_expr = FunctionExpr::with_spans(
@@ -3042,12 +2989,22 @@ fn collect_named_class(
                                 parameter.readonly,
                                 visibility_from_ts_accessibility(parameter.accessibility),
                                 MemberSpans {
-                                    declaration: Some(parameter.span.into()),
-                                    name: Some(identifier.span.into()),
-                                    type_annotation: parameter
-                                        .type_annotation
-                                        .as_ref()
-                                        .map(|annotation| annotation.type_annotation.span().into()),
+                                    declaration: Some(verter_span::Span::new(
+                                        parameter.span.start,
+                                        parameter.span.end,
+                                    )),
+                                    name: Some(verter_span::Span::new(
+                                        identifier.span.start,
+                                        identifier.span.end,
+                                    )),
+                                    type_annotation: parameter.type_annotation.as_ref().map(
+                                        |annotation| {
+                                            verter_span::Span::new(
+                                                annotation.type_annotation.span().start,
+                                                annotation.type_annotation.span().end,
+                                            )
+                                        },
+                                    ),
                                 },
                             ),
                         ));
@@ -3062,12 +3019,16 @@ fn collect_named_class(
                         ctor_sigs.push((
                             extract_function_signature(&method.value, source),
                             FunctionSpans {
-                                signature: Some(method.span.into()),
-                                return_type: method
-                                    .value
-                                    .return_type
-                                    .as_ref()
-                                    .map(|rt| rt.type_annotation.span().into()),
+                                signature: Some(verter_span::Span::new(
+                                    method.span.start,
+                                    method.span.end,
+                                )),
+                                return_type: method.value.return_type.as_ref().map(|rt| {
+                                    verter_span::Span::new(
+                                        rt.type_annotation.span().start,
+                                        rt.type_annotation.span().end,
+                                    )
+                                }),
                             },
                             method.value.body.is_some(),
                         ));
@@ -3083,16 +3044,26 @@ fn collect_named_class(
                         &mut member_overload_ordinals,
                     );
                     let fn_spans = FunctionSpans {
-                        signature: Some(method.value.span.into()),
-                        return_type: method
-                            .value
-                            .return_type
-                            .as_ref()
-                            .map(|rt| rt.type_annotation.span().into()),
+                        signature: Some(verter_span::Span::new(
+                            method.value.span.start,
+                            method.value.span.end,
+                        )),
+                        return_type: method.value.return_type.as_ref().map(|rt| {
+                            verter_span::Span::new(
+                                rt.type_annotation.span().start,
+                                rt.type_annotation.span().end,
+                            )
+                        }),
                     };
                     let member_spans = MemberSpans {
-                        declaration: Some(method.span.into()),
-                        name: Some(method.key.span().into()),
+                        declaration: Some(verter_span::Span::new(
+                            method.span.start,
+                            method.span.end,
+                        )),
+                        name: Some(verter_span::Span::new(
+                            method.key.span().start,
+                            method.key.span().end,
+                        )),
                         type_annotation: None,
                     };
                     let mut function_expr = FunctionExpr::with_spans(
@@ -3366,8 +3337,9 @@ fn collect_enum(
     out: &mut LoweredStatementParts,
 ) {
     use crate::analysis::enum_constant::{
-        enum_constant_expr, enum_first_member_expr, enum_increment_expr, evaluate_enum_constant,
+        enum_constant_expr, enum_first_member_expr, enum_increment_expr,
     };
+    use verter_session_query::enum_constant::evaluate_enum_constant;
     let enum_name = decl.id.name.as_str();
     let ambient = ambient || decl.declare;
     // Where each member name is first declared in this body: a reference
@@ -3507,7 +3479,7 @@ fn own_references_read<'m>(
     declared: &rustc_hash::FxHashMap<String, usize>,
     earlier: impl Fn(&str) -> Option<&'m EnumMemberValue>,
 ) -> OwnReferences {
-    use crate::analysis::enum_constant::EnumConstant;
+    use verter_session_query::enum_constant::EnumConstant;
     use verter_type_expr::facts::{EnumConstantExpr, EnumConstantStep, EnumScalar};
     let literal = |constant: EnumConstant| match constant.to_scalar() {
         EnumScalar::Number(text) => EnumConstantStep::Number(text),
@@ -5539,12 +5511,17 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .map(|ta| lower_ts_type(&ta.type_annotation, source))
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
             let spans = MemberSpans {
-                declaration: Some(prop.span.into()),
-                name: Some(prop.key.span().into()),
-                type_annotation: prop
-                    .type_annotation
-                    .as_ref()
-                    .map(|ta| ta.type_annotation.span().into()),
+                declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
+                name: Some(verter_span::Span::new(
+                    prop.key.span().start,
+                    prop.key.span().end,
+                )),
+                type_annotation: prop.type_annotation.as_ref().map(|ta| {
+                    verter_span::Span::new(
+                        ta.type_annotation.span().start,
+                        ta.type_annotation.span().end,
+                    )
+                }),
             };
             Some(ObjectMember::Property(
                 verter_type_expr::ObjectProperty::with_key_spans_public(
@@ -5574,15 +5551,20 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
             let fn_spans = FunctionSpans {
-                signature: Some(method.span.into()),
-                return_type: method
-                    .return_type
-                    .as_ref()
-                    .map(|rt| rt.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(method.span.start, method.span.end)),
+                return_type: method.return_type.as_ref().map(|rt| {
+                    verter_span::Span::new(
+                        rt.type_annotation.span().start,
+                        rt.type_annotation.span().end,
+                    )
+                }),
             };
             let member_spans = MemberSpans {
-                declaration: Some(method.span.into()),
-                name: Some(method.key.span().into()),
+                declaration: Some(verter_span::Span::new(method.span.start, method.span.end)),
+                name: Some(verter_span::Span::new(
+                    method.key.span().start,
+                    method.key.span().end,
+                )),
                 type_annotation: None,
             };
             Some(ObjectMember::Method(
@@ -5616,11 +5598,13 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
             let fn_spans = FunctionSpans {
-                signature: Some(call.span.into()),
-                return_type: call
-                    .return_type
-                    .as_ref()
-                    .map(|rt| rt.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(call.span.start, call.span.end)),
+                return_type: call.return_type.as_ref().map(|rt| {
+                    verter_span::Span::new(
+                        rt.type_annotation.span().start,
+                        rt.type_annotation.span().end,
+                    )
+                }),
             };
             Some(ObjectMember::CallSignature(
                 FunctionExpr::with_spans(
@@ -5637,13 +5621,16 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
             let (key_name, key_type, key_span) = (
                 param.name.to_string(),
                 lower_ts_type(&param.type_annotation.type_annotation, source),
-                Some(param.span.into()),
+                Some(verter_span::Span::new(param.span.start, param.span.end)),
             );
             let value_type = lower_ts_type(&idx.type_annotation.type_annotation, source);
             let spans = IndexSignatureSpans {
-                declaration: Some(idx.span.into()),
+                declaration: Some(verter_span::Span::new(idx.span.start, idx.span.end)),
                 key: key_span,
-                value: Some(idx.type_annotation.type_annotation.span().into()),
+                value: Some(verter_span::Span::new(
+                    idx.type_annotation.type_annotation.span().start,
+                    idx.type_annotation.type_annotation.span().end,
+                )),
             };
             Some(ObjectMember::IndexSignature(IndexSignature::with_spans(
                 key_name,
@@ -5665,11 +5652,13 @@ fn lower_interface_member(sig: &TSSignature<'_>, source: &str) -> Option<ObjectM
                 .map(|tp| lower_type_param_decls(tp, source))
                 .unwrap_or_default();
             let fn_spans = FunctionSpans {
-                signature: Some(ctor.span.into()),
-                return_type: ctor
-                    .return_type
-                    .as_ref()
-                    .map(|rt| rt.type_annotation.span().into()),
+                signature: Some(verter_span::Span::new(ctor.span.start, ctor.span.end)),
+                return_type: ctor.return_type.as_ref().map(|rt| {
+                    verter_span::Span::new(
+                        rt.type_annotation.span().start,
+                        rt.type_annotation.span().end,
+                    )
+                }),
             };
             Some(ObjectMember::ConstructSignature(FunctionExpr::with_spans(
                 params,
@@ -5695,7 +5684,7 @@ fn lower_this_param(this: &TSThisParameter<'_>, source: &str) -> FunctionParam {
             .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
         false,
         false,
-        Some(this.span.into()),
+        Some(verter_span::Span::new(this.span.start, this.span.end)),
         this.type_annotation.is_some(),
     )
 }
@@ -5750,7 +5739,7 @@ fn lower_function_params_without_initializer_inference(
             ty,
             param.optional || param.initializer.is_some(),
             false,
-            Some(param.span.into()),
+            Some(verter_span::Span::new(param.span.start, param.span.end)),
             has_ts_annotation,
         );
         parameter.is_parameter_property =
@@ -5773,7 +5762,7 @@ fn lower_function_params_without_initializer_inference(
             ty,
             false,
             true,
-            Some(rest.span.into()),
+            Some(verter_span::Span::new(rest.span.start, rest.span.end)),
             has_ts_annotation,
         ));
     }
@@ -5867,23 +5856,6 @@ pub struct BindingExpansionEntry {
     pub owner: TopLevelOwnerId,
 }
 
-/// Path segment for [`FieldExpansionContext::output_path`] — a path from
-/// the parent macro shell (e.g. `Props<T>`) to the specific field the
-/// closure is being invoked for. The session-side closure converts this
-/// into a `verter_session::semantic_query::PathSegment` slice when
-/// constructing the dispatch projection query (plan Step 1 / D1.1).
-///
-/// `Member` is the only variant required for Step 1 — `defineProps`,
-/// `defineEmits`, and `defineSlots` all expose fields at named members
-/// of the macro's parent type. Future variants (`Index`, `KeyOf`) are
-/// deferred until a consumer needs them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum PathSegment {
-    /// Named-member hop, e.g. `[Member("items")]` for the `items` prop
-    /// field of `defineProps<Props>()`.
-    Member(std::sync::Arc<str>),
-}
-
 /// Closure invocation context for
 /// [`expand_macro_types_impl_with_expander`]'s `expand_field_expr`
 /// callback (plan Step 1 / D1.1).
@@ -5912,25 +5884,25 @@ pub struct FieldExpansionContext {
 }
 
 fn publication_exactness(
-    exactness: crate::analysis::type_expand::ExpansionExactness,
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
 ) -> verter_type_expr::ResolutionExactness {
     match exactness {
-        crate::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete => {
             verter_type_expr::ResolutionExactness::ExactConcrete
         }
-        crate::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
             verter_type_expr::ResolutionExactness::ExactSymbolic
         }
-        crate::analysis::type_expand::ExpansionExactness::Incomplete => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete => {
             verter_type_expr::ResolutionExactness::Incomplete
         }
     }
 }
 
 fn publication_diagnostic_kind(
-    reason: crate::analysis::type_expand::ExpansionStopReason,
+    reason: verter_session_query::analysis::type_expand::ExpansionStopReason,
 ) -> verter_type_expr::ResolutionDiagnosticKind {
-    use crate::analysis::type_expand::ExpansionStopReason as Source;
+    use verter_session_query::analysis::type_expand::ExpansionStopReason as Source;
     use verter_type_expr::ResolutionDiagnosticKind as Target;
     match reason {
         Source::BudgetExceeded => Target::BudgetExceeded,
@@ -5953,8 +5925,8 @@ fn publication_diagnostic_kind(
 
 fn expanded_field_authority(
     source: SemanticTypeSource,
-    exactness: crate::analysis::type_expand::ExpansionExactness,
-    diagnostics: &[crate::analysis::type_expand::ExpansionDiagnostic],
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
+    diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> verter_type_expr::ResolvedTypeAuthority {
     let diagnostics: Arc<[verter_type_expr::ResolutionDiagnostic]> = diagnostics
         .iter()
@@ -5974,22 +5946,22 @@ fn expanded_field_authority(
 }
 
 pub fn expand_macro_types_impl_with_expander<F>(
-    macros: &[crate::analysis::types::AnalyzedMacro],
+    macros: &[verter_session_query::analysis::types::AnalyzedMacro],
     source: Option<&str>,
     binding_entries: &[BindingExpansionEntry],
     debug_env: Option<&mut EvalEnv>,
     scope: MacroExpansionScope,
     mut expand_field_expr: F,
-) -> crate::analysis::type_expand::ExpandedComponentTypes
+) -> verter_session_query::analysis::type_expand::ExpandedComponentTypes
 where
     F: FnMut(
         FieldExpansionContext,
         Option<&verter_type_expr::locators::MacroPayloadLocator>,
-    ) -> crate::analysis::type_expand::ExpansionResult<
-        crate::analysis::type_expand::ExpandedNormalizedExpr,
+    ) -> verter_session_query::analysis::type_expand::ExpansionResult<
+        verter_session_query::analysis::type_expand::ExpandedNormalizedExpr,
     >,
 {
-    use crate::analysis::type_expand::{ExpandedComponentTypes, ExpandedField};
+    use verter_session_query::analysis::type_expand::{ExpandedComponentTypes, ExpandedField};
 
     let mut result = ExpandedComponentTypes::default();
     let started = Instant::now();
@@ -6224,7 +6196,7 @@ where
             let item_started = Instant::now();
             let stage_log = ExpandStageLog {
                 macro_index: usize::MAX,
-                macro_kind: crate::analysis::types::AnalyzedMacroKind::DefineExpose,
+                macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose,
                 stage: "binding",
                 target: name.as_str(),
                 started: item_started,
@@ -6300,7 +6272,9 @@ where
     result
 }
 
-pub fn has_named_shape_surface(shape: &crate::analysis::type_expand::ExpandedObjectShape) -> bool {
+pub fn has_named_shape_surface(
+    shape: &verter_session_query::analysis::type_expand::ExpandedObjectShape,
+) -> bool {
     !shape.properties.is_empty() || !shape.call_signatures.is_empty()
 }
 
@@ -6802,11 +6776,16 @@ fn indexed_value_step<'a>(
                     signature.return_type.map(Arc::new),
                     signature.type_parameters,
                     FunctionSpans {
-                        signature: Some(function.span.into()),
-                        return_type: function
-                            .return_type
-                            .as_ref()
-                            .map(|annotation| annotation.type_annotation.span().into()),
+                        signature: Some(verter_span::Span::new(
+                            function.span.start,
+                            function.span.end,
+                        )),
+                        return_type: function.return_type.as_ref().map(|annotation| {
+                            verter_span::Span::new(
+                                annotation.type_annotation.span().start,
+                                annotation.type_annotation.span().end,
+                            )
+                        }),
                     },
                 )
                 .with_predicate(signature.predicate),

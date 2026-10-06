@@ -6,28 +6,31 @@
 //! node result DIRECTLY against the shared resolver
 //! (`realize_callable_member`) — both node-domain.
 
-use crate::resolver_core::request_ports::IndexedInputs;
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
+use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 
 use verter_type_expr::{MemberVisibility, PrimitiveName, TypeExpr};
 
-use super::{ArmCombineNode, CallableNodeView};
-use crate::meta_resolve::dispatch_helpers::realize_callable_member;
-use crate::project_semantic_dispatch::{
-    node_data_for, ProjectSemanticDispatch, StructuralFactDemandOutcome,
-};
 use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
 use crate::resolver_store::CurrentHostStoreView;
-use crate::semantic_query::{
+use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
+use crate::typeinfo::shallow_surface::callable_first_param_object_surface;
+use crate::types::HostConfig;
+use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::callable_view::{
+    realize_callable_member, ArmCombineNode, CallableNodeView, CALLABLE_VIEW_DEPTH_FUSE,
+};
+use verter_type_engine::project_semantic_dispatch::{
+    node_data_for, ProjectSemanticDispatch, StructuralFactDemandOutcome,
+};
+use verter_type_engine::semantic_query::{
     DeclIdentity, FunctionParam, HashValue, InstantiateKey, LiteralValue, PartialReasonSet,
     PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
     ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryKey, SurfaceMember,
     TupleElement,
 };
-use crate::semantic_query_memo::SemanticGraphStore;
-use crate::typeinfo::framework_surface::vue_exec::navigate_param_to_object_surface;
-use crate::types::HostConfig;
-use crate::VerterHost;
+use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 // ───────────────────────────── node builders ─────────────────────────────
 
@@ -60,12 +63,14 @@ fn function_with_return_span(
     return_type_span: Option<verter_span::Span>,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Signature {
-        kind: crate::semantic_query::SignatureKind::Call,
+        kind: verter_type_engine::semantic_query::SignatureKind::Call,
         params: Arc::from(params.into_boxed_slice()),
         return_type,
         type_parameters: Arc::from(Vec::new().into_boxed_slice()),
         occurrence: None,
-        return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(return_type),
+        return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
+            return_type,
+        ),
         signature_span: None,
         return_type_span,
         predicate: None,
@@ -75,7 +80,7 @@ fn function_with_return_span(
 
 fn union(graph: &SemanticGraphStore, arms: Vec<SemanticNodeId>) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             arms.into_boxed_slice(),
         )),
     ))
@@ -83,7 +88,7 @@ fn union(graph: &SemanticGraphStore, arms: Vec<SemanticNodeId>) -> SemanticNodeI
 
 fn intersection(graph: &SemanticGraphStore, arms: Vec<SemanticNodeId>) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             arms.into_boxed_slice(),
         )),
     ))
@@ -117,7 +122,7 @@ fn object_surface(
         .iter()
         .map(|(name, value)| SurfaceMember {
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            key: crate::semantic_query::AuthoredPropertyKey::string(*name),
+            key: verter_type_engine::semantic_query::AuthoredPropertyKey::string(*name),
             value: *value,
             optional: false,
             readonly: false,
@@ -126,11 +131,12 @@ fn object_surface(
             visibility: MemberVisibility::Public,
             spans: Default::default(),
             declaration_origin: None,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+            declared_in_macro_type_arg:
+                verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: Default::default(),
         })
         .collect();
-    let view = crate::test_surface_view! {
+    let view = verter_type_engine::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),
         call_signatures: Arc::from(Vec::new().into_boxed_slice()),
         construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -381,7 +387,7 @@ fn single_callable_arm_distinct_node_ids_with_equal_raised_shape_refuse() {
         "the two callables intern to distinct node ids (param-type nodes differ)"
     );
     assert_eq!(
-        crate::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch(
+        verter_type_engine::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch(
             &dispatch,
             f_direct,
             f_via_alias
@@ -1142,9 +1148,7 @@ fn first_param_object_surface_projects_param_members() {
         void,
     );
 
-    let view = CallableNodeView::new(&dispatch, f);
-    let surface = view
-        .first_param_object_surface(&host, shallow())
+    let surface = callable_first_param_object_surface(&dispatch, &host, f, shallow())
         .expect("the first-param object projects a one-level surface");
     let mut names: Vec<&str> = surface
         .members
@@ -1181,7 +1185,8 @@ fn workspace_host_with_svelte(
             extensions: vec![],
             workspace_root: "/workspace".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace"),
@@ -1242,7 +1247,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
     assert!(
         prepared
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("row")),
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("row")),
         "the exact-owner prepared declaration indexes `row`"
     );
     assert!(
@@ -1256,7 +1261,8 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
         "the unplanted ordinary owner must not recover instance-owned `Props`"
     );
 
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let facts = host
         .resolve_svelte_script_facts_with_ctx(&ctx, component)
         .expect_exact("svelte facts");
@@ -1274,7 +1280,7 @@ fn exact_instance_owner_prepared_body_locator_materializes_without_ordinary_fall
     let raised_base = dispatch
         .raise_semantic_type_source_to_hot(
             &verter_type_expr::facts::SemanticTypeSource::Authored(props_type.locator.clone()),
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id: component,
                 scope_owner: owner,
                 context: ProjectionReductionContext::structural_transit_with_mode(
@@ -1422,7 +1428,7 @@ fn direct_import_preparation_has_cold_warm_exact_owner_parity() {
         assert_eq!(external.symbol_name, "Snippet");
         assert!(prepared
             .member_index
-            .contains_key(&crate::semantic_query::PropertyKey::identifier("row")));
+            .contains_key(&verter_type_engine::semantic_query::PropertyKey::identifier("row")));
     }
 }
 
@@ -1552,7 +1558,7 @@ fn unresolved_direct_import_remains_a_typed_preparation_failure() {
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "Props",
             ),
-            Err(crate::resolver_core::prepared_decl::PreparationFailure::MissingExternalOwner {
+            Err(verter_session_query::inputs::prepared::PreparationFailure::MissingExternalOwner {
                 local_name
             }) if local_name == "External"
         ));
@@ -1599,12 +1605,14 @@ fn single_callable_arm_realizes_declared_and_instantiated_callbacks() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_0, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
 
     let member = |name: &str| -> SemanticNodeId {
         surface
@@ -1728,12 +1736,14 @@ fn event_names_resolves_declref_and_instantiationref_event_unions() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_1 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_1, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -1830,12 +1840,14 @@ fn positional_params_expands_declref_and_instantiationref_rest_tuples() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_2 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_2, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -1938,12 +1950,14 @@ fn single_callable_arm_resolves_carrier_wrapped_nullish_callable() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_3, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2044,12 +2058,14 @@ fn slot_param_and_return_resolves_aliased_and_nullable_slot_arms() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_4 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_4, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2161,12 +2177,14 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_5 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_5, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let onprops = surface
         .members
         .iter()
@@ -2192,13 +2210,13 @@ fn first_param_object_surface_keeps_root_carrier_shaped() {
     // The shallow surface still projects the one-level members, and is
     // context-invariant (Shallow regardless of the caller's mode).
     let names = |context| -> Vec<String> {
-        let mut n: Vec<String> = CallableNodeView::new(&dispatch, onprops)
-            .first_param_object_surface(&ctx, context)
-            .expect("the first-param object projects a one-level surface")
-            .members
-            .iter()
-            .map(|m| m.string_name().expect("string-key fixture").to_string())
-            .collect();
+        let mut n: Vec<String> =
+            callable_first_param_object_surface(&dispatch, &ctx, onprops, context)
+                .expect("the first-param object projects a one-level surface")
+                .members
+                .iter()
+                .map(|m| m.string_name().expect("string-key fixture").to_string())
+                .collect();
         n.sort();
         n
     };
@@ -2284,7 +2302,8 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_6 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_6 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface = navigate_param_to_object_surface(
         &ctx,
         &fixture_dispatch_6,
@@ -2293,7 +2312,8 @@ fn normalize_node_for_fact_demand_resolves_carrier_chains() {
     )
     .resolved_for_tests()
     .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2351,7 +2371,8 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_7 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_7 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface = navigate_param_to_object_surface(
         &ctx,
         &fixture_dispatch_7,
@@ -2360,7 +2381,8 @@ fn normalize_node_for_fact_demand_preserves_cycles_and_resolves_deep_finite_chai
     )
     .resolved_for_tests()
     .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2513,12 +2535,14 @@ fn normalize_node_for_fact_demand_over_cap_template_behind_declref_is_partial() 
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_8 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_8 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_8, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let toowide = surface
         .members
         .iter()
@@ -2576,7 +2600,8 @@ fn positional_params_partial_rest_demand_fails_whole_read() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_9 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_9 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface = navigate_param_to_object_surface(
         &ctx,
         &fixture_dispatch_9,
@@ -2585,7 +2610,8 @@ fn positional_params_partial_rest_demand_fails_whole_read() {
     )
     .resolved_for_tests()
     .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let mut_ref = surface
         .members
         .iter()
@@ -2636,7 +2662,8 @@ fn demand_validated_structural_node_partial_yields_none() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_10 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_10 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface = navigate_param_to_object_surface(
         &ctx,
         &fixture_dispatch_10,
@@ -2645,7 +2672,8 @@ fn demand_validated_structural_node_partial_yields_none() {
     )
     .resolved_for_tests()
     .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let mut_ref = surface
         .members
         .iter()
@@ -2703,12 +2731,14 @@ fn event_names_direct_self_reference_terminates_complete() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_11 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_11 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_11, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let onself = surface
         .members
         .iter()
@@ -2775,12 +2805,14 @@ fn event_names_mutual_cycle_fails_whole_via_visited_set() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_12 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_12 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_12, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let member = |name: &str| -> SemanticNodeId {
         surface
             .members
@@ -2856,7 +2888,7 @@ fn event_names_over_deep_nested_union_trips_collect_fuse() {
     // (each a distinct interned single-arm union, so the recursion truly
     // descends one level per hop and trips the fuse).
     let mut buried = string_literal(&graph, "deep");
-    for _ in 0..(super::CALLABLE_VIEW_DEPTH_FUSE + 5) {
+    for _ in 0..(CALLABLE_VIEW_DEPTH_FUSE + 5) {
         buried = union(&graph, vec![buried]);
     }
     // `present` is FIRST so it is collected BEFORE the buried arm trips the fuse
@@ -3037,19 +3069,21 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
     let number = prim(&graph, PrimitiveKind::Number);
     let symbol = prim(&graph, PrimitiveKind::Symbol);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
-    let nominal = graph.intern_node(SemanticNodeData::new_nominal_typeof(
-        crate::semantic_query::ValueRootKey {
-            scope: ScopeId::file(Arc::from("/events.ts"), owner),
-            name: Arc::from("TOKEN"),
-        },
-        Arc::from([]),
-        verter_type_expr::facts::ValueDeclIdentityPart {
-            canonical_id: Arc::from("/events.ts"),
-            owner,
-            symbol: Arc::from("TOKEN"),
-            member_path: Arc::from([]),
-        },
-    ));
+    let nominal = graph.intern_node(
+        verter_type_engine::semantic_query::new_nominal_typeof_for_tests(
+            verter_type_engine::semantic_query::ValueRootKey {
+                scope: ScopeId::file(Arc::from("/events.ts"), owner),
+                name: Arc::from("TOKEN"),
+            },
+            Arc::from([]),
+            verter_type_expr::facts::ValueDeclIdentityPart {
+                canonical_id: Arc::from("/events.ts"),
+                owner,
+                symbol: Arc::from("TOKEN"),
+                member_path: Arc::from([]),
+            },
+        ),
+    );
     for (label, leaf) in [("number", number), ("symbol", symbol), ("nominal", nominal)] {
         let names_union = union(&graph, vec![a, leaf]);
         let f = function(
@@ -3164,12 +3198,14 @@ fn peel_stops_at_instantiation_ref_while_normalize_instantiates() {
         "the exact instance owner indexes the local `Props` declaration"
     );
 
-    let fixture_dispatch_13 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_13 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_13, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let row = surface
         .members
         .iter()
@@ -3273,7 +3309,8 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
         "the exact instance owner indexes the local `Props` declaration"
     );
 
-    let fixture_dispatch_14 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_14 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface = navigate_param_to_object_surface(
         &ctx,
         &fixture_dispatch_14,
@@ -3282,7 +3319,8 @@ fn peel_bounded_fail_closed_on_declref_cycle() {
     )
     .resolved_for_tests()
     .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let mutual = surface
         .members
         .iter()
@@ -3433,12 +3471,14 @@ fn validated_snippet_params_partial_arg_fails_closed_not_bindingless() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_15 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_15 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_15, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let toowide = surface
         .members
         .iter()
@@ -3603,12 +3643,14 @@ fn validated_snippet_params_declref_tuple_arg_resolves_the_superset_flip() {
         .expect_exact("svelte facts");
     let props_type = facts.syntax().props_type.as_ref().expect("props type");
 
-    let fixture_dispatch_16 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let fixture_dispatch_16 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let surface =
         navigate_param_to_object_surface(&ctx, &fixture_dispatch_16, component, props_type)
             .resolved_for_tests()
             .expect("props surface");
-    let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
     let x = surface
         .members
         .iter()
@@ -3763,9 +3805,9 @@ fn realize_of_derived_union_collapses_duplicate_realized_arms() {
     // The production shape: `default: SlotA | SlotB` raises an AUTHORED
     // union shell of reference carriers.
     let authored = graph.intern_node(SemanticNodeData::Union(
-        crate::semantic_query::composite::CompositeList::authored_shell(Arc::from(
-            vec![via_one, via_two].into_boxed_slice(),
-        )),
+        verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
+            Arc::from(vec![via_one, via_two].into_boxed_slice()),
+        ),
     ));
     assert_eq!(
         realize_callable_member(&dispatch, authored, navigate()).resolved_for_tests(),
@@ -3783,7 +3825,7 @@ fn realize_of_derived_union_collapses_duplicate_realized_arms() {
 /// never an incomplete realization.
 #[test]
 fn a_builtin_nominal_carrier_realizes_to_a_complete_non_callable() {
-    use crate::typeinfo::surface_resolution::SurfaceResolution;
+    use verter_type_engine::semantic_query::surface_resolution::SurfaceResolution;
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3802,7 +3844,7 @@ fn a_builtin_nominal_carrier_realizes_to_a_complete_non_callable() {
 /// event and is DECIDED: the enumeration stays complete.
 #[test]
 fn event_names_builtin_nominal_first_param_is_a_complete_non_contributor() {
-    use crate::typeinfo::surface_resolution::SurfaceResolution;
+    use verter_type_engine::semantic_query::surface_resolution::SurfaceResolution;
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = Arc::clone(host.project_type_store().semantic_graph());
@@ -3820,4 +3862,4 @@ fn event_names_builtin_nominal_first_param_is_a_complete_non_contributor() {
     );
 }
 
-use crate::resolver_core::request_ports::OwnedLowering as _;
+use verter_type_engine::resolver_core::request_ports::OwnedLowering as _;

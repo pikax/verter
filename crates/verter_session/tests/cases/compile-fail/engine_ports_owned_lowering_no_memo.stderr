@@ -1,5 +1,5 @@
-error[E0599]: no method named `decl_bodies` found for struct `verter_session::decl_body_memo::IndexedExpressionDemand` in the current scope
+error[E0599]: no method named `decl_bodies` found for struct `verter_session::host_source_demand::HostExpressionDemand` in the current scope
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/engine_ports_owned_lowering_no_memo.rs
   |
   |         source.decl_bodies();
-  |                ^^^^^^^^^^^ method not found in `verter_session::decl_body_memo::IndexedExpressionDemand`
+  |                ^^^^^^^^^^^ method not found in `verter_session::host_source_demand::HostExpressionDemand`

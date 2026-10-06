@@ -7,6 +7,7 @@
 //! `Ns.Member` names) into the `DeclHeaderIndex` augmentation-scope
 //! inventories, mirroring the whole-env augmentation walk in
 //! `crate::analysis::type_eval_build::build_eval_env`.
+use verter_session_query::declarations::header_index::AugmentationBlockRecord;
 
 use super::*;
 
@@ -66,7 +67,7 @@ pub(super) fn index_augmentation_block(
     index.augmentation_blocks.push(AugmentationBlockRecord {
         scope: scope.clone(),
         owner: ctx.anchor.owner,
-        span: block.span.into(),
+        span: verter_span::Span::new(block.span.start, block.span.end),
         default_export,
         export_assignment,
     });
@@ -245,7 +246,7 @@ impl<'s, 'a> NamespaceVisitor<'s, 'a> for AugmentationNamespaces<'_, '_> {
                 NamespaceBlockRecord {
                     owner: self.ctx.anchor.owner,
                     qualified_name: self.path.name().to_owned(),
-                    span: decl.span.into(),
+                    span: verter_span::Span::new(decl.span.start, decl.span.end),
                     instantiated: false,
                 },
             ));
@@ -439,18 +440,18 @@ fn index_augmentation_class_value(
         .entry(ctx.key(id.name.as_str()))
         .or_insert_with(|| ValueDeclHeader {
             kind: ValueDeclKind::Class,
-            span: cls.span.into(),
-            name_span: id.span.into(),
+            span: verter_span::Span::new(cls.span.start, cls.span.end),
+            name_span: verter_span::Span::new(id.span.start, id.span.end),
             object_member_headers: Vec::new(),
             contributors: Vec::new(),
         });
     entry.kind = ValueDeclKind::Class;
-    entry.span = cls.span.into();
-    entry.name_span = id.span.into();
+    entry.span = verter_span::Span::new(cls.span.start, cls.span.end);
+    entry.name_span = verter_span::Span::new(id.span.start, id.span.end);
     push_contributor(
         &mut entry.contributors,
         ctx,
-        cls.span.into(),
-        id.span.into(),
+        verter_span::Span::new(cls.span.start, cls.span.end),
+        verter_span::Span::new(id.span.start, id.span.end),
     );
 }

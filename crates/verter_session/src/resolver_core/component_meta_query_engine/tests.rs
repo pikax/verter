@@ -41,7 +41,8 @@ export interface AvatarProps {
     );
     assert!(host.ensure_loaded("/src/Avatar.vue"));
 
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_0);
 
     let declaration = engine
@@ -56,7 +57,7 @@ export interface AvatarProps {
     assert_eq!(declaration.resolved_name, "AvatarProps");
     assert_eq!(
         declaration.kind,
-        crate::resolver_core::ResolvedDeclarationKind::Interface,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
     );
     assert!(
         declaration.span.end > declaration.span.start,
@@ -98,7 +99,8 @@ export interface AvatarProps {
     );
     assert!(host.ensure_loaded("/src/Avatar.vue"));
 
-    let fixture_dispatch_1 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_1 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_1);
 
     let declaration = engine
@@ -113,7 +115,7 @@ export interface AvatarProps {
     assert_eq!(declaration.resolved_name, "AvatarProps");
     assert_eq!(
         declaration.kind,
-        crate::resolver_core::ResolvedDeclarationKind::Interface,
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
     );
     assert!(
         declaration.span.end > declaration.span.start,
@@ -199,13 +201,14 @@ defineProps<{
         .and_then(|field| field.payload.clone())
         .unwrap_or_else(|| panic!("the analyzer must stamp the title field's payload locator"));
 
-    let fixture_dispatch_2 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_2 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_2);
     let field_value = engine
         .macro_field_value_node(
             "/src/App.vue",
             0,
-            &[verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from("title"))],
+            &[verter_session_query::analysis::field_path::PathSegment::Member(Arc::from("title"))],
         )
         .expect("title field value node");
     let fast = engine
@@ -294,14 +297,15 @@ defineProps<{
         .and_then(|field| field.payload.clone())
         .unwrap_or_else(|| panic!("the analyzer must stamp the content field's payload locator"));
 
-    let fixture_dispatch_3 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_3 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_3);
     let field_value = engine
         .macro_field_value_node(
             "/src/App.vue",
             0,
             &[
-                verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from(
+                verter_session_query::analysis::field_path::PathSegment::Member(Arc::from(
                     "content",
                 )),
             ],
@@ -382,14 +386,15 @@ defineProps<{
         .and_then(|field| field.payload.clone())
         .unwrap_or_else(|| panic!("the analyzer must stamp the contentId field's payload locator"));
 
-    let fixture_dispatch_4 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_4 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_4);
     let field_value = engine
         .macro_field_value_node(
             "/src/App.vue",
             0,
             &[
-                verter_semantic::analysis::type_eval_build::PathSegment::Member(Arc::from(
+                verter_session_query::analysis::field_path::PathSegment::Member(Arc::from(
                     "contentId",
                 )),
             ],
@@ -449,7 +454,8 @@ export interface LinkProps extends NuxtLinkProps {
     assert!(host.ensure_loaded("/src/Link.vue"));
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_5 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_5 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_5);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
@@ -534,7 +540,8 @@ export class MixedClass {
     assert!(host.ensure_loaded("/src/Mixed.vue"));
     let _store_view = host.resolver_store_view();
 
-    let fixture_dispatch_6 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_6 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_6);
 
     let member_names = |projected: &TypeExpr| -> std::collections::BTreeSet<String> {
@@ -664,7 +671,8 @@ export interface LinkProps extends NuxtLinkProps {
     assert!(host.ensure_loaded("/src/Link.vue"));
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_7 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_7 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_7);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
@@ -775,7 +783,8 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     assert!(host.ensure_loaded("/src/Link.vue"));
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_8 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_8 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_8);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["to".to_string(), "target".to_string()]);
@@ -914,7 +923,8 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     assert!(host.ensure_loaded("/src/Link.vue"));
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_9 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_9 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_9);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["target".to_string(), "to".to_string()]);
@@ -1052,7 +1062,8 @@ export interface LinkProps extends NuxtLinkProps, Omit<ButtonHTMLAttributes, 'ty
     );
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_10 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_10 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_10);
     let route =
         crate::resolver_core::RouteDemand::pick(vec!["target".to_string(), "to".to_string()]);
@@ -1142,7 +1153,8 @@ type F<T> = <T>(x: T) => T
 
     let _store_view = host.resolver_store_view_read().into_owned_view();
 
-    let fixture_dispatch_11 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_11 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let query_engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_11);
 
     // `F<string>` — instantiate the generic function-typed alias with the
@@ -1495,7 +1507,7 @@ defineProps<Pick<HelperProps, 'size'>>()
     let resolved = host
         .resolve_component_meta(
             "/src/Card.vue",
-            crate::semantic_query::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("Card.vue must resolve");
 
@@ -1532,11 +1544,10 @@ fn step8_route_hash_pure_content_derived() {
     use crate::resolver_core::shallow_file_state::ShallowFileState;
 
     use std::sync::Arc;
-    use verter_semantic::analysis::Hash16;
+    use verter_session_query::analysis::types::Hash16;
 
-    let routes = Arc::new(
-        verter_parser::utils::oxc::script::route_inventory::ScriptRouteInventory::default(),
-    );
+    let routes =
+        Arc::new(verter_session_query::analysis::route_inventory::ScriptRouteInventory::default());
     let state = ShallowFileState::header_routing_only_for_test(Hash16::default(), routes);
 
     let h1 = crate::resolver_store::hash_route_surface(&state);
@@ -1768,7 +1779,7 @@ defineProps<{
     let resolved = host
         .resolve_component_meta(
             "/src/Avatar.vue",
-            crate::semantic_query::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("Avatar.vue must resolve under audit-enabled config");
 
@@ -1837,7 +1848,7 @@ defineProps<{ size?: 'sm' | 'md' | 'lg' }>()
     let resolved = host
         .resolve_component_meta(
             "/src/Avatar.vue",
-            crate::semantic_query::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("Avatar.vue must resolve under audit-off config");
 
@@ -1946,7 +1957,8 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
             extensions: vec![],
             workspace_root: "/workspace/node_modules/@me/inner-pkg".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace/node_modules/@me/inner-pkg"),
@@ -1970,14 +1982,16 @@ fn workspace_classification_helpers_use_typed_accessor_not_substring() {
     )]);
     assert!(host.ensure_loaded(workspace_linked_canonical));
 
-    // Sanity: the typed accessor on the host's resolver-context
+    // Sanity: the host's typed ownership accessor and its resolver-context
     // surface must classify the workspace-linked-package canonical
     // as workspace-owned (NOT package-backed). The substring check
     // on the same canonical would return `true` (path contains
     // `/node_modules/`).
-    let ctx: &dyn super::super::ResolverContext = &host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = &host;
     assert!(
-        ctx.workspace_is_workspace_owned(workspace_linked_canonical),
+        host.workspace_is_workspace_owned(workspace_linked_canonical),
         "workspace-linked package must be workspace-owned per typed accessor",
     );
     assert!(
@@ -2075,7 +2089,8 @@ fn resolve_imported_registry_symbol_reuses_value_on_admission_failure_without_re
         }],
     );
 
-    let fixture_dispatch_12 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_12 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_12);
     // Prime the wildcard-route fuse so exactly ONE further slow-lane
     // `allow_wildcard_route()` stays within budget — a second
@@ -2177,7 +2192,7 @@ fn resolve_imported_registry_symbol_reuses_value_on_admission_failure_without_re
 ///    concurrently-published symbol.
 #[test]
 fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
-    use super::ResolvedImportedRegistrySymbol;
+    use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
 
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
@@ -2216,7 +2231,8 @@ fn resolve_imported_registry_symbol_surfaces_concurrently_published_value() {
         .ensure_indexed_ready("/concurrent_pub/index.ts")
         .is_some());
 
-    let fixture_dispatch_13 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_13 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_13);
 
     // The value a concurrent request validated-and-published into the
@@ -2413,69 +2429,70 @@ fn resolve_imported_registry_symbol_resolves_once_under_concurrent_misses() {
         .imported_registry_db()
         .subscribe_joiner_park_for_test();
 
-    let results: Vec<(usize, Option<super::ResolvedImportedRegistrySymbol>)> =
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..WORKERS)
-                .map(|_| {
-                    let host_ref = &host;
-                    scope.spawn(move || {
-                        let fixture_dispatch_14 =
-                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                host_ref,
-                            );
-                        let mut engine =
-                            ComponentMetaQueryEngine::new(host_ref, &fixture_dispatch_14);
-                        // Give each worker's wildcard-route fuse ample
-                        // budget: the discriminator is the SUMMED
-                        // consumption count, not a near-fanout trip.
-                        engine.prime_wildcard_route_fuse_for_tests(WORKERS + 4);
-                        let fuse_before = engine.wildcard_route_fuse_consumed_for_tests();
-                        let resolved = engine.resolve_imported_registry_symbol(
-                            "/singleflight/index.ts",
-                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                            "Wide",
+    let results: Vec<(
+        usize,
+        Option<verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol>,
+    )> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let host_ref = &host;
+                scope.spawn(move || {
+                    let fixture_dispatch_14 =
+                        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                            host_ref,
                         );
-                        let fuse_consumed = engine
-                            .wildcard_route_fuse_consumed_for_tests()
-                            .saturating_sub(fuse_before);
-                        (fuse_consumed, resolved)
-                    })
+                    let mut engine = ComponentMetaQueryEngine::new(host_ref, &fixture_dispatch_14);
+                    // Give each worker's wildcard-route fuse ample
+                    // budget: the discriminator is the SUMMED
+                    // consumption count, not a near-fanout trip.
+                    engine.prime_wildcard_route_fuse_for_tests(WORKERS + 4);
+                    let fuse_before = engine.wildcard_route_fuse_consumed_for_tests();
+                    let resolved = engine.resolve_imported_registry_symbol(
+                        "/singleflight/index.ts",
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        "Wide",
+                    );
+                    let fuse_consumed = engine
+                        .wildcard_route_fuse_consumed_for_tests()
+                        .saturating_sub(fuse_before);
+                    (fuse_consumed, resolved)
                 })
-                .collect();
+            })
+            .collect();
 
-            // Winner-park rendezvous — prove every joiner has coalesced
-            // onto the winner's in-flight slot BEFORE releasing the winner.
-            // The joiner-park send fires immediately before `Condvar::wait_while`,
-            // so WORKERS-1 receipts are the exact occupancy proof.
-            let mut coalesced = 0usize;
-            for i in 0..(WORKERS - 1) {
-                parked
-                    .recv_timeout(std::time::Duration::from_secs(30))
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "joiner {i} failed to coalesce onto the winner's in-flight slot \
+        // Winner-park rendezvous — prove every joiner has coalesced
+        // onto the winner's in-flight slot BEFORE releasing the winner.
+        // The joiner-park send fires immediately before `Condvar::wait_while`,
+        // so WORKERS-1 receipts are the exact occupancy proof.
+        let mut coalesced = 0usize;
+        for i in 0..(WORKERS - 1) {
+            parked
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "joiner {i} failed to coalesce onto the winner's in-flight slot \
                              within 30s — the deterministic singleflight rendezvous is broken"
-                        )
-                    });
-                coalesced += 1;
-            }
-            // Release the winner BEFORE joining so a coalescing timeout can
-            // never deadlock the scope's thread join on the parked winner;
-            // the `_winner_park_guard` is a drop-time backstop.
-            winner_release.release();
-            assert_eq!(
-                coalesced,
-                WORKERS - 1,
-                "the {WORKERS} concurrent cold-miss workers failed to coalesce onto ONE \
+                    )
+                });
+            coalesced += 1;
+        }
+        // Release the winner BEFORE joining so a coalescing timeout can
+        // never deadlock the scope's thread join on the parked winner;
+        // the `_winner_park_guard` is a drop-time backstop.
+        winner_release.release();
+        assert_eq!(
+            coalesced,
+            WORKERS - 1,
+            "the {WORKERS} concurrent cold-miss workers failed to coalesce onto ONE \
                  in-flight slot — the deterministic singleflight rendezvous is \
                  broken (the winner-park / joiner-park contract no longer holds)",
-            );
+        );
 
-            handles
-                .into_iter()
-                .map(|h| h.join().expect("worker thread joined"))
-                .collect()
-        });
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("worker thread joined"))
+            .collect()
+    });
 
     let total_fuse_consumed: usize = results.iter().map(|(consumed, _)| consumed).sum();
     assert_eq!(
@@ -2568,7 +2585,9 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
     // trips immediately, so the symbol is never looked up (PARTIAL).
     {
         let fixture_dispatch_15 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                host.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_15);
         engine.prime_wildcard_route_fuse_for_tests(0);
         let resolved = engine.resolve_imported_registry_symbol(
@@ -2597,7 +2616,7 @@ fn fuse_tripped_route_only_symbol_admits_no_warm_negative_and_fresh_resolves() {
     // Request 2 — FRESH engine WITH budget. The symbol resolves (proving
     // no warm negative short-circuited it to None).
     let fixture_dispatch_15 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_15);
     let resolved2 = engine2.resolve_imported_registry_symbol(
         "/m4_src/index.ts",
@@ -2640,12 +2659,14 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
     // because the partial sticky is request-scoped (production
     // component-meta requests always install one before resolving).
     {
-        use crate::request_context::{RequestContext, RequestContextGuard};
+        use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
         let rctx = RequestContext::new(1, Arc::from("/m4_src/index.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
 
         let fixture_dispatch_16 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                host.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_16);
         engine.prime_wildcard_route_fuse_for_tests(0);
         let _ = engine.can_resolve_registry_symbol(
@@ -2659,7 +2680,7 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
             "fixture invariant: the wildcard-route fuse tripped during resolvability",
         );
         assert!(
-            crate::request_context::current_request_result_is_partial(),
+            verter_type_engine::request_context::current_request_result_is_partial(),
             "precondition: the fuse-trip MUST set the request partial sticky",
         );
     }
@@ -2673,7 +2694,7 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
 
     // Request 2 — FRESH engine WITH budget. The symbol IS resolvable.
     let fixture_dispatch_16 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let mut engine2 = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_16);
     let resolvable2 = engine2.can_resolve_registry_symbol(
         "/m4_src/index.ts",
@@ -2709,8 +2730,8 @@ fn fuse_tripped_resolvability_does_not_cache_derived_false() {
 /// same-generation warm hit inherits the stale verdict.
 #[test]
 fn fenced_serve_resolvability_verdict_is_not_admitted() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
     use std::sync::atomic::Ordering;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     // Control — an UNFENCED resolvability query admits the verdict.
     let control = build_route_only_reexport_host();
@@ -2722,7 +2743,9 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
         let _guard = RequestContextGuard::install(rctx);
 
         let fixture_dispatch_17 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                control.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_17);
         assert!(
             engine.can_resolve_registry_symbol(
@@ -2752,7 +2775,9 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
         let _guard = RequestContextGuard::install(rctx);
 
         let fixture_dispatch_18 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                host.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_18);
         host.test_force
             .force_indexed_ready_serve_fence_for_tests
@@ -2769,7 +2794,7 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
         // Orthogonality: a fenced serve is non-cacheable, NOT partial — it must
         // NOT raise the request partial sticky.
         assert!(
-            !crate::request_context::current_request_result_is_partial(),
+            !verter_type_engine::request_context::current_request_result_is_partial(),
             "a fenced resolvability serve is non-cacheable, NOT partial — non-cacheability \
              routes through the fact tracer, never the partial sticky",
         );
@@ -2800,8 +2825,8 @@ fn fenced_serve_resolvability_verdict_is_not_admitted() {
 /// (`live_count` grows); the overflowed compute must NOT.
 #[test]
 fn tracer_overflow_refuses_resolvability_verdict_admission() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
     use std::sync::atomic::Ordering;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     // Control — an unarmed resolvability query admits the verdict.
     let control = build_route_only_reexport_host();
@@ -2813,7 +2838,9 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
         let _guard = RequestContextGuard::install(rctx);
 
         let fixture_dispatch_19 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                control.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_19);
         assert!(
             engine.can_resolve_registry_symbol(
@@ -2842,12 +2869,15 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
         let _guard = RequestContextGuard::install(rctx);
 
         let fixture_dispatch_20 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                host.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_20);
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(
-                crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+                verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
                 Ordering::Relaxed,
             );
         let resolvable = engine.can_resolve_registry_symbol(
@@ -2857,6 +2887,7 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
             None,
         );
         host.test_force
+            .engine
             .force_fact_tracer_overflow_observations
             .store(0, Ordering::Relaxed);
         // The verdict still flows to THIS caller (overflow is cache-only).
@@ -2867,7 +2898,7 @@ fn tracer_overflow_refuses_resolvability_verdict_admission() {
         );
         // Orthogonality: overflow is non-cacheable, NOT partial.
         assert!(
-            !crate::request_context::current_request_result_is_partial(),
+            !verter_type_engine::request_context::current_request_result_is_partial(),
             "a tracer overflow is non-cacheable, NOT partial — it must never raise the \
              request partial sticky",
         );
@@ -2926,7 +2957,8 @@ fn scope_shadowing_is_built_once_per_scope_and_memoized() {
     assert!(host.ensure_loaded("/src/A.vue"));
     assert!(host.ensure_loaded("/src/B.vue"));
 
-    let fixture_dispatch_21 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let fixture_dispatch_21 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
     let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_21);
 
     // Two probes for the SAME scope reuse ONE cached instance — the
@@ -2995,7 +3027,9 @@ fn fenced_serve_declaration_lookup_is_not_admitted() {
     let control_before = control_db.live_count();
     let control_resolved = {
         let fixture_dispatch_22 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                control.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_22);
         engine
             .resolve_type_declaration(
@@ -3029,7 +3063,9 @@ fn fenced_serve_declaration_lookup_is_not_admitted() {
         .store(true, Ordering::Relaxed);
     let fenced_resolved = {
         let fixture_dispatch_23 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(fenced.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                fenced.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref(), &fixture_dispatch_23);
         engine
             .resolve_type_declaration(
@@ -3095,7 +3131,9 @@ fn fenced_serve_imported_registry_symbol_is_not_admitted() {
     let control_before = control_db.live_count();
     let control_resolved = {
         let fixture_dispatch_24 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                control.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_24);
         engine
             .resolve_imported_registry_symbol(
@@ -3128,7 +3166,9 @@ fn fenced_serve_imported_registry_symbol_is_not_admitted() {
         .store(true, Ordering::Relaxed);
     let fenced_resolved = {
         let fixture_dispatch_25 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(fenced.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                fenced.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(fenced.as_ref(), &fixture_dispatch_25);
         engine
             .resolve_imported_registry_symbol(
@@ -3220,7 +3260,9 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
     let control_before = control_db.live_count();
     let control_locator = {
         let fixture_dispatch_26 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(control.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                control.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(control.as_ref(), &fixture_dispatch_26);
         engine.owner_collection_expr(
             "/oc_src/types.ts",
@@ -3256,6 +3298,7 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
         state
             .decl_bodies()
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
+            .value
             .is_some(),
         "fixture invariant: the pin demand must acquire the owner's retained-snapshot lease",
     );
@@ -3265,7 +3308,9 @@ fn broken_decl_body_lease_owner_collection_is_not_admitted() {
     let broken_before = broken_db.live_count();
     let broken_locator = {
         let fixture_dispatch_27 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(broken.as_ref());
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                broken.as_ref(),
+            );
         let mut engine = ComponentMetaQueryEngine::new(broken.as_ref(), &fixture_dispatch_27);
         engine.owner_collection_expr(
             "/oc_src/types.ts",
@@ -3328,13 +3373,14 @@ fn broken_decl_body_lease_prepared_decl_scratch_memo_does_not_shadow_recovery() 
         state
             .decl_bodies()
             .type_decl_in(verter_type_expr::TopLevelOwnerId::ordinary_file(), "Pin")
+            .value
             .is_some(),
         "fixture invariant: the pin demand must acquire the owner's retained-snapshot lease",
     );
     state.decl_bodies().release_retained_snapshot_for_test();
 
     let fixture_dispatch_28 =
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
     let mut engine = ComponentMetaQueryEngine::new(host.as_ref(), &fixture_dispatch_28);
     let degraded = engine.prepared_type_decl(
         "/oc_src/types.ts",

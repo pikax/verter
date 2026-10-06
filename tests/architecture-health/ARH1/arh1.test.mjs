@@ -23,10 +23,10 @@ const cloneProducts = () => structuredClone(clean);
 const hotspot = (dirty, path) =>
   dirty["dependency-contracts"].hotspots.find((h) => h.path === path);
 const SCHEDULER = "crates/verter_scheduler/src/scheduler.rs";
-const FLOW_RETURN = "crates/verter_session/src/project_semantic_dispatch/flow_return.rs";
-const PSD_BUILD = "crates/verter_session/src/project_semantic_dispatch/build.rs";
-const SEMANTIC_QUERY = "crates/verter_session/src/semantic_query.rs";
-const FLOW_SLICE = "crates/verter_session/src/flow_slice_content.rs";
+const FLOW_RETURN = "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs";
+const PSD_BUILD = "crates/verter_type_engine/src/project_semantic_dispatch/build.rs";
+const SEMANTIC_QUERY = "crates/verter_type_engine/src/semantic_query.rs";
+const FLOW_SLICE = "crates/verter_semantic_source/src/flow_slice_content.rs";
 
 test("ARH1-ratification: clean products validate and cover every mandatory case surface", () => {
   const result = validate(clean, loadManifest(), arh0);
@@ -72,7 +72,7 @@ test("ARH1-hotspot-coverage dirty twin: an ARH0 hotspot without a contract is re
 test("ARH1-hotspot-coverage dirty twin: a contract row the inventory does not carry is rejected (AC1)", () => {
   const dirty = cloneProducts();
   const row = hotspot(dirty, SEMANTIC_QUERY);
-  row.path = "crates/verter_session/src/semantic_query_memo/arena.rs";
+  row.path = "crates/verter_type_engine/src/semantic_query_memo/arena.rs";
   const result = validate(dirty, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(
@@ -1078,7 +1078,7 @@ test("ARH1-state-lifetimes dirty twin: an unrelated file mentioning the state in
   const dirty = cloneProducts();
   const row = hotspot(dirty, SCHEDULER).stateLifetimes.find((s) => s.state === "Scheduler.nodes");
   // semantic_query.rs mentions "nodes" in prose/comments; it declares none.
-  row.soleOwner = "crates/verter_session/src/semantic_query.rs";
+  row.soleOwner = "crates/verter_type_engine/src/semantic_query.rs";
   const result = validate(dirty, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(
@@ -1299,7 +1299,7 @@ test("ARH1-hotspot-coverage dirty twin: an authority owner that is not a cohesiv
   const a2 = hotspot(wrongResponsibility, SCHEDULER).authority.find(
     (x) => x.responsibility === "batch coordination",
   );
-  a2.survivingOwner = "crates/verter_scheduler/src/cancellation.rs";
+  a2.survivingOwner = "crates/verter_execution/src/cancellation.rs";
   result = validate(wrongResponsibility, loadManifest(), arh0);
   assert.equal(result.ok, false);
   assert.ok(

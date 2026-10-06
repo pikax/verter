@@ -1,0 +1,3634 @@
+//! Lazy declaration-body memo — the content-addressed body store one
+//! `IndexedReady` artifact owns.
+//!
+//! The shallow declaration-header index ([`DeclHeaderIndex`]) is the
+//! eager inventory; THIS memo materialises declaration BODIES on first
+//! semantic demand, through the scheduler-side
+//! [`DeclLoweringService`] retained snapshot (never a re-parse per
+//! touch — native retains the snapshot on a worker thread it owns;
+//! `wasm32` retains it in a single-thread thread-local shard, NOT a
+//! service field, since the `Rc`-backed parse is `!Send`/`!Sync`),
+//! and caches the owned results per symbol.
+//! The memo is a FILE-ARTIFACT
+//! child: its identity is the owning artifact's
+//! `(canonical, whole_hash, parse_env_hash)` [`SnapshotKey`] — content-
+//! addressed by construction, so a content edit produces a fresh memo
+//! and the superseded one can never answer a new-content demand.
+//! Overlay artifacts own their own memo instance; an overlay body can
+//! therefore never populate a base read (and vice versa).
+//!
+//! Concurrency: one `OnceLock` per `(space, scope, name)` entry —
+//! concurrent first-touch of one symbol lowers it ONCE; waiters block
+//! cooperatively on the cell. The cell is cloned OUT of the map before
+//! initialisation so no map shard lock is held across the lowering
+//! call. A demanded statement that also declares sibling symbols
+//! backfills exactly those siblings' entries (the work was actually
+//! performed — path-independent population of only what the compute
+//! produced).
+use verter_session_query::source::demand::DemandOutcome;
+use verter_session_query::source::demand::SourceRead;
+use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
+
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
+
+use dashmap::DashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use verter_parser::utils::oxc::script::raw_surface::{
+    capture_statement_surfaces, merge_overload_groups, RawSourceSurface, SymbolSpace,
+};
+use verter_semantic::analysis::decl_dependencies::{
+    collect_statement_dependency_names, DeclDependencyNames, DeclarationPath,
+};
+use verter_semantic::analysis::decl_headers::build_decl_header_index;
+use verter_semantic::analysis::framework_facts::svelte::{
+    lower_props_annotation_at_with_owners, lower_svelte_type_argument_at_with_owners,
+    PropsAnnotationLowering, SvelteTypeArgumentLowering,
+};
+use verter_semantic::analysis::type_eval_build::{
+    lower_jsdoc_typedef_at_comment, lower_statement_parts, lower_svelte_runes_statement_parts,
+    register_statement_parts, BuildEvalEnvContext, LoweredTypeDeclParts, LoweredValueDeclParts,
+    StatementLowerCtx,
+};
+use verter_session_query::declarations::header_index::DeclHeaderIndex;
+use verter_session_query::declarations::{
+    AugmentationScopeKind, EnumMemberValue, EvalEnv, FunctionSignature, TypeDeclKind,
+    ValueDeclGroup, ValueDeclKind,
+};
+use verter_session_query::facts::{
+    produce_shallow_route_facts, type_body_fingerprint, value_body_fingerprint, CrossDeclLens,
+    EmptyRouteFactLens, HashOutcome, RouteFactLens, TransientTypeBody, UnresolvedLens,
+    ValueBodyFingerprintInput,
+};
+use verter_session_query::source::transient_parts::{TransientTypeParts, TransientValueParts};
+use verter_session_query::type_solver::prepared::{
+    collect_heritage_base_facts, collect_key_domain_closedness_fact,
+};
+use verter_session_query::type_solver::{PreparedTypeDecl, ResolvedRootIdentity};
+use verter_type_expr::facts::{
+    EnumScalar, HeritageBaseFact, KeyDomainClosednessFact, NarrowTypeParam, PreparedMemberFact,
+    TypeDependencyPathFact, ValueAnnotationClass, VueIgnoredHeritageFact,
+};
+use verter_type_expr::locators::{TypeBodyPathStep, TypeBodySlot};
+use verter_type_expr::span_origins::DeclContributorAnchor;
+use verter_type_expr::{DeclBindingKey, ObjectExpr, TopLevelOwnerId, TypeExpr, TypeParam};
+
+use crate::decl_lowering::{DeclLoweringCounters, DeclLoweringService, SnapshotLease};
+use crate::parsed_eval_program::{WalkStackRefused, WalkedRead};
+use crate::source_lens::{RouteLens, ShallowLens};
+use crate::typeof_dependencies::collect_typeof_roots;
+use verter_session_query::source::snapshot::SnapshotKey;
+
+pub(crate) mod locator_deref;
+
+/// Dependency-neutral lowered declaration values are owned by
+/// `verter_session_query::resolution::lowered_decl`. This module re-exports
+/// them for the session-owned lazy-lowering machinery and its consumers.
+pub use verter_session_query::resolution::{LoweredTypeDecl, LoweredValueDecl, ValueBodyHashFact};
+
+/// Lower one call, `new` or tagged template through `lower` while
+/// collecting the read root of each of its `argument_count` arguments and
+/// of its receiver.
+///
+/// Absence of an observer result stays distinct from an explicit
+/// `NonBinding` disposition: an argument or receiver the lowering did not
+/// report exactly once is an invalid observation, and the whole call is
+/// then unavailable — no missing address may fall back to the file's
+/// same-spelled value.
+fn observed_indexed_call(
+    argument_count: usize,
+    lower: impl FnOnce(
+        &mut dyn FnMut(
+            verter_semantic::analysis::type_eval_build::IndexedCallReadSite,
+            verter_session_query::analysis::indexed_value::IndexedValueReadRoot,
+        ),
+    ) -> verter_type_expr::IndexedValueCall,
+) -> Option<IndexedFlowCallExpression> {
+    use verter_semantic::analysis::type_eval_build::IndexedCallReadSite;
+    use verter_session_query::analysis::indexed_value::IndexedValueReadRoot;
+    let mut roots: Vec<Option<IndexedValueReadRoot>> = (0..argument_count).map(|_| None).collect();
+    let mut receiver_root = None;
+    let mut invalid_observation = false;
+    let call = lower(&mut |site, root| match site {
+        IndexedCallReadSite::Argument(ordinal) => match roots.get_mut(ordinal) {
+            Some(slot) => invalid_observation |= slot.replace(root).is_some(),
+            None => invalid_observation = true,
+        },
+        IndexedCallReadSite::Receiver => {
+            invalid_observation |= receiver_root.replace(root).is_some();
+        }
+    });
+    if invalid_observation {
+        return None;
+    }
+    let argument_roots = roots.into_iter().collect::<Option<Box<[_]>>>()?;
+    let receiver_root = match (call.receiver.is_some(), receiver_root) {
+        (true, Some(root)) => Some(root),
+        (false, None) => None,
+        _ => return None,
+    };
+    Some(IndexedFlowCallExpression {
+        call,
+        argument_roots,
+        receiver_root,
+    })
+}
+
+/// The committed value of one per-symbol demand cell.
+///
+/// The cell carries the [`LeaseMiss`](Self::LeaseMiss) outcome ITSELF (never a
+/// thread-local side flag) so EVERY waiter that joins the initializer's
+/// `get_or_init` observes the same outcome: a joiner can never read a
+/// [`Ready(None)`](Self::Ready) the initializer meant as a transient no-warm
+/// ReturnOnly. A `LeaseMiss` cell is EVICTED from its owning map (ptr-eq-guarded
+/// so a fresh cell a concurrent retry installed is untouched) — a later demand
+/// under a live lease recomputes; a `Ready(None)` is a genuine, cacheable
+/// absence retained warm.
+enum DemandCell<D> {
+    Ready(Option<Arc<D>>),
+    LeaseMiss,
+}
+
+type TypeCell = Arc<OnceLock<DemandCell<LoweredTypeDecl>>>;
+type ValueCell = Arc<OnceLock<DemandCell<LoweredValueDecl>>>;
+type LoweredDeclGroups = (
+    Vec<(DeclBindingKey, LoweredTypeDecl)>,
+    Vec<(DeclBindingKey, LoweredValueDecl)>,
+);
+
+/// Outcome of a demanded per-symbol lowering ([`DeclBodyMemo::lower_demanded`]).
+///
+/// The two `None`-shaped miss classes are DISTINCT and must be handled
+/// differently by the caller's memo commit:
+///
+/// - [`Ready`](Self::Ready) — the lease-only run completed. `Some(batch)` is
+///   the lowered product; `None` is a GENUINE miss (no service on a seeded
+///   memo, or a fatal parse) whose body-less result is CORRECT and cacheable.
+/// - [`LeaseMiss`](Self::LeaseMiss) — the lease pin was broken (unreachable in
+///   practice): the lowering did not run and produced NOTHING. Fail CLOSED via
+///   ReturnOnly — the caller must NOT memoize this as a body-less warm entry
+///   (a silent wrong-empty result), in DEBUG *or* RELEASE. A later demand
+///   under a live lease recovers.
+enum DemandLower {
+    Ready(Option<LoweredStatementBatch>),
+    LeaseMiss,
+}
+
+/// TRANSIENT per-name retention between `lower_statement_parts` and
+/// `register_statement_parts` inside one demanded lowering: the ordered
+/// contributor bodies (fingerprint + classification input), their
+/// contributor-statement anchors (span-origin minting), and the unioned
+/// type-parameter headers. Fact-production intermediates — live only for the
+/// duration of the lowering closure, never stored on the memo or any cache.
+#[derive(Debug, Clone, Default)]
+struct RetainedTypeTransients {
+    /// Contributor bodies in source/binder order (the same order the
+    /// registered group's contributors carry).
+    bodies: Vec<TypeExpr>,
+    /// Per-body contributor STATEMENT index (parallel to
+    /// [`bodies`](Self::bodies)): `Some(program.body ordinal)` for a
+    /// statement-lowered body — the [`DeclContributorAnchor`] the prepared
+    /// member facts' span origins descend from — and `None` for a
+    /// JSDoc-`@typedef` payload body (comment-derived, not
+    /// statement-addressable: the honest `Synthetic` origin).
+    contributor_anchors: Vec<Option<DeclContributorAnchor>>,
+    /// Type parameters unioned across contributors in source order,
+    /// first-seen by name.
+    type_parameters: Vec<TypeParam>,
+}
+
+impl RetainedTypeTransients {
+    fn push(&mut self, parts: &LoweredTypeDeclParts, anchor: Option<DeclContributorAnchor>) {
+        self.bodies.push(parts.body.clone());
+        self.contributor_anchors.push(anchor);
+        for param in &parts.type_parameters {
+            if !self.type_parameters.iter().any(|p| p.name == param.name) {
+                self.type_parameters.push(param.clone());
+            }
+        }
+    }
+
+    fn extend_from(&mut self, other: RetainedTypeTransients) {
+        self.bodies.extend(other.bodies);
+        self.contributor_anchors.extend(other.contributor_anchors);
+        for param in other.type_parameters {
+            if !self.type_parameters.iter().any(|p| p.name == param.name) {
+                self.type_parameters.push(param);
+            }
+        }
+    }
+}
+
+/// One declaration owner's typed dependency products, unioned across every
+/// same-name contributor before the lowered memo record is minted.
+#[derive(Debug, Clone, Default)]
+struct DeclDependencyFacts {
+    full: FxHashSet<TypeDependencyPathFact>,
+    structural: FxHashSet<TypeDependencyPathFact>,
+    declaration_carrier: FxHashSet<TypeDependencyPathFact>,
+    value_queries: FxHashSet<TypeDependencyPathFact>,
+    value_positions: FxHashSet<TypeDependencyPathFact>,
+    has_unroutable_value_position: bool,
+    /// The heritage-specific half of `has_unroutable_value_position`: a
+    /// class `extends` clause whose base is an EXPRESSION the dependency
+    /// walk could not name. Kept apart from the collapsed bool so a
+    /// nominal heritage consumer is not also gated by an unrelated
+    /// computed key.
+    has_unnamed_class_heritage: bool,
+}
+
+impl DeclDependencyFacts {
+    fn extend(&mut self, dependencies: DeclDependencyNames) {
+        self.full.extend(dependencies.dependency_paths);
+        self.structural
+            .extend(dependencies.structural_dependency_paths);
+        self.declaration_carrier
+            .extend(dependencies.declaration_carrier_paths);
+        self.value_queries.extend(dependencies.value_query_paths);
+        self.value_positions
+            .extend(dependencies.value_position_paths);
+        self.has_unnamed_class_heritage |= dependencies
+            .unsupported_value_positions
+            .contains(&verter_type_expr_oxc::UnsupportedValuePositionKind::ClassHeritageExpression);
+        self.has_unroutable_value_position |= !dependencies.unsupported_value_positions.is_empty();
+    }
+}
+
+/// TRANSIENT per-name VALUE-declaration retention inside one demanded
+/// lowering — the value-space sibling of [`RetainedTypeTransients`]: the
+/// last-wins contributor's lowered annotation / object shape, retained
+/// between `lower_statement_parts` and `register_statement_parts` so the
+/// value-body content fingerprint is computed AT LOWERING TIME from the same
+/// lowering that registered the facts. Fact-production intermediates — live
+/// only for the duration of the lowering closure, never stored on the memo
+/// or any cache.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RetainedValueTransients {
+    /// The LAST contributor's transient lowered annotation — strict
+    /// last-wins, mirroring [`ValueDeclGroup::primary`] (the authoritative
+    /// contributor), so the fingerprint observes the same annotation the
+    /// legacy stored-field read observed.
+    type_annotation: Option<TypeExpr>,
+    /// The LAST contributor's transient lowered object shape (same
+    /// last-wins rule).
+    object_shape: Option<ObjectExpr>,
+}
+
+impl RetainedValueTransients {
+    fn push(&mut self, parts: &LoweredValueDeclParts) {
+        self.type_annotation = parts.type_annotation.clone();
+        self.object_shape = parts.object_shape.clone();
+    }
+}
+
+/// Owned product of one statement-batch lowering job: every symbol the
+/// demanded statements actually declared, ready for entry population.
+struct LoweredStatementBatch {
+    types: Vec<(DeclBindingKey, LoweredTypeDecl)>,
+    values: Vec<(DeclBindingKey, LoweredValueDecl)>,
+    aug_types: Vec<(AugmentationScopeKind, DeclBindingKey, LoweredTypeDecl)>,
+    aug_values: Vec<(AugmentationScopeKind, DeclBindingKey, LoweredValueDecl)>,
+    /// Declaration-body contributors lowered by this job — the
+    /// `decl_bodies_lowered` increment.
+    lowered_count: usize,
+}
+
+/// A finite source-demand lease shared with the artifact's body memo.
+/// No host, graph, declaration cache, or arbitrary worker callback escapes.
+struct SnapshotDemandLease {
+    key: SnapshotKey,
+    eval_source: Arc<str>,
+    source_type: oxc_span::SourceType,
+    service: Option<Arc<DeclLoweringService>>,
+    lease: OnceLock<SnapshotLease>,
+    counters: Arc<DeclLoweringCounters>,
+}
+impl SnapshotDemandLease {
+    fn ensure_lease(&self) {
+        let Some(service) = self.service.as_ref() else {
+            return;
+        };
+        self.lease.get_or_init(|| {
+            let outcome = service.acquire_lease(&self.key, &self.eval_source, self.source_type);
+            if outcome.parsed_now {
+                self.counters
+                    .eval_program_parses
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            outcome.lease
+        });
+    }
+}
+
+/// The existing once-per-source structural index authority, selected without
+/// retaining the declaration memo or its preparation services.
+struct FunctionIndexDemand {
+    snapshot: Arc<SnapshotDemandLease>,
+    owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
+    class_fields: Arc<verter_session_query::declarations::class_fields::ClassFieldValues>,
+    function_program_index:
+        OnceLock<Arc<verter_session_query::function_program::FunctionProgramIndex>>,
+}
+impl FunctionIndexDemand {
+    pub fn function_program_index(
+        &self,
+    ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
+        if let Some(cached) = self.function_program_index.get() {
+            return WalkedRead::clean(cached.clone());
+        }
+        let Some(service) = self.snapshot.service.as_ref() else {
+            // Seeded memos carry no parse to walk; the empty index is the
+            // CORRECT value (a genuine miss, not a lease-pin break).
+            return WalkedRead::clean(
+                self.function_program_index
+                    .get_or_init(Default::default)
+                    .clone(),
+            );
+        };
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.snapshot.ensure_lease();
+        let owner_table = Arc::clone(&self.owner_table);
+        let canonical = Arc::clone(&self.snapshot.key.canonical);
+        let parse_env_hash = self.snapshot.key.parse_env_hash;
+        let class_fields = Arc::clone(&self.class_fields);
+        let Some(index) = service.run_leased(&self.snapshot.key, move |program| {
+            program.map(|p| {
+                p.function_program_index(
+                    owner_table.as_ref(),
+                    Arc::clone(&canonical),
+                    &parse_env_hash,
+                    &class_fields,
+                )
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly. NEVER memoize
+            // the empty index — a retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: function_program_index's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+            );
+            return WalkedRead::clean(Arc::new(Default::default()));
+        };
+        // A missed snapshot, or a walk-stack lease refused the program's
+        // index walks: an uncached empty index, never memoized. The refusal
+        // travels with it to the consumer that marks its result partial.
+        let index = match index {
+            Some(Ok(index)) => index,
+            missed => {
+                tracing::error!(
+                    canonical = %self.snapshot.key.canonical,
+                    "decl-body lease pin broken: function_program_index's lease-only run missed \
+                     the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
+                );
+                let empty = Arc::new(Default::default());
+                return match missed {
+                    Some(Err(WalkStackRefused)) => WalkedRead::refused(empty),
+                    _ => WalkedRead::clean(empty),
+                };
+            }
+        };
+        WalkedRead::clean(self.function_program_index.get_or_init(|| index).clone())
+    }
+}
+
+/// Owned, statically dispatched expression demands for one exact observed
+/// source. Selecting this capability performs no parsing or lowering.
+#[derive(Clone)]
+pub struct IndexedExpressionDemand {
+    snapshot: Arc<SnapshotDemandLease>,
+    index: Arc<FunctionIndexDemand>,
+    carrier_module: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(any(test, feature = "test-support"))]
+    lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
+}
+/// See module docs.
+pub struct DeclBodyMemo {
+    #[cfg(any(test, feature = "test-support"))]
+    pub capture_lookup_work: Arc<std::sync::atomic::AtomicUsize>,
+    /// This memo's slice lowerings' work
+    /// ([`crate::flow_slice_content::lowering_probe`]).
+    #[cfg(any(test, feature = "test-support"))]
+    pub lowering_work: Arc<crate::flow_slice_content::lowering_probe::LoweringWork>,
+    key: SnapshotKey,
+    #[cfg(any(test, feature = "test-support"))]
+    eval_source: Arc<str>,
+    framework_parse: Option<verter_session_query::source::framework_parse::FrameworkParseFacts>,
+    owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
+    /// Scope-aware component mode captured from the SAME retained eval program
+    /// during cold indexing. This is separate from `.svelte.ts`/`.svelte.js`
+    /// rune-module classification: a `.svelte` carrier may be legacy or runes
+    /// depending on explicit options and unresolved rune references.
+    svelte_component_runes_mode: bool,
+    /// `None` on a seeded memo (every entry pre-filled; nothing to
+    /// compute lazily).
+    service: Option<Arc<DeclLoweringService>>,
+    /// LEASE pinning this memo's retained parse snapshot for the lifetime
+    /// of the memo (hence the owning `IndexedReady` artifact). Acquired
+    /// lazily on the first service-backed body demand; dropped with the
+    /// memo, releasing the retained parse. A seeded memo (no service)
+    /// never holds a lease.
+    snapshot: Arc<SnapshotDemandLease>,
+    header_index: Arc<DeclHeaderIndex>,
+    counters: Arc<DeclLoweringCounters>,
+    /// The ONE shared shallow cross-decl lens, built ONCE per state by
+    /// the session's `fact_emission::build_shallow_lens` and installed at the end of
+    /// `ShallowFileState` construction (the lens derives from the FINISHED
+    /// state, which owns this memo — so it cannot be a plain constructor
+    /// argument). Consulted by the lowering-time body-fingerprint producer;
+    /// the SAME `Arc` backs the lazy fact source, so there is exactly one
+    /// lens instance per state.
+    lens: OnceLock<Arc<ShallowLens>>,
+    /// The ONE shared route-fact lens (hash-free full-import-target +
+    /// header-membership view) the graph-free route producer classifies
+    /// against — installed with the shallow lens at state construction.
+    route_lens: OnceLock<Arc<RouteLens>>,
+    type_entries: DashMap<DeclBindingKey, TypeCell>,
+    value_entries: DashMap<DeclBindingKey, ValueCell>,
+    aug_type_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
+    aug_value_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
+    whole_env: OnceLock<Arc<EvalEnv>>,
+    /// The per-file function program index — a DEMAND product: exact
+    /// function identities + body locators, binding/reference inventory,
+    /// return sites, writes/effects, the control-region skeleton, exact
+    /// direct local call targets, and whole-function stable hashes.
+    /// Arena-free, no lowered types; built once through the retained
+    /// snapshot on first Flow demand.
+    function_index: Arc<FunctionIndexDemand>,
+    raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
+}
+
+impl std::fmt::Debug for DeclBodyMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclBodyMemo")
+            .field("key", &self.key)
+            .field("type_entries", &self.type_entries.len())
+            .field("value_entries", &self.value_entries.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeclBodyMemo {
+    /// Production constructor: an index-only memo whose bodies lower on
+    /// first demand through `service`.
+    ///
+    /// `lease` carries the snapshot pin already acquired by the cold-index
+    /// parse (the earliest service parse for this content generation) so
+    /// the body demands reuse that one parse instead of re-parsing. When
+    /// `None`, the memo acquires its own lease lazily on first body demand
+    /// (see [`Self::ensure_lease`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        key: SnapshotKey,
+        eval_source: Arc<str>,
+        framework_parse: Option<verter_session_query::source::framework_parse::FrameworkParseFacts>,
+        source_type: oxc_span::SourceType,
+        owner_table: Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
+        svelte_component_runes_mode: bool,
+        service: Arc<DeclLoweringService>,
+        header_index: Arc<DeclHeaderIndex>,
+        counters: Arc<DeclLoweringCounters>,
+        lease: Option<SnapshotLease>,
+    ) -> Self {
+        let lease_cell = OnceLock::new();
+        if let Some(lease) = lease {
+            let _ = lease_cell.set(lease);
+        }
+        let snapshot = Arc::new(SnapshotDemandLease {
+            key: key.clone(),
+            eval_source: Arc::clone(&eval_source),
+            source_type,
+            service: Some(Arc::clone(&service)),
+            lease: lease_cell,
+            counters: Arc::clone(&counters),
+        });
+        let function_index = Arc::new(FunctionIndexDemand {
+            snapshot: Arc::clone(&snapshot),
+            owner_table: Arc::clone(&owner_table),
+            class_fields: Arc::clone(&header_index.class_field_values),
+            function_program_index: OnceLock::new(),
+        });
+        Self {
+            #[cfg(any(test, feature = "test-support"))]
+            capture_lookup_work: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            lowering_work: Arc::default(),
+            key,
+            #[cfg(any(test, feature = "test-support"))]
+            eval_source,
+            framework_parse,
+            owner_table,
+            svelte_component_runes_mode,
+            service: Some(service),
+            snapshot,
+            header_index,
+            counters,
+            lens: OnceLock::new(),
+            route_lens: OnceLock::new(),
+            type_entries: DashMap::default(),
+            value_entries: DashMap::default(),
+            aug_type_entries: DashMap::default(),
+            aug_value_entries: DashMap::default(),
+            whole_env: OnceLock::new(),
+            function_index,
+            raw_surfaces: DashMap::default(),
+        }
+    }
+
+    /// Seeded constructor for the env-supplied construction path (test
+    /// fixtures and other already-built-env callers): every entry is
+    /// pre-filled from the built env using the same per-symbol folding
+    /// the lazy path performs, and the whole env is pre-set. No service;
+    /// nothing lowers lazily.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seeded_from_env(
+        key: SnapshotKey,
+        env: &EvalEnv,
+        header_index: Arc<DeclHeaderIndex>,
+    ) -> Self {
+        let counters = Arc::new(DeclLoweringCounters::default());
+        let snapshot = Arc::new(SnapshotDemandLease {
+            key: key.clone(),
+            eval_source: Arc::from(""),
+            source_type: oxc_span::SourceType::ts(),
+            service: None,
+            lease: OnceLock::new(),
+            counters: Arc::clone(&counters),
+        });
+        let function_index = Arc::new(FunctionIndexDemand {
+            snapshot: Arc::clone(&snapshot),
+            owner_table: Arc::new(
+                verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+                    0,
+                ),
+            ),
+            class_fields: Arc::clone(&header_index.class_field_values),
+            function_program_index: OnceLock::new(),
+        });
+        let memo = Self {
+            #[cfg(any(test, feature = "test-support"))]
+            capture_lookup_work: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            lowering_work: Arc::default(),
+            key,
+            #[cfg(any(test, feature = "test-support"))]
+            eval_source: Arc::from(""),
+            framework_parse: None,
+            owner_table: Arc::new(
+                verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+                    0,
+                ),
+            ),
+            svelte_component_runes_mode: false,
+            service: None,
+            snapshot,
+            header_index,
+            counters,
+            lens: OnceLock::new(),
+            route_lens: OnceLock::new(),
+            type_entries: DashMap::default(),
+            value_entries: DashMap::default(),
+            aug_type_entries: DashMap::default(),
+            aug_value_entries: DashMap::default(),
+            whole_env: OnceLock::new(),
+            function_index,
+            raw_surfaces: DashMap::default(),
+        };
+
+        for (name, group) in &env.type_symbols {
+            let dependencies = DeclDependencyFacts::default();
+            let enum_type_arms = env
+                .value_symbols
+                .get(name)
+                .and_then(ValueDeclGroup::enum_type_union);
+            // A seeded env carries locator-only groups: no transient lowered
+            // bodies exist here, so only an ENUM group (whose fingerprint
+            // derives from its scalar-union arms, which contain no `Ref`
+            // sites — the lens is never consulted) can mint a `body_hash`
+            // at seed time. A non-enum seeded group — single AND merged —
+            // fails LOUDLY inside `lowered_type_decl_from_group`
+            // (fail-lowering, never a fabricated fingerprint); seed callers
+            // that need non-enum type cells must supply transient bodies.
+            let lowered = lowered_type_decl_from_group(
+                group,
+                &dependencies,
+                enum_type_arms,
+                &RetainedTypeTransients::default(),
+                memo.header_index
+                    .type_headers
+                    .get(name)
+                    .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
+                &UnresolvedLens,
+                &EmptyRouteFactLens,
+            );
+            memo.type_entries.insert(
+                name.clone(),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+            );
+        }
+        for (name, group) in &env.value_symbols {
+            // Seeded groups carry FACTS only — no transient lowered
+            // annotation/shape exists here, so a non-enum record whose
+            // fingerprint would need them carries the DEGRADED
+            // `budget_exceeded` outcome, forced by the session fold
+            // (`lowered_value_decl_from_group`) — a VALUE-only mechanism
+            // (the seeded TYPE prefill above fails loudly instead), distinct
+            // from the shared encoder's `MAX_HASH_DEPTH` depth-cap; an
+            // honest bit with the pre-existing admission semantics
+            // (see `ValueBodyHashFact::budget_exceeded`).
+            let lowered = lowered_value_decl_from_group(group, None, &UnresolvedLens);
+            memo.value_entries.insert(
+                name.clone(),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+            );
+        }
+        for ((scope, name), group) in &env.augmentation_scopes {
+            // Same seeded limitation as the file-scope type prefill above:
+            // locator-only groups carry no transient bodies to fingerprint.
+            let lowered = lowered_type_decl_from_group(
+                group,
+                &DeclDependencyFacts::default(),
+                None,
+                &RetainedTypeTransients::default(),
+                memo.header_index
+                    .augmentation_type_headers
+                    .get(scope)
+                    .and_then(|headers| headers.get(name))
+                    .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
+                &UnresolvedLens,
+                &EmptyRouteFactLens,
+            );
+            memo.aug_type_entries.insert(
+                (scope.clone(), name.clone()),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+            );
+        }
+        for ((scope, name), group) in &env.augmentation_value_scopes {
+            let lowered = lowered_value_decl_from_group(group, None, &UnresolvedLens);
+            memo.aug_value_entries.insert(
+                (scope.clone(), name.clone()),
+                Arc::new(OnceLock::from(DemandCell::Ready(Some(Arc::new(lowered))))),
+            );
+        }
+        let _ = memo.whole_env.set(Arc::new(env.clone()));
+        memo
+    }
+
+    pub fn header_index(&self) -> &Arc<DeclHeaderIndex> {
+        &self.header_index
+    }
+
+    pub fn owner_table(
+        &self,
+    ) -> &Arc<verter_session_query::analysis::top_level_owners::TopLevelOwnerTable> {
+        &self.owner_table
+    }
+
+    /// Install the ONE shared shallow cross-decl lens. Called exactly once, at
+    /// the end of `ShallowFileState` construction (the lens derives from the
+    /// finished state), strictly before any body demand can reach
+    /// [`Self::lower_demanded`]. Idempotent on a repeat set (first wins).
+    pub fn install_shallow_lens(&self, lens: Arc<ShallowLens>) {
+        let _ = self.lens.set(lens);
+    }
+
+    /// The shared shallow lens — the SAME `Arc` the lazy body-fact source
+    /// carries, so the lowering-time fingerprint and the fact emission read
+    /// one lens instance.
+    pub fn shallow_lens(&self) -> Arc<ShallowLens> {
+        Arc::clone(self.lens.get().expect(
+            "ShallowLens is installed at ShallowFileState construction, before any body demand",
+        ))
+    }
+
+    /// Install the ONE shared route-fact lens (the hash-free full-import-target
+    /// view the graph-free route producer classifies against). Same lifecycle
+    /// as [`Self::install_shallow_lens`]: installed exactly once at the end of
+    /// `ShallowFileState` construction, strictly before any body demand;
+    /// idempotent on a repeat set (first wins).
+    pub fn install_route_fact_lens(&self, lens: Arc<RouteLens>) {
+        let _ = self.route_lens.set(lens);
+    }
+
+    /// The shared route-fact lens.
+    pub fn route_fact_lens(&self) -> Arc<RouteLens> {
+        Arc::clone(self.route_lens.get().expect(
+            "RouteLens is installed at ShallowFileState construction, before any body demand",
+        ))
+    }
+
+    /// The canonical id this memo's snapshot lowers (anchors route-fact
+    /// recipe locators).
+    /// The lowering service this memo demands bodies through (`None` for a
+    /// seeded memo).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lowering_service_for_test(&self) -> Option<&Arc<DeclLoweringService>> {
+        self.service.as_ref()
+    }
+
+    pub fn snapshot_identity(&self) -> verter_session_query::source::snapshot::SnapshotKey {
+        self.key.clone()
+    }
+
+    pub fn canonical_id(&self) -> Arc<str> {
+        Arc::clone(&self.key.canonical)
+    }
+
+    /// The file's statically-classified [`FileLanguage`], derived from the
+    /// memo's canonical id through the global registry (no host needed) so the
+    /// lazy memo path stays self-contained. This is the rune-ambient
+    /// classification source for both the whole-env oracle and the centralized
+    /// effective-lookup.
+    fn rune_module_file_language(&self) -> verter_language::FileLanguage {
+        verter_language::LanguageRegistry::global()
+            .classify_static(self.key.canonical.as_ref())
+            .static_resolution()
+    }
+
+    /// Whether this file is a Svelte standalone rune module — the gate the
+    /// centralized effective-lookup applies before consulting the rune
+    /// ambient inventory (per-file scoping). Classified from the canonical id,
+    /// so a plain `.ts` / `.js` never reports `true`.
+    pub(crate) fn is_rune_module(&self) -> bool {
+        crate::rune_ambient::is_svelte_rune_module(&self.rune_module_file_language())
+    }
+
+    /// Whether the centralized effective lookup may consult the Svelte rune
+    /// ambient for this file. Standalone rune modules are classified by their
+    /// language id; component carriers use the scope-aware mode fact captured
+    /// from their retained combined script program during cold indexing.
+    pub fn rune_ambient_visible(&self) -> bool {
+        self.is_rune_module() || self.svelte_component_runes_mode
+    }
+
+    /// The owned framework parse facts of this content generation, when the
+    /// file is a framework carrier.
+    pub fn framework_parse_facts(
+        &self,
+    ) -> Option<&verter_session_query::source::framework_parse::FrameworkParseFacts> {
+        self.framework_parse.as_ref()
+    }
+
+    /// Acquire (once) the lease pinning this memo's retained parse
+    /// snapshot for the rest of the memo's life. Called before every
+    /// service-backed run so the snapshot stays warm across every body /
+    /// whole-env / raw-surface demand on this content generation — a live
+    /// artifact never silently re-parses. The single eval-program parse
+    /// is counted HERE (the lease acquisition); every subsequent demand
+    /// runs LEASE-ONLY (`run_leased`) against the pinned snapshot, so a
+    /// broken pin is a lowering MISS, never a transient re-parse.
+    /// A seeded memo (no service) never acquires a lease.
+    fn ensure_lease(&self) {
+        self.snapshot.ensure_lease();
+    }
+
+    pub fn indexed_expression_demand(&self) -> IndexedExpressionDemand {
+        IndexedExpressionDemand {
+            snapshot: Arc::clone(&self.snapshot),
+            index: Arc::clone(&self.function_index),
+            carrier_module: self.framework_parse.is_some(),
+            #[cfg(any(test, feature = "test-support"))]
+            capture_lookup_work: Arc::clone(&self.capture_lookup_work),
+            #[cfg(any(test, feature = "test-support"))]
+            lowering_work: Arc::clone(&self.lowering_work),
+        }
+    }
+
+    /// Demand the lowered body of one TYPE symbol, collapsing a broken
+    /// lease to an absent value that carries its `LeaseMiss` refusal by
+    /// value ([`DemandOutcome::into_source_read`]); the engine consumer
+    /// applies the refusal.
+    pub fn type_decl_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> SourceRead<Option<Arc<LoweredTypeDecl>>> {
+        self.type_decl_outcome_in(owner, name).into_source_read()
+    }
+
+    pub fn type_decl_outcome_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredTypeDecl> {
+        let key = DeclBindingKey::new(owner, name);
+        let Some((contributors, jsdoc_typedef)) = self
+            .header_index
+            .type_header_in(owner, name)
+            .map(|header| (header.contributors.clone(), header.jsdoc_typedef))
+        else {
+            // Not inventoried: a genuine, cacheable absence — never a
+            // lease-miss.
+            return DemandOutcome::Ready(None);
+        };
+        let cell = self.type_entries.entry(key.clone()).or_default().clone();
+        // Backfill runs OUTSIDE the cell commit — see [`Self::backfill`]. The
+        // initializing caller receives the batch and backfills siblings after
+        // its own cell is committed; a lease-miss evicts the cell and commits
+        // nothing.
+        let (outcome, batch) = self.demand_and_commit(
+            &cell,
+            &key,
+            &contributors,
+            jsdoc_typedef,
+            |batch| {
+                batch
+                    .types
+                    .iter()
+                    .find(|(candidate, _)| candidate == &key)
+                    .map(|(_, decl)| Arc::new(decl.clone()))
+            },
+            |poisoned| {
+                self.type_entries
+                    .remove_if(&key, |_, existing| Arc::ptr_eq(existing, poisoned));
+            },
+        );
+        if let Some(batch) = batch {
+            self.backfill(batch, &contributors, Some((SymbolSpace::Type, &key)), None);
+        }
+        outcome
+    }
+
+    /// Demand the lowered body of one file-scope VALUE symbol.
+    pub fn value_decl(&self, name: &str) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
+        self.value_decl_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn value_decl_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
+        self.value_decl_outcome_in(owner, name).into_source_read()
+    }
+
+    pub fn value_decl_outcome_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredValueDecl> {
+        let key = DeclBindingKey::new(owner, name);
+        let Some(contributors) = self
+            .header_index
+            .value_header_in(owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        let cell = self.value_entries.entry(key.clone()).or_default().clone();
+        let (outcome, batch) = self.demand_and_commit(
+            &cell,
+            &key,
+            &contributors,
+            None,
+            |batch| {
+                batch
+                    .values
+                    .iter()
+                    .find(|(candidate, _)| candidate == &key)
+                    .map(|(_, decl)| Arc::new(decl.clone()))
+            },
+            |poisoned| {
+                self.value_entries
+                    .remove_if(&key, |_, existing| Arc::ptr_eq(existing, poisoned));
+            },
+        );
+        if let Some(batch) = batch {
+            self.backfill(batch, &contributors, Some((SymbolSpace::Value, &key)), None);
+        }
+        outcome
+    }
+
+    /// Non-blocking peek at a TYPE declaration's lowered body — NEVER
+    /// triggers `acquire_lease`'s worker-thread rendezvous
+    /// (`DeclLoweringService::acquire_lease`, a genuine cross-thread
+    /// blocking wait), unlike [`Self::type_decl_outcome_in`]. The
+    /// Data-only `ResolverObservation` accessor.
+    ///
+    /// `AttemptOutcome::Complete(None)` covers BOTH "genuinely not
+    /// inventoried" (the header index — always eagerly, synchronously
+    /// available — has no entry) AND "already demanded, committed empty"
+    /// (`DemandCell::Ready(None)`): both are stable, cacheable facts.
+    /// `AttemptOutcome::NeedInputs` covers "inventoried but not yet
+    /// demanded," "a demand is currently in-flight on another thread," and
+    /// "a `DemandCell::LeaseMiss` observed in the narrow window before the
+    /// committing thread evicts it" — all three collapse to the SAME
+    /// externally-observable state (the cell entry not being a settled
+    /// `Ready`) by `DemandCell`'s own eviction invariant, and all three
+    /// mean the same thing: the caller must trigger the blocking lowering
+    /// path (`type_decl_outcome_in`) and retry, never treat this as a
+    /// stable fact.
+    ///
+    /// Provides data for immutable attempt snapshots without blocking the
+    /// semantic kernel.
+    #[allow(dead_code)]
+    pub fn peek_type_decl(
+        &self,
+        canonical: &str,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> verter_session_query::resolution::AttemptOutcome<Option<Arc<LoweredTypeDecl>>> {
+        use verter_session_query::resolution::AttemptOutcome;
+
+        if self.header_index.type_header_in(owner, name).is_none() {
+            return AttemptOutcome::Complete(None);
+        }
+        let key = DeclBindingKey::new(owner, name);
+        let entry = self.type_entries.get(&key);
+        match entry.as_deref().and_then(|cell| cell.get()) {
+            Some(DemandCell::Ready(value)) => AttemptOutcome::Complete(value.clone()),
+            Some(DemandCell::LeaseMiss) | None => {
+                AttemptOutcome::NeedInputs(self.decl_body_need_inputs(
+                    canonical,
+                    owner,
+                    name,
+                    verter_session_query::resolution::DeclarationSpace::Type,
+                ))
+            }
+        }
+    }
+
+    /// Non-blocking peek at a VALUE declaration's lowered body — the value-
+    /// space mirror of [`Self::peek_type_decl`]; see its doc comment for
+    /// the full `AttemptOutcome` mapping rationale.
+    #[allow(dead_code)]
+    pub fn peek_value_decl(
+        &self,
+        canonical: &str,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> verter_session_query::resolution::AttemptOutcome<Option<Arc<LoweredValueDecl>>> {
+        use verter_session_query::resolution::AttemptOutcome;
+
+        if self.header_index.value_header_in(owner, name).is_none() {
+            return AttemptOutcome::Complete(None);
+        }
+        let key = DeclBindingKey::new(owner, name);
+        let entry = self.value_entries.get(&key);
+        match entry.as_deref().and_then(|cell| cell.get()) {
+            Some(DemandCell::Ready(value)) => AttemptOutcome::Complete(value.clone()),
+            Some(DemandCell::LeaseMiss) | None => {
+                AttemptOutcome::NeedInputs(self.decl_body_need_inputs(
+                    canonical,
+                    owner,
+                    name,
+                    verter_session_query::resolution::DeclarationSpace::Value,
+                ))
+            }
+        }
+    }
+
+    /// Shared `LoadSet` construction for [`Self::peek_type_decl`]/
+    /// [`Self::peek_value_decl`]'s `NeedInputs` arm. `space` disambiguates
+    /// which lowering space demanded the key (see
+    /// [`verter_session_query::resolution::DeclarationSpace`]'s docs): the
+    /// same `(canonical, owner, name)` triple can independently miss in
+    /// both spaces for the same declaration name.
+    ///
+    /// The `ResolutionBasis` is [`ResolutionBasis::unbound_placeholder`]
+    /// because this memo does not own the request basis. The request driver
+    /// replaces it when incorporating the demand into an attempt.
+    fn decl_body_need_inputs(
+        &self,
+        canonical: &str,
+        owner: TopLevelOwnerId,
+        name: &str,
+        space: verter_session_query::resolution::DeclarationSpace,
+    ) -> verter_session_query::resolution::LoadSet {
+        use verter_session_query::resolution::{InputKey, LoadSet, ResolutionBasis};
+        LoadSet::new(
+            vec![InputKey::DeclBody {
+                canonical: std::sync::Arc::from(canonical),
+                owner,
+                name: std::sync::Arc::from(name),
+                space,
+            }],
+            ResolutionBasis::unbound_placeholder(),
+        )
+    }
+
+    /// The body fingerprint for a file-scope TYPE symbol — the single
+    /// output/compat body-fact site on the memo side, used by the parse-time
+    /// fact emitter to compute a body fingerprint (`semantic_hash` /
+    /// `display_hash`) and nothing else.
+    ///
+    /// The fingerprint is computed ONCE, at lazy decl-body lowering time,
+    /// from the transient lowered contributor bodies (see
+    /// [`LoweredTypeDecl::body_hash`]); this accessor returns that stored
+    /// memo-owned fact — no lens, no locator deref, no re-lowering. Demanding
+    /// the symbol's body (the one lazy lowering) is the only work this read
+    /// can trigger.
+    pub fn compat_type_body_hash_input(&self, name: &str) -> SourceRead<Option<HashOutcome>> {
+        self.compat_type_body_hash_input_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    /// Exact-owner form of [`Self::compat_type_body_hash_input`].
+    pub fn compat_type_body_hash_input_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> SourceRead<Option<HashOutcome>> {
+        self.type_decl_in(owner, name)
+            .map(|decl| decl.map(|decl| decl.body_hash.clone()))
+    }
+
+    pub fn augmentation_type_decl_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> SourceRead<Option<Arc<LoweredTypeDecl>>> {
+        self.augmentation_type_decl_outcome_in(scope, owner, name)
+            .into_source_read()
+    }
+
+    pub fn augmentation_type_decl_outcome_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredTypeDecl> {
+        let key = DeclBindingKey::new(owner, name);
+        let Some(contributors) = self
+            .header_index
+            .augmentation_type_header_in(scope, owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        let cell = self
+            .aug_type_entries
+            .entry((scope.clone(), key.clone()))
+            .or_default()
+            .clone();
+        let (outcome, batch) = self.demand_and_commit(
+            &cell,
+            &key,
+            &contributors,
+            None,
+            |batch| {
+                batch
+                    .aug_types
+                    .iter()
+                    .find(|(candidate_scope, candidate, _)| {
+                        candidate_scope == scope && candidate == &key
+                    })
+                    .map(|(_, _, decl)| Arc::new(decl.clone()))
+            },
+            |poisoned| {
+                self.aug_type_entries
+                    .remove_if(&(scope.clone(), key.clone()), |_, existing| {
+                        Arc::ptr_eq(existing, poisoned)
+                    });
+            },
+        );
+        if let Some(batch) = batch {
+            self.backfill(
+                batch,
+                &contributors,
+                None,
+                Some((scope, SymbolSpace::Type, &key)),
+            );
+        }
+        outcome
+    }
+
+    /// Demand the lowered body of one augmentation-scoped VALUE symbol.
+    pub fn augmentation_value_decl(
+        &self,
+        scope: &AugmentationScopeKind,
+        name: &str,
+    ) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
+        self.augmentation_value_decl_in(scope, TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn augmentation_value_decl_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> SourceRead<Option<Arc<LoweredValueDecl>>> {
+        self.augmentation_value_decl_outcome_in(scope, owner, name)
+            .into_source_read()
+    }
+
+    pub fn augmentation_value_decl_outcome_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<LoweredValueDecl> {
+        let key = DeclBindingKey::new(owner, name);
+        let Some(contributors) = self
+            .header_index
+            .augmentation_value_header_in(scope, owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        let cell = self
+            .aug_value_entries
+            .entry((scope.clone(), key.clone()))
+            .or_default()
+            .clone();
+        let (outcome, batch) = self.demand_and_commit(
+            &cell,
+            &key,
+            &contributors,
+            None,
+            |batch| {
+                batch
+                    .aug_values
+                    .iter()
+                    .find(|(candidate_scope, candidate, _)| {
+                        candidate_scope == scope && candidate == &key
+                    })
+                    .map(|(_, _, decl)| Arc::new(decl.clone()))
+            },
+            |poisoned| {
+                self.aug_value_entries
+                    .remove_if(&(scope.clone(), key.clone()), |_, existing| {
+                        Arc::ptr_eq(existing, poisoned)
+                    });
+            },
+        );
+        if let Some(batch) = batch {
+            self.backfill(
+                batch,
+                &contributors,
+                None,
+                Some((scope, SymbolSpace::Value, &key)),
+            );
+        }
+        outcome
+    }
+
+    /// The whole-file eval environment — a DEMAND product for whole-file
+    /// consumers. Its most-hit consumer is `local_type_declaration_id`
+    /// (type-decl identity resolution, reached on every `get_component_meta`
+    /// resolution via `base_eval_env_arc`); the others are fallthrough,
+    /// runtime values, and value-alias peeling. Built once through the
+    /// retained snapshot and memoized; the per-symbol query path never
+    /// touches it.
+    pub fn whole_env(&self) -> Arc<EvalEnv> {
+        // Warm path.
+        if let Some(cached) = self.whole_env.get() {
+            return cached.clone();
+        }
+        let Some(service) = self.service.as_ref() else {
+            // Seeded memos pre-set the env; an un-seeded memo without a service
+            // has no body to lower — the empty env is the CORRECT value, cache
+            // it (this is a genuine miss, not a lease-pin break).
+            return self
+                .whole_env
+                .get_or_init(|| Arc::new(EvalEnv::default()))
+                .clone();
+        };
+        // Pin the retained snapshot for this memo's lifetime (parse counted at
+        // lease acquisition); the LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
+        let owner_table = Arc::clone(&self.owner_table);
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
+        let Some(mut env) = service.run_leased(&self.key, move |program| {
+            // Charged on the WORKER, where the lowering actually runs — the
+            // caller thread is blocked in the rendezvous, not doing this work.
+            verter_audit::attribute_scope!(EvalEnvBuild);
+            program
+                .map(|p| {
+                    verter_semantic::analysis::type_eval_build::build_eval_env_with_owners(
+                        p.borrow_dependent(),
+                        p.source_str(),
+                        &build_ctx,
+                        owner_table.as_ref(),
+                        &class_fields,
+                    )
+                })
+                .unwrap_or_default()
+        }) else {
+            // Broken lease pin (unreachable in practice): fail CLOSED via
+            // ReturnOnly. NEVER memoize the empty env — that is the silent
+            // wrong-empty warm entry release builds used to admit; a retry
+            // under a live lease recovers. Loud, not silent.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: whole_env's lease-only run missed the \
+                 retained snapshot; failing closed to an uncached empty env (ReturnOnly)"
+            );
+            return Arc::new(EvalEnv::default());
+        };
+        self.counters
+            .eval_env_builds
+            .fetch_add(1, Ordering::Relaxed);
+        self.counters
+            .decl_bodies_lowered
+            .fetch_add(env.total_decl_count() as u64, Ordering::Relaxed);
+        // `<script setup generic="T">` parameters are NOT bound into this env:
+        // they resolve through the dispatch `DeclarationScopePayload`
+        // (`scope_type_bindings`, sourced from the prepared-decl bundle's
+        // script-setup type bindings), consulted before any per-symbol
+        // prepared-decl fallback — the same rail the per-symbol path uses.
+        // A Svelte rune module (`.svelte.ts` / `.svelte.js`) merges the
+        // module-valid runes into its whole env so its exported
+        // rune-derived types infer correctly — per-file scoped, no
+        // eval_source byte change. The runes are sourced from the SAME
+        // centralized rune ambient inventory the graph-native
+        // effective-lookup consults, so the oracle and the per-symbol
+        // readers agree on rune visibility. Classify from the canonical
+        // via the static registry (no host needed) so the lazy memo
+        // path stays self-contained.
+        if self.svelte_component_runes_mode {
+            crate::rune_ambient::merge_rune_ambient_inventory_into_env(&mut env);
+        } else {
+            let file_language = self.rune_module_file_language();
+            crate::rune_ambient::merge_rune_ambient_into_env(&mut env, &file_language);
+        }
+        // Commit only the REAL env (idempotent — a cold race loses harmlessly).
+        self.whole_env.get_or_init(|| Arc::new(env)).clone()
+    }
+
+    /// The per-file function program index — a DEMAND product built ONCE
+    /// through the retained parse snapshot (the same lease-only run every
+    /// other body product uses) and memoized. The semantic walk returns
+    /// structural per-function hashes; this boundary folds the parser /
+    /// language / parse-env identity into each entry's
+    /// `flow_body_stable_hash` so a parse-env move or a parser/language
+    /// flip misses exactly the affected artifact slots. Unrelated
+    /// functions are not lowered — the index is structural only.
+    pub fn function_program_index(
+        &self,
+    ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
+        self.function_index.function_program_index()
+    }
+
+    /// The flow-slice function key of a fixture memo's `entry`: the key a
+    /// bound flow graph over this memo's retained structure is minted under.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_slice_function_key_for_tests(
+        &self,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
+    ) -> verter_session_query::flow::bundle::FlowSliceFunctionKey {
+        let file_language =
+            verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
+        let (_, parse_key) =
+            verter_language::default_parse_identity_for(&self.eval_source, &file_language)
+                .expect("fixture parse identity");
+        verter_session_query::flow::bundle::FlowSliceFunctionKey {
+            canonical_id: Arc::clone(&self.key.canonical),
+            function: entry.key().clone(),
+            flow_body_stable_hash: entry.flow_body_stable_hash(),
+            flow_body_exact_hash: entry.flow_body_exact_hash().expect("fixture exact body"),
+            parse_env_hash: self.key.parse_env_hash,
+            parse_key,
+            file_language,
+            build_toolchain_fingerprint:
+                verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
+        }
+    }
+
+    /// Lower the selected slice content of `entry`. `policy` is the
+    /// function's own project's flow policy: the content lowering types an
+    /// optional parameter under its `strictNullChecks` algebra and an
+    /// object literal member's `this` under its `noImplicitThis` (the rest
+    /// of the content is policy-free syntax).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_slice_content(
+        &self,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
+        selection: verter_session_query::flow::slice::FlowSliceSelection,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
+        self.indexed_expression_demand()
+            .flow_slice_content(matched, selection, bound, policy)
+            .value
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_slice_content_with_context(
+        &self,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
+        selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
+        context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> Option<Arc<verter_session_query::flow::slice::SliceContent>> {
+        self.indexed_expression_demand()
+            .flow_slice_content_with_context(matched, selection, bound, context, policy)
+            .value
+    }
+
+    /// Lower selected missing annotations in one retained-source lease. Slots
+    /// preserve authored absence separately from a source/locator mismatch.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_capture_authorities(
+        &self,
+        locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
+    ) -> Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>> {
+        self.indexed_expression_demand()
+            .flow_capture_authorities(locators)
+            .value
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn flow_capture_authority(
+        &self,
+        locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
+    ) -> Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>> {
+        self.flow_capture_authorities(std::slice::from_ref(locator))?
+            .pop()?
+    }
+
+    /// The OWN type-parameter clause of one indexed function, lowered
+    /// through the same lease-only retained-snapshot run every other body
+    /// product uses (pure job, owned output, no host re-entry).
+    ///
+    /// NOT memoized: a caller demands it only for a clause the shallow
+    /// index already flagged as carrying a DEFAULT, which is rare, and
+    /// the caller's own family memo prevents same-demand recomputation.
+    /// Returns `None` on a locator miss (a typed miss, never a panic) or
+    /// on a seeded memo / broken lease pin.
+    /// The arena-free [`FunctionBodySkeleton`] of one indexed function —
+    /// the demand-sliced flow substrate's structural input, built through
+    /// the same lease-only retained-snapshot run every other body product
+    /// uses (pure job, owned output, no host re-entry). NOT memoized
+    /// here: the project-global `FunctionFlowGraphStore` is the
+    /// once-per-content-version authority and consults this producer at
+    /// most once per pinned content version. Returns `None` on a locator
+    /// miss (a typed miss, never a panic) or on a seeded memo / broken
+    /// lease pin.
+    ///
+    /// [`FunctionBodySkeleton`]: verter_session_query::flow::skeleton::FunctionBodySkeleton
+    pub fn function_body_skeleton(
+        &self,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
+    ) -> WalkedRead<Option<verter_session_query::flow::skeleton::FunctionBodySkeleton>> {
+        self.function_flow_structure(entry).map(|structure| {
+            structure
+                .ok()
+                .flatten()
+                .map(|prepared| prepared.into_parts().0)
+        })
+    }
+
+    /// Build the current frame with the index's retained closure-access facts,
+    /// returning its exact binding map with the structure for shared publication.
+    pub fn function_flow_structure(
+        &self,
+        entry: &verter_session_query::function_program::FunctionProgramEntry,
+    ) -> WalkedRead<
+        Result<
+            Option<verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton>,
+            verter_session_query::flow::binding::FlowBindingMapError,
+        >,
+    > {
+        let Some(service) = self.service.as_ref() else {
+            return WalkedRead::clean(Ok(None));
+        };
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.ensure_lease();
+        let mut refusal = None;
+        let index = self.function_program_index().absorb_into(&mut refusal);
+        let nested_bodies = crate::flow_slice_content::nested_function_bodies(&index, entry);
+        let entry = entry.clone();
+        let Some(skeleton) = service.run_leased(&self.key, move |program| {
+            program.map(|p| {
+                use verter_semantic::analysis::flow::{
+                    build_indexed_function_body_skeleton_in, FunctionBodySource,
+                };
+                use verter_semantic::analysis::function_program::FunctionNode;
+                p.with_indexed_function(&entry, |resolved, entry| {
+                    let source = match &resolved.node {
+                        FunctionNode::Function(func) => {
+                            if func.r#type == oxc_ast::ast::FunctionType::FunctionExpression {
+                                FunctionBodySource::from_function_expression(func)?
+                            } else {
+                                FunctionBodySource::from_function(func)?
+                            }
+                        }
+                        FunctionNode::Arrow(arrow) => FunctionBodySource::from_arrow(arrow),
+                        FunctionNode::Initializer(expression) => {
+                            FunctionBodySource::from_initializer(expression)
+                        }
+                    };
+                    Some(build_indexed_function_body_skeleton_in(
+                        &source,
+                        p.source_str(),
+                        &nested_bodies,
+                        entry,
+                    ))
+                })
+                .map(Option::flatten)
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: function_body_skeleton's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return WalkedRead {
+                value: Ok(None),
+                refusal,
+            };
+        };
+        WalkedRead::from_program_walk(skeleton)
+            .with_prior_refusal(refusal)
+            .map(Option::transpose)
+    }
+
+    /// Transient typed IR for one indexed declaration expression. The retained
+    /// AST is reborrowed on demand; no body `TypeExpr` is memo-owned.
+    pub fn indexed_program_expression_ir(
+        &self,
+        record: &verter_session_query::function_program::ProgramExpressionRecord,
+    ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
+        self.indexed_expression_demand()
+            .indexed_program_expression_ir(record)
+    }
+
+    /// Transient typed IR for one authored call, `new` expression or tagged
+    /// template, re-read from the retained snapshot at `span`. The call's
+    /// served-function entry is found through the program index (a
+    /// flow-selected call is inside a served function by construction); no
+    /// body `TypeExpr` is memo-owned. The lowered call's `kind` says whether
+    /// it calls or constructs.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn indexed_call_expression_at(
+        &self,
+        span: verter_span::Span,
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
+        self.indexed_call_expression_over_frame_at(span, Arc::from([]))
+    }
+
+    /// [`Self::indexed_call_expression_at`] for a flow frame that lowers
+    /// and evaluates the arguments `frame_lowered` names by ordinal itself:
+    /// a direct call among them keeps no record of its own
+    /// (`lower_indexed_call_expression_with_read_roots`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn indexed_call_expression_over_frame_at(
+        &self,
+        span: verter_span::Span,
+        frame_lowered: Arc<[bool]>,
+    ) -> Option<Arc<IndexedFlowCallExpression>> {
+        self.indexed_expression_demand()
+            .indexed_call_expression_over_frame_at(span, frame_lowered)
+            .value
+    }
+
+    /// Whether the whole-file env has already been materialised (test
+    /// observability — never a validity signal).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn whole_env_materialized(&self) -> bool {
+        self.whole_env.get().is_some()
+    }
+
+    /// Whether a per-symbol TYPE cell has a COMMITTED entry (test
+    /// observability — never a validity signal). A lease-miss ReturnOnly
+    /// leaves the (lazily-created) cell uninitialised, so this returns `false`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn type_entry_materialized(&self, name: &str) -> bool {
+        let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name);
+        self.type_entries
+            .get(&key)
+            .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
+    }
+
+    /// Whether a per-symbol VALUE cell has a COMMITTED entry (test
+    /// observability — never a validity signal).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn value_entry_materialized(&self, name: &str) -> bool {
+        let key = DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name);
+        self.value_entries
+            .get(&key)
+            .is_some_and(|cell| matches!(cell.get(), Some(DemandCell::Ready(_))))
+    }
+
+    /// Whether a `(name, space)` raw-surface capture has a COMMITTED entry
+    /// (test observability — never a validity signal). A lease-miss ReturnOnly
+    /// never inserts, so this returns `false`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn raw_surfaces_materialized(&self, name: &str, space: SymbolSpace) -> bool {
+        self.raw_surfaces.contains_key(&(
+            DeclarationPath::root(DeclBindingKey::new(TopLevelOwnerId::ordinary_file(), name)),
+            space,
+        ))
+    }
+
+    /// Break the memo's worker-retained parse snapshot so the NEXT body
+    /// demand lease-misses (test observability for the fail-closed ReturnOnly
+    /// rail). The memo still HOLDS its `SnapshotLease` (so `ensure_lease`
+    /// will not re-acquire), but the worker-side retained snapshot is
+    /// released — mirroring the invariant-violation scenario. No-op on a
+    /// seeded memo (no service).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_retained_snapshot_for_test(&self) {
+        if let Some(service) = self.service.as_ref() {
+            service.release_retained_snapshot_for_test(&self.key);
+        }
+    }
+
+    /// Demand the parse-time `RawSourceSurface` contributor vector for
+    /// one `(name, symbol_space)` — captured from exactly the demanded
+    /// symbol's contributing statements through the retained snapshot,
+    /// memoized per triple.
+    pub fn raw_surfaces_for(&self, name: &str, space: SymbolSpace) -> Arc<Vec<RawSourceSurface>> {
+        self.raw_surfaces_for_in(TopLevelOwnerId::ordinary_file(), name, space)
+    }
+
+    pub fn raw_surfaces_for_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        space: SymbolSpace,
+    ) -> Arc<Vec<RawSourceSurface>> {
+        let declaration = DeclarationPath::root(DeclBindingKey::new(owner, name));
+        if let Some(cached) = self.raw_surfaces.get(&(declaration.clone(), space)) {
+            return Arc::clone(&cached);
+        }
+
+        let mut contributors = Vec::new();
+        match space {
+            SymbolSpace::Type => {
+                if let Some(header) = self.header_index.type_header_in(owner, name) {
+                    contributors.extend_from_slice(&header.contributors);
+                }
+                // An enum is registered dual-space, so its TYPE header above
+                // already carries these locators; the dedicated enum table is
+                // the member-NAME authority, and folding its contributor
+                // locators in defensively keeps the capture complete even if a
+                // refactor ever decoupled the two (deduped below).
+                if let Some(header) = self
+                    .header_index
+                    .enum_headers
+                    .get(&DeclBindingKey::new(owner, name))
+                {
+                    contributors.extend_from_slice(&header.contributors);
+                }
+            }
+            SymbolSpace::Value => {
+                if let Some(header) = self.header_index.value_header_in(owner, name) {
+                    contributors.extend_from_slice(&header.contributors);
+                }
+                if let Some(header) = self
+                    .header_index
+                    .enum_headers
+                    .get(&DeclBindingKey::new(owner, name))
+                {
+                    contributors.extend_from_slice(&header.contributors);
+                }
+            }
+        }
+        contributors.sort_unstable_by_key(|contributor| contributor.anchor.contributor_index);
+        contributors.dedup_by_key(|contributor| contributor.anchor.contributor_index);
+
+        let surfaces =
+            if let (false, Some(service)) = (contributors.is_empty(), self.service.as_ref()) {
+                self.ensure_lease();
+                let canonical = self.key.canonical.to_string();
+                let wanted = name.to_string();
+                // LEASE-ONLY run: never a transient re-parse. A broken lease
+                // pin (the run misses the retained snapshot) fails CLOSED via
+                // ReturnOnly BELOW — the empty capture is returned UNCACHED so
+                // a lease-pin break can never silently memoize a wrong-empty
+                // capture (in DEBUG *or* RELEASE).
+                let leased = service.run_leased(&self.key, move |program| {
+                    let Some(program) = program else {
+                        return Vec::new();
+                    };
+                    let program = program.borrow_dependent();
+                    let captured: Vec<_> = contributors
+                        .iter()
+                        .filter_map(|contributor| {
+                            program
+                                .body
+                                .get(contributor.anchor.contributor_index as usize)
+                        })
+                        .flat_map(capture_statement_surfaces)
+                        .collect();
+                    merge_overload_groups(captured)
+                        .into_iter()
+                        .filter(|c| c.name == wanted && c.symbol_space == space)
+                        .map(|c| {
+                            let mut surface = c.surface;
+                            surface.decl_canonical = canonical.clone();
+                            surface
+                        })
+                        .collect::<Vec<_>>()
+                });
+                let Some(surfaces) = leased else {
+                    // Broken lease pin (unreachable in practice): ReturnOnly —
+                    // return the empty capture WITHOUT memoizing it; a retry
+                    // under a live lease recovers. Loud, not silent.
+                    tracing::error!(
+                        canonical = %self.key.canonical,
+                        "decl-body lease pin broken: raw_surfaces_for's lease-only run \
+                         missed the retained snapshot; failing closed to an uncached \
+                         empty capture (ReturnOnly)"
+                    );
+                    return Arc::new(Vec::new());
+                };
+                surfaces
+            } else {
+                // No contributors / no service: a GENUINE empty capture — cache
+                // it (the demanded symbol has no parse-time surfaces).
+                Vec::new()
+            };
+
+        let surfaces = Arc::new(surfaces);
+        self.raw_surfaces
+            .insert((declaration, space), Arc::clone(&surfaces));
+        surfaces
+    }
+
+    /// Lower the demanded symbol's contributing statements through the
+    /// retained snapshot, producing the owned per-symbol batch. `None`
+    /// on a fatal parse — or on a broken lease pin (the LEASE-ONLY run
+    /// fails CLOSED to the lowering miss, loudly in debug/test builds;
+    /// it can never transiently re-parse).
+    ///
+    /// Like [`Self::whole_env`], this per-symbol path binds NO `<script
+    /// setup generic="T">` parameter into its env: a script-setup generic
+    /// is never resolved through a per-symbol `type_decl` demand. SFC
+    /// own-file type bodies referencing `T` resolve through the dispatch
+    /// `DeclarationScopePayload` (`scope_type_bindings`, sourced from the
+    /// prepared-decl bundle's script-setup type bindings), which is
+    /// consulted BEFORE any fallback to the per-symbol prepared-decl
+    /// lookup — so the generic is already bound and never reaches this
+    /// scratch env.
+    fn lower_demanded(
+        &self,
+        key: &DeclBindingKey,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
+    ) -> DemandLower {
+        // A seeded memo has no service: nothing to lower, a genuine (cacheable)
+        // body-less miss — NOT a lease-pin break.
+        let Some(service) = self.service.as_ref() else {
+            return DemandLower::Ready(None);
+        };
+        self.ensure_lease();
+        // Several declarations in ONE statement (the overloads of a function
+        // inside one `declare global` block) share its anchor: the statement
+        // is lowered and registered once, which registers every one of them.
+        let mut lowered_statements = rustc_hash::FxHashSet::default();
+        let contributors: Vec<_> = contributors
+            .iter()
+            .filter(|contributor| lowered_statements.insert(contributor.anchor.contributor_index))
+            .cloned()
+            .collect();
+        let key = key.clone();
+        let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
+        let lens = self.shallow_lens();
+        let route_lens = self.route_fact_lens();
+        let header_index = Arc::clone(&self.header_index);
+        let svelte_component_runes_mode = self.svelte_component_runes_mode;
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+
+            let mut scratch = EvalEnv::new();
+            // TRANSIENT lowered TYPE bodies + type-parameter headers, retained
+            // BETWEEN lowering and registration (the split
+            // `lower_statement_parts` → `register_statement_parts` flow) so the
+            // decl-body content fingerprint is computed HERE, at lowering time,
+            // from the same lowering that registered the facts. Accumulated
+            // across ALL demanded statements per declared name (contributor
+            // source order) so a merged group fingerprints its FULL same-name
+            // contributor set. Fact-production intermediates — dropped with
+            // this closure, never stored.
+            let mut retained_types: FxHashMap<DeclBindingKey, RetainedTypeTransients> =
+                FxHashMap::default();
+            let mut retained_aug_types: FxHashMap<
+                (AugmentationScopeKind, DeclBindingKey),
+                RetainedTypeTransients,
+            > = FxHashMap::default();
+            // TRANSIENT lowered VALUE annotations/shapes, retained the same
+            // way for the value-body fingerprint (see
+            // [`RetainedValueTransients`]).
+            let mut retained_values: FxHashMap<DeclBindingKey, RetainedValueTransients> =
+                FxHashMap::default();
+            let mut retained_aug_values: FxHashMap<
+                (AugmentationScopeKind, DeclBindingKey),
+                RetainedValueTransients,
+            > = FxHashMap::default();
+            let mut aug_dep_records: FxHashMap<
+                (AugmentationScopeKind, DeclBindingKey),
+                DeclDependencyFacts,
+            > = FxHashMap::default();
+            let mut dep_records: FxHashMap<DeclBindingKey, DeclDependencyFacts> =
+                FxHashMap::default();
+            for contributor in &contributors {
+                let index = contributor.anchor.contributor_index;
+                let Some(stmt) = program.body.get(index as usize) else {
+                    continue;
+                };
+                let owner = contributor.anchor.owner;
+                let parts = if svelte_component_runes_mode {
+                    lower_svelte_runes_statement_parts(stmt, source, &class_fields)
+                } else {
+                    lower_statement_parts(
+                        stmt,
+                        source,
+                        program.source_type.is_typescript_definition(),
+                        &class_fields,
+                    )
+                };
+                for decl in &parts.type_decls {
+                    retained_types
+                        .entry(DeclBindingKey::new(owner, decl.name.as_str()))
+                        .or_default()
+                        .push(decl, Some(contributor.anchor));
+                }
+                for (scope, decl) in &parts.aug_type_decls {
+                    retained_aug_types
+                        .entry((
+                            scope.clone(),
+                            DeclBindingKey::new(owner, decl.name.as_str()),
+                        ))
+                        .or_default()
+                        .push(decl, Some(contributor.anchor));
+                }
+                for decl in &parts.value_decls {
+                    retained_values
+                        .entry(DeclBindingKey::new(owner, decl.name.as_str()))
+                        .or_default()
+                        .push(decl);
+                }
+                for (scope, decl) in &parts.aug_value_decls {
+                    retained_aug_values
+                        .entry((
+                            scope.clone(),
+                            DeclBindingKey::new(owner, decl.name.as_str()),
+                        ))
+                        .or_default()
+                        .push(decl);
+                }
+                // `export default interface I` / `export default class C`
+                // mirrors the declared-name type symbol under `default` at
+                // registration; mirror the retained transients the same way so
+                // the mirrored symbol fingerprints identically.
+                if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
+                    if let Some(retained) = retained_types
+                        .get(&DeclBindingKey::new(owner, alias_from))
+                        .cloned()
+                    {
+                        retained_types
+                            .entry(DeclBindingKey::new(owner, "default"))
+                            .or_default()
+                            .extend_from(retained);
+                    }
+                }
+                register_statement_parts(
+                    parts,
+                    StatementLowerCtx {
+                        build: &build_ctx,
+                        contributor_index: index,
+                        statement_owner: verter_session_query::analysis::top_level_owners::TopLevelStatementOwner {
+                            owner,
+                            owner_local_ordinal: contributor.anchor.owner_local_ordinal,
+                        },
+                    },
+                    &mut scratch,
+                );
+                for (declaration, deps) in collect_statement_dependency_names(stmt, owner) {
+                    dep_records
+                        .entry(declaration.qualified_key())
+                        .or_default()
+                        .extend(deps);
+                }
+                collect_augmentation_statement_dependencies(stmt, owner, &mut aug_dep_records);
+            }
+            if let Some(jsdoc_typedef) = jsdoc_typedef {
+                if let Some(typedef) = lower_jsdoc_typedef_at_comment(
+                    &program.comments,
+                    source,
+                    key.name.as_ref(),
+                    key.owner,
+                    jsdoc_typedef.comment_span.start,
+                    &build_ctx,
+                    &mut scratch,
+                ) {
+                    dep_records
+                        .entry(key.clone())
+                        .or_default()
+                        .extend(typedef.dependencies);
+                    let retained = retained_types.entry(key.clone()).or_default();
+                    retained.bodies.push(typedef.body);
+                    // A JSDoc `@typedef` payload is comment-derived — not
+                    // statement-addressable, so its member span origins are
+                    // the honest `Synthetic` miss.
+                    retained.contributor_anchors.push(None);
+                }
+            }
+
+            let lowered_count = scratch.total_decl_count();
+            let mut batch = LoweredStatementBatch {
+                types: Vec::new(),
+                values: Vec::new(),
+                aug_types: Vec::new(),
+                aug_values: Vec::new(),
+                lowered_count,
+            };
+            let empty_retained = RetainedTypeTransients::default();
+            for (decl_key, group) in &scratch.type_symbols {
+                let dependencies = dep_records.get(decl_key).cloned().unwrap_or_default();
+                // An enum's type-space body is derived from its MERGED
+                // value members (same name → matching value group), so the
+                // type and value spaces never diverge.
+                let enum_type_arms = scratch
+                    .value_symbols
+                    .get(decl_key)
+                    .and_then(ValueDeclGroup::enum_type_union);
+                let retained = retained_types.get(decl_key).unwrap_or(&empty_retained);
+                let owned_lens = lens.for_owner(decl_key.owner);
+                let owned_route_lens = route_lens.for_owner(decl_key.owner);
+                batch.types.push((
+                    decl_key.clone(),
+                    lowered_type_decl_from_group(
+                        group,
+                        &dependencies,
+                        enum_type_arms,
+                        retained,
+                        header_index
+                            .type_headers
+                            .get(decl_key)
+                            .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
+                        &owned_lens,
+                        &owned_route_lens,
+                    ),
+                ));
+            }
+            for (decl_key, group) in &scratch.value_symbols {
+                let owned_lens = lens.for_owner(decl_key.owner);
+                batch.values.push((
+                    decl_key.clone(),
+                    lowered_value_decl_from_group(
+                        group,
+                        retained_values.get(decl_key),
+                        &owned_lens,
+                    ),
+                ));
+            }
+            for ((scope, decl_key), group) in &scratch.augmentation_scopes {
+                // Ambient augmentation blocks do not inventory enum
+                // declarations, so no value-derived enum union applies here.
+                let retained = retained_aug_types
+                    .get(&(scope.clone(), decl_key.clone()))
+                    .unwrap_or(&empty_retained);
+                let owned_lens = lens.for_owner(decl_key.owner);
+                let owned_route_lens = route_lens.for_owner(decl_key.owner);
+                let dependencies = aug_dep_records
+                    .get(&(scope.clone(), decl_key.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                batch.aug_types.push((
+                    scope.clone(),
+                    decl_key.clone(),
+                    lowered_type_decl_from_group(
+                        group,
+                        &dependencies,
+                        None,
+                        retained,
+                        header_index
+                            .augmentation_type_headers
+                            .get(scope)
+                            .and_then(|headers| headers.get(decl_key))
+                            .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
+                        &owned_lens,
+                        &owned_route_lens,
+                    ),
+                ));
+            }
+            for ((scope, decl_key), group) in &scratch.augmentation_value_scopes {
+                let owned_lens = lens.for_owner(decl_key.owner);
+                batch.aug_values.push((
+                    scope.clone(),
+                    decl_key.clone(),
+                    lowered_value_decl_from_group(
+                        group,
+                        retained_aug_values.get(&(scope.clone(), decl_key.clone())),
+                        &owned_lens,
+                    ),
+                ));
+            }
+            Some(batch)
+        });
+        // Outer `None` = a broken lease pin (the lease-only run missed the
+        // retained snapshot; the job did NOT run). Fail CLOSED via ReturnOnly:
+        // this must NEVER be memoized as a body-less warm entry, in DEBUG *or*
+        // RELEASE (silent wrong-empty is the defect the prior debug-only
+        // `debug_assert!` left latent in release). Loud, not silent
+        // (fail-lowering, not silent-skip); a later demand under a live lease
+        // recovers. Inner `Some/None` = the run completed (batch / fatal-parse
+        // genuine miss) — the caller may cache it.
+        let Some(inner) = outcome else {
+            tracing::error!(
+                canonical = %self.key.canonical,
+                "decl-body lease pin broken: the demanded lowering's lease-only run \
+                 missed the retained snapshot; failing closed to ReturnOnly (uncached)"
+            );
+            return DemandLower::LeaseMiss;
+        };
+        if let Some(batch) = inner.as_ref() {
+            self.counters
+                .decl_bodies_lowered
+                .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);
+        }
+        DemandLower::Ready(inner)
+    }
+
+    /// Get-or-compute a per-symbol cell under `get_or_init` single-flight, with
+    /// a lease-miss ReturnOnly rail.
+    ///
+    /// The demanded lowering runs INSIDE `get_or_init` so a symbol demanded
+    /// concurrently lowers exactly ONCE (the hot-path single-flight contract).
+    /// The committed cell is a [`DemandCell`]: a [`DemandLower::Ready`] commits
+    /// [`DemandCell::Ready`] (with the extracted decl) and returns the batch so
+    /// the initializing caller can backfill siblings; a
+    /// [`DemandLower::LeaseMiss`] commits [`DemandCell::LeaseMiss`]. Because the
+    /// no-warm signal is carried by the committed cell itself — never a
+    /// thread-local side flag — EVERY waiter that joins the initializer's
+    /// `get_or_init` reads the same `LeaseMiss` (a joiner can no longer observe
+    /// the initializer's transient `None` as a false `Ready(None)`). Any
+    /// observer of a `LeaseMiss` cell (initializer, joiner, or a re-demand of a
+    /// not-yet-evicted poisoned cell) runs `on_lease_miss_evict`, which drops
+    /// the poisoned cell from its owning map ptr-eq-guarded — so no future
+    /// demand serves the wrong-empty warm entry and the next demand retries
+    /// under a live lease. Fail CLOSED via ReturnOnly, in DEBUG *and* RELEASE.
+    fn demand_and_commit<D>(
+        &self,
+        cell: &Arc<OnceLock<DemandCell<D>>>,
+        key: &DeclBindingKey,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
+        extract: impl FnOnce(&LoweredStatementBatch) -> Option<Arc<D>>,
+        on_lease_miss_evict: impl FnOnce(&Arc<OnceLock<DemandCell<D>>>),
+    ) -> (DemandOutcome<D>, Option<LoweredStatementBatch>) {
+        // Warm / joiner-visible hit — the cell already carries a committed
+        // outcome (this thread lost the init race or re-demands a warm cell).
+        if let Some(committed) = cell.get() {
+            return match committed {
+                DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), None),
+                DemandCell::LeaseMiss => {
+                    on_lease_miss_evict(cell);
+                    (DemandOutcome::LeaseMiss, None)
+                }
+            };
+        }
+        let leftover: std::cell::Cell<Option<LoweredStatementBatch>> = std::cell::Cell::new(None);
+        let committed =
+            cell.get_or_init(
+                || match self.lower_demanded(key, contributors, jsdoc_typedef) {
+                    DemandLower::Ready(maybe_batch) => {
+                        let decl = maybe_batch.as_ref().and_then(extract);
+                        leftover.set(maybe_batch);
+                        DemandCell::Ready(decl)
+                    }
+                    DemandLower::LeaseMiss => DemandCell::LeaseMiss,
+                },
+            );
+        match committed {
+            DemandCell::Ready(value) => (DemandOutcome::Ready(value.clone()), leftover.take()),
+            // Surface the DISTINCT `LeaseMiss` outcome (so a caller that must
+            // not collapse this transient ReturnOnly into a cacheable genuine
+            // miss — the locator-deref path — routes it to a no-warm signal)
+            // and evict the poisoned cell so the next demand retries.
+            DemandCell::LeaseMiss => {
+                on_lease_miss_evict(cell);
+                (DemandOutcome::LeaseMiss, None)
+            }
+        }
+    }
+
+    /// Populate sibling entries the demanded statements ALSO declared
+    /// (set-if-vacant; the demanded entry itself is excluded — it was
+    /// already published by the `get_or_init` that produced this batch).
+    ///
+    /// Runs OUTSIDE the demanded cell's `get_or_init` closure, on the
+    /// initializing thread only: publishing a sibling space with a
+    /// blocking `OnceLock::set` while still holding the demanded cell's
+    /// init-lock would deadlock against a concurrent demand of that
+    /// sibling (a merged `class K {}` occupies BOTH the type and value
+    /// space — type demand sets the value cell, value demand sets the type
+    /// cell). With the demanded init-lock released first, a sibling `set`
+    /// that races a concurrent initializer just returns `Err`; the
+    /// concurrent initializer never waits on us, so no cycle forms.
+    /// Coverage-gated: a sibling
+    /// backfills ONLY when the lowered statement set covers ALL of that
+    /// symbol's header contributors — a statement batch that lowered a
+    /// SUBSET (the class half of an interface+class merge, demanded via
+    /// its value side) must not pre-fill the full entry. Only recorded,
+    /// actually lowered results enter — never broader pretend-coverage.
+    fn backfill(
+        &self,
+        batch: LoweredStatementBatch,
+        lowered_statements: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        demanded_file_scope: Option<(SymbolSpace, &DeclBindingKey)>,
+        demanded_augmentation: Option<(&AugmentationScopeKind, SymbolSpace, &DeclBindingKey)>,
+    ) {
+        let covers =
+            |contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor]| {
+                contributors.iter().all(|candidate| {
+                    lowered_statements
+                        .iter()
+                        .any(|lowered| lowered.anchor == candidate.anchor)
+                })
+            };
+        for (key, decl) in batch.types {
+            if demanded_file_scope == Some((SymbolSpace::Type, &key)) {
+                continue;
+            }
+            if !self
+                .header_index
+                .type_header_in(key.owner, key.name.as_ref())
+                .is_some_and(|header| covers(&header.contributors))
+            {
+                continue;
+            }
+            let cell = self.type_entries.entry(key).or_default().clone();
+            let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
+        }
+        for (key, decl) in batch.values {
+            if demanded_file_scope == Some((SymbolSpace::Value, &key)) {
+                continue;
+            }
+            if !self
+                .header_index
+                .value_header_in(key.owner, key.name.as_ref())
+                .is_some_and(|header| covers(&header.contributors))
+            {
+                continue;
+            }
+            let cell = self.value_entries.entry(key).or_default().clone();
+            let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
+        }
+        for (scope, key, decl) in batch.aug_types {
+            if demanded_augmentation == Some((&scope, SymbolSpace::Type, &key)) {
+                continue;
+            }
+            if !self
+                .header_index
+                .augmentation_type_header_in(&scope, key.owner, key.name.as_ref())
+                .is_some_and(|header| covers(&header.contributors))
+            {
+                continue;
+            }
+            let cell = self
+                .aug_type_entries
+                .entry((scope, key))
+                .or_default()
+                .clone();
+            let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
+        }
+        for (scope, key, decl) in batch.aug_values {
+            if demanded_augmentation == Some((&scope, SymbolSpace::Value, &key)) {
+                continue;
+            }
+            if !self
+                .header_index
+                .augmentation_value_header_in(&scope, key.owner, key.name.as_ref())
+                .is_some_and(|header| covers(&header.contributors))
+            {
+                continue;
+            }
+            let cell = self
+                .aug_value_entries
+                .entry((scope, key))
+                .or_default()
+                .clone();
+            let _ = cell.set(DemandCell::Ready(Some(Arc::new(decl))));
+        }
+    }
+}
+
+/// Union one contributor's header type parameters into the transient list,
+/// first-seen by name — the shared fold the file-scope, augmentation, and
+/// `export default` alias branches all apply so the re-borrowed union can
+/// never drift from the demanded lowering's.
+fn union_type_params_first_seen(type_parameters: &mut Vec<TypeParam>, params: &[TypeParam]) {
+    for param in params {
+        if !type_parameters.iter().any(|p| p.name == param.name) {
+            type_parameters.push(param.clone());
+        }
+    }
+}
+
+impl DeclBodyMemo {
+    /// TYPE-space transient contributor parts of one demanded file-scope
+    /// symbol (bodies in source order — a JSDoc-`@typedef` name appends its
+    /// re-derived payload body — plus the unioned header type parameters),
+    /// re-lowered from the retained snapshot in a LEASE-ONLY job for the
+    /// locator-deref worker. The demand cells are NOT touched and
+    /// nothing is committed — the graph-tier `LowerLocator` memo owns caching
+    /// the lowered product per `(locator, content)`; this service is its
+    /// authored-body borrow. `Ready(None)` = not inventoried / no service /
+    /// fatal parse (genuine, cacheable); `LeaseMiss` = broken lease pin
+    /// (transient ReturnOnly).
+    pub fn transient_type_parts(&self, name: &str) -> DemandOutcome<TransientTypeParts> {
+        self.transient_type_parts_in(TopLevelOwnerId::ordinary_file(), name)
+    }
+
+    pub fn transient_type_parts_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TransientTypeParts> {
+        let Some((contributors, jsdoc_typedef)) = self
+            .header_index
+            .type_header_in(owner, name)
+            .map(|header| (header.contributors.clone(), header.jsdoc_typedef))
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        self.transient_type_parts_for(
+            DeclBindingKey::new(owner, name),
+            &contributors,
+            jsdoc_typedef,
+            None,
+        )
+    }
+
+    /// Augmentation-scoped sibling of [`Self::transient_type_parts_in`].
+    pub(crate) fn transient_augmentation_type_parts_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TransientTypeParts> {
+        let Some(contributors) = self
+            .header_index
+            .augmentation_type_header_in(scope, owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        self.transient_type_parts_for(
+            DeclBindingKey::new(owner, name),
+            &contributors,
+            None,
+            Some(scope),
+        )
+    }
+
+    /// Shared lease-only TYPE-body re-lowering over the demanded symbol's
+    /// contributing statements. `aug_scope` selects the augmentation-scoped
+    /// parts vector; `None` reads the file-scope parts (plus the
+    /// `export default interface/class` mirror and the JSDoc-typedef payload).
+    fn transient_type_parts_for(
+        &self,
+        key: DeclBindingKey,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
+        aug_scope: Option<&AugmentationScopeKind>,
+    ) -> DemandOutcome<TransientTypeParts> {
+        let Some(service) = self.service.as_ref() else {
+            // Seeded memo: locator-only groups retain no authored source to
+            // re-borrow — a genuine, cacheable body-less miss.
+            return DemandOutcome::Ready(None);
+        };
+        self.ensure_lease();
+        let contributors = contributors.to_vec();
+        let aug_scope = aug_scope.cloned();
+        let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            let mut parts_out = TransientTypeParts::default();
+            for contributor in &contributors {
+                let Some(stmt) = program
+                    .body
+                    .get(contributor.anchor.contributor_index as usize)
+                else {
+                    continue;
+                };
+                let parts = lower_statement_parts(
+                    stmt,
+                    source,
+                    program.source_type.is_typescript_definition(),
+                    &class_fields,
+                );
+                match aug_scope.as_ref() {
+                    Some(scope) => {
+                        for (part_scope, decl) in &parts.aug_type_decls {
+                            if part_scope == scope && decl.name == key.name.as_ref() {
+                                parts_out.bodies.push(decl.body.clone());
+                                union_type_params_first_seen(
+                                    &mut parts_out.type_parameters,
+                                    &decl.type_parameters,
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        for decl in &parts.type_decls {
+                            if decl.name == key.name.as_ref() {
+                                parts_out.bodies.push(decl.body.clone());
+                                union_type_params_first_seen(
+                                    &mut parts_out.type_parameters,
+                                    &decl.type_parameters,
+                                );
+                            }
+                        }
+                        // `export default interface I` / `export default
+                        // class C` mirrors the declared-name symbol under
+                        // `default` — mirror the transient bodies AND the
+                        // unioned header parameters the same way (see the
+                        // demanded-lowering path).
+                        if key.name.as_ref() == "default" {
+                            if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
+                                for decl in &parts.type_decls {
+                                    if decl.name == alias_from {
+                                        parts_out.bodies.push(decl.body.clone());
+                                        union_type_params_first_seen(
+                                            &mut parts_out.type_parameters,
+                                            &decl.type_parameters,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(jsdoc_typedef) = jsdoc_typedef {
+                let mut scratch = EvalEnv::new();
+                if let Some(typedef) = lower_jsdoc_typedef_at_comment(
+                    &program.comments,
+                    source,
+                    key.name.as_ref(),
+                    key.owner,
+                    jsdoc_typedef.comment_span.start,
+                    &build_ctx,
+                    &mut scratch,
+                ) {
+                    parts_out.bodies.push(typedef.body);
+                }
+            }
+            Some(parts_out)
+        });
+        match outcome {
+            // Broken lease pin: the job ran nothing — transient ReturnOnly.
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient type-body re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            // Fatal parse: a genuine, cacheable body-less miss.
+            Some(None) => DemandOutcome::Ready(None),
+            Some(Some(parts)) => DemandOutcome::Ready(Some(Arc::new(parts))),
+        }
+    }
+
+    /// The re-derived JSDoc-`@typedef` payload body of one demanded typedef
+    /// alias — the [`AuthoredBodyLocator::JsdocTypedefBody`] deref source.
+    /// Lease-only; same outcome semantics as
+    /// [`Self::transient_type_parts`]. Serves ONLY the typedef payload
+    /// (never a same-name TS declaration's statement body — the typedef
+    /// locator addresses the comment-derived payload specifically).
+    pub(crate) fn transient_jsdoc_typedef_body_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TypeExpr> {
+        let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        let Some(jsdoc_typedef) = self
+            .header_index
+            .type_header_in(owner, name)
+            .and_then(|header| header.jsdoc_typedef)
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        self.ensure_lease();
+        let name = name.to_string();
+        let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            let mut scratch = EvalEnv::new();
+            Some(
+                lower_jsdoc_typedef_at_comment(
+                    &program.comments,
+                    source,
+                    &name,
+                    owner,
+                    jsdoc_typedef.comment_span.start,
+                    &build_ctx,
+                    &mut scratch,
+                )
+                .map(|typedef| typedef.body),
+            )
+        });
+        match outcome {
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient JSDoc-typedef re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            Some(None) => DemandOutcome::Ready(None),
+            Some(Some(None)) => DemandOutcome::Ready(None),
+            Some(Some(Some(body))) => DemandOutcome::Ready(Some(Arc::new(body))),
+        }
+    }
+
+    /// The re-derived `$props()` binding-annotation payload at one demanded
+    /// macro ordinal — the [`MacroPayloadPosition::TypeAnnotation`] deref
+    /// source. Lease-only; same outcome semantics as
+    /// [`Self::transient_type_parts`].
+    ///
+    /// The position replays the capture's shared macro-ordinal walk
+    /// ([`lower_props_annotation_at`]) over THIS memo's retained snapshot;
+    /// the module-script region comes from the memo's OWN carrier artifact —
+    /// every input is keyed by `self.key`, no read outside the lease. The
+    /// yielded [`PropsAnnotationLowering`] keeps the two authored absences
+    /// typed (`Unannotated` / `NoPropsCall`) so the deref maps each to its
+    /// exact fail-closed error — never a fabricated body.
+    ///
+    /// [`MacroPayloadPosition::TypeAnnotation`]: verter_type_expr::locators::MacroPayloadPosition::TypeAnnotation
+    pub(crate) fn transient_props_annotation_body(
+        &self,
+        owner: TopLevelOwnerId,
+        macro_index: u32,
+    ) -> DemandOutcome<PropsAnnotationLowering> {
+        let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.ensure_lease();
+        let module_region = self
+            .framework_parse
+            .as_ref()
+            .and_then(verter_session_query::source::framework_parse::FrameworkParseFacts::module_script_region);
+        let owner_table = Arc::clone(&self.owner_table);
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            Some(lower_props_annotation_at_with_owners(
+                program,
+                source,
+                module_region,
+                owner_table.as_ref(),
+                owner,
+                macro_index,
+            ))
+        });
+        match outcome {
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient $props-annotation re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            Some(None) => DemandOutcome::Ready(None),
+            Some(Some(lowering)) => DemandOutcome::Ready(Some(Arc::new(lowering))),
+        }
+    }
+
+    /// Re-derive a Svelte `$props<T>()` / tracked
+    /// `createEventDispatcher<T>()` type argument at one demanded macro
+    /// ordinal from this memo's retained program.
+    ///
+    /// This is the framework-provider fallback for
+    /// [`MacroPayloadPosition::TypeArgument`] when the analyzer macro hot
+    /// mirror has no row. It replays the same Svelte macro-ordinal walk used at
+    /// capture and retains typed missing-vs-unannotated outcomes.
+    ///
+    /// [`MacroPayloadPosition::TypeArgument`]: verter_type_expr::locators::MacroPayloadPosition::TypeArgument
+    pub(crate) fn transient_svelte_type_argument_body(
+        &self,
+        owner: TopLevelOwnerId,
+        macro_index: u32,
+    ) -> DemandOutcome<SvelteTypeArgumentLowering> {
+        let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.ensure_lease();
+        let module_region = self
+            .framework_parse
+            .as_ref()
+            .and_then(verter_session_query::source::framework_parse::FrameworkParseFacts::module_script_region);
+        let owner_table = Arc::clone(&self.owner_table);
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            Some(lower_svelte_type_argument_at_with_owners(
+                program,
+                source,
+                module_region,
+                owner_table.as_ref(),
+                owner,
+                macro_index,
+            ))
+        });
+        match outcome {
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient Svelte type-argument re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            Some(None) => DemandOutcome::Ready(None),
+            Some(Some(lowering)) => DemandOutcome::Ready(Some(Arc::new(lowering))),
+        }
+    }
+
+    /// The re-derived authored PER-FIELD macro payload at one demanded
+    /// `(macro ordinal, field ordinal)` — the
+    /// [`MacroPayloadPosition::Field`] deref source. Lease-only; same
+    /// outcome semantics as [`Self::transient_type_parts`].
+    ///
+    /// The position replays the analyzer's OWN macro assembly
+    /// ([`verter_semantic::analysis::lower_macro_field_payload_at`] — one
+    /// macro-ordinal / field-ordinal addressing engine, mint side and deref
+    /// side cannot drift) over THIS memo's retained snapshot. The yielded
+    /// [`MacroFieldPayloadLowering`] keeps the authored absences typed
+    /// (`Unauthored` / `NoField`) so the deref maps each to its exact
+    /// fail-closed error — never a fabricated body.
+    ///
+    /// [`MacroPayloadPosition::Field`]: verter_type_expr::locators::MacroPayloadPosition::Field
+    /// [`MacroFieldPayloadLowering`]: verter_semantic::analysis::MacroFieldPayloadLowering
+    pub(crate) fn transient_macro_field_payload(
+        &self,
+        owner: TopLevelOwnerId,
+        macro_index: u32,
+        field_index: u32,
+    ) -> DemandOutcome<verter_semantic::analysis::MacroFieldPayloadLowering> {
+        let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.ensure_lease();
+        let owner_table = Arc::clone(&self.owner_table);
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            Some(
+                verter_semantic::analysis::lower_macro_field_payload_at_with_owners(
+                    program,
+                    source,
+                    owner_table.as_ref(),
+                    owner,
+                    macro_index,
+                    field_index,
+                ),
+            )
+        });
+        match outcome {
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient macro field-payload re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            Some(None) => DemandOutcome::Ready(None),
+            Some(Some(lowering)) => DemandOutcome::Ready(Some(Arc::new(lowering))),
+        }
+    }
+
+    /// Transient re-derivation of one macro call's authored generic TYPE
+    /// ARGUMENT from THIS memo's retained snapshot — the lease-only
+    /// hydration serving the macro hot mirror's sole producer
+    /// (`macro_type_arg_hot_ref`). Replays the analyzer's own span address
+    /// (`AnalyzedMacro.span`) through
+    /// [`verter_semantic::analysis::lower_macro_type_argument_at_span`],
+    /// so the mint side and the deref side share one address. `Ready(None)` =
+    /// no macro-shaped call at that span / no authored type argument (a
+    /// genuine typed absence); a broken lease pin is the DISTINCT
+    /// `LeaseMiss` (transient ReturnOnly).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn transient_macro_type_argument(
+        &self,
+        macro_span: verter_span::Span,
+    ) -> DemandOutcome<TypeExpr> {
+        self.indexed_expression_demand()
+            .transient_macro_type_argument(macro_span)
+    }
+
+    /// Recover one member's authored declaration-site spans from this memo's
+    /// RETAINED parse via its producer-emitted span-recovery origin — the
+    /// lease-pinned NO-PARSE wrapper over
+    /// [`crate::locator_span_recovery::recover_member_spans`]. Any recovery
+    /// failure (a seeded service-less memo, a broken lease pin, a stale
+    /// origin) yields the DEFAULT (all-absent) spans — an honest absence,
+    /// never a fabricated byte range.
+    pub fn recover_member_spans_or_absent(
+        &self,
+        origin: &verter_type_expr::span_origins::MemberSpansOrigin,
+    ) -> verter_type_expr::MemberSpans {
+        let Some(service) = self.service.as_ref() else {
+            return verter_type_expr::MemberSpans::default();
+        };
+        self.ensure_lease();
+        crate::locator_span_recovery::recover_member_spans(service, &self.key, origin)
+            .unwrap_or_default()
+    }
+
+    /// VALUE-space transient parts of one demanded file-scope symbol
+    /// (last-wins annotation / object shape; GROUP-ordered signature IR),
+    /// re-lowered from the retained snapshot in a LEASE-ONLY job for the
+    /// locator-deref worker. Same outcome semantics as
+    /// [`Self::transient_type_parts`].
+    pub fn transient_value_parts_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TransientValueParts> {
+        let Some(contributors) = self
+            .header_index
+            .value_header_in(owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        self.transient_value_parts_for(name, contributors, None)
+    }
+
+    /// Augmentation-scoped sibling of [`Self::transient_value_parts_in`].
+    pub fn transient_augmentation_value_parts_in(
+        &self,
+        scope: &AugmentationScopeKind,
+        owner: TopLevelOwnerId,
+        name: &str,
+    ) -> DemandOutcome<TransientValueParts> {
+        let Some(contributors) = self
+            .header_index
+            .augmentation_value_header_in(scope, owner, name)
+            .map(|header| header.contributors.clone())
+        else {
+            return DemandOutcome::Ready(None);
+        };
+        self.transient_value_parts_for(name, contributors, Some(scope))
+    }
+
+    /// Shared lease-only VALUE-body re-lowering over the demanded symbol's
+    /// contributing statements. `aug_scope` selects the augmentation-scoped
+    /// parts vector; `None` reads the file-scope parts.
+    fn transient_value_parts_for(
+        &self,
+        name: &str,
+        contributors: Vec<verter_session_query::declarations::header_index::DeclHeaderContributor>,
+        aug_scope: Option<&AugmentationScopeKind>,
+    ) -> DemandOutcome<TransientValueParts> {
+        let Some(service) = self.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.ensure_lease();
+        let name = name.to_string();
+        let aug_scope = aug_scope.cloned();
+        let svelte_component_runes_mode = self.svelte_component_runes_mode;
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            let mut merged = TransientValueParts::default();
+            let mut found = false;
+            // Several declarations in ONE statement (the overloads of a
+            // function inside one `declare global` block) share its anchor:
+            // the statement is lowered once and yields every one of them.
+            let mut lowered_statements = rustc_hash::FxHashSet::default();
+            for contributor in &contributors {
+                if !lowered_statements.insert(contributor.anchor.contributor_index) {
+                    continue;
+                }
+                let Some(stmt) = program
+                    .body
+                    .get(contributor.anchor.contributor_index as usize)
+                else {
+                    continue;
+                };
+                let parts = if svelte_component_runes_mode {
+                    lower_svelte_runes_statement_parts(stmt, source, &class_fields)
+                } else {
+                    lower_statement_parts(
+                        stmt,
+                        source,
+                        program.source_type.is_typescript_definition(),
+                        &class_fields,
+                    )
+                };
+                let value_decls = parts.value_decls.iter().filter(|_| aug_scope.is_none());
+                let aug_value_decls = parts
+                    .aug_value_decls
+                    .iter()
+                    .filter(|(part_scope, _)| Some(part_scope) == aug_scope.as_ref())
+                    .map(|(_, decl)| decl);
+                for decl in value_decls.chain(aug_value_decls) {
+                    if decl.name != name {
+                        continue;
+                    }
+                    found = true;
+                    // Strict last-wins annotation/shape (the group's
+                    // `primary()` rule); signatures CONCATENATE in
+                    // contributor order — the index is the GROUP-level
+                    // `ValueSignature` ordinal the minted locators carry.
+                    merged.type_annotation = decl.type_annotation.clone();
+                    merged.object_shape = decl.object_shape.clone();
+                    merged.signatures.extend(decl.signatures.iter().cloned());
+                    merged.kind = Some(decl.kind);
+                }
+                // A dual-space declaration's HEADER type parameters (a
+                // `class K<T>` constructor shape references `T`) ride the
+                // SAME statements' type-side parts — union them first-seen
+                // by name so the deref binds the class's own binder shells.
+                let type_decls = parts.type_decls.iter().filter(|_| aug_scope.is_none());
+                let aug_type_decls = parts
+                    .aug_type_decls
+                    .iter()
+                    .filter(|(part_scope, _)| Some(part_scope) == aug_scope.as_ref())
+                    .map(|(_, decl)| decl);
+                for decl in type_decls.chain(aug_type_decls) {
+                    if decl.name != name {
+                        continue;
+                    }
+                    for param in &decl.type_parameters {
+                        if !merged
+                            .type_parameters
+                            .iter()
+                            .any(|existing| existing.name == param.name)
+                        {
+                            merged.type_parameters.push(param.clone());
+                        }
+                    }
+                }
+            }
+            Some(found.then_some(merged))
+        });
+        match outcome {
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient value-part re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            Some(None) => DemandOutcome::Ready(None),
+            Some(Some(None)) => DemandOutcome::Ready(None),
+            Some(Some(Some(parts))) => DemandOutcome::Ready(Some(Arc::new(parts))),
+        }
+    }
+}
+
+/// Fold EVERY type/value group of an already-built env into per-name lowered
+/// records, with the fingerprint/classification TRANSIENTS re-lowered from
+/// the given parsed program — the ambient-inventory construction path (the
+/// rune prelude), sharing the ONE per-symbol fold the lazy memo uses so an
+/// ambient record can never diverge from the memo-served shape. Uses the
+/// lens-free [`UnresolvedLens`] / [`EmptyRouteFactLens`]: ambient records
+/// never enter the parse fact rail, so cross-decl reference identity is
+/// inert there.
+pub(crate) fn lowered_decls_from_env_and_program(
+    env: &EvalEnv,
+    program: &oxc_ast::ast::Program<'_>,
+    source: &str,
+) -> LoweredDeclGroups {
+    let owner = TopLevelOwnerId::ordinary_file();
+    let header_index = build_decl_header_index(program, source);
+    let mut retained_types: FxHashMap<DeclBindingKey, RetainedTypeTransients> =
+        FxHashMap::default();
+    let mut retained_values: FxHashMap<DeclBindingKey, RetainedValueTransients> =
+        FxHashMap::default();
+    let mut dep_records: FxHashMap<DeclBindingKey, DeclDependencyFacts> = FxHashMap::default();
+    for (index, stmt) in program.body.iter().enumerate() {
+        let parts = lower_statement_parts(
+            stmt,
+            source,
+            program.source_type.is_typescript_definition(),
+            &header_index.class_field_values,
+        );
+        let contributor_anchor =
+            u32::try_from(index)
+                .ok()
+                .map(|contributor_index| DeclContributorAnchor {
+                    contributor_index,
+                    owner,
+                    owner_local_ordinal: contributor_index,
+                });
+        for decl in &parts.type_decls {
+            retained_types
+                .entry(DeclBindingKey::new(owner, decl.name.as_str()))
+                .or_default()
+                .push(decl, contributor_anchor);
+        }
+        for decl in &parts.value_decls {
+            retained_values
+                .entry(DeclBindingKey::new(owner, decl.name.as_str()))
+                .or_default()
+                .push(decl);
+        }
+        if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
+            if let Some(retained) = retained_types
+                .get(&DeclBindingKey::new(owner, alias_from))
+                .cloned()
+            {
+                retained_types
+                    .entry(DeclBindingKey::new(owner, "default"))
+                    .or_default()
+                    .extend_from(retained);
+            }
+        }
+        for (declaration, dependencies) in collect_statement_dependency_names(stmt, owner) {
+            dep_records
+                .entry(declaration.qualified_key())
+                .or_default()
+                .extend(dependencies);
+        }
+    }
+    let empty_retained = RetainedTypeTransients::default();
+    let types = env
+        .type_symbols
+        .iter()
+        .map(|(key, group)| {
+            let dependencies = dep_records.get(key).cloned().unwrap_or_default();
+            let enum_type_arms = env
+                .value_symbols
+                .get(key)
+                .and_then(ValueDeclGroup::enum_type_union);
+            (
+                key.clone(),
+                lowered_type_decl_from_group(
+                    group,
+                    &dependencies,
+                    enum_type_arms,
+                    retained_types.get(key).unwrap_or(&empty_retained),
+                    header_index
+                        .type_headers
+                        .get(key)
+                        .map_or(&[], |header| header.vue_ignored_heritage.as_slice()),
+                    &UnresolvedLens,
+                    &EmptyRouteFactLens,
+                ),
+            )
+        })
+        .collect();
+    let values = env
+        .value_symbols
+        .iter()
+        .map(|(key, group)| {
+            (
+                key.clone(),
+                lowered_value_decl_from_group(group, retained_values.get(key), &UnresolvedLens),
+            )
+        })
+        .collect();
+    (types, values)
+}
+
+/// Fold one same-name TYPE contributor group into the lazily-served
+/// per-symbol record — the same body merge / parameter union the eager
+/// shallow build performed per symbol.
+///
+/// `enum_type_arms` is the enum's value-derived scalar-union arm set, supplied
+/// by the caller when this type name is an `enum` (see
+/// [`ValueDeclGroup::enum_type_union`]). An enum's type-space body has NO
+/// authored type-body position — the registered placeholder slot
+/// (`merged_body()`) stays the LOCATOR carrier, while the arms drive the
+/// `body_hash` fingerprint here and materialise as the actual union at the
+/// graph layer on demand, derived from the MERGED value members so the type
+/// and value spaces never diverge.
+///
+/// `retained` carries this lowering's TRANSIENT contributor bodies (source
+/// order) + unioned type-parameter headers — the fingerprint / dep-derivation
+/// inputs, read in place and dropped by the caller.
+fn lowered_type_decl_from_group(
+    group: &verter_session_query::declarations::TypeDeclGroup,
+    dependencies: &DeclDependencyFacts,
+    enum_type_arms: Option<Vec<EnumScalar>>,
+    retained: &RetainedTypeTransients,
+    vue_ignored_heritage: &[VueIgnoredHeritageFact],
+    lens: &dyn CrossDeclLens,
+    route_lens: &dyn RouteFactLens,
+) -> LoweredTypeDecl {
+    let primary = group.primary();
+    // Dual-space enum knowledge rides the value-derived arms: a same-name
+    // `enum` group merges (every contributor slot retained) even though its
+    // type-space kind is the structural `Alias`.
+    let body = group.merged_body_dual_space(enum_type_arms.is_some());
+    let space = verter_session_query::facts::SymbolSpace::Type;
+
+    // The fingerprint + member/typeof dep derivation read the SAME transient
+    // view the legacy folded-body read observed: the enum scalar-union arms
+    // for an enum group; every retained contributor body for a merged group;
+    // the last (primary, last-wins) retained body for a single group.
+    let (mut body_hash, dep_bodies): (HashOutcome, &[TypeExpr]) = match &enum_type_arms {
+        Some(arms) => (
+            // Scalar arms are literals / primitive domains — they carry no
+            // `Ref` sites, no object members, and no `typeof` roots, so the
+            // member/typeof derivations below see an empty body set.
+            type_body_fingerprint(TransientTypeBody::EnumUnion(arms), space, lens),
+            &[],
+        ),
+        None if body.is_merged() => {
+            // Symmetric with the single-body branch below: a merged group with
+            // NO retained transient contributor bodies (the seeded,
+            // locator-only path) must fail loudly — hashing `Merged(&[])`
+            // would mint a fabricated empty-object fingerprint for bodies
+            // that were never lowered.
+            assert!(
+                !retained.bodies.is_empty(),
+                "every registered merged type symbol retains the transient lowered contributor \
+                 bodies of the lowerings that registered it (fail-lowering, never a fabricated \
+                 fingerprint)",
+            );
+            (
+                type_body_fingerprint(TransientTypeBody::Merged(&retained.bodies), space, lens),
+                retained.bodies.as_slice(),
+            )
+        }
+        None => {
+            let primary_body = retained.bodies.last().expect(
+                "every registered type symbol retains the transient lowered body of the \
+                 lowering that registered it (fail-lowering, never a fabricated fingerprint)",
+            );
+            (
+                type_body_fingerprint(TransientTypeBody::Single(primary_body), space, lens),
+                std::slice::from_ref(primary_body),
+            )
+        }
+    };
+
+    // ONE graph-free route-fact production over the ordered contributor
+    // list: duplicate member names across merged contributors fold with
+    // FIRST-contributor precedence (the producer's property-level `seen` set
+    // spans contributors, mirroring the legacy eager fold into one object
+    // view) — matching the MergedDecl peer-merge property rule. The producer
+    // walks ONLY these transient bodies: no sibling demand, no locator deref,
+    // no cross-file resolution — same-file transitive closure lives in the
+    // session route closures reading these stored facts.
+    let route_facts = produce_shallow_route_facts(dep_bodies, route_lens);
+    let mut typeof_roots = FxHashSet::default();
+    for dep_body in dep_bodies {
+        if collect_typeof_roots(dep_body, &mut typeof_roots).is_err() {
+            body_hash.budget_exceeded = true;
+            typeof_roots.clear();
+            break;
+        }
+    }
+    let mut typeof_root_names: Vec<String> = typeof_roots.into_iter().collect();
+    typeof_root_names.sort_unstable();
+
+    // NARROW type-parameter facts, unioned first-seen-by-name across
+    // contributors in source order — the fact mirror of the retained
+    // typed-IR parameter union above.
+    let mut narrow_type_parameters: Vec<NarrowTypeParam> = Vec::new();
+    for decl in group.contributors() {
+        for param in decl.type_parameters.params.iter() {
+            if !narrow_type_parameters
+                .iter()
+                .any(|existing| existing.name == param.name)
+            {
+                narrow_type_parameters.push(param.clone());
+            }
+        }
+    }
+
+    // Prepared classification FACTS (member index / wrapper shape /
+    // projection class), classified at THIS lazy lowering from the SAME
+    // transient contributor bodies the fingerprint observed, through the
+    // shared verter_semantic prepared classifiers on a scratch
+    // `PreparedTypeDecl` — the facts are copied off the scratch and the
+    // transient bodies are dropped by the caller (the session prepared-decl
+    // builder COPIES the stored facts; no re-classification, no locator
+    // deref, no dispatch at prepare time). An enum type body has no authored
+    // object body to classify (its type surface is the value-derived scalar
+    // union), so it keeps the default facts.
+    let anchor = &primary.body.anchor;
+    let root_identity = ResolvedRootIdentity::new_in_owner(
+        anchor.canonical_id.as_ref(),
+        anchor.owner,
+        anchor.symbol.as_ref(),
+    );
+    let mut scratch = PreparedTypeDecl::new(root_identity.clone(), primary.kind);
+    scratch.type_parameters = narrow_type_parameters.clone();
+    if enum_type_arms.is_none() {
+        let contributor_anchor =
+            |ordinal: usize| retained.contributor_anchors.get(ordinal).copied().flatten();
+        if body.is_merged() {
+            // Per-contributor member indexing so each member fact carries its
+            // owning contributor's span-origin anchor AND its `MergedContributor`
+            // locator step (the shared deref addresses a merged body's
+            // sub-positions through a contributor step first). Duplicate names
+            // fold with FIRST-contributor precedence — the MergedDecl peer-merge
+            // property rule the legacy eager fold applied.
+            let mut merged_index: FxHashMap<
+                verter_type_expr::facts::FactPropertyKey,
+                PreparedMemberFact,
+            > = FxHashMap::default();
+            for (ordinal, contributor_body) in retained.bodies.iter().enumerate() {
+                let mut per_contributor =
+                    PreparedTypeDecl::new(root_identity.clone(), primary.kind);
+                per_contributor.type_parameters = narrow_type_parameters.clone();
+                per_contributor.build_member_index(contributor_body, contributor_anchor(ordinal));
+                for (name, mut fact) in per_contributor.member_index {
+                    if merged_index.contains_key(&name) {
+                        continue;
+                    }
+                    let contributor_step = TypeBodyPathStep::MergedContributor {
+                        ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                    };
+                    let mut path: Vec<TypeBodyPathStep> =
+                        Vec::with_capacity(fact.ty.path.len() + 1);
+                    path.push(contributor_step);
+                    path.extend(fact.ty.path.iter().cloned());
+                    fact.ty = TypeBodySlot {
+                        anchor: fact.ty.anchor.clone(),
+                        path: path.into(),
+                    };
+                    // The member's AUTHORED head argument locators address the
+                    // same body position as `fact.ty` and were minted against
+                    // this contributor's OWN body, so they take the SAME
+                    // contributor step. Without it the head derefs the wrong
+                    // contributor — a silently wrong authored argument rather
+                    // than a typed miss.
+                    fact.reference_head = fact
+                        .reference_head
+                        .with_arg_path_prefix(&[contributor_step]);
+                    merged_index.insert(name, fact);
+                }
+            }
+            scratch.member_index = merged_index;
+            // Wrapper/projection classify over the primary (last-wins)
+            // contributor body — merged interfaces are never mapped wrappers
+            // or forward subjects, so this matches the legacy folded-view
+            // classification per body shape.
+            if let Some(primary_body) = retained.bodies.last() {
+                scratch.classify_wrapper_shape(primary_body);
+                scratch.classify_projection(primary_body);
+            }
+        } else if let Some(primary_body) = retained.bodies.last() {
+            scratch.build_member_index(
+                primary_body,
+                contributor_anchor(retained.bodies.len().saturating_sub(1)),
+            );
+            scratch.classify_wrapper_shape(primary_body);
+            scratch.classify_projection(primary_body);
+        }
+    }
+
+    // Heritage-base FACTS of a CLASS or INTERFACE body's Intersection fold,
+    // minted ONCE at this lazy lowering from the SAME transient contributor
+    // bodies — a pure syntactic extraction (no head resolution, no argument
+    // lowering; the dispatch resolves heads and lowers demanded arguments).
+    // Gated on the group's authoritative kind: a class or interface
+    // Intersection fold encodes its `extends` heritage, an alias
+    // intersection none. A merged group mints per contributor under its
+    // `MergedContributor` path step so the argument locators deref through
+    // the merged body shape; a single group mints from the primary
+    // (last-wins) body — the one body the locator deref serves.
+    let heritage_bases: Arc<[HeritageBaseFact]> = if enum_type_arms.is_none()
+        && matches!(primary.kind, TypeDeclKind::Class | TypeDeclKind::Interface)
+    {
+        if body.is_merged() {
+            let mut facts: Vec<HeritageBaseFact> = Vec::new();
+            for (ordinal, contributor_body) in retained.bodies.iter().enumerate() {
+                let prefix = [TypeBodyPathStep::MergedContributor {
+                    ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
+                }];
+                facts.extend(collect_heritage_base_facts(
+                    &root_identity,
+                    contributor_body,
+                    &prefix,
+                ));
+            }
+            facts.into()
+        } else if let Some(primary_body) = retained.bodies.last() {
+            collect_heritage_base_facts(&root_identity, primary_body, &[]).into()
+        } else {
+            Arc::from([])
+        }
+    } else {
+        Arc::from([])
+    };
+
+    // KEY-DOMAIN closedness FACT, minted ONCE at this lazy lowering from the
+    // SAME transient contributor bodies — a pure syntactic extraction
+    // (binding-independent-sound arms only; everything else escapes by
+    // locator to the dispatch-time node-route classifier). Enum groups mint
+    // no fact: their type surface is the value-derived scalar union, and the
+    // closedness evaluator reads the absent fact as UNAVAILABLE — matching
+    // the body-less transient re-borrow the previous query-time walk hit.
+    let key_domain_closedness: Option<Arc<KeyDomainClosednessFact>> = if enum_type_arms.is_none() {
+        Some(Arc::new(collect_key_domain_closedness_fact(
+            &root_identity,
+            &retained.bodies,
+            body.is_merged(),
+        )))
+    } else {
+        None
+    };
+
+    LoweredTypeDecl {
+        kind: primary.kind,
+        contributor_facts: Arc::from(group.contributors().to_vec().into_boxed_slice()),
+        body,
+        body_hash,
+        dependency_paths: dependencies.full.clone(),
+        structural_dependency_paths: dependencies.structural.clone(),
+        declaration_carrier_paths: dependencies.declaration_carrier.clone(),
+        value_query_paths: dependencies.value_queries.clone(),
+        value_position_paths: dependencies.value_positions.clone(),
+        has_unroutable_value_position: dependencies.has_unroutable_value_position,
+        route_facts,
+        typeof_root_names,
+        narrow_type_parameters,
+        vue_ignored_heritage: Arc::from(vue_ignored_heritage),
+        member_index: scratch.member_index,
+        wrapper_shape: scratch.wrapper_shape,
+        projection_class: scratch.projection_class,
+        heritage_bases,
+        // Only a CLASS can author heritage; the walk's unnamed-base fact is
+        // meaningless on any other kind and must never gate one.
+        has_unnamed_class_heritage: primary.kind == TypeDeclKind::Class
+            && dependencies.has_unnamed_class_heritage,
+        key_domain_closedness,
+    }
+}
+
+/// Fold one same-name VALUE contributor group into the lazily-served
+/// per-symbol record — a pure FACT COPY off the group (the facts were minted
+/// by the inventory producer; nothing is re-derived from a raw body). An
+/// enum's FULL member set is unioned across every same-name contributor via
+/// [`ValueDeclGroup::merged_enum_unified`] (NOT `primary()`-only, which would
+/// drop earlier merged declarations' members) so the type/value projection
+/// surfaces and the value-body fingerprint both read from one lossless rail.
+///
+/// `retained` carries this lowering's TRANSIENT last-wins annotation / object
+/// shape — the value-body fingerprint inputs, read in place and dropped by
+/// the caller (the value-space mirror of the type-side `body_hash`
+/// precedent). `None` (the seeded env prefill / ambient-inventory path) has
+/// no transients: an enum still fingerprints fully from its folded member
+/// facts, while a record whose fingerprint would need the missing transients
+/// (a classified annotation, or an object shape on a non-enum) carries a
+/// DEGRADED `budget_exceeded` outcome forced HERE, in this session fold — an
+/// honest bit, never a fabricated fingerprint. That forcing is VALUE-only
+/// (the type-side transient-less non-enum fold in
+/// `lowered_type_decl_from_group` fails loudly instead of setting the bit)
+/// and is distinct from the shared hash encoder's `MAX_HASH_DEPTH`
+/// depth-cap, which sets the same bit for real deep bodies, type and value
+/// alike. The parse-domain admission drops the bit at `Fact` construction —
+/// pre-existing and unchanged by this storage flip (see
+/// [`ValueBodyHashFact::budget_exceeded`]).
+pub(crate) fn lowered_value_decl_from_group(
+    group: &ValueDeclGroup,
+    retained: Option<&RetainedValueTransients>,
+    lens: &dyn CrossDeclLens,
+) -> LoweredValueDecl {
+    let primary = group.primary();
+    fold_lowered_value_decl(
+        primary.kind,
+        primary.type_annotation.clone(),
+        group.merged_signatures(),
+        primary.object_shape.clone(),
+        group.merged_enum_unified(),
+        group.merged_enum_member_names_fact(),
+        retained,
+        lens,
+    )
+}
+
+/// The single record-assembly + fingerprint core shared by EVERY
+/// [`LoweredValueDecl`] producer — the group fold above and the synthesized
+/// component-default constructor below — so the value-body fingerprint
+/// convention and the honest degraded-bit rule have exactly one
+/// implementation.
+#[allow(clippy::too_many_arguments)]
+fn fold_lowered_value_decl(
+    kind: ValueDeclKind,
+    type_annotation: verter_type_expr::facts::ValueTypeAnnotationFact,
+    signatures: Vec<FunctionSignature>,
+    object_shape: Option<verter_type_expr::facts::ObjectShapeFact>,
+    enum_members: Option<verter_type_expr::facts::EnumMemberFact>,
+    enum_member_names: Option<verter_type_expr::facts::EnumMemberNamesFact>,
+    retained: Option<&RetainedValueTransients>,
+    lens: &dyn CrossDeclLens,
+) -> LoweredValueDecl {
+    // Rail-explicit transient tuple view of the merged enum inventory — the
+    // lossless [`EnumMemberValue::from_scalar`] bijection over the stored
+    // scalars, minted for the fingerprint input and dropped (the fingerprint
+    // reads the folded-literal subset only).
+    let enum_tuples: Option<Vec<(String, EnumMemberValue)>> = enum_members.as_ref().map(|fact| {
+        fact.members
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.clone(),
+                    EnumMemberValue::from_scalar(&entry.value),
+                )
+            })
+            .collect()
+    });
+    let (transient_annotation, transient_shape) = match retained {
+        Some(retained) => (
+            retained.type_annotation.as_ref(),
+            retained.object_shape.as_ref(),
+        ),
+        None => (None, None),
+    };
+    // The enum arm of the fingerprint reads ONLY the folded member tuples
+    // (fully fact-derived), so an enum never degrades. A transient-less
+    // non-enum whose fingerprint would observe the annotation body or the
+    // object shape (the two positions the facts no longer carry as typed IR)
+    // degrades honestly instead of hashing an input the producer did not see.
+    let is_enum = kind == ValueDeclKind::Enum && enum_tuples.is_some();
+    let degraded = retained.is_none()
+        && !is_enum
+        && (!matches!(type_annotation.classification, ValueAnnotationClass::Absent)
+            || object_shape.is_some());
+    let mut body_hash = value_body_fingerprint(
+        &ValueBodyFingerprintInput::new(
+            transient_annotation,
+            &signatures,
+            kind,
+            transient_shape,
+            enum_tuples.as_deref(),
+        ),
+        verter_session_query::facts::SymbolSpace::Value,
+        lens,
+    );
+    if degraded {
+        body_hash.budget_exceeded = true;
+    }
+    LoweredValueDecl {
+        kind,
+        type_annotation,
+        signatures,
+        object_shape,
+        enum_members,
+        enum_member_names,
+        body_hash: ValueBodyHashFact::from_outcome(body_hash),
+    }
+}
+
+/// Build the synthesized COMPONENT-DEFAULT value record (`class default` with
+/// one construct signature) from its fabricated public-instance SOURCE — the
+/// framework synth legs' single [`LoweredValueDecl`] constructor
+/// (the session's `resolver_core::vue_default_synth` /
+/// `resolver_core::svelte_default_synth`).
+///
+/// The instance shape rides the annotation FACT as the closed/synthesized
+/// four-source arm ([`ValueAnnotationClass::Direct`] — the documented
+/// classification for a type with no authored `TSType` node): authored member
+/// payloads inside it stay content-free locators lowered on demand through
+/// the one dispatch, never eagerly. The construct signature is honest to the
+/// vocabulary: no parameters, no type parameters, and an ABSENT return source
+/// (the return is the synthesized annotation source, not an authored
+/// position).
+///
+/// Fingerprinting routes through the SAME shared fold as the group producer:
+/// a transient-less record with a classified annotation carries the honest
+/// DEGRADED bit ([`ValueBodyHashFact::budget_exceeded`]) — the synthesized
+/// source is not part of the fingerprint byte convention, and a fabricated
+/// complete fingerprint would collide across distinct synthesized bodies.
+/// Version identity rides the owner's `FileWholeHash` (the synth output is a
+/// pure function of parse-domain inputs stored on content-addressed shallow
+/// state). The lens is [`UnresolvedLens`] BY RULE: synthesis is a parse-domain
+/// syntax-only producer forbidden from resolving imports (guard
+/// `component_default_synth_parse_domain_only`), and the signature-bearing
+/// fingerprint arm performs no reference resolution.
+pub fn lowered_value_decl_for_synthesised_default(
+    instance: verter_type_expr::facts::SemanticTypeSource,
+) -> LoweredValueDecl {
+    use verter_type_expr::span_origins::{FunctionSpansOrigin, SourceSynthetic};
+    fold_lowered_value_decl(
+        ValueDeclKind::Class,
+        verter_type_expr::facts::ValueTypeAnnotationFact {
+            is_unique_symbol: false,
+            unique_symbol_members: Arc::from([]),
+            typeof_alias_target: None,
+            classification: ValueAnnotationClass::Direct,
+            annotation: Some(instance),
+            reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
+            expression_source: None,
+            literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
+        },
+        vec![FunctionSignature {
+            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            parameters: Arc::from(Vec::new().into_boxed_slice()),
+            return_source: verter_type_expr::facts::FunctionReturnSource::Absent,
+            // A synthesised default-export constructor has no authored return
+            // annotation at all.
+            return_reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::Unavailable,
+            has_implementation_body: true,
+            spans_origin: FunctionSpansOrigin::Synthetic(SourceSynthetic),
+        }],
+        None,
+        None,
+        None,
+        None,
+        &UnresolvedLens,
+    )
+}
+
+/// Collect the dependency-name records of AUGMENTATION-scoped inner
+/// declarations (`declare global { … }` / `declare module "spec" { … }`),
+/// keyed by `(scope, DeclBindingKey)`. The file-scope collector deliberately
+/// skips ambient scopes; without this, an augmentation contributor body
+/// lowers with EMPTY dependency paths and its unresolvable referenced
+/// imports can never fail preparation with `MissingExternalOwner` — a
+/// silently-Complete surface. Inner statements classify with the SAME
+/// per-statement collector as file scope (the augmentation body shares the
+/// containing file's import namespace).
+fn collect_augmentation_statement_dependencies(
+    stmt: &oxc_ast::ast::Statement<'_>,
+    owner: TopLevelOwnerId,
+    out: &mut FxHashMap<(AugmentationScopeKind, DeclBindingKey), DeclDependencyFacts>,
+) {
+    use oxc_ast::ast::Statement;
+    let (scope, body): (AugmentationScopeKind, &[oxc_ast::ast::Statement<'_>]) = match stmt {
+        // `declare global { … }` is its own statement variant.
+        Statement::TSGlobalDeclaration(global) => {
+            (AugmentationScopeKind::Global, &global.body.body)
+        }
+        // An identifier namespace is NOT an augmentation scope — its inner
+        // decls key under qualified `Ns.Name` file-scope records.
+        Statement::TSExternalModuleDeclaration(module) => {
+            let scope = AugmentationScopeKind::Module(module.id.value.to_string());
+            let Some(block) = module.body.as_ref() else {
+                return;
+            };
+            (scope, &block.body)
+        }
+        _ => return,
+    };
+    for inner in body {
+        for (declaration, deps) in collect_statement_dependency_names(inner, owner) {
+            out.entry((scope.clone(), declaration.qualified_key()))
+                .or_default()
+                .extend(deps);
+        }
+    }
+}
+
+/// Fold the parser / language / parse-env identity into a freshly built
+/// function program index's structural per-function hashes. The semantic
+/// walk's `flow_body_stable_hash` covers body content only; this boundary
+/// mix is what makes a parse-env move or a parser/language flip miss
+/// exactly the affected artifact slots without re-walking the body.
+pub fn fold_flow_body_env_identity(
+    index: &verter_session_query::function_program::FunctionProgramIndex,
+    parse_env_hash: &verter_session_query::analysis::types::Hash16,
+    source_type: oxc_span::SourceType,
+) -> verter_session_query::function_program::FunctionProgramIndex {
+    const SALT: &[u8] = b"verter-flow-body-env-identity:v1";
+    index.map_stable_hashes(|stable| {
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(SALT);
+        buf.extend_from_slice(stable);
+        buf.extend_from_slice(parse_env_hash);
+        buf.extend_from_slice(
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
+                .as_bytes(),
+        );
+        buf.extend_from_slice(format!("{source_type:?}").as_bytes());
+        crate::source_hash::hash_16(&buf)
+    })
+}
+
+/// The source side of the expression-source capability. A read whose
+/// program walk was refused a walk-stack lease carries that refusal by value
+/// ([`WalkedRead`]); the request-side capability that serves these reads to
+/// the engine applies it.
+impl IndexedExpressionDemand {
+    pub fn function_program_index(
+        &self,
+    ) -> WalkedRead<Arc<verter_session_query::function_program::FunctionProgramIndex>> {
+        self.index.function_program_index()
+    }
+
+    pub fn indexed_program_expression_ir(
+        &self,
+        record: &verter_session_query::function_program::ProgramExpressionRecord,
+    ) -> Option<Arc<verter_type_expr::IndexedValueExpression>> {
+        let service = self.snapshot.service.as_ref()?;
+        self.snapshot.ensure_lease();
+        let record = record.clone();
+        let node = service.run_leased(&self.snapshot.key, move |program| {
+            program.and_then(|parsed| {
+                verter_semantic::analysis::function_program::build_indexed_program_expression_ir(
+                    parsed.borrow_dependent(),
+                    parsed.source_str(),
+                    &record,
+                )
+            })
+        })??;
+        Some(Arc::new(node))
+    }
+
+    pub fn indexed_call_expression_over_frame_at(
+        &self,
+        span: verter_span::Span,
+        frame_lowered: Arc<[bool]>,
+    ) -> WalkedRead<Option<Arc<IndexedFlowCallExpression>>> {
+        use verter_semantic::analysis::function_program::IndexedCallSite;
+        use verter_semantic::analysis::type_eval_build::{
+            lower_indexed_call_expression_with_read_roots,
+            lower_indexed_new_expression_with_read_roots,
+            lower_indexed_tagged_template_expression_with_read_roots,
+        };
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return WalkedRead::clean(None);
+        };
+        self.snapshot.ensure_lease();
+        let mut refusal = None;
+        let _index = self.function_program_index().absorb_into(&mut refusal);
+        let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
+            program.map(|parsed| {
+                let source = parsed.source_str();
+                parsed
+                    .with_indexed_call_site(span, |site| match site {
+                        IndexedCallSite::Call(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_call_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
+                            })
+                        }
+                        IndexedCallSite::Construct(call) => {
+                            observed_indexed_call(call.arguments.len(), |observe| {
+                                lower_indexed_new_expression_with_read_roots(
+                                    call,
+                                    source,
+                                    observe,
+                                    &frame_lowered,
+                                )
+                            })
+                        }
+                        // The template strings are the first argument.
+                        IndexedCallSite::TaggedTemplate(tagged) => {
+                            observed_indexed_call(tagged.quasi.expressions.len() + 1, |observe| {
+                                lower_indexed_tagged_template_expression_with_read_roots(
+                                    tagged, source, observe,
+                                )
+                            })
+                        }
+                    })
+                    .map(Option::flatten)
+            })
+        }) else {
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
+        };
+        WalkedRead::from_program_walk(node)
+            .with_prior_refusal(refusal)
+            .map(|node| node.map(Arc::new))
+    }
+
+    pub fn function_type_param_clause(
+        &self,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
+    ) -> WalkedRead<Option<Vec<verter_session_query::flow::slice::SliceTypeParam>>> {
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return WalkedRead::clean(None);
+        };
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.snapshot.ensure_lease();
+        // A witness another index answered names no position THIS source
+        // serves: the same typed miss as an unknown entry.
+        let mut refusal = None;
+        if !matched.is_served_by(&self.function_program_index().absorb_into(&mut refusal)) {
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
+        }
+        let entry = matched.entry().clone();
+        let Some(clause) = service.run_leased(&self.snapshot.key, move |program| {
+            program.map(|p| {
+                p.with_indexed_function(&entry, |resolved, _entry| {
+                    crate::flow_slice_content::build_function_type_param_clause(
+                        resolved,
+                        p.source_str(),
+                    )
+                })
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: function_type_param_clause's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
+        };
+        WalkedRead::from_program_walk(clause).with_prior_refusal(refusal)
+    }
+
+    pub fn flow_slice_content(
+        &self,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
+        selection: verter_session_query::flow::slice::FlowSliceSelection,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> WalkedRead<Option<Arc<verter_session_query::flow::slice::SliceContent>>> {
+        self.flow_slice_content_with_context(matched, Some(selection), bound, None, policy)
+    }
+
+    pub fn flow_slice_content_with_context(
+        &self,
+        matched: verter_session_query::function_program::FunctionProgramMatch<'_>,
+        selection: Option<verter_session_query::flow::slice::FlowSliceSelection>,
+        bound: &verter_session_query::flow::bundle::BoundFlowGraph,
+        context: Option<Arc<verter_session_query::flow::slice::NestedFlowContext>>,
+        policy: verter_session_query::flow::policy::FlowReturnPolicy,
+    ) -> WalkedRead<Option<Arc<verter_session_query::flow::slice::SliceContent>>> {
+        let entry = matched.entry();
+        if bound.key().function != *entry.key()
+            || Some(bound.key().flow_body_exact_hash) != entry.flow_body_exact_hash()
+            || context
+                .as_ref()
+                .is_some_and(|context| !context.matches_snapshot(&self.snapshot.key))
+        {
+            return WalkedRead::clean(None);
+        }
+        let skeleton = Arc::clone(bound.bundle().skeleton());
+        let bindings = Arc::clone(bound.bundle().bindings());
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return WalkedRead::clean(None);
+        };
+        // Pin the retained snapshot for this memo's lifetime; the
+        // LEASE-ONLY run below reuses it.
+        self.snapshot.ensure_lease();
+        let mut refusal = None;
+        let index = self.function_program_index().absorb_into(&mut refusal);
+        // A witness another index answered names no position THIS source
+        // serves: the same typed miss as an unknown entry.
+        if !matched.is_served_by(&index) {
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
+        }
+        let entry = entry.clone();
+        // A carrier's script block (`.vue` / `.svelte`) compiles to a
+        // module by construction; a plain script file proves module scope
+        // only through its own top-level syntax.
+        let carrier_module = self.carrier_module;
+        let snapshot = self.snapshot.key.clone();
+        #[cfg(any(test, feature = "test-support"))]
+        let work = Arc::clone(&self.capture_lookup_work);
+        #[cfg(any(test, feature = "test-support"))]
+        let lowering_work = Arc::clone(&self.lowering_work);
+        let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
+            #[cfg(any(test, feature = "test-support"))]
+            let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
+            #[cfg(any(test, feature = "test-support"))]
+            let _lowering = crate::flow_slice_content::lowering_probe::enter(lowering_work);
+            program.map(|p| {
+                p.with_indexed_function(&entry, |resolved, entry| {
+                    crate::flow_slice_content::build_flow_slice_content(
+                        crate::flow_slice_content::FlowSliceSource {
+                            program: p.borrow_dependent(),
+                            walks: p.walk_stack(),
+                            resolved,
+                        },
+                        p.source_str(),
+                        &index,
+                        entry,
+                        selection.as_ref(),
+                        &skeleton,
+                        Arc::clone(&bindings),
+                        carrier_module,
+                        &snapshot,
+                        context.as_deref(),
+                        policy,
+                    )
+                })
+                .map(Option::flatten)
+            })
+        }) else {
+            // Broken lease pin: fail CLOSED via ReturnOnly, unmemoized — a
+            // retry under a live lease recovers.
+            tracing::error!(
+                canonical = %self.snapshot.key.canonical,
+                "decl-body lease pin broken: flow_slice_content's lease-only run missed \
+                 the retained snapshot; failing closed to an uncached miss (ReturnOnly)"
+            );
+            return WalkedRead {
+                value: None,
+                refusal,
+            };
+        };
+        WalkedRead::from_program_walk(node)
+            .with_prior_refusal(refusal)
+            .map(|node| node.map(Arc::new))
+    }
+
+    pub fn flow_capture_authorities(
+        &self,
+        locators: &[verter_session_query::flow::slice::SliceCaptureAuthorityLocator],
+    ) -> WalkedRead<
+        Option<Vec<Option<Option<verter_session_query::flow::slice::SliceCaptureAuthority>>>>,
+    > {
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return WalkedRead::clean(None);
+        };
+        let mut refusal = None;
+        let index = self.function_program_index().absorb_into(&mut refusal);
+        let snapshot = self.snapshot.key.clone();
+        let locators = locators.to_vec();
+        #[cfg(any(test, feature = "test-support"))]
+        let work = Arc::clone(&self.capture_lookup_work);
+        self.snapshot.ensure_lease();
+        let authorities = service
+            .run_leased(&self.snapshot.key, move |program| {
+                #[cfg(any(test, feature = "test-support"))]
+                let _probe = verter_session_query::flow::slice::capture_lookup_probe::enter(work);
+                let program = program?;
+                Some(
+                    locators
+                        .iter()
+                        .map(|locator| {
+                            if !locator.matches_snapshot(&snapshot) {
+                                return None;
+                            }
+                            let entry = index.get(&locator.declaration().defining_function)?;
+                            crate::flow_slice_content::build_flow_capture_authority(
+                                program.borrow_dependent(),
+                                program.source_str(),
+                                entry.entry(),
+                                locator,
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .flatten();
+        WalkedRead {
+            value: authorities,
+            refusal,
+        }
+    }
+
+    pub fn transient_macro_type_argument(
+        &self,
+        macro_span: verter_span::Span,
+    ) -> DemandOutcome<TypeExpr> {
+        let Some(service) = self.snapshot.service.as_ref() else {
+            return DemandOutcome::Ready(None);
+        };
+        self.snapshot.ensure_lease();
+        let outcome = service.run_leased(&self.snapshot.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            Some(
+                verter_semantic::analysis::lower_macro_type_argument_at_span(
+                    program, source, macro_span,
+                ),
+            )
+        });
+        match outcome {
+            // Service-level lease miss OR a program-absent re-borrow: both are
+            // the transient broken-pin class — fail closed to ReturnOnly.
+            None | Some(None) => {
+                tracing::error!(
+                    canonical = %self.snapshot.key.canonical,
+                    "decl-body lease pin broken: transient macro type-argument re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                DemandOutcome::LeaseMiss
+            }
+            // A genuine typed absence: no macro-shaped call at the span / no
+            // authored type argument.
+            Some(Some(None)) => DemandOutcome::Ready(None),
+            Some(Some(Some(expr))) => DemandOutcome::Ready(Some(Arc::new(expr))),
+        }
+    }
+}

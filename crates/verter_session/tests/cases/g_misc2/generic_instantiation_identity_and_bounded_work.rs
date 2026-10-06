@@ -55,11 +55,11 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     IndexKey, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
 /// `Pair` carries a default that references the FIRST parameter by name,
@@ -281,7 +281,7 @@ fn constrained_parameter_substitutes_the_exact_argument_not_its_constraint() {
         let data = graph.node_data(*node);
         let indexed_key = match data.as_deref() {
             Some(SemanticNodeData::IndexedAccess {
-                index: verter_session::semantic_query::IndexKey::String(name),
+                index: verter_type_engine::semantic_query::IndexKey::String(name),
                 ..
             }) => name.to_string(),
             other => panic!(
@@ -439,11 +439,11 @@ fn mapper_kind_classification_materialises_no_value_body() {
     for (alias, expected) in [
         (
             "IdentityOpen",
-            verter_session::semantic_query::MapperKind::Identity,
+            verter_type_engine::semantic_query::MapperKind::Identity,
         ),
         (
             "ComputedOpen",
-            verter_session::semantic_query::MapperKind::Computed,
+            verter_type_engine::semantic_query::MapperKind::Computed,
         ),
     ] {
         // A fresh host per alias so the counters measure this alias's

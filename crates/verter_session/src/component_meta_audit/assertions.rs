@@ -28,7 +28,7 @@ use super::{
     DerivationEdgeRecord, EdgeId, InstantiationRecord, NodeId, OriginEdgeKind, RequestAuditRecord,
     SharedLoadReuseRecord,
 };
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// Maximum depth for the iterative walker. Exceeding this cap
 /// terminates the affected branch with a `DepthExceeded` marker

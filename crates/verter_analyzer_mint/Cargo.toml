@@ -1,0 +1,13 @@
+[package]
+name = "verter_analyzer_mint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Construction authorities reserved for Verter's syntax analyzer — reachable only by crates that declare a direct dependency on this crate"
+keywords = ["vue", "compiler"]
+categories = ["compilers"]
+
+[dependencies]

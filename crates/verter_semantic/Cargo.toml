@@ -20,9 +20,12 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 # builds compile `compute_flow_slice_hash` without the counter TLS or
 # its increment. Plain `#[cfg(test)]` cannot gate this: the consumer is
 # a different crate, where this crate's `test` cfg is false.
-test-support = []
+test-support = ["verter_session_query/test-support"]
 
 [dependencies]
+verter_session_query = { workspace = true }
+# The analyzer alone mints member-list anchors from live syntax nodes.
+verter_analyzer_mint = { workspace = true }
 verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span" }
 # Leaf observability substrate (layer 1): path helpers keep their
@@ -67,6 +70,8 @@ bitflags = "2.11"
 web-time = "1.1"
 
 [dev-dependencies]
+verter_resolution = { workspace = true }
+verter_session_query = { workspace = true, features = ["test-support"] }
 static_assertions = "1.1.0"
 # The C2 privacy-rail UI harness (tests/ui/type_info_privacy.rs) compiles its
 # fixtures through trybuild, mirroring the workspace's compile-contract

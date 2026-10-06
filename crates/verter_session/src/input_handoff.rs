@@ -25,7 +25,8 @@
 
 use std::sync::Arc;
 
-use crate::input_basis::{InputBasis, LoadWave, NegativeFact, Observation, RequestInputBinding};
+use crate::input_basis::{InputBasis, LoadWave, NegativeFact, Observation};
+use verter_session_query::source::input_binding::RequestInputBinding;
 
 /// One asynchronously acquired file row handed to
 /// [`CommittedInputHandoff::commit`].

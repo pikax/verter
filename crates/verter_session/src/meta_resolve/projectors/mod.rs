@@ -8,14 +8,14 @@
 //!
 //! Authority chain:
 //!
-//! 1. `crate::structural_carrier_producer::macro_type_arg_hot_ref(ctx, file, macro_index)`
+//! 1. `verter_type_engine::structural_carrier_producer::macro_type_arg_hot_ref(ctx, file, macro_index)`
 //!    reads the macro arg's mode-neutral hot-mirror handle (the ONE producer)
 //!    so the dispatch can resolve the macro payload from the structural
 //!    carrier.
 //! 2. `dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload { .. })`
 //!    yields the macro payload's semantic node (the resolved type that
 //!    backs the macro instance).
-//! 3. `dispatch.execute_read(SemanticQueryKey::ProjectPath { base, path: [], context: crate::semantic_query::ProjectionReductionContext::published(Shallow)})`
+//! 3. `dispatch.execute_read(SemanticQueryKey::ProjectPath { base, path: [], context: verter_type_engine::semantic_query::ProjectionReductionContext::published(Shallow)})`
 //!    enumerates the payload's surface members.
 //! 4. For each surface member, the projector raises the member's value
 //!    node back to `TypeExpr` and classifies its exactness via
@@ -34,22 +34,24 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::{
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::{
     ExpansionDiagnostic, ExpansionExactness, ExpansionExecutionStatus, ExpansionStopReason,
 };
-use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::{
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{
     DeclIdentity, PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey, SurfaceMember,
+    SemanticQueryKey,
 };
-use crate::types::FileAnalysisSnapshot;
 
-use super::dep_signature::emit_dispatch_dep_signature_facts;
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
+use verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts;
 
 pub(crate) mod define_shapes;
 pub(crate) mod emits;
@@ -167,8 +169,8 @@ pub(crate) use output_sink::{
 /// the dispatch path didn't surface still appear in the published
 /// analysis.
 fn merge_projected_fields_by_name(
-    target: &mut Vec<verter_semantic::analysis::type_expand::ExpandedField>,
-    projected: Vec<verter_semantic::analysis::type_expand::ExpandedField>,
+    target: &mut Vec<verter_session_query::analysis::type_expand::ExpandedField>,
+    projected: Vec<verter_session_query::analysis::type_expand::ExpandedField>,
 ) {
     for field in projected {
         if let Some(existing) = target.iter_mut().find(|t| t.name == field.name) {
@@ -222,14 +224,15 @@ pub(crate) fn project_evaluated_types(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     file: &str,
     snapshot: &FileAnalysisSnapshot,
-    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    evaluated_types: &mut verter_session_query::analysis::type_expand::ExpandedComponentTypes,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
 ) {
     // Construct a `SurfaceProjection` per macro kind so each
     // projector entry receives a path-precise cursor.
     // `whole_surface(kind)` admits every published member name;
     // narrower cursors are threaded in when consumer demand is known.
-    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::meta_resolve::projection_demand::SurfaceProjection;
+    use verter_type_engine::component_meta_caches::PublishedSurfaceKind;
 
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         let owner = build_owner_decl_identity(query_engine.ctx, file, mac.owner);
@@ -323,7 +326,7 @@ pub(crate) fn project_evaluated_types(
                     .retain(|entry| entry.macro_index != macro_index);
                 if !fields.is_empty() {
                     evaluated_types.exposed.push(
-                        verter_semantic::analysis::type_expand::ExpandedMacroExposed {
+                        verter_session_query::analysis::type_expand::ExpandedMacroExposed {
                             macro_index,
                             fields,
                         },
@@ -361,7 +364,7 @@ pub(crate) const SFC_SCRIPT_SETUP_DECL_NAME: &str = "<sfc-script-setup>";
 /// graph-native synthesis layer (path-independent caching per
 /// `CLAUDE.md` Build Philosophy).
 pub(crate) fn build_owner_decl_identity(
-    ctx: &dyn ResolverContext,
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
 ) -> DeclIdentity {
@@ -411,188 +414,6 @@ pub(crate) fn empty_path() -> Arc<[PathSegment]> {
 // Strictly request-bound: the sealed `ResolverContext` and the `debug_assert!`
 // require the caller's request view.
 // =============================================================================
-
-/// Result of peeking whether a type's shape is known cheaply.
-///
-/// `Some(_)` ⇒ the caller may publish or short-circuit WITHOUT
-/// triggering reduction. `None` ⇒ the cache is cold; the caller must
-/// reduce (or publish the Ref shallow per the shallow-by-default rule).
-/// Read the positive member evidence backing `node`, if `node` resolves to a
-/// `SemanticNodeData::Object` shell. An empty result does not prove that an
-/// open-spread surface has no additional members, and an UNRESOLVED carrier
-/// (an import miss, an opaque shell) is an INCOMPLETE resolution with its
-/// typed reason — never a silent zero-member success.
-///
-/// An `ObjectSpreadProgram` node is the walker's typed open evidence for an
-/// open / multi-alternative program root (it never fabricates a closed
-/// `Object` for those): publish its POSITIVE member evidence through the
-/// correlated spread query — presence only, never completeness, exactly
-/// this reader's standing contract.
-/// `Union` / `Intersection` / `Conditional` carriers (the walker's typed
-/// open evidence for compound roots containing open programs) recurse
-/// per-branch with the SAME presence-only rule and merge under the macro
-/// enumeration convention (a member present in any branch is published).
-pub(crate) fn read_positive_surface_members(
-    ctx: &dyn ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    surface_node: SemanticNodeId,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
-    use crate::typeinfo::surface_resolution::SurfaceResolution;
-
-    /// Join per-arm resolutions under the given member-join rule: the joined
-    /// positive members always publish, and ANY incomplete arm makes the
-    /// whole join incomplete with the union of the arms' typed reasons — the
-    /// joined subset is usable but never passes as the complete evidence.
-    fn join_arms(
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-        arms: &[crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>>],
-        join: impl FnOnce(
-            &crate::semantic_query_memo::SemanticGraphStore,
-            &[Vec<SurfaceMember>],
-            &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-        ) -> Vec<SurfaceMember>,
-    ) -> crate::typeinfo::surface_resolution::SurfaceResolution<Vec<SurfaceMember>> {
-        use crate::typeinfo::surface_resolution::SurfaceResolution;
-        let mut incomplete = None::<crate::typeinfo::surface_resolution::NonEmptyReasons>;
-        let mut per_arm: Vec<Vec<SurfaceMember>> = Vec::with_capacity(arms.len());
-        for arm in arms {
-            match arm {
-                SurfaceResolution::Resolved(members) | SurfaceResolution::OpenPresence(members) => {
-                    per_arm.push((**members).clone())
-                }
-                SurfaceResolution::NoSurface(_) => per_arm.push(Vec::new()),
-                SurfaceResolution::Incomplete(inc) => {
-                    incomplete = Some(match incomplete {
-                        Some(acc) => acc.union(inc.non_empty_reasons()),
-                        None => inc.non_empty_reasons(),
-                    });
-                    per_arm.push(Vec::new());
-                }
-            }
-        }
-        let mut canonical_evidence =
-            crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-        let members = join(dispatch.graph(), &per_arm, &mut canonical_evidence);
-        dispatch.deposit_canonical_evidence(canonical_evidence);
-        match incomplete {
-            Some(reasons) => SurfaceResolution::incomplete_with(reasons, members),
-            None => SurfaceResolution::resolved(members),
-        }
-    }
-
-    match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), surface_node).as_deref()
-    {
-        Some(SemanticNodeData::Object(view)) => {
-            SurfaceResolution::resolved(view.positive_members().to_vec())
-        }
-        Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
-            let formula = match dispatch.project_object_spread_for_consumer(
-                surface_node,
-                crate::semantic_query::ObjectProjectionSelector::Surface,
-                crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Shallow,
-                ),
-            ) {
-                crate::semantic_query::QueryResult::Value(formula) => formula,
-                crate::semantic_query::QueryResult::Recursive(_) => {
-                    return SurfaceResolution::incomplete(
-                        crate::typeinfo::surface_resolution::NonEmptyReasons::of(
-                            crate::semantic_query::PartialReason::SamePathRecursion,
-                        ),
-                    );
-                }
-                // A stable / well-formed open marker contributes no members
-                // and stays COMPLETE; only an operational fault is partial.
-                crate::semantic_query::QueryResult::Error(error) => {
-                    return match crate::typeinfo::surface_resolution::stable_query_error_partiality(
-                        &error,
-                    ) {
-                        Some(reasons) => SurfaceResolution::incomplete(reasons),
-                        None => SurfaceResolution::resolved(Vec::new()),
-                    };
-                }
-            };
-            let mut canonical_evidence =
-                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-            let members =
-                crate::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
-                    dispatch.graph(),
-                    &formula,
-                    &mut canonical_evidence,
-                );
-            dispatch.deposit_canonical_evidence(canonical_evidence);
-            SurfaceResolution::resolved(members)
-        }
-        Some(SemanticNodeData::Union(arms)) => {
-            let arms = arms.members_arc();
-            let per_arm: Vec<_> = arms
-                .iter()
-                .map(|arm| read_positive_surface_members(ctx, dispatch, *arm))
-                .collect();
-            join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                crate::project_semantic_dispatch::walk::presence_union_members(
-                    graph, per_arm, evidence,
-                )
-            })
-        }
-        // Intersection carriers merge under INTERSECTION rules (required
-        // in any declaring arm stays required, same-key collisions
-        // intersect the values, readonly in any arm survives) — the union
-        // rule would mark intersection members optional and union their
-        // values.
-        Some(SemanticNodeData::Intersection(arms)) => {
-            let arms = arms.members_arc();
-            let per_arm: Vec<_> = arms
-                .iter()
-                .map(|arm| read_positive_surface_members(ctx, dispatch, *arm))
-                .collect();
-            join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                crate::project_semantic_dispatch::walk::presence_intersection_members(
-                    graph, per_arm, evidence,
-                )
-            })
-        }
-        Some(SemanticNodeData::Conditional {
-            true_branch_ref,
-            false_branch_ref,
-            pending,
-            ..
-        }) => {
-            let true_branch = dispatch.apply_conditional_branch_pending(
-                *true_branch_ref,
-                pending.as_deref(),
-                true,
-            );
-            let false_branch = dispatch.apply_conditional_branch_pending(
-                *false_branch_ref,
-                pending.as_deref(),
-                false,
-            );
-            let per_arm = [
-                read_positive_surface_members(ctx, dispatch, true_branch),
-                read_positive_surface_members(ctx, dispatch, false_branch),
-            ];
-            join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                crate::project_semantic_dispatch::walk::presence_union_members(
-                    graph, per_arm, evidence,
-                )
-            })
-        }
-        // An OPERATIONALLY unresolved carrier contributes no members AND
-        // says so — the typed reason makes `Known | Missing` distinguishable
-        // from `Known`. A member-less resolved shape (a primitive / a
-        // function) and a STABLE authored-miss carrier (a `BareRef` mirror,
-        // the walker's well-formed `OpenSurface` marker) genuinely
-        // contribute no positive member evidence — the complete answer.
-        other => {
-            match crate::typeinfo::surface_resolution::stable_member_carrier_partiality(ctx, other)
-            {
-                Some(reasons) => SurfaceResolution::incomplete(reasons),
-                None => SurfaceResolution::resolved(Vec::new()),
-            }
-        }
-    }
-}
 
 /// Build a [`MacroExpansionDiagnostics`] for a `QueryError` encountered
 /// during projection. Mirrors `slot_binding_graph::macro_expansion_for_query_error`.
@@ -654,17 +475,17 @@ pub(crate) fn macro_expansion_for_cycle(
 #[must_use]
 pub(crate) fn macro_payload_surface_provenance(
     macro_kind: AnalyzedMacroKind,
-) -> crate::semantic_query::SurfaceProvenanceContext {
+) -> verter_type_engine::semantic_query::SurfaceProvenanceContext {
     match macro_kind {
         AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
-            crate::semantic_query::SurfaceProvenanceContext::MacroTypeArgOwnBody
+            verter_type_engine::semantic_query::SurfaceProvenanceContext::MacroTypeArgOwnBody
         }
         AnalyzedMacroKind::DefineEmits
         | AnalyzedMacroKind::DefineSlots
         | AnalyzedMacroKind::DefineModel
         | AnalyzedMacroKind::DefineExpose
         | AnalyzedMacroKind::DefineOptions => {
-            crate::semantic_query::SurfaceProvenanceContext::Structural
+            verter_type_engine::semantic_query::SurfaceProvenanceContext::Structural
         }
     }
 }
@@ -672,7 +493,7 @@ pub(crate) fn macro_payload_surface_provenance(
 /// Resolve a type-based macro's payload through `ResolveMacroPayload`.
 ///
 /// Reads the macro arg's ONE mode-neutral mirror handle
-/// (`crate::structural_carrier_producer::macro_type_arg_hot_ref`) — the producer lowered
+/// (`verter_type_engine::structural_carrier_producer::macro_type_arg_hot_ref`) — the producer lowered
 /// the `parsed_type_argument` once — then RE-ENTERS the shared dispatch with
 /// `ResolveMacroPayload` (Navigate) for the terminal demand over that carrier
 /// handle and returns the macro payload node on success. This is a different
@@ -686,7 +507,7 @@ pub(crate) fn macro_payload_surface_provenance(
 /// unresolved import to a non-existent module), a diagnostic is
 /// pushed before returning `None`.
 pub(crate) fn resolve_macro_payload(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     owner: &DeclIdentity,
     file: &str,
     macro_index: usize,
@@ -727,7 +548,7 @@ pub(crate) fn resolve_macro_payload(
         type_args,
         context: dispatch.macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
     });
-    crate::request_context::observe_component_meta_read_suppress(&payload_read);
+    verter_type_engine::request_context::observe_component_meta_read_suppress(&payload_read);
     emit_dispatch_dep_signature_facts(dispatch, &payload_read.dep_signature);
     if !payload_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -765,7 +586,8 @@ pub(crate) fn resolve_macro_payload(
     // empty surface that's indistinguishable from a successful
     // empty payload.
     if let Some(SemanticNodeData::Opaque(err)) =
-        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), payload_node).as_deref()
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), payload_node)
+            .as_deref()
     {
         diag_sink.push(macro_expansion_for_query_error(
             macro_index,
@@ -794,8 +616,10 @@ pub(crate) fn resolve_macro_payload(
     // non-`Opaque` Object; carrier-stopped payloads (an open mapped
     // surface) are neither empty-Object nor root-`DeclRef` shapes and
     // never reach the probe.
-    let payload_data =
-        crate::project_semantic_dispatch::node_data_for(dispatch.graph(), payload_node);
+    let payload_data = verter_type_engine::project_semantic_dispatch::node_data_for(
+        dispatch.graph(),
+        payload_node,
+    );
     let payload_is_empty_surface = matches!(
         payload_data.as_deref(),
         Some(SemanticNodeData::Object(view))
@@ -838,7 +662,7 @@ pub(crate) fn resolve_macro_payload(
                     base: product.hot.node(),
                     path: empty_path(),
                     context:
-                        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                             ProjectionMode::Navigate,
                         ),
                 });
@@ -851,7 +675,7 @@ pub(crate) fn resolve_macro_payload(
             });
             if let Some(probe_node) = probe_node {
                 let unresolved: Option<String> =
-                    match crate::project_semantic_dispatch::node_data_for(
+                    match verter_type_engine::project_semantic_dispatch::node_data_for(
                         dispatch.graph(),
                         probe_node,
                     )
@@ -860,13 +684,13 @@ pub(crate) fn resolve_macro_payload(
                         Some(SemanticNodeData::Opaque(err)) => Some(format!("{err:?}")),
                         Some(SemanticNodeData::DeclRef { identity }) => {
                             let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(
-                                crate::semantic_query::ResolveDeclKey {
-                                    scope: crate::semantic_query::ScopeId {
+                                verter_type_engine::semantic_query::ResolveDeclKey {
+                                    scope: verter_type_engine::semantic_query::ScopeId {
                                         canonical_id: std::sync::Arc::clone(&identity.canonical_id),
                                         owner: identity.owner,
                                         local_scope: None,
                                         binder_scope_id:
-                                            crate::semantic_query::BinderScopeId::file_scope(
+                                            verter_type_engine::semantic_query::BinderScopeId::file_scope(
                                                 identity.owner,
                                             ),
                                     },
@@ -876,14 +700,14 @@ pub(crate) fn resolve_macro_payload(
                             emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
                             match read.value {
                                 QueryResult::Value(anchor) => {
-                                    match crate::project_semantic_dispatch::node_data_for(
+                                    match verter_type_engine::project_semantic_dispatch::node_data_for(
                                         dispatch.graph(),
                                         anchor,
                                     )
                                     .as_deref()
                                     {
                                         Some(SemanticNodeData::Opaque(
-                                            err @ crate::semantic_query::QueryError::Miss,
+                                            err @ verter_type_engine::semantic_query::QueryError::Miss,
                                         )) => Some(format!("{err:?}")),
                                         _ => None,
                                     }
@@ -926,13 +750,14 @@ pub(crate) fn resolve_macro_payload(
 }
 
 pub(crate) fn resolve_payload_surface(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     payload_node: SemanticNodeId,
     macro_index: usize,
     expansion_kind: MacroExpansionKind,
-    provenance: crate::semantic_query::SurfaceProvenanceContext,
+    provenance: verter_type_engine::semantic_query::SurfaceProvenanceContext,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> crate::typeinfo::surface_resolution::SurfaceResolution<SemanticNodeId> {
+) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
+    let claims = dispatch.host_attachment().surface_claims();
     // The empty-path `ProjectPath` carries the macro's surface
     // provenance (by design): for a props payload that
     // resolved to a `DeclRef` carrier (`defineProps<FooProps>()`), the
@@ -955,12 +780,13 @@ pub(crate) fn resolve_payload_surface(
     let surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: payload_node,
         path: empty_path(),
-        context: crate::semantic_query::ProjectionReductionContext::macro_object_surface(
-            ProjectionMode::Shallow,
-            provenance,
-        ),
+        context:
+            verter_type_engine::semantic_query::ProjectionReductionContext::macro_object_surface(
+                ProjectionMode::Shallow,
+                provenance,
+            ),
     });
-    crate::request_context::observe_component_meta_read_suppress(&surface_read);
+    verter_type_engine::request_context::observe_component_meta_read_suppress(&surface_read);
     emit_dispatch_dep_signature_facts(dispatch, &surface_read.dep_signature);
     if !surface_read.walker_diagnostics.is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
@@ -971,9 +797,7 @@ pub(crate) fn resolve_payload_surface(
         ));
     }
     match surface_read.value {
-        QueryResult::Value(id) => {
-            crate::typeinfo::surface_resolution::SurfaceResolution::resolved(id)
-        }
+        QueryResult::Value(id) => claims.resolved(id),
         QueryResult::Recursive(_) => {
             // Cycles are NON-FATAL by rule: they bound the publish surface
             // to the non-recursive arms — the degraded COMPLETE answer, not
@@ -983,7 +807,7 @@ pub(crate) fn resolve_payload_surface(
                 expansion_kind,
                 "cyclic-macro-payload-surface".to_string(),
             ));
-            crate::typeinfo::surface_resolution::SurfaceResolution::no_surface()
+            claims.no_surface()
         }
         QueryResult::Error(e) => {
             diag_sink.push(macro_expansion_for_query_error(
@@ -995,11 +819,11 @@ pub(crate) fn resolve_payload_surface(
             // complete no-surface answer; an OPERATIONAL fault (budget /
             // cancellation / torn state) is an INCOMPLETE resolution with
             // its typed reason on the returned claim.
-            match crate::typeinfo::surface_resolution::stable_query_error_partiality(&e) {
+            match verter_type_engine::semantic_query::surface_resolution::stable_query_error_partiality(&e) {
                 Some(reasons) => {
-                    crate::typeinfo::surface_resolution::SurfaceResolution::incomplete(reasons)
+                    claims.incomplete(reasons)
                 }
-                None => crate::typeinfo::surface_resolution::SurfaceResolution::no_surface(),
+                None => claims.no_surface(),
             }
         }
     }

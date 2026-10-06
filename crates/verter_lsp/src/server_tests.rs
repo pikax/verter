@@ -1384,7 +1384,7 @@ fn install_test_resolver_for_root(
         server,
         root,
         tsconfig,
-        verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        verter_session_query::resolution::IdeProjectCompilerOptions::default(),
     );
 }
 
@@ -1392,7 +1392,7 @@ fn install_test_resolver_for_root_with_options(
     server: &VerterLanguageServer,
     root: &str,
     tsconfig: Option<&str>,
-    compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions,
+    compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions,
 ) {
     let vfs_ws = std::sync::Arc::new(verter_workspace::FilesystemWorkspace::new(
         verter_workspace::FilesystemOptions::default(),
@@ -1416,15 +1416,15 @@ fn install_test_resolver_for_root_with_options(
         // materialized set, so `ConfiguredMembership::contains` matches every
         // file under `root` via the static spec (the documented bridge mode for
         // a harness that does not walk the disk).
-        let spec = verter_semantic::resolver_core::StaticMembershipSpec {
+        let spec = verter_session_query::resolution::StaticMembershipSpec {
             files: Vec::new(),
-            include: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+            include: vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                     &root_cp, "**/*",
                 ),
             )],
-            exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+            exclude: vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                     &root_cp,
                     "node_modules/**",
                 ),
@@ -1432,12 +1432,12 @@ fn install_test_resolver_for_root_with_options(
             .into(),
         };
         projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            id: verter_session_query::resolution::ProjectId(0),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-                membership: verter_semantic::resolver_core::ConfiguredMembership {
+                membership: verter_session_query::resolution::ConfiguredMembership {
                     spec,
                     materialized_files: Default::default(),
                 },
@@ -1448,14 +1448,14 @@ fn install_test_resolver_for_root_with_options(
         });
     }
     projects.push(verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        id: verter_session_query::resolution::ProjectId(0),
         root: root_cp.clone(),
         workspace_root: root_cp.clone(),
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Fallback {
             membership: verter_workspace::FallbackMembership {
                 root: root_cp.clone(),
-                exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                    verter_semantic::resolver_core::NormalizedGlob::new(&format!(
+                exclude: vec![verter_session_query::resolution::CompiledGlob::new(
+                    verter_session_query::resolution::NormalizedGlob::new(&format!(
                         "{}/node_modules/**",
                         root
                     )),
@@ -1467,7 +1467,7 @@ fn install_test_resolver_for_root_with_options(
     // IDs must match index position (the snapshot invariant
     // `build_workspace_snapshot_simple` upholds after its precedence sort).
     for (i, project) in projects.iter_mut().enumerate() {
-        project.id = verter_workspace::workspace_snapshot::ProjectId(i as u32);
+        project.id = verter_session_query::resolution::ProjectId(i as u32);
     }
 
     let mut resolver_project = verter_workspace::ide_project_config(
@@ -1476,7 +1476,7 @@ fn install_test_resolver_for_root_with_options(
         tsconfig.map(|s| s.to_string()),
     );
     resolver_project.compiler_options = compiler_options;
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![resolver_project]);
+    let resolver = verter_resolution::ModuleResolverCore::new(vec![resolver_project]);
 
     let snapshot = std::sync::Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
@@ -1508,13 +1508,15 @@ fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::Fil
         verter_workspace::FilesystemOptions::default(),
     ));
     let root_cp = verter_workspace::CanonicalPath::new(root);
-    let spec = verter_semantic::resolver_core::StaticMembershipSpec {
+    let spec = verter_session_query::resolution::StaticMembershipSpec {
         files: Vec::new(),
-        include: vec![verter_semantic::resolver_core::CompiledGlob::new(
-            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(&root_cp, "**/*"),
+        include: vec![verter_session_query::resolution::CompiledGlob::new(
+            verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
+                &root_cp, "**/*",
+            ),
         )],
-        exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
-            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+        exclude: vec![verter_session_query::resolution::CompiledGlob::new(
+            verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                 &root_cp,
                 "node_modules/**",
             ),
@@ -1522,27 +1524,27 @@ fn configured_owner_vfs(root: &str, tsconfig: &str) -> Arc<verter_workspace::Fil
         .into(),
     };
     let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        id: verter_session_query::resolution::ProjectId(0),
         root: root_cp.clone(),
         workspace_root: root_cp.clone(),
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
             tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-            membership: verter_semantic::resolver_core::ConfiguredMembership {
+            membership: verter_session_query::resolution::ConfiguredMembership {
                 spec,
                 materialized_files: Default::default(),
             },
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: Vec::new(),
             workspace_aliases: Vec::new(),
         },
     }];
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             root.to_string(),
             root.to_string(),
             Some(tsconfig.to_string()),
-        ),
-    ]);
+        )]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,
@@ -1930,13 +1932,13 @@ fn test_module_reference(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_session_query::analysis::types::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
 ) -> verter_session::ScriptModuleReference {
     verter_session::ScriptModuleReference {
-        syntax: verter_semantic::analysis::ModuleReferenceSyntax::StaticImport,
-        semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
+        syntax: verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport,
+        semantics: verter_session_query::analysis::types::ModuleReferenceSemantics::Import,
         is_type_only: false,
         raw_text: raw_text.to_string(),
         literal_specifier: literal_specifier.map(str::to_string),
@@ -1955,10 +1957,10 @@ fn test_module_reference_with_semantics(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_session_query::analysis::types::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
-    semantics: verter_semantic::analysis::ModuleReferenceSemantics,
+    semantics: verter_session_query::analysis::types::ModuleReferenceSemantics,
     is_type_only: bool,
 ) -> verter_session::ScriptModuleReference {
     verter_session::ScriptModuleReference {
@@ -1979,13 +1981,13 @@ fn test_analyzed_module_reference(
     raw_text: &str,
     literal_specifier: Option<&str>,
     finite_specifiers: &[&str],
-    analyzability: verter_semantic::analysis::ModuleReferenceAnalyzability,
+    analyzability: verter_session_query::analysis::types::ModuleReferenceAnalyzability,
     expr_start: usize,
     expr_end: usize,
-) -> verter_semantic::analysis::AnalyzedModuleReference {
-    verter_semantic::analysis::AnalyzedModuleReference {
-        syntax: verter_semantic::analysis::ModuleReferenceSyntax::StaticImport,
-        semantics: verter_semantic::analysis::ModuleReferenceSemantics::Import,
+) -> verter_session_query::analysis::types::AnalyzedModuleReference {
+    verter_session_query::analysis::types::AnalyzedModuleReference {
+        syntax: verter_session_query::analysis::types::ModuleReferenceSyntax::StaticImport,
+        semantics: verter_session_query::analysis::types::ModuleReferenceSemantics::Import,
         is_type_only: false,
         raw_text: raw_text.to_string(),
         literal_specifier: literal_specifier.map(str::to_string),
@@ -2061,8 +2063,8 @@ impl verter_workspace::WorkspaceRead for TestResolverReader {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
         verter_workspace::WorkspaceRead::resolve_import(
             &self.workspace,
             importer_id,
@@ -2075,7 +2077,7 @@ impl verter_workspace::WorkspaceRead for TestResolverReader {
         &self,
         importer_id: &str,
         specifier: &str,
-        ctx: verter_semantic::resolver_core::ResolutionContext,
+        ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
         verter_workspace::WorkspaceRead::resolve_import_outcome(
             &self.workspace,
@@ -2150,14 +2152,14 @@ impl verter_workspace::WorkspaceRead for ReturnOnlyResolverReader {
         &self,
         _importer_id: &str,
         specifier: &str,
-        _ctx: verter_semantic::resolver_core::ResolutionContext,
-    ) -> Option<verter_semantic::resolver_core::ResolveResult> {
-        (specifier == "./dep").then(|| verter_semantic::resolver_core::ResolveResult {
+        _ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<verter_session_query::resolution::ResolveResult> {
+        (specifier == "./dep").then(|| verter_session_query::resolution::ResolveResult {
             source_id: "/workspace/src/dep.ts".to_string(),
             provider_id: "/workspace/src/dep.ts".to_string(),
             provider_specifier: "./dep".to_string(),
-            provider_target: verter_semantic::resolver_core::ProviderTarget::SourceFile,
-            resolution_kind: verter_semantic::resolver_core::ResolutionKind::Relative,
+            provider_target: verter_session_query::resolution::ProviderTarget::SourceFile,
+            resolution_kind: verter_session_query::resolution::ResolutionKind::Relative,
             owner_tsconfig_path: Some("/workspace/tsconfig.json".to_string()),
         })
     }
@@ -2514,30 +2516,30 @@ fn module_reference_request_kind_uses_require_semantics() {
         "'pkg'",
         Some("pkg"),
         &[],
-        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+        verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
         0,
         5,
-        verter_semantic::analysis::ModuleReferenceSemantics::Require,
+        verter_session_query::analysis::types::ModuleReferenceSemantics::Require,
         false,
     );
     assert_eq!(
         module_reference_request_kind(&require_reference),
-        verter_semantic::resolver_core::ResolveRequestKind::RequireCall
+        verter_session_query::resolution::ResolveRequestKind::RequireCall
     );
 
     let type_reference = test_module_reference_with_semantics(
         "'pkg'",
         Some("pkg"),
         &[],
-        verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+        verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
         0,
         5,
-        verter_semantic::analysis::ModuleReferenceSemantics::Import,
+        verter_session_query::analysis::types::ModuleReferenceSemantics::Import,
         true,
     );
     assert_eq!(
         module_reference_request_kind(&type_reference),
-        verter_semantic::resolver_core::ResolveRequestKind::TypeImport
+        verter_session_query::resolution::ResolveRequestKind::TypeImport
     );
 }
 
@@ -2566,7 +2568,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 foo_expr,
                 Some("./Foo.vue"),
                 &[],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
                 foo_start,
                 foo_start + foo_expr.len(),
             ),
@@ -2574,7 +2576,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 util_expr,
                 Some("./util"),
                 &[],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
                 util_start,
                 util_start + util_expr.len(),
             ),
@@ -2582,7 +2584,7 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
                 dynamic_expr,
                 None,
                 &["./Foo.vue"],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet,
                 dynamic_start,
                 dynamic_start + dynamic_expr.len(),
             ),
@@ -2598,13 +2600,12 @@ fn provider_sync_without_snapshot_is_deferred_not_fallback_rewritten() {
 /// target must therefore never become a provider buffer or an exact host route.
 #[test]
 fn provider_sync_refuses_return_only_resolution_products() {
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.json".to_string()),
-        ),
-    ]);
+        )]);
     let source = "import { value } from './dep';\n";
     let expr = "'./dep'";
     let start = source.find(expr).expect("fixture import");
@@ -2623,7 +2624,7 @@ fn provider_sync_refuses_return_only_resolution_products() {
             expr,
             Some("./dep"),
             &[],
-            verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+            verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
             start,
             start + expr.len(),
         )],
@@ -2641,13 +2642,12 @@ fn provider_sync_refuses_return_only_resolution_products() {
 
 #[test]
 fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let reader =
         TestResolverReader::with_files(&["/workspace/src/Foo.vue", "/workspace/src/util.ts"]);
     let source =
@@ -2674,7 +2674,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 foo_expr,
                 Some("./Foo.vue"),
                 &[],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
                 foo_start,
                 foo_start + foo_expr.len(),
             ),
@@ -2682,7 +2682,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 util_expr,
                 Some("./util"),
                 &[],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
                 util_start,
                 util_start + util_expr.len(),
             ),
@@ -2690,7 +2690,7 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
                 dynamic_expr,
                 None,
                 &["./Foo.vue", "./util"],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet,
                 dynamic_start,
                 dynamic_start + dynamic_expr.len(),
             ),
@@ -2738,13 +2738,12 @@ fn provider_sync_with_snapshot_uses_resolved_dependencies_only() {
 
 #[test]
 fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let reader = TestResolverReader::with_files(&[
         "/workspace/src/tempUtil.ts",
         "/workspace/src/ExternalChild.vue",
@@ -2766,7 +2765,7 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
                 temp_util_expr,
                 Some("./tempUtil"),
                 &[],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
                 temp_util_start,
                 temp_util_start + temp_util_expr.len(),
             ),
@@ -2774,7 +2773,7 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
                 child_expr,
                 Some("./ExternalChild.vue"),
                 &[],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
                 child_start,
                 child_start + child_expr.len(),
             ),
@@ -2795,13 +2794,12 @@ fn analyzed_refs_resolve_extensionless_vue_dependencies_to_exact_files() {
 
 #[test]
 fn provider_vue_path_helpers_use_original_paths() {
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
 
     let ide_path =
         provider_ide_path_for_source(&resolver, "/workspace/src/App.vue", false).unwrap();
@@ -2819,13 +2817,12 @@ fn provider_vue_path_helpers_use_original_paths() {
 
 #[test]
 fn provider_path_helpers_round_trip_through_resolver() {
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     // Host must have the backing .vue source for the collision guard to pass
     let host = VerterHost::new_standalone(HostConfig::default());
     host.upsert(verter_session::UpsertRequest {
@@ -2854,13 +2851,12 @@ fn provider_path_helpers_round_trip_through_resolver() {
 fn vue_tsx_collision_with_real_file() {
     // A real .vue.tsx file exists but there's no matching .vue source in any project.
     // source_id_from_provider_carrier_path should return None (collision guard).
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace/src".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let host = VerterHost::new_standalone(HostConfig::default());
 
     // "/workspace/src/weird.vue.tsx" has no backing "/workspace/src/weird.vue"
@@ -2875,13 +2871,12 @@ fn vue_tsx_collision_with_real_file() {
 #[test]
 fn vue_tsx_virtual_file_resolves() {
     // A virtual .vue.tsx with a backing .vue source registered in a project.
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     // Host must have the backing .vue source for the collision guard to pass
     let host = VerterHost::new_standalone(HostConfig::default());
     host.upsert(verter_session::UpsertRequest {
@@ -2906,13 +2901,12 @@ fn vue_tsx_collision_guard_rejects_when_host_missing_source() {
     // The resolver thinks /workspace/src/Real.vue.tsx belongs to the project
     // and strips the suffix to get /workspace/src/Real.vue, but the host
     // has never compiled Real.vue → collision guard must reject.
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let host = VerterHost::new_standalone(HostConfig::default());
     // Do NOT upsert /workspace/src/Real.vue into host
 
@@ -2930,13 +2924,12 @@ fn svelte_ts_rune_module_resolves_to_itself_not_phantom_component() {
     // but no backing `store.svelte` component source exists in the host. The
     // generalized collision guard must reject the phantom `store.svelte` and
     // map the rune module to ITSELF.
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let host = VerterHost::new_standalone(HostConfig::default());
     let rune_language = verter_session::FileLanguage::adapter_module(
         verter_session::ScriptSourceType::Ts,
@@ -2974,13 +2967,12 @@ fn svelte_component_virtual_still_resolves_to_carrier() {
     // The genuine component-virtual case: a real `Foo.svelte` component source
     // exists, and its `Foo.svelte.ts` API virtual must still reverse-map to the
     // `Foo.svelte` carrier (the generalization must not break this).
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let host = VerterHost::new_standalone(HostConfig::default());
     host.upsert(verter_session::UpsertRequest {
         canonical_id: Some("/workspace/src/Foo.svelte".to_string()),
@@ -3192,7 +3184,7 @@ fn to_pascal_case_pins_dollar_unicode_and_double_extension_behavior() {
     // reached the formatter it must still produce a VALID identifier — the inner
     // `.vue` is just another `.` separator. No invalid identifier can result.
     let double_ext_stem =
-        verter_semantic::resolver_core::strip_carrier_extension("Model.Named.vue.ts");
+        verter_session_query::resolution::strip_carrier_extension("Model.Named.vue.ts");
     assert_eq!(
         double_ext_stem, "Model.Named.vue.ts",
         "`.ts` is not a carrier extension, so the `.vue.ts` suffix is not stripped"
@@ -3204,7 +3196,7 @@ fn to_pascal_case_pins_dollar_unicode_and_double_extension_behavior() {
     );
     // And on a genuine carrier-stripped stem the result is clean.
     assert_eq!(
-        to_pascal_case(verter_semantic::resolver_core::strip_carrier_extension(
+        to_pascal_case(verter_session_query::resolution::strip_carrier_extension(
             "Model.Named.vue"
         )),
         "ModelNamed"
@@ -3821,15 +3813,15 @@ fn configured_claimant_snapshot(
 ) -> Arc<verter_workspace::WorkspaceSnapshot> {
     let root_cp = verter_workspace::CanonicalPath::new(root);
     let make_configured = |tsconfig: &str| {
-        let spec = verter_semantic::resolver_core::StaticMembershipSpec {
+        let spec = verter_session_query::resolution::StaticMembershipSpec {
             files: Vec::new(),
-            include: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+            include: vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                     &root_cp, "**/*",
                 ),
             )],
-            exclude: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+            exclude: vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                     &root_cp,
                     "node_modules/**",
                 ),
@@ -3837,17 +3829,17 @@ fn configured_claimant_snapshot(
             .into(),
         };
         verter_workspace::workspace_snapshot::OwnershipProject {
-            id: verter_workspace::workspace_snapshot::ProjectId(0),
+            id: verter_session_query::resolution::ProjectId(0),
             root: root_cp.clone(),
             workspace_root: root_cp.clone(),
             payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-                membership: verter_semantic::resolver_core::ConfiguredMembership {
+                membership: verter_session_query::resolution::ConfiguredMembership {
                     spec,
                     materialized_files: Default::default(),
                 },
                 compiler_options:
-                    verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+                    verter_session_query::resolution::IdeProjectCompilerOptions::default(),
                 references: Vec::new(),
                 workspace_aliases: Vec::new(),
             },
@@ -4636,7 +4628,8 @@ async fn publish_carrier_pin_is_captured_before_the_compile_not_after() {
     // edit — so it stays anchored to revision A while the live identity moves
     // to B. The fenced record inside the gateway's `Published` branch must
     // refuse outright rather than pair mismatched content.
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(&canonical_id, false);
+    let ide_path =
+        verter_session_query::resolution::carrier_ide_provider_path(&canonical_id, false);
     assert!(
         server
             .documents
@@ -4947,9 +4940,9 @@ async fn initialized_returns_before_background_configure_paths_completes() {
 
 #[test]
 fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
-    let analysis = verter_semantic::analysis::ScriptAnalysisSnapshot {
+    let analysis = verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
         imports: vec![
-            verter_semantic::analysis::AnalyzedImport {
+            verter_session_query::analysis::types::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
@@ -4957,7 +4950,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: Some("C:/project/src/MyComp.vue".to_string()),
             },
-            verter_semantic::analysis::AnalyzedImport {
+            verter_session_query::analysis::types::AnalyzedImport {
                 source: "./utils".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
@@ -4965,7 +4958,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: Some("C:/project/src/utils.ts".to_string()),
             },
-            verter_semantic::analysis::AnalyzedImport {
+            verter_session_query::analysis::types::AnalyzedImport {
                 source: "./Other.vue".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 is_type_only: false,
@@ -4973,7 +4966,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
                 span: verter_span::Span::new(0, 0),
                 resolved_canonical_id: None,
             },
-            verter_semantic::analysis::AnalyzedImport {
+            verter_session_query::analysis::types::AnalyzedImport {
                 source: "./MyComp.vue".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 is_type_only: false,
@@ -4987,7 +4980,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
         macros: Vec::new(),
         macro_usage: None,
         macro_type_deps: Vec::new(),
-        flags: verter_semantic::analysis::AnalysisFlags::empty(),
+        flags: verter_session_query::analysis::types::AnalysisFlags::empty(),
         exported_functions: Vec::new(),
         vue_api_calls: Vec::new(),
         dom_query_calls: Vec::new(),
@@ -5023,7 +5016,7 @@ fn collect_imported_carrier_priority_ids_keeps_only_resolved_vue_imports() {
 #[test]
 fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
     let imports = vec![
-        verter_semantic::analysis::AnalyzedImport {
+        verter_session_query::analysis::types::AnalyzedImport {
             source: "./TypedSlotComp.vue".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             is_type_only: false,
@@ -5031,7 +5024,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: None,
         },
-        verter_semantic::analysis::AnalyzedImport {
+        verter_session_query::analysis::types::AnalyzedImport {
             source: "./utils".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
@@ -5068,7 +5061,7 @@ fn collect_imported_carrier_priority_ids_falls_back_to_relative_resolution() {
 #[test]
 fn refused_later_carrier_resolution_discards_the_entire_priority_batch() {
     let imports = vec![
-        verter_semantic::analysis::AnalyzedImport {
+        verter_session_query::analysis::types::AnalyzedImport {
             source: "./First.vue".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
@@ -5076,7 +5069,7 @@ fn refused_later_carrier_resolution_discards_the_entire_priority_batch() {
             span: verter_span::Span::new(0, 0),
             resolved_canonical_id: Some("/workspace/src/First.vue".to_string()),
         },
-        verter_semantic::analysis::AnalyzedImport {
+        verter_session_query::analysis::types::AnalyzedImport {
             source: "./Second.vue".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             is_type_only: false,
@@ -5137,8 +5130,8 @@ fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
         .map(
             |(specifier, resolved_canonical_id)| verter_workspace::ExactResolution {
                 specifier: specifier.to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                 resolved_canonical_id: Some(resolved_canonical_id.to_string()),
                 possible_canonical_ids: vec![resolved_canonical_id.to_string()],
             },
@@ -5172,9 +5165,9 @@ fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
                 &workspace,
                 parent,
                 specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                    kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                 },
             )
             .into_publication()
@@ -5194,13 +5187,12 @@ fn did_open_resolves_carrier_working_set_from_upsert_import_facts() {
 
 #[test]
 fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let reader = TestResolverReader::with_files(&[
         "/workspace/src/Foo.vue",
         "/workspace/src/Bar.vue",
@@ -5219,7 +5211,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
                 "'./Foo.vue'",
                 Some("./Foo.vue"),
                 &[],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::Exact,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact,
                 0,
                 10,
             ),
@@ -5227,7 +5219,7 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
                 "`./${name}.vue`",
                 None,
                 &["./Bar.vue", "./util"],
-                verter_semantic::analysis::ModuleReferenceAnalyzability::FiniteSet,
+                verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet,
                 11,
                 27,
             ),
@@ -5246,13 +5238,12 @@ fn did_open_prioritizes_exact_and_finite_dynamic_targets() {
 
 #[test]
 fn unknown_dynamic_imports_sync_no_provider_dependencies() {
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             "/workspace".to_string(),
             "/workspace".to_string(),
             Some("/workspace/tsconfig.app.json".to_string()),
-        ),
-    ]);
+        )]);
     let reader = TestResolverReader::with_files(&["/workspace/src/Foo.vue"]);
     let targets = collect_priority_carrier_public_api_targets_from_module_references(
         Some(&PublishedResolverSnapshot {
@@ -5266,7 +5257,7 @@ fn unknown_dynamic_imports_sync_no_provider_dependencies() {
             "`./${name}.vue`",
             None,
             &[],
-            verter_semantic::analysis::ModuleReferenceAnalyzability::UnknownDynamic,
+            verter_session_query::analysis::types::ModuleReferenceAnalyzability::UnknownDynamic,
             0,
             15,
         )],
@@ -5499,7 +5490,7 @@ async fn svelte_dotted_component_completion_is_sanitized_but_edit_placement_defe
 
     // The shared COMPLETION ITEM synthesis (tag insert + CLASS kind) is the
     // user-visible shared surface — assert it produces a valid tag + CLASS.
-    let analysis = verter_session::FileAnalysisSnapshot::default();
+    let analysis = verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
     let items = crate::features::completion::tag_name_completions(
         &analysis,
         Some(&ws_components),
@@ -5708,7 +5699,7 @@ async fn resolve_component_document_for_usage_follows_barrel_reexports() {
     );
     assert!(
         child.analysis.macros.iter().any(|mac| {
-            mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineEmits
+            mac.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits
                 && mac.emit_fields.iter().any(|field| field.name == "custom")
         }),
         "resolved child analysis should expose the child's emit declaration"
@@ -7153,6 +7144,92 @@ async fn completion_final_native_retry_waits_for_commit_fence_and_returns_curren
     drop(service);
 }
 
+/// The final native completion holds the document commit fence, so only
+/// background settlement can move its basis. A generation-only move recomputes
+/// it under that fence; a workspace replacement, or generation churn that never
+/// stops moving, still answers `ContentModified` instead of recomputing forever
+/// or answering against a superseded workspace.
+#[tokio::test(flavor = "multi_thread")]
+async fn final_native_completion_settles_generation_moves_and_fails_closed_past_them() {
+    let source =
+        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>";
+    let canonical = "/workspace/App.vue";
+    for change in ["generation", "churn", "workspace"] {
+        let service = make_hover_test_service(Arc::new(MockTypeProvider::new()));
+        let server = service.inner();
+        install_test_resolver(server);
+        let uri = open_test_vue(server, canonical, source);
+        let position = LineIndex::new_utf16(source)
+            .offset_to_position(source.find("count }}").unwrap() as u32)
+            .expect("completion position");
+        let recomputations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let host = server.documents.host_arc();
+            let recomputations = Arc::clone(&recomputations);
+            server.on_final_completion_recompute(move || {
+                let seen = recomputations.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                // Churn moves the generation inside every recomputation the
+                // bound allows, then stops: an unbounded loop would settle.
+                if change == "churn" && seen <= super::GENERATION_ONLY_RECOMPUTE_LIMIT {
+                    host.host().bump_diagnostics_generation(canonical);
+                }
+            });
+        }
+        let (first_arrived, first_release) = server.pause_next_completion_after_snapshot();
+        let (second_arrived, second_release) = server.pause_next_completion_after_snapshot();
+        let (final_arrived, final_release) = server.pause_final_completion_after_snapshot();
+
+        let completion = server.completion(completion_params(&uri, position, None));
+        let drive = async {
+            // Two edit races spend the provider attempts and reach the final
+            // native attempt.
+            first_arrived.notified().await;
+            server.documents.did_change(&uri, 2, source);
+            first_release.notify_one();
+            second_arrived.notified().await;
+            server.documents.did_change(&uri, 3, source);
+            second_release.notify_one();
+
+            final_arrived.notified().await;
+            if change == "workspace" {
+                install_test_resolver(server);
+            } else {
+                server
+                    .documents
+                    .host()
+                    .bump_diagnostics_generation(canonical);
+            }
+            final_release.notify_one();
+        };
+        let (response, ()) = futures_util::future::join(completion, drive).await;
+        let recomputations = recomputations.load(std::sync::atomic::Ordering::SeqCst);
+        match change {
+            "generation" => {
+                assert!(response.is_ok(), "{change}: {response:?}");
+                assert_eq!(recomputations, 1, "{change}");
+            }
+            "churn" => {
+                assert!(
+                    matches!(&response, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                    "{change}: {response:?}"
+                );
+                assert_eq!(
+                    recomputations,
+                    super::GENERATION_ONLY_RECOMPUTE_LIMIT,
+                    "{change}"
+                );
+            }
+            _ => {
+                assert!(
+                    matches!(&response, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+                    "{change}: {response:?}"
+                );
+                assert_eq!(recomputations, 0, "{change}");
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
     let child = |prop: &str| {
@@ -7256,6 +7333,15 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
                 raced_membership.is_err(),
                 "close membership must wait for the final native completion fence"
             );
+            // Background settlement keeps running while the fence is held: the
+            // sync coordinator re-arms this open importer once its imported
+            // child's publication settles, advancing only the diagnostics
+            // generation. Land that move inside the fenced calculation so the
+            // final answer must survive it rather than depend on its timing.
+            server
+                .documents
+                .host()
+                .bump_diagnostics_generation(&crate::documents::uri_to_canonical_id(&app_uri));
             final_snapshot_release.notify_one();
         };
         futures_util::future::join(close, prove_serialized).await;
@@ -8259,7 +8345,9 @@ import TypedChild from './TypedChild.vue'\n\
         .macros
         .iter()
         .enumerate()
-        .find(|(_, mac)| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineSlots)
+        .find(|(_, mac)| {
+            mac.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
+        })
         .expect("the child must have a defineSlots macro");
     let resolver_surface =
         host.resolve_vue_macro_surface(&verter_session::typeinfo::VueMacroSurfaceRequest {
@@ -16479,7 +16567,7 @@ export const direct = Comp;
     let provider = Arc::new(MockTypeProvider::new());
     let sync = ProjectSync::new(provider.clone(), ProjectSyncMode::FullProject);
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(vec![project]),
+        resolver: verter_resolution::ModuleResolverCore::new(vec![project]),
         resolution_view: None,
         ownership_ready: true,
     };
@@ -19869,7 +19957,7 @@ defineProps<{ msg: string }>()
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_root.clone(),
                 workspace_root.clone(),
@@ -20013,7 +20101,7 @@ defineProps<{ msg: string }>()
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_root.clone(),
                 workspace_root.clone(),
@@ -20135,7 +20223,7 @@ defineProps<{ msg: string }>()
     let tsconfig = format!("{workspace_root}/tsconfig.json");
     let owner_vfs = configured_owner_vfs(&workspace_root, &tsconfig);
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_root.clone(),
                 workspace_root.clone(),
@@ -20419,7 +20507,7 @@ async fn tsserver_barrel_resolution_skips_rewrites_when_ts_extensions_are_allowe
         server,
         &workspace_id,
         Some(&format!("{workspace_id}/tsconfig.json")),
-        verter_semantic::resolver_core::IdeProjectCompilerOptions {
+        verter_session_query::resolution::IdeProjectCompilerOptions {
             allow_importing_ts_extensions: true,
             ..Default::default()
         },
@@ -20506,8 +20594,9 @@ async fn tsserver_barrel_resolution_rewrites_carrier_exports_without_ts_extensio
 // the allowImportingTsExtensions barrel policy.
 #[test]
 fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::workspace_snapshot::{
-        OwnershipProject, ProjectId, ProjectPayload, SnapshotGeneration,
+        OwnershipProject, ProjectPayload, SnapshotGeneration,
     };
 
     fn configured_project(
@@ -20523,11 +20612,11 @@ fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
             workspace_root: verter_workspace::CanonicalPath::new("/workspace"),
             payload: ProjectPayload::Configured {
                 tsconfig_path: verter_workspace::CanonicalPath::new(tsconfig),
-                membership: verter_semantic::resolver_core::ConfiguredMembership {
-                    spec: verter_semantic::resolver_core::StaticMembershipSpec {
+                membership: verter_session_query::resolution::ConfiguredMembership {
+                    spec: verter_session_query::resolution::StaticMembershipSpec {
                         files: Vec::new(),
-                        include: vec![verter_semantic::resolver_core::CompiledGlob::new(
-                            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(
+                        include: vec![verter_session_query::resolution::CompiledGlob::new(
+                            verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(
                                 &root, "**/*",
                             ),
                         )],
@@ -20535,7 +20624,7 @@ fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
                     },
                     materialized_files: Default::default(),
                 },
-                compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions {
+                compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions {
                     allow_importing_ts_extensions,
                     ..Default::default()
                 },
@@ -20551,7 +20640,7 @@ fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
             configured_project(0, "/workspace/a", "/workspace/a/tsconfig.json", true),
             configured_project(1, "/workspace/b", "/workspace/b/tsconfig.json", false),
         ],
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(Vec::new()),
+        resolver: verter_resolution::ModuleResolverCore::new(Vec::new()),
         generation: SnapshotGeneration(1),
     };
     assert!(
@@ -20575,7 +20664,7 @@ fn tsserver_authored_specifier_policy_is_project_exact_and_all_owner() {
             configured_project(0, "/workspace", "/workspace/tsconfig.a.json", true),
             configured_project(1, "/workspace", "/workspace/tsconfig.b.json", false),
         ],
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(Vec::new()),
+        resolver: verter_resolution::ModuleResolverCore::new(Vec::new()),
         generation: SnapshotGeneration(1),
     };
     assert!(
@@ -23575,7 +23664,7 @@ async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_
         workspace_id.clone(),
         Some(format!("{workspace_id}/tsconfig.app.json")),
     );
-    project.compiler_options = verter_semantic::resolver_core::IdeProjectCompilerOptions {
+    project.compiler_options = verter_session_query::resolution::IdeProjectCompilerOptions {
         base_url: Some(workspace_id.clone()),
         paths: vec![("@/*".to_string(), vec!["src/*".to_string()])],
         ..Default::default()
@@ -23607,7 +23696,7 @@ async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_
 
     // Verify the resolver can resolve these specifiers
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(vec![project]),
+        resolver: verter_resolution::ModuleResolverCore::new(vec![project]),
         resolution_view: None,
         ownership_ready: true,
     };
@@ -23625,9 +23714,9 @@ async fn sync_pending_carrier_provider_file_composes_external_template_into_ide_
     let external_resolved = ws.resolve_import(
         &app_id,
         "@/partials/panel.html",
-        verter_semantic::resolver_core::ResolutionContext {
-            kind: verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr,
-            phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
+        verter_session_query::resolution::ResolutionContext {
+            kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
         },
     );
     assert!(
@@ -23729,7 +23818,7 @@ defineProps<{ msg: string }>()
 
     let tsconfig = format!("{workspace_id}/tsconfig.app.json");
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_id.clone(),
                 workspace_id.clone(),
@@ -28641,15 +28730,15 @@ fn carrier_dependency_ids_resolves_carriers_and_filters_non_carriers() {
         vec![
             verter_workspace::ExactResolution {
                 specifier: "./B.vue".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                 resolved_canonical_id: Some("/src/B.vue".to_string()),
                 possible_canonical_ids: vec!["/src/B.vue".to_string()],
             },
             verter_workspace::ExactResolution {
                 specifier: "./util".to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                 resolved_canonical_id: Some("/src/util.ts".to_string()),
                 possible_canonical_ids: vec!["/src/util.ts".to_string()],
             },
@@ -29854,7 +29943,8 @@ async fn destructive_background_reload_never_substitutes_disk_for_an_open_docume
         "precondition: the open buffer still holds the unsaved edit"
     );
 
-    let ide_path = verter_semantic::resolver_core::carrier_ide_provider_path(&canonical_id, false);
+    let ide_path =
+        verter_session_query::resolution::carrier_ide_provider_path(&canonical_id, false);
     let recorded = server
         .documents
         .provider_surfaces()
@@ -31610,7 +31700,7 @@ fn standalone_host_cannot_resolve_disk_files() {
     std::fs::write(ws.join("App.vue"), "<template><div/></template>").unwrap();
 
     let host = VerterHost::new_standalone(HostConfig::default());
-    let file_id = verter_semantic::resolver_core::normalize_canonical_id(
+    let file_id = verter_session_query::resolution::normalize_canonical_id(
         &ws.join("App.vue").to_string_lossy().replace('\\', "/"),
     );
     // Positive: standalone host cannot load disk files (documents the limitation)
@@ -33973,6 +34063,76 @@ async fn virtual_file_query_serves_provider_result_from_stable_matched_surface()
     );
 }
 
+/// A virtual tab is a document the host never ingests, so the readiness basis
+/// a virtual-file definition settles against carries no diagnostics
+/// generation. Background settlement of the carrier the tab mirrors (or of the
+/// tab's own id) during the provider await is therefore not a basis move: the
+/// definition answers with the provider's location instead of
+/// `ContentModified`. The served surface stays guarded by the provider-surface
+/// check, which is what a carrier resync with new content trips.
+#[tokio::test(flavor = "multi_thread")]
+async fn virtual_file_definition_survives_a_generation_move_during_the_provider_await() {
+    let content = "computed\n";
+    let (service, provider, virtual_uri, tsx_path) =
+        make_virtual_file_fixture(content, content).await;
+    let server = service.inner();
+    let offset = "comp".len() as u32;
+    provider.set_definitions(
+        &tsx_path,
+        offset,
+        vec![crate::type_provider::protocol::TypeLocation {
+            path: tsx_path.clone(),
+            start: 0,
+            end: "computed".len() as u32,
+        }],
+    );
+    let virtual_canonical = crate::documents::uri_to_canonical_id(&virtual_uri);
+    let documents = Arc::clone(&server.documents);
+    let moved_canonical = virtual_canonical.clone();
+    provider.set_on_query(
+        &tsx_path,
+        Box::new(move || {
+            documents
+                .host()
+                .bump_diagnostics_generation("/workspace/src/App.vue");
+            documents
+                .host()
+                .bump_diagnostics_generation(&moved_canonical);
+        }),
+    );
+
+    let response = server
+        .goto_definition(goto_definition_params(
+            &virtual_uri,
+            Position {
+                line: 0,
+                character: offset,
+            },
+        ))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("a generation move during the provider await must not fail it: {error:?}")
+        });
+
+    assert_eq!(
+        server
+            .documents
+            .host()
+            .get_diagnostics_generation(&virtual_canonical),
+        None,
+        "the host never tracks a virtual tab, so its basis has no generation to move"
+    );
+    let Some(GotoDefinitionResponse::Array(locations)) = response else {
+        panic!("the virtual-file definition answers with the provider location, got {response:?}");
+    };
+    assert_eq!(locations.len(), 1, "{locations:?}");
+    assert_eq!(locations[0].range.start, Position::new(0, 0));
+    assert_eq!(
+        locations[0].range.end,
+        Position::new(0, "computed".len() as u32)
+    );
+}
+
 /// Shared setup for the FOREIGN-carrier mapping tests: parent + child carriers
 /// synced (both CarrierIde surfaces recorded), with the mock provider primed to
 /// return a definition location inside the CHILD's IDE surface for a query at
@@ -35341,6 +35501,54 @@ async fn hover_recomputes_until_the_diagnostics_generation_stops_moving() {
     }
 }
 
+/// Background settlement advances a document's diagnostics generation at any
+/// instant, including just after a request's answer was checked against an
+/// unmoved basis. That move is later than the answer: the checked hover is the
+/// reply. Reading the generation a second time before replying turned such a
+/// move into `ContentModified`, which an editor shows as no hover at all.
+#[tokio::test]
+async fn hover_answer_checked_against_an_unmoved_basis_survives_a_later_generation_move() {
+    let source = "<script setup lang=\"ts\">\nconst width = 10\n</script>\n<template><div>{{ width }}</div></template>\n";
+    let canonical = "/workspace/src/App.vue";
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service_tsgo(provider.clone());
+    let server = service.inner();
+    install_test_resolver(server);
+    let uri = open_test_vue(server, canonical, source);
+    server.ensure_current_file_synced(&uri).await;
+    let position = find_document_position(server, &uri, "{{ width }}", 3);
+    set_type_hover_at_vue_position(server, &provider, &uri, position, "const width: number");
+    let documents = Arc::clone(&server.documents);
+    let moves = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_moves = Arc::clone(&moves);
+    server.after_settlement_observed(move || {
+        observed_moves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        documents.host().bump_diagnostics_generation(canonical);
+    });
+
+    let hover = server
+        .hover(hover_params(&uri, position))
+        .await
+        .unwrap_or_else(|error| {
+            panic!("a generation move after the answer was checked must not fail it: {error:?}")
+        })
+        .expect("the checked hover answers");
+
+    assert_eq!(
+        moves.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the move lands once, after the only settlement"
+    );
+    let HoverContents::Markup(contents) = hover.contents else {
+        panic!("expected markup");
+    };
+    assert!(
+        contents.value.contains("width: number"),
+        "the reply is the checked provider hover: {}",
+        contents.value
+    );
+}
+
 /// Definition settles its provider leg against a basis captured after its
 /// repair. Generation-only moves during the provider await (several, as when
 /// imported files open back to back) recompute that leg instead of answering
@@ -36420,7 +36628,7 @@ async fn a_failed_carrier_sync_leaves_dependency_readiness_cold_and_retries() {
     // the publication reaches its mint point with exactly one failed leg.
     let child_id = format!("{workspace_id}/src/MyComp.vue");
     let child_ide_path =
-        verter_semantic::resolver_core::carrier_ide_provider_path(&child_id, false);
+        verter_session_query::resolution::carrier_ide_provider_path(&child_id, false);
     provider.set_fail_sync_path(&child_ide_path);
 
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
@@ -36543,10 +36751,10 @@ async fn generic_rename_fails_closed_while_project_carrier_frontier_is_incomplet
     let child_id = format!("{workspace_id}/src/MyComp.vue");
     let root = verter_workspace::CanonicalPath::new(&workspace_id);
     let tsconfig = format!("{workspace_id}/tsconfig.json");
-    let spec = verter_semantic::resolver_core::StaticMembershipSpec {
+    let spec = verter_session_query::resolution::StaticMembershipSpec {
         files: Vec::new(),
-        include: vec![verter_semantic::resolver_core::CompiledGlob::new(
-            verter_semantic::resolver_core::NormalizedGlob::from_root_and_pattern(&root, "**/*"),
+        include: vec![verter_session_query::resolution::CompiledGlob::new(
+            verter_session_query::resolution::NormalizedGlob::from_root_and_pattern(&root, "**/*"),
         )],
         exclude: Arc::from([]),
     };
@@ -36557,27 +36765,27 @@ async fn generic_rename_fails_closed_while_project_carrier_frontier_is_incomplet
     .into_iter()
     .collect();
     let projects = vec![verter_workspace::workspace_snapshot::OwnershipProject {
-        id: verter_workspace::workspace_snapshot::ProjectId(0),
+        id: verter_session_query::resolution::ProjectId(0),
         root: root.clone(),
         workspace_root: root.clone(),
         payload: verter_workspace::workspace_snapshot::ProjectPayload::Configured {
             tsconfig_path: verter_workspace::CanonicalPath::new(&tsconfig),
-            membership: verter_semantic::resolver_core::ConfiguredMembership {
+            membership: verter_session_query::resolution::ConfiguredMembership {
                 spec,
                 materialized_files,
             },
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: Vec::new(),
             workspace_aliases: Vec::new(),
         },
     }];
-    let resolver = verter_semantic::resolver_core::ModuleResolverCore::new(vec![
-        verter_workspace::ide_project_config(
+    let resolver =
+        verter_resolution::ModuleResolverCore::new(vec![verter_workspace::ide_project_config(
             workspace_id.clone(),
             workspace_id.clone(),
             Some(tsconfig),
-        ),
-    ]);
+        )]);
     let snapshot = Arc::new(verter_workspace::WorkspaceSnapshot {
         owners_memo: Default::default(),
         projects,
@@ -36736,7 +36944,7 @@ async fn cancelled_definition_does_not_prevent_dependency_ready_publication() {
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
     let child_id = format!("{workspace_id}/src/MyComp.vue");
     let child_ide_path =
-        verter_semantic::resolver_core::carrier_ide_provider_path(&child_id, false);
+        verter_session_query::resolution::carrier_ide_provider_path(&child_id, false);
 
     // Park the import-set pass INSIDE the child companion open, past the
     // definition deadline.
@@ -36891,7 +37099,7 @@ async fn definition_does_not_join_in_flight_dependency_publication() {
     let usage_uri = workspace_uri(&workspace_id, "src/Usage.vue");
     let child_id = format!("{workspace_id}/src/components/MyComp.vue");
     let child_ide_path =
-        verter_semantic::resolver_core::carrier_ide_provider_path(&child_id, false);
+        verter_session_query::resolution::carrier_ide_provider_path(&child_id, false);
     let (arrived, release) = provider.block_open_file(&child_ide_path);
 
     let position = find_document_position(server, &usage_uri, "<MyComp>", 1);
@@ -36987,7 +37195,7 @@ async fn completion_returns_fast_without_awaiting_import_carrier_sync() {
     let app_uri = workspace_uri(&workspace_id, "src/App.vue");
     let child_id = format!("{workspace_id}/src/MyComp.vue");
     let child_ide_path =
-        verter_semantic::resolver_core::carrier_ide_provider_path(&child_id, false);
+        verter_session_query::resolution::carrier_ide_provider_path(&child_id, false);
 
     // SurfaceReady for the current file (lifecycle path), so completion's
     // provider context capture succeeds and only the dependency leg differs.
@@ -38549,7 +38757,7 @@ async fn the_pending_snapshot_drain_recovers_a_projectionless_carrier() {
 
     let tsconfig = format!("{workspace_id}/tsconfig.app.json");
     let snapshot = PublishedResolverSnapshot {
-        resolver: verter_semantic::resolver_core::ModuleResolverCore::new(vec![
+        resolver: verter_resolution::ModuleResolverCore::new(vec![
             verter_workspace::ide_project_config(
                 workspace_id.clone(),
                 workspace_id.clone(),
@@ -39013,7 +39221,7 @@ async fn lane_interleaving_fixture(
 }
 
 fn ide_application_count(provider: &MockTypeProvider, canonical_id: &str) -> usize {
-    let path = verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, false);
+    let path = verter_session_query::resolution::carrier_ide_provider_path(canonical_id, false);
     provider
         .calls()
         .iter()
@@ -39513,7 +39721,7 @@ async fn a_background_api_open_yields_to_hover_and_refuses_a_changed_revision() 
     let (service, provider, uri) = lane_interleaving_fixture("BackgroundApiYields").await;
     let server = service.inner();
     let canonical = crate::documents::uri_to_canonical_id(&uri);
-    let path = verter_semantic::resolver_core::carrier_api_provider_path(&canonical);
+    let path = verter_session_query::resolution::carrier_api_provider_path(&canonical);
     let (arrived, release) = provider.block_open_file(&path);
     let snapshot = server.published_resolver().unwrap();
     let vfs = server.vfs_workspace.read().clone();

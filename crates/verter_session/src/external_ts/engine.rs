@@ -38,7 +38,7 @@ use std::sync::Arc;
 use verter_identity::canonical::Canonical;
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::InputBasisId;
-use verter_semantic::analysis::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 use crate::file_artifact_store::ProjectIdentity;
 use crate::semantic_capability::CertifiedTypeEngineBinding;

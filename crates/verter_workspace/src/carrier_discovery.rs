@@ -38,7 +38,7 @@
 use crate::canonical_path::CanonicalPath;
 use crate::snapshot_builder::{membership_to_spec, supported_extensions_for};
 use crate::ProjectMembership;
-use verter_semantic::resolver_core::{carrier_ide_provider_path, IdeProjectCompilerOptions};
+use verter_session_query::resolution::{carrier_ide_provider_path, IdeProjectCompilerOptions};
 
 /// How a carrier's companion TypeScript surface becomes a member of a
 /// configured Program.

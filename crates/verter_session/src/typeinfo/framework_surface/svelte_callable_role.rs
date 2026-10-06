@@ -3,14 +3,14 @@
 use verter_type_expr::facts::SvelteSnippetImportFact;
 use verter_type_expr::{PropCallableRole, ResolutionExactness, ResolutionProvenance};
 
-use crate::project_semantic_dispatch::symbol_identity::SymbolIdentityDemandOutcome;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::SemanticNodeId;
+use verter_type_engine::project_semantic_dispatch::symbol_identity::SymbolIdentityDemandOutcome;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 /// Compare one prop value's resolved identity with package-validated Svelte
 /// `Snippet` import identities.
 pub(super) fn classify_svelte_callable_role(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     prop_value: SemanticNodeId,
     snippet_imports: &[SvelteSnippetImportFact],
 ) -> PropCallableRole {
@@ -61,7 +61,7 @@ mod tests {
     use verter_type_expr::PropCallableRoleUnresolvedReason;
 
     use super::*;
-    use crate::semantic_query::{QueryError, SemanticNodeData};
+    use verter_type_engine::semantic_query::{QueryError, SemanticNodeData};
 
     /// Mutation recipe: restore the empty-`snippet_imports` early return in
     /// `classify_svelte_callable_role`; this test must fail with `Other`.
@@ -92,7 +92,7 @@ mod tests {
         );
 
         let complete_non_match = dispatch.graph().intern_node(SemanticNodeData::Primitive(
-            crate::semantic_query::PrimitiveKind::String,
+            verter_type_engine::semantic_query::PrimitiveKind::String,
         ));
         assert_eq!(
             classify_svelte_callable_role(&dispatch, complete_non_match, &[]),

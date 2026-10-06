@@ -20,8 +20,8 @@
 
 use std::path::PathBuf;
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
 #[path = "../correctness/expected.rs"]

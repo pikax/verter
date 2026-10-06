@@ -59,7 +59,7 @@ fn try_produce(
     demand: VueMacroCodegenDemand,
 ) -> Result<
     crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
-    crate::semantic_query::ExecutionAbort,
+    verter_type_engine::semantic_query::ExecutionAbort,
 > {
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         host.produce_vue_macro_codegen_with_ctx(ctx, canonical_id, demand)
@@ -363,7 +363,9 @@ defineProps<Props>()
         .macros
         .iter()
         .enumerate()
-        .find(|(_, mac)| mac.kind == verter_semantic::analysis::AnalyzedMacroKind::DefineProps)
+        .find(|(_, mac)| {
+            mac.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps
+        })
         .expect("fixture must publish defineProps");
     let owner = verter_type_expr::TopLevelOwnerId::instance(0);
     assert_eq!(mac.owner, owner);
@@ -374,16 +376,18 @@ defineProps<Props>()
     assert!(indexed.shallow_state.has_value_symbol_in(owner, "Base"));
     assert!(indexed.shallow_state.has_value_symbol_in(owner, "seed"));
 
-    let fixture_dispatch_0 = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
-    let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-        &host,
-        &fixture_dispatch_0,
-        canonical,
-        owner,
-        None,
-        "Props",
-    )
-    .expect("exact-owner header facts must resolve the local Props root");
+    let fixture_dispatch_0 =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let resolved =
+        verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            &host,
+            &fixture_dispatch_0,
+            canonical,
+            owner,
+            None,
+            "Props",
+        )
+        .expect("exact-owner header facts must resolve the local Props root");
     assert_eq!(resolved.canonical_id.as_ref(), canonical);
     assert_eq!(resolved.owner, owner);
     assert_eq!(resolved.symbol_name.as_ref(), "Props");
@@ -395,11 +399,12 @@ defineProps<Props>()
     assert_eq!(deps.owner_value_deps, ["seed"]);
     assert_eq!(deps.retained_value_carrier_deps, ["Base"]);
 
-    let product = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
-        .macro_type_arg_hot_ref(canonical, macro_index)
-        .expect("macro payload carrier must be present");
-    let data = crate::project_semantic_dispatch::node_data_for(
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host).graph(),
+    let product =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+            .macro_type_arg_hot_ref(canonical, macro_index)
+            .expect("macro payload carrier must be present");
+    let data = verter_type_engine::project_semantic_dispatch::node_data_for(
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host).graph(),
         product.hot.node(),
     )
     .expect("macro payload carrier node must be interned");
@@ -409,7 +414,7 @@ defineProps<Props>()
     assert_eq!(name.as_ref(), "Props");
     assert!(matches!(
         scope,
-        crate::semantic_query::NodeScopeId::File {
+        verter_type_engine::semantic_query::NodeScopeId::File {
             canonical_id,
             owner: scope_owner,
             ..
@@ -417,19 +422,23 @@ defineProps<Props>()
     ));
 
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-        let dispatch = crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
         let resolved = dispatch.resolve_carrier_subject_node(
             product.hot.node(),
-            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                crate::semantic_query::ProjectionMode::Navigate,
+            verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),
         );
-        let data = crate::project_semantic_dispatch::node_data_for(
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx).graph(),
+        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+                .graph(),
             resolved,
         )
         .expect("direct carrier resolution must preserve exact declaration identity");
-        let crate::semantic_query::SemanticNodeData::DeclRef { identity } = data.as_ref() else {
+        let verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity } =
+            data.as_ref()
+        else {
             panic!("local Props carrier must resolve to an exact DeclRef: {data:?}");
         };
         assert_eq!(identity.canonical_id.as_ref(), canonical);
@@ -459,28 +468,31 @@ defineProps<CompanionOnly & Shared>()
     let module = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let instance = verter_type_expr::TopLevelOwnerId::instance(0);
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
-        let companion = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            ctx,
-            dispatch,
-            canonical,
-            instance,
-            None,
-            "CompanionOnly",
-        )
-        .expect("setup must see the unique validated companion owner");
+        let companion =
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                ctx,
+                dispatch,
+                canonical,
+                instance,
+                None,
+                "CompanionOnly",
+            )
+            .expect("setup must see the unique validated companion owner");
         assert_eq!(companion.owner, module);
         assert_eq!(companion.symbol_name.as_ref(), "CompanionOnly");
 
-        let shadowed = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            ctx, dispatch, canonical, instance, None, "Shared",
-        )
-        .expect("the exact setup declaration must win before companion lookup");
+        let shadowed =
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                ctx, dispatch, canonical, instance, None, "Shared",
+            )
+            .expect("the exact setup declaration must win before companion lookup");
         assert_eq!(shadowed.owner, instance);
 
         assert!(
-            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 ctx,
                 dispatch,
                 canonical,
@@ -512,13 +524,15 @@ defineProps<Before>()
     let module = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let instance = verter_type_expr::TopLevelOwnerId::instance(0);
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         for _ in 0..2 {
-            let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-                ctx, dispatch, canonical, instance, None, "Before",
-            )
-            .expect("cold and warm lookup must retain the exact companion owner");
+            let resolved =
+                verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                    ctx, dispatch, canonical, instance, None, "Before",
+                )
+                .expect("cold and warm lookup must retain the exact companion owner");
             assert_eq!(resolved.owner, module);
         }
     });
@@ -534,19 +548,21 @@ defineProps<After>()
 </script>"#,
     );
     crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
-        let dispatch = &crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+        let dispatch =
+            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         assert!(
-            crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
                 ctx, dispatch, canonical, instance, None, "Before",
             )
             .is_none(),
             "the removed companion header must not survive the edit"
         );
-        let resolved = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            ctx, dispatch, canonical, instance, None, "After",
-        )
-        .expect("the replacement companion header must resolve after invalidation");
+        let resolved =
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                ctx, dispatch, canonical, instance, None, "After",
+            )
+            .expect("the replacement companion header must resolve after invalidation");
         assert_eq!(resolved.owner, module);
     });
 }
@@ -829,11 +845,12 @@ defineProps<Payload>()
     // preserved end-to-end, never masked by a generic fault class.
     let reasons = output.completeness.reasons();
     assert!(
-        reasons.contains(crate::semantic_query::PartialReasonSet::BUDGET_EXCEEDED),
+        reasons.contains(verter_type_engine::semantic_query::PartialReasonSet::BUDGET_EXCEEDED),
         "aggregate completeness must carry BUDGET_EXCEEDED, got {reasons:?}"
     );
     assert!(
-        !reasons.contains(crate::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT),
+        !reasons
+            .contains(verter_type_engine::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT),
         "the precise budget class must NOT be masked by SEMANTIC_QUERY_FAULT, got {reasons:?}"
     );
     assert!(
@@ -978,7 +995,7 @@ fn scheduler_key_is_content_free_but_input_pin_moves_across_edit() {
 
 #[test]
 fn scheduler_identity_isolates_exact_demand_and_session() {
-    use crate::resolver_core::StoreViewCompatToken;
+    use verter_session_query::facts::store_view::StoreViewCompatToken;
 
     let base = StoreViewCompatToken {
         epoch: 7,
@@ -1064,7 +1081,7 @@ defineProps<{
     assert!(facts_cacheable);
     assert_eq!(
         output.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
     );
 
     let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(props)) =
@@ -1257,7 +1274,7 @@ defineEmits<Emits>()
     );
     assert_eq!(
         output.completeness,
-        crate::semantic_query::ResultCompleteness::Complete
+        verter_type_engine::semantic_query::ResultCompleteness::Complete
     );
 
     let runtime = output.runtime.as_ref().expect("runtime bundle");

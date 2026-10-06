@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 
 use crate::path_matches_prefix;
 use crate::types::{ExactResolution, ExactResolutionResult};
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 /// Coherent per-owner dependency state. Each class is owned by exactly one
 /// kind of writer event; the canonical reverse axis is maintained via

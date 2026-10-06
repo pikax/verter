@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::documents::line_index::LineIndex;
 use crate::features::action_utils;
@@ -22,7 +22,7 @@ use crate::features::macro_codegen::MacroCodegen;
 /// For each unknown prop, generates a cross-file edit to add the prop
 /// to the child component's `defineProps`.
 pub fn component_code_actions(
-    analysis: &verter_session::FileAnalysisSnapshot,
+    analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     resolve_child_context: &dyn Fn(&str) -> Option<ChildComponentContext>,
 ) -> Vec<CodeActionOrCommand> {
     let unknowns = component_diagnostics::find_unknown_props(analysis, &|source| {
@@ -222,7 +222,7 @@ fn component_attribute_anchor(
 ///
 /// Produces insertion edits before the component's `>` or `/>`.
 pub fn suggest_matching_props(
-    analysis: &verter_session::FileAnalysisSnapshot,
+    analysis: &verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
     structure: &verter_session::carrier_publication_store::RegisteredFileStructure,
     line_index: &LineIndex,
     uri: &Uri,

@@ -83,7 +83,9 @@ pub fn lower_ts_type_with_whole_query(
             TSType::TSTypeQuery(query)
                 if matches!(query.expr_name, TSTypeQueryExprName::IdentifierReference(_)) =>
             {
-                type_query_identifier(query).map(|identifier| identifier.span.into())
+                type_query_identifier(query).map(|identifier| {
+                    verter_span::Span::new(identifier.span.start, identifier.span.end)
+                })
             }
             _ => None,
         };
@@ -295,8 +297,11 @@ fn build_ts_type<'b, 'a>(
                     .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
-                    signature: Some(ctor.span.into()),
-                    return_type: Some(ctor.return_type.type_annotation.span().into()),
+                    signature: Some(verter_span::Span::new(ctor.span.start, ctor.span.end)),
+                    return_type: Some(verter_span::Span::new(
+                        ctor.return_type.type_annotation.span().start,
+                        ctor.return_type.type_annotation.span().end,
+                    )),
                 },
             ))
             .with_abstract(ctor.r#abstract);
@@ -786,12 +791,17 @@ fn lower_ts_signature<'b, 'a>(
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
 
             let spans = MemberSpans {
-                declaration: Some(prop.span.into()),
-                name: Some(prop.key.span().into()),
-                type_annotation: prop
-                    .type_annotation
-                    .as_ref()
-                    .map(|ta| ta.type_annotation.span().into()),
+                declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
+                name: Some(verter_span::Span::new(
+                    prop.key.span().start,
+                    prop.key.span().end,
+                )),
+                type_annotation: prop.type_annotation.as_ref().map(|ta| {
+                    verter_span::Span::new(
+                        ta.type_annotation.span().start,
+                        ta.type_annotation.span().end,
+                    )
+                }),
             };
             Some(ObjectMember::Property(
                 ObjectProperty::with_key_spans_public(key, ty, prop.optional, prop.readonly, spans),
@@ -808,17 +818,22 @@ fn lower_ts_signature<'b, 'a>(
                     .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
-                    signature: Some(method.span.into()),
-                    return_type: method
-                        .return_type
-                        .as_ref()
-                        .map(|rt| rt.type_annotation.span().into()),
+                    signature: Some(verter_span::Span::new(method.span.start, method.span.end)),
+                    return_type: method.return_type.as_ref().map(|rt| {
+                        verter_span::Span::new(
+                            rt.type_annotation.span().start,
+                            rt.type_annotation.span().end,
+                        )
+                    }),
                 },
                 lower,
             ));
             let spans = MemberSpans {
-                declaration: Some(method.span.into()),
-                name: Some(method.key.span().into()),
+                declaration: Some(verter_span::Span::new(method.span.start, method.span.end)),
+                name: Some(verter_span::Span::new(
+                    method.key.span().start,
+                    method.key.span().end,
+                )),
                 type_annotation: None,
             };
             Some(ObjectMember::Method(
@@ -834,11 +849,13 @@ fn lower_ts_signature<'b, 'a>(
                     .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
-                    signature: Some(call.span.into()),
-                    return_type: call
-                        .return_type
-                        .as_ref()
-                        .map(|rt| rt.type_annotation.span().into()),
+                    signature: Some(verter_span::Span::new(call.span.start, call.span.end)),
+                    return_type: call.return_type.as_ref().map(|rt| {
+                        verter_span::Span::new(
+                            rt.type_annotation.span().start,
+                            rt.type_annotation.span().end,
+                        )
+                    }),
                 },
                 lower,
             ));
@@ -848,13 +865,16 @@ fn lower_ts_signature<'b, 'a>(
             let param = &idx.parameter;
             let key_name = param.name.to_string();
             let key_type = lower(&param.type_annotation.type_annotation);
-            let key_span = Some(param.span.into());
+            let key_span = Some(verter_span::Span::new(param.span.start, param.span.end));
 
             let value_type = lower(&idx.type_annotation.type_annotation);
             let spans = IndexSignatureSpans {
-                declaration: Some(idx.span.into()),
+                declaration: Some(verter_span::Span::new(idx.span.start, idx.span.end)),
                 key: key_span,
-                value: Some(idx.type_annotation.type_annotation.span().into()),
+                value: Some(verter_span::Span::new(
+                    idx.type_annotation.type_annotation.span().start,
+                    idx.type_annotation.type_annotation.span().end,
+                )),
             };
             Some(ObjectMember::IndexSignature(IndexSignature::with_spans(
                 key_name,
@@ -875,11 +895,13 @@ fn lower_ts_signature<'b, 'a>(
                     .map(|tp| lower_type_params(tp, lower))
                     .unwrap_or_default(),
                 FunctionSpans {
-                    signature: Some(ctor.span.into()),
-                    return_type: ctor
-                        .return_type
-                        .as_ref()
-                        .map(|rt| rt.type_annotation.span().into()),
+                    signature: Some(verter_span::Span::new(ctor.span.start, ctor.span.end)),
+                    return_type: ctor.return_type.as_ref().map(|rt| {
+                        verter_span::Span::new(
+                            rt.type_annotation.span().start,
+                            rt.type_annotation.span().end,
+                        )
+                    }),
                 },
             ));
             Some(ObjectMember::ConstructSignature(func))
@@ -951,8 +973,11 @@ fn lower_function_type<'b, 'a>(
             .map(|tp| lower_type_params(tp, lower))
             .unwrap_or_default(),
         FunctionSpans {
-            signature: Some(func.span.into()),
-            return_type: Some(func.return_type.type_annotation.span().into()),
+            signature: Some(verter_span::Span::new(func.span.start, func.span.end)),
+            return_type: Some(verter_span::Span::new(
+                func.return_type.type_annotation.span().start,
+                func.return_type.type_annotation.span().end,
+            )),
         },
         lower,
     ))
@@ -981,7 +1006,7 @@ fn lower_formal_parameters<'b, 'a>(
                 .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any)),
             false,
             false,
-            Some(this.span.into()),
+            Some(verter_span::Span::new(this.span.start, this.span.end)),
             this.type_annotation.is_some(),
         ));
     }
@@ -1001,7 +1026,7 @@ fn lower_formal_parameters<'b, 'a>(
             ty,
             param.optional,
             false,
-            Some(param.span().into()),
+            Some(verter_span::Span::new(param.span().start, param.span().end)),
             has_ts_annotation,
         ));
     }
@@ -1018,7 +1043,7 @@ fn lower_formal_parameters<'b, 'a>(
             ty,
             false,
             true,
-            Some(rest.span().into()),
+            Some(verter_span::Span::new(rest.span().start, rest.span().end)),
             has_ts_annotation,
         ));
     }

@@ -25,6 +25,7 @@ parser_cache_audit = []
 stack-fault-injection = []
 
 [dependencies]
+verter_session_query = { workspace = true }
 verter_debug_assert = { workspace = true }
 verter_span = { path = "../verter_span", version = "0.0.1-beta.1" }
 verter_language = { path = "../verter_language", version = "0.0.1-beta.3" }

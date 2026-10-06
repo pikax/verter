@@ -2,11 +2,8 @@
 //! scope, binder, environment, operand, and request identity cannot be forged.
 
 use std::sync::Arc;
-use verter_session::semantic_query::operand::{
-    OperandBinderIdentity, OperandLexicalScope, OperandSplitEnv, SemanticOperand,
-    SemanticOperandForceRequest,
-};
-use verter_session::semantic_query::{ProjectionMode, ProjectionReductionContext};
+use verter_type_engine::semantic_query::operand::{OperandBinderIdentity, OperandLexicalScope, OperandSplitEnv, SemanticOperand, SemanticOperandForceRequest};
+use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
 use verter_type_expr::TopLevelOwnerId;
 
 fn main() {

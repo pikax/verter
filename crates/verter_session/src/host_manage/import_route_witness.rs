@@ -53,11 +53,14 @@
 //! imports / reexports / wildcard reexports from the shallow routing
 //! surface, plus the SFC `src=` external requests from the scheduler's
 //! parse snapshot. No resolved canonical is read from a parse artifact.
+use verter_type_engine::request_route_memo::{
+    ImportRouteObservation, ImportRouteObservationKey, NormalizedCanonical, NormalizedCanonicalKey,
+};
 
 use std::cell::{Cell, RefCell};
 
-use crate::resolver_core::FactVersionRef;
 use crate::VerterHost;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 thread_local! {
     /// Number of [`ResolutionWitnessScope`] frames installed on this
@@ -122,78 +125,6 @@ fn replay_resolution_witness(observed: &[FactVersionRef]) {
     });
 }
 
-/// What resolving one owner's specifier set observed: whether a resolution
-/// was refused, and every observation the admitted ones recorded, in order.
-#[derive(Debug)]
-pub(crate) struct ImportRouteObservation {
-    refused: bool,
-    observed: Vec<FactVersionRef>,
-}
-
-/// The identity of one witness build within a request: the host, the
-/// owner, the specifier lanes resolved, and the generations a load or an
-/// edit advances, so a build after either resolves again.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ImportRouteObservationKey {
-    host: usize,
-    canonical: std::sync::Arc<str>,
-    specifiers: Vec<(
-        String,
-        Option<verter_semantic::resolver_core::ResolveRequestKind>,
-    )>,
-    load_generation: u64,
-    store_view_epoch: u64,
-}
-
-/// A request's witness builds, so every consumer that roots on an owner's
-/// import-route witness within the request shares one resolution of the
-/// owner's specifiers instead of resolving all of them again (the witness
-/// is rooting evidence: a build that a later change in the request makes
-/// stale fails validation, never answers wrongly). Owned by the
-/// [`crate::request_context::RequestContext`] and dropped with it; bounded
-/// by the owners the request roots on.
-#[derive(Debug, Default)]
-pub(crate) struct ImportRouteObservationMemo(
-    parking_lot::Mutex<
-        rustc_hash::FxHashMap<ImportRouteObservationKey, std::sync::Arc<ImportRouteObservation>>,
-    >,
-);
-
-/// One analysis-canonical normalization a request made: the canonical it
-/// normalized to (`None`: to itself), whether a resolution it drove was
-/// refused, and every observation those resolutions recorded.
-#[derive(Debug)]
-pub(crate) struct NormalizedCanonical {
-    pub(crate) normalized: Option<std::sync::Arc<str>>,
-    pub(crate) refused: bool,
-    observed: Vec<FactVersionRef>,
-}
-
-/// The identity of one normalization within a request: the host, the
-/// canonical, and the generations a load or an edit advances, so a
-/// normalization after either probes again.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct NormalizedCanonicalKey {
-    host: usize,
-    canonical: std::sync::Arc<str>,
-    load_generation: u64,
-    store_view_epoch: u64,
-}
-
-/// A request's analysis-canonical normalizations, so every consumer that
-/// normalizes the same canonical in the request shares one run of its
-/// declaration-companion probes (a normalization is rooting evidence
-/// exactly like a witness build: its observations are replayed into the
-/// witness scopes open around each consumer, and a refusal is re-noted).
-/// Owned by the [`crate::request_context::RequestContext`] and dropped
-/// with it; bounded by the canonicals the request normalizes.
-#[derive(Debug, Default)]
-pub(crate) struct NormalizedCanonicalMemo(
-    parking_lot::Mutex<
-        rustc_hash::FxHashMap<NormalizedCanonicalKey, std::sync::Arc<NormalizedCanonical>>,
-    >,
-);
-
 #[cfg(test)]
 thread_local! {
     /// How many normalizations ran their probes on this thread; test-only.
@@ -219,7 +150,7 @@ impl VerterHost {
         canonical: &str,
         normalize: impl FnOnce() -> (Option<std::sync::Arc<str>>, bool),
     ) -> std::sync::Arc<NormalizedCanonical> {
-        let request = crate::request_context::current_request_context();
+        let request = verter_type_engine::request_context::current_request_context();
         let key = request.as_ref().map(|_| NormalizedCanonicalKey {
             host: self as *const Self as usize,
             canonical: std::sync::Arc::from(canonical),
@@ -231,8 +162,8 @@ impl VerterHost {
             if let Some(hit) = hit {
                 replay_resolution_witness(&hit.observed);
                 if hit.refused {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                    verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                     );
                 }
                 return hit;
@@ -350,7 +281,7 @@ impl VerterHost {
         canonical_id: &str,
         specifiers: &[(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
     ) -> Option<Vec<FactVersionRef>> {
         #[cfg(test)]
@@ -362,7 +293,7 @@ impl VerterHost {
             return self.decline_import_route_witness();
         }
         let witness = self.observed_import_route_witness(canonical_id, specifiers)?;
-        if witness.len() > verter_workspace::FACT_SIGNATURE_CAP {
+        if witness.len() > verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP {
             // Overflow: the witness cannot represent the complete
             // observation set, so it is not rootable. Never represented
             // by a truncated or empty signature (`.DECISION.md` §3).
@@ -384,7 +315,7 @@ impl VerterHost {
         canonical_id: &str,
         specifiers: &[(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
     ) -> Option<Vec<FactVersionRef>> {
         let observation = self.import_route_observation(canonical_id, specifiers);
@@ -416,10 +347,10 @@ impl VerterHost {
         canonical_id: &str,
         specifiers: &[(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )],
     ) -> std::sync::Arc<ImportRouteObservation> {
-        let request = crate::request_context::current_request_context();
+        let request = verter_type_engine::request_context::current_request_context();
         let key = request.as_ref().map(|_| ImportRouteObservationKey {
             host: self as *const Self as usize,
             canonical: std::sync::Arc::from(canonical_id),
@@ -476,8 +407,8 @@ impl VerterHost {
     /// Mark the enclosing compute non-cacheable and report an
     /// unrootable import-route witness.
     fn decline_import_route_witness(&self) -> Option<Vec<FactVersionRef>> {
-        crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-            crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+            verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
         );
         None
     }
@@ -522,7 +453,9 @@ impl VerterHost {
     pub(crate) fn observe_owner_import_route_witness(&self, canonical_id: &str) -> bool {
         match self.owner_import_route_witness(canonical_id) {
             Some(witness) => {
-                crate::resolver_core::resolver_context::observe_fan_out_borrowed(&witness);
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out_borrowed(
+                    &witness,
+                );
                 true
             }
             None => false,
@@ -567,12 +500,12 @@ impl VerterHost {
     ) -> Option<
         Vec<(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )>,
     > {
         let mut specifiers: Vec<(
             String,
-            Option<verter_semantic::resolver_core::ResolveRequestKind>,
+            Option<verter_session_query::resolution::ResolveRequestKind>,
         )> = Vec::new();
         let mut readable = false;
 
@@ -588,7 +521,7 @@ impl VerterHost {
                 specifiers.extend(data.parse.external_requests.iter().map(|request| {
                     (
                         request.specifier.clone(),
-                        Some(verter_semantic::resolver_core::ResolveRequestKind::SfcSrcAttr),
+                        Some(verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr),
                     )
                 }));
                 let analysis = &data.parse.script_analysis;
@@ -629,11 +562,11 @@ impl VerterHost {
                     .map(|wildcard| (wildcard.source_specifier.clone(), None)),
             );
             specifiers.extend(state.exports.values().filter_map(|export| match export {
-                crate::resolver_core::shallow_file_state::ExportTarget::Reexport {
+                verter_session_query::inputs::shallow::ExportTarget::Reexport {
                     source_specifier,
                     ..
                 } => Some((source_specifier.clone(), None)),
-                crate::resolver_core::shallow_file_state::ExportTarget::Local { .. } => None,
+                verter_session_query::inputs::shallow::ExportTarget::Local { .. } => None,
             }));
         }
 

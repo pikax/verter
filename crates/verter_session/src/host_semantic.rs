@@ -46,7 +46,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
     ) -> verter_semantic::query::QueryResult<
-        Option<verter_semantic::facts::component::ComponentSurface>,
+        Option<verter_session_query::facts::component::ComponentSurface>,
     > {
         use verter_semantic::query::QueryResult;
         use verter_semantic::refs::FileRef;
@@ -83,8 +83,8 @@ impl VerterHost {
     ) -> verter_semantic::query::QueryResult<
         Option<
             Vec<(
-                verter_semantic::facts::binding::BindingDeclaration,
-                verter_semantic::facts::reactivity::ReactivityFact,
+                verter_session_query::facts::binding::BindingDeclaration,
+                verter_session_query::facts::reactivity::ReactivityFact,
             )>,
         >,
     > {
@@ -157,7 +157,9 @@ impl VerterHost {
 
         // Extract boundary edges from template analysis
         let boundary_edges = {
-            let template: Option<verter_semantic::analysis::TemplateAnalysisSnapshot> = None;
+            let template: Option<
+                verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+            > = None;
             template
                 .map(|t| {
                     verter_semantic::extract::extract_boundary_edges(
@@ -189,7 +191,7 @@ impl VerterHost {
         canonical_id: &str,
         binding_name: &str,
     ) -> verter_semantic::query::QueryResult<
-        Option<verter_semantic::facts::reactivity::ReactivityFact>,
+        Option<verter_session_query::facts::reactivity::ReactivityFact>,
     > {
         use verter_semantic::query::QueryResult;
 
@@ -250,10 +252,10 @@ impl VerterHost {
         &self,
         component_ref: &verter_semantic::refs::ComponentRef,
     ) -> verter_semantic::query::QueryResult<
-        Option<verter_semantic::facts::runtime_schema::ComponentRuntimeSchema>,
+        Option<verter_session_query::facts::runtime_schema::ComponentRuntimeSchema>,
     > {
-        use verter_semantic::facts::runtime_schema::extract_runtime_schema;
         use verter_semantic::query::QueryResult;
+        use verter_session_query::facts::runtime_schema::extract_runtime_schema;
 
         let revision = self.semantic_revision();
         let surface_result = self.semantic_component_surface(&component_ref.file_id);
@@ -281,7 +283,7 @@ impl VerterHost {
     ///   propagation; the new content for a reloaded canonical
     ///   produces fresh facts).
     pub fn register_facts_for_new_content(&self, canonical_id: &str) {
-        verter_workspace::probe_scope!(REGISTER_FACTS);
+        verter_session_query::probe_scope!(REGISTER_FACTS);
         self.semantic_db().invalidate(canonical_id);
     }
 

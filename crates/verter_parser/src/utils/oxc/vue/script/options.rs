@@ -151,9 +151,9 @@ fn record_function_declaration<'a>(declaration: &'a Function<'a>, items: &mut Ve
             (false, false) => DeclarationKind::Function,
         };
         items.push(ScriptItem::Declaration(ScriptDeclaration {
-            span: Span::from(declaration.span),
+            span: Span::new(declaration.span.start, declaration.span.end),
             name: Some(id.name.as_str()),
-            name_span: Some(Span::from(id.span)),
+            name_span: Some(Span::new(id.span.start, id.span.end)),
             kind,
             is_ref_like: false,
             // The Options-API path never projects a `defineExpose` surface, so
@@ -170,9 +170,9 @@ fn record_class_declaration<'a>(declaration: &'a Class<'a>, items: &mut Vec<Scri
     }
     if let Some(id) = &declaration.id {
         items.push(ScriptItem::Declaration(ScriptDeclaration {
-            span: Span::from(declaration.span),
+            span: Span::new(declaration.span.start, declaration.span.end),
             name: Some(id.name.as_str()),
-            name_span: Some(Span::from(id.span)),
+            name_span: Some(Span::new(id.span.start, id.span.end)),
             kind: DeclarationKind::Class,
             is_ref_like: false,
             callable: None,
@@ -189,7 +189,7 @@ fn process_default_export<'a>(
     errors: &mut Vec<ScriptError>,
     is_async: &mut bool,
 ) -> ScriptDefaultExport<'a> {
-    let span = Span::from(export.span);
+    let span = Span::new(export.span.start, export.span.end);
 
     // Check known declaration types first
     match &export.declaration {
@@ -227,7 +227,7 @@ fn analyze_default_export_expression<'a>(
         // Plain object: export default { ... }
         Expression::ObjectExpression(obj) => {
             let mut default_export = ScriptDefaultExport::new(span, DefaultExportType::Object)
-                .with_object_span(Span::from(obj.span));
+                .with_object_span(Span::new(obj.span.start, obj.span.end));
 
             // Look for setup function
             if let Some(setup_body_span) = find_setup_in_object(obj, ctx, items, errors, is_async) {
@@ -251,7 +251,7 @@ fn analyze_default_export_expression<'a>(
                         if let Some(Expression::ObjectExpression(obj)) = arg.as_expression() {
                             let setup_span =
                                 find_setup_in_object(obj, ctx, items, errors, is_async);
-                            (Some(Span::from(obj.span)), setup_span)
+                            (Some(Span::new(obj.span.start, obj.span.end)), setup_span)
                         } else {
                             (None, None)
                         }
@@ -346,7 +346,7 @@ fn process_setup_value<'a>(
                 if setup_ctx.is_async {
                     *is_async = true;
                 }
-                Some(Span::from(body.span))
+                Some(Span::new(body.span.start, body.span.end))
             } else {
                 None
             }
@@ -362,7 +362,7 @@ fn process_setup_value<'a>(
                 if setup_ctx.is_async {
                     *is_async = true;
                 }
-                Some(Span::from(body.span))
+                Some(Span::new(body.span.start, body.span.end))
             } else {
                 // Expression body - no statements to process
                 None
@@ -490,7 +490,7 @@ fn extract_ident_keys_from_object(
     for prop in &obj.properties {
         if let ObjectPropertyKind::ObjectProperty(p) = prop {
             if let PropertyKey::StaticIdentifier(id) = &p.key {
-                bindings.push((Span::from(id.span), bt));
+                bindings.push((Span::new(id.span.start, id.span.end), bt));
             }
         }
     }
@@ -575,9 +575,9 @@ fn collect_declarations_from_pattern<'a>(
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
             items.push(ScriptItem::Declaration(ScriptDeclaration {
-                span: Span::from(id.span),
+                span: Span::new(id.span.start, id.span.end),
                 name: Some(id.name.as_str()),
-                name_span: Some(Span::from(id.span)),
+                name_span: Some(Span::new(id.span.start, id.span.end)),
                 kind,
                 is_ref_like: false,
                 callable: None,

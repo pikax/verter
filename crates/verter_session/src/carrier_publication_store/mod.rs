@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use verter_compiler::framework_common::FrameworkParseArtifact;
+use verter_execution::cancellation::CancellationToken;
 use verter_language::carrier_grammar::{
     AcceptedRegisteredCarrierSource, CarrierAcceptanceError, CarrierGrammarAuthority,
     CarrierGrammarFingerprint, GrammarAuthorityNamespaceId,
@@ -18,10 +19,9 @@ use verter_language::registered_source_authority::{
     RegisteredSourceSnapshotId, SourceAuthorityNamespaceId, SourceGeneration,
 };
 use verter_language::{FrameworkAdapterId, LanguageId, ParseKey};
-use verter_scheduler::cancellation::CancellationToken;
 
 use crate::carrier_artifact_cohort::current_persisted_carrier_artifact_cohort;
-use crate::types::MetaProvenance;
+use crate::meta_provenance::MetaProvenance;
 use persistence::{
     CarrierStableUnitStore, InMemoryStableUnitStore, RetainedStableUnit, StableUnitKey,
 };

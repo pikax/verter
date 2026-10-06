@@ -1,11 +1,11 @@
 use super::*;
-use crate::resolver_core::declaration_metadata::ResolvedExportTarget;
 use std::collections::BTreeMap;
-use verter_semantic::analysis::type_eval::DeclarationId;
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, ImportBindingKind,
     ResolvedLocalType,
 };
+use verter_session_query::declarations::metadata::ResolvedExportTarget;
+use verter_session_query::declarations::DeclarationId;
 use verter_span::Span;
 use verter_type_expr::{PrimitiveName, TopLevelOwnerId};
 
@@ -31,7 +31,7 @@ fn local_ref_shape(type_ref: &str) -> verter_type_expr::facts::ResolvedLocalShap
 struct TestSnapshot {
     imports: Vec<AnalyzedImport>,
     macros: Vec<AnalyzedMacro>,
-    macro_type_deps: Vec<verter_semantic::analysis::types::MacroTypeDep>,
+    macro_type_deps: Vec<verter_session_query::analysis::types::MacroTypeDep>,
 }
 
 struct TestHost {
@@ -99,7 +99,7 @@ impl ComponentMetaResolverHost for TestHost {
     fn snapshot_macro_type_deps<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_semantic::analysis::types::MacroTypeDep] {
+    ) -> &'a [verter_session_query::analysis::types::MacroTypeDep] {
         &snapshot.macro_type_deps
     }
 
@@ -244,7 +244,7 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
     fn snapshot_macro_type_deps<'a>(
         &self,
         snapshot: &'a Self::Snapshot,
-    ) -> &'a [verter_semantic::analysis::types::MacroTypeDep] {
+    ) -> &'a [verter_session_query::analysis::types::MacroTypeDep] {
         &snapshot.macro_type_deps
     }
 
@@ -291,7 +291,8 @@ impl ComponentMetaResolverHost for CombinedSurfaceTestHost {
                 canonical_source: "/dep.ts".to_string(),
                 owner: TopLevelOwnerId::ordinary_file(),
                 span: Span::new(0, 29),
-                kind: crate::resolver_core::ResolvedDeclarationKind::Interface,
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
             },
             native_props: vec![crate::resolver_core::ResolvedNativeProp {
@@ -376,13 +377,13 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
             parsed_type_argument_scope: None,
             span: Span::new(0, 20),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             macro_index: 0,
             import_source: "./dep".to_string(),
             type_name: "Props".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_span: Span::new(0, 20),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -481,13 +482,13 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
             parsed_type_argument_scope: None,
             span: Span::new(0, 20),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             macro_index: 0,
             import_source: "./dep".to_string(),
             type_name: "Emits".to_string(),
             macro_kind: AnalyzedMacroKind::DefineEmits,
             macro_span: Span::new(0, 20),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -523,16 +524,16 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
         imported_surface_calls: std::cell::Cell::new(0),
         eval_outputs: ComponentMetaEvalOutputs {
             evaluated_types: Some(
-                verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+                verter_session_query::analysis::type_expand::ExpandedComponentTypes {
                     props: Vec::new(),
                     define_props: Vec::new(),
                     define_emits: vec![
-                        verter_semantic::analysis::type_expand::ExpandedMacroObjectShape {
+                        verter_session_query::analysis::type_expand::ExpandedMacroObjectShape {
                             macro_index: 0,
-                            result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                                verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                            result: verter_session_query::analysis::type_expand::ExpansionResult::exact_symbolic(
+                                verter_session_query::analysis::type_expand::ExpandedObjectShape {
                                     properties: vec![
-                                        verter_semantic::analysis::type_expand::ExpandedProperty {
+                                        verter_session_query::analysis::type_expand::ExpandedProperty {
                                             name: "save".to_string(),
                                             ty: verter_type_expr::facts::SourcePosition::Present(verter_type_expr::facts::SemanticTypeSource::Synthesized(
                                                 verter_type_expr::facts::ResolvedLocalShape::Tuple(
@@ -612,13 +613,13 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
             parsed_type_argument_scope: None,
             span: Span::new(0, 20),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             macro_index: 0,
             import_source: "./dep".to_string(),
             type_name: "Emits".to_string(),
             macro_kind: AnalyzedMacroKind::DefineEmits,
             macro_span: Span::new(0, 20),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -709,13 +710,13 @@ defineEmits<Emits>()
             parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             macro_index: 0,
             import_source: "./dep".to_string(),
             type_name: "RootEmits".to_string(),
             macro_kind: AnalyzedMacroKind::DefineEmits,
             macro_span: Span::new(0, source.len() as u32),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -989,21 +990,21 @@ type LocalItem = {
             span: Span::new(0, source.len() as u32),
         }],
         macro_type_deps: vec![
-            verter_semantic::analysis::types::MacroTypeDep {
+            verter_session_query::analysis::types::MacroTypeDep {
                 type_name: "ImportedBase".to_string(),
                 import_source: "./types".to_string(),
                 macro_kind: AnalyzedMacroKind::DefineProps,
                 macro_index: 0,
                 macro_span: Span::new(0, source.len() as u32),
-                usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+                usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
             },
-            verter_semantic::analysis::types::MacroTypeDep {
+            verter_session_query::analysis::types::MacroTypeDep {
                 type_name: "ImportedKeys".to_string(),
                 import_source: "./types".to_string(),
                 macro_kind: AnalyzedMacroKind::DefineProps,
                 macro_index: 0,
                 macro_span: Span::new(0, source.len() as u32),
-                usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+                usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
             },
         ],
     };
@@ -1046,14 +1047,14 @@ type Props = Pick<ImportedBase, 'href'>
             (),
         )]),
         eval_outputs: ComponentMetaEvalOutputs {
-            evaluated_types: Some(verter_semantic::analysis::type_expand::ExpandedComponentTypes {
+            evaluated_types: Some(verter_session_query::analysis::type_expand::ExpandedComponentTypes {
                 define_props: vec![
-                    verter_semantic::analysis::type_expand::ExpandedMacroProps {
+                    verter_session_query::analysis::type_expand::ExpandedMacroProps {
                         macro_index: 0,
-                        result: verter_semantic::analysis::type_expand::ExpansionResult::exact_symbolic(
-                            verter_semantic::analysis::type_expand::ExpandedObjectShape {
+                        result: verter_session_query::analysis::type_expand::ExpansionResult::exact_symbolic(
+                            verter_session_query::analysis::type_expand::ExpandedObjectShape {
                                 properties: vec![
-                                    verter_semantic::analysis::type_expand::ExpandedProperty {
+                                    verter_session_query::analysis::type_expand::ExpandedProperty {
                                         name: "href".to_string(),
                                         ty: verter_type_expr::facts::SourcePosition::Present(
                                             verter_type_expr::facts::SemanticTypeSource::Closed(
@@ -1112,13 +1113,13 @@ type Props = Pick<ImportedBase, 'href'>
             parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             type_name: "ImportedBase".to_string(),
             import_source: "./types".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1176,7 +1177,7 @@ type Props = Pick<ImportedBase, 'href'>
             binding_name: Some("props".to_string()),
             model_name: None,
             has_inherit_attrs_false: false,
-            prop_fields: vec![verter_semantic::analysis::AnalyzedPropField {
+            prop_fields: vec![verter_session_query::analysis::types::AnalyzedPropField {
                 name: "href".to_string(),
                 is_optional: true,
                 span: Span::new(0, 0),
@@ -1196,7 +1197,8 @@ type Props = Pick<ImportedBase, 'href'>
                 type_expr_scope: Some(verter_type_expr::TypeExprScope::new("/test.ts")),
                 description: None,
                 tags: Vec::new(),
-                resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+                resolution_source:
+                    verter_session_query::analysis::types::TypeResolutionSource::Rust,
                 resolution_error: None,
                 declared_in_macro_type_arg: false,
                 constructor_bindings: Vec::new(),
@@ -1217,13 +1219,13 @@ type Props = Pick<ImportedBase, 'href'>
             parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             type_name: "ImportedBase".to_string(),
             import_source: "./types".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1298,13 +1300,13 @@ type Props = {
             parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             type_name: "ImportedBase".to_string(),
             import_source: "./types".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1383,13 +1385,13 @@ type Props = {
             parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             type_name: "ImportedBase".to_string(),
             import_source: "./types".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1463,13 +1465,13 @@ type Props = Omit<ImportedBase, 'hidden'>
             parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             type_name: "ImportedBase".to_string(),
             import_source: "./types".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1544,13 +1546,13 @@ type Props = Omit<ImportedBase, 'hidden'>
             parsed_type_argument_scope: None,
             span: Span::new(0, source.len() as u32),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             type_name: "ImportedBase".to_string(),
             import_source: "./types".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, source.len() as u32),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1607,13 +1609,13 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
             parsed_type_argument_scope: None,
             span: Span::new(0, 1),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             type_name: "Props".to_string(),
             import_source: "./types".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, 1),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 
@@ -1692,13 +1694,13 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
             parsed_type_argument_scope: None,
             span: Span::new(0, 1),
         }],
-        macro_type_deps: vec![verter_semantic::analysis::types::MacroTypeDep {
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
             type_name: "StringOrVNode".to_string(),
             import_source: "./types".to_string(),
             macro_kind: AnalyzedMacroKind::DefineProps,
             macro_index: 0,
             macro_span: Span::new(0, 1),
-            usage: verter_semantic::analysis::types::MacroTypeDepUsage::Surface,
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
         }],
     };
 

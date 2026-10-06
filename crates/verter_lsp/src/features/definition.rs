@@ -9,9 +9,10 @@
 // - DOM query selector strings → matching template elements (with CSS rule fallback)
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::types::{DomQueryCallSite, DomQueryKind};
 use verter_semantic::analysis::{match_selector, MatchResult};
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::DomQueryCallSite;
+use verter_session_query::analysis::types::DomQueryKind;
 
 use verter_session::carrier_publication_store::RegisteredFileStructure;
 
@@ -244,9 +245,15 @@ pub fn definition_at_position(
         if in_template {
             // Navigate $props → defineProps, $emit → defineEmits, $slots → defineSlots
             let macro_kind = match word.as_str() {
-                "$props" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineProps),
-                "$emit" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineEmits),
-                "$slots" => Some(verter_semantic::analysis::AnalyzedMacroKind::DefineSlots),
+                "$props" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps)
+                }
+                "$emit" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits)
+                }
+                "$slots" => {
+                    Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots)
+                }
                 _ => None,
             };
             if let Some(kind) = macro_kind {
@@ -732,7 +739,7 @@ fn css_rule_definition(
     target: &CssRefTarget,
     element: Option<(
         usize,
-        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+        &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     )>,
     analysis: &FileAnalysisSnapshot,
     line_index: &LineIndex,
@@ -800,11 +807,11 @@ fn css_rule_definition(
 /// 2 = no derivable structure / no element context,
 /// 3 = structurally cannot match.
 pub(crate) fn class_rule_match_rank(
-    cls: &verter_semantic::analysis::style::AnalyzedCssClass,
-    css: &verter_semantic::analysis::style::CssAnalysis,
+    cls: &verter_session_query::analysis::style::AnalyzedCssClass,
+    css: &verter_session_query::analysis::style::CssAnalysis,
     element: Option<(
         usize,
-        &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+        &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     )>,
 ) -> u8 {
     let Some((element_idx, template)) = element else {

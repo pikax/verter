@@ -1,0 +1,580 @@
+//! `SemanticGraphStore` test-support surface — the `#[doc(hidden)]`
+//! `*_for_tests` publish / probe helpers the integration suite drives.
+//!
+//! Extracted from `mod.rs` as a continuation `impl SemanticGraphStore` block
+//! (same module tree, sibling file). These are public test-only entry points
+//! (compiled in every build so integration-test crates can call them); they
+//! reach the store's private admission internals through the parent module
+//! (`use super::*`).
+
+use super::*;
+
+/// Per-key error returned by `SemanticGraphStore::execute_cooperative_batch`.
+///
+/// The enum is re-exported through the test-support surface so integration
+/// tests can project per-key failures without losing their typed reason.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BatchExpandError {
+    /// Canonical content changed between the surface stamp and this read.
+    StaleContentChanged,
+    /// The canonical was deleted between stamp and read.
+    FileDeleted,
+    /// The declaration no longer exists under the current view.
+    DeclarationRemoved,
+    /// The semantic node was evicted and would require an unauthorized cold
+    /// rebuild.
+    EvictedNode,
+}
+
+impl SemanticGraphStore {
+    /// Resolve a test batch through validated warm reads without admitting
+    /// cold work. Missing or stale entries retain the typed per-key error.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn execute_cooperative_batch<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        keys: &[crate::semantic_query::SemanticQueryKey],
+    ) -> Vec<Result<SemanticNodeId, BatchExpandError>> {
+        keys.iter()
+            .map(|key| {
+                if let Some(hit) = self.get_validated(key, ctx) {
+                    match hit.value {
+                        QueryResult::Value(node) | QueryResult::Recursive(node) => Ok(node),
+                        QueryResult::Error(_) => Err(BatchExpandError::EvictedNode),
+                    }
+                } else {
+                    Err(BatchExpandError::EvictedNode)
+                }
+            })
+            .collect()
+    }
+
+    /// Test-only accessor: read the entry's [`ReadSetSignature`]
+    /// carrier for `key`. Returns `None` when no entry is present.
+    /// Surfaces the carrier's path-precise `facts` rail so integration
+    /// tests can assert what facts the entry actually holds.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn entry_read_set_signature_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .and_then(|slots| slots.slot_peek_any(slot).cloned())
+            .map(|entry| entry.read_set_signature)
+    }
+
+    /// Test-only accessor: read the entry's `self_root_canonicals` for
+    /// `key` (the content-version rail of the files the entry's value was
+    /// built from). Returns `None` when no entry is present.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn entry_self_root_canonicals_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<Arc<[Arc<str>]>> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .and_then(|slots| slots.slot_peek_any(slot).cloned())
+            .map(|entry| entry.self_root_canonicals)
+    }
+
+    /// Test-only probe: the §3.4 `satisfied_projection` (materialised
+    /// record set) of the FIRST candidate in `key`'s `(family, slot)`.
+    /// Lets a guard assert backfill writes the RECORDED points verbatim
+    /// (never a synthesised target-slot / meet point). `None` when the
+    /// slot is empty.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn entry_satisfied_projection_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<MaterializedSet> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .and_then(|slots| slots.slot_peek_any(slot).cloned())
+            .map(|entry| entry.satisfied_projection)
+    }
+
+    /// Test-only direct publish. Delegates to
+    /// [`Self::publish_with_carrier_dispatch_and_generation_for_tests`]
+    /// with an empty dispatch-dep signature and generation `0`.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_with_carrier_for_tests(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+    ) -> usize {
+        self.publish_with_carrier_dispatch_and_generation_for_tests(
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            empty_signature(),
+            0,
+        )
+    }
+
+    /// Variant of [`Self::publish_with_carrier_for_tests`] taking an
+    /// explicit `dispatch_dep_signature` (FIFO reverse-index symmetry
+    /// discriminator). Generation `0`.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_with_carrier_and_dispatch_for_tests(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+    ) -> usize {
+        self.publish_with_carrier_dispatch_and_generation_for_tests(
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            0,
+        )
+    }
+
+    /// Variant taking an explicit `validated_at_generation` — used
+    /// by multi-candidate overlay/base tests. The `satisfied_projection`
+    /// defaults to the single requested point for `key` (so the published
+    /// entry self-satisfies its own slot's warm-hit gate). Use
+    /// [`Self::publish_with_materialized_set_for_tests`] to craft a record
+    /// set that DIFFERS from the nominal slot (the §3.4 discriminating
+    /// guards).
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_with_carrier_dispatch_and_generation_for_tests(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+        validated_at_generation: u64,
+    ) -> usize {
+        let satisfied_projection = MaterializedSet::single(requested_point_for_key(&key));
+        self.publish_with_materialized_set_for_tests(
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            validated_at_generation,
+            satisfied_projection,
+        )
+    }
+
+    /// Test-only direct publish taking an EXPLICIT
+    /// `satisfied_projection` — the §3.4 materialised-record set the
+    /// published entry carries. Lets a guard publish an entry whose
+    /// recorded points DIFFER from its nominal slot (e.g. an `Expanded`
+    /// slot whose compute only materialised a `Navigate` point), exercising
+    /// the warm-hit `cached_satisfies` gate and the recorded-point
+    /// backfill directly.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_with_materialized_set_for_tests(
+        &self,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+        validated_at_generation: u64,
+        satisfied_projection: MaterializedSet,
+    ) -> usize {
+        self.publish_for_tests_impl(
+            None,
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            validated_at_generation,
+            satisfied_projection,
+        )
+    }
+
+    /// Store-view-aware variant of
+    /// [`Self::publish_with_carrier_dispatch_and_generation_for_tests`]:
+    /// the publish plans its per-family bounded-retention eviction
+    /// against the publishing caller's stable store view (invalid-first
+    /// victim selection). The `satisfied_projection` defaults to the
+    /// single requested point for `key`. Backs the per-family
+    /// bounded-retention guards.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn publish_with_view_for_tests(
+        &self,
+        view: &dyn crate::resolver_core::fact_validation_port::FactValidation,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+        validated_at_generation: u64,
+    ) -> usize {
+        let satisfied_projection = MaterializedSet::single(requested_point_for_key(&key));
+        self.publish_for_tests_impl(
+            Some(view),
+            key,
+            result,
+            read_set_signature,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            validated_at_generation,
+            satisfied_projection,
+        )
+    }
+
+    /// Shared implementation of the test-only direct publishes. `view`
+    /// is the publishing caller's stable store view used for
+    /// invalid-first eviction planning; `None` (the legacy helpers)
+    /// falls back to the front-of-LRU-order victim.
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(clippy::too_many_arguments)]
+    fn publish_for_tests_impl(
+        &self,
+        view: Option<&dyn crate::resolver_core::fact_validation_port::FactValidation>,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        dispatch_dep_signature: DepSignature,
+        validated_at_generation: u64,
+        satisfied_projection: MaterializedSet,
+    ) -> usize {
+        if !matches!(result, QueryResult::Value(_)) {
+            return 0;
+        }
+        let (family, slot) = family_and_slot(&key);
+        let requested_path = requested_path_for_key(&key);
+        let admission_seq = self.alloc_candidate_admission_seq();
+        let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
+        let entry = MemoEntry {
+            result: match result {
+                QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                QueryResult::Error(error) => QueryResult::Error(error),
+            },
+            read_set_signature: read_set_signature.clone(),
+            dispatch_dep_signature: Arc::clone(&dispatch_dep_signature),
+            self_root_canonicals,
+            walker_diagnostics: Arc::from([]),
+            satisfied_projection,
+            // Test-support seeding runs against fixture stores that own
+            // no retention account; production publication always goes
+            // through a charged path.
+            retention_charge: None,
+            validated_at_generation,
+            admission_seq,
+        };
+        let cap = family.candidate_cap();
+        let eviction = match view {
+            Some(ctx) => {
+                family::plan_family_slot_eviction(&self.entries, &family, slot, &entry, cap, ctx)
+            }
+            None => family::EvictionVictim::LruFront,
+        };
+        let mut entries = self.entries_lock_diagnosed();
+        let family_was_new = !entries.contains_key(&family);
+        let outcome = entries.entry(family.clone()).or_default().publish(
+            slot,
+            entry,
+            &requested_path,
+            cap,
+            eviction,
+        );
+        let populated_slots = outcome.populated;
+        for (displaced_slot, displaced_entry) in &outcome.displaced {
+            reverse_index::drain_candidate_reverse_index_registrations(
+                &self.canonical_to_entries,
+                &family,
+                *displaced_slot,
+                displaced_entry,
+            );
+        }
+        if family_was_new && !populated_slots.is_empty() {
+            self.record_family_admission_locked(&mut entries, &family);
+        }
+        reverse_index::register_reverse_index(
+            &self.canonical_to_entries,
+            &family,
+            &populated_slots,
+            &read_set_signature,
+            &dispatch_dep_signature,
+            admission_seq,
+        );
+        drop(entries);
+        populated_slots.len()
+    }
+
+    /// Test-only candidate-count probe for `(family, slot)`.
+    #[doc(hidden)]
+    /// Test-only probe: the keys of every in-flight entry still CLAIMED
+    /// and UNCOMPLETED — a flight whose owner has finished but which was
+    /// never published, drained, or aborted.
+    ///
+    /// A retained entry in this state is lifecycle poison: a later
+    /// demand of the same key joins it, `register_wait` reports a cycle
+    /// against an owner that is no longer active, and the caller gets a
+    /// permanent false `QueryResult::Recursive`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn retained_claimed_flight_keys_for_tests(&self) -> Vec<SemanticQueryKey> {
+        // Collect the handles under the table lock, then inspect each
+        // entry's `state` with the table lock RELEASED (the store's
+        // lock-order rule: `state` is never taken while `inflight` is
+        // held).
+        let handles: Vec<(PreparedKeyHandle, Arc<FlightCell>)> = {
+            let table = self.inflight.lock();
+            table
+                .iter()
+                .map(|(handle, entry)| (handle.clone(), Arc::clone(entry)))
+                .collect()
+        };
+        handles
+            .into_iter()
+            .filter(|(_, entry)| {
+                let state = entry.state.lock();
+                state.claimed && state.completed.is_none() && !state.aborted
+            })
+            .map(|(handle, _)| handle.key().clone())
+            .collect()
+    }
+
+    /// Test-only probe: the keys of EVERY entry still resident in the
+    /// ORDINARY in-flight table, whatever its completion state.
+    ///
+    /// [`Self::retained_claimed_flight_keys_for_tests`] filters on
+    /// `completed.is_none()`, so it is structurally blind to the worse
+    /// failure: a flight that COMPLETED and was then retired into the
+    /// wrong table. That entry stays resident forever — admission finds
+    /// it and takes the joiner branch on every later demand, so the key
+    /// can never re-warm, and the flight table becomes an ungated shadow
+    /// cache holding the completed value with no generation gate, no
+    /// bounded retention, and no reverse-index participation.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn resident_flight_keys_for_tests(&self) -> Vec<SemanticQueryKey> {
+        let table = self.inflight.lock();
+        table.keys().map(|handle| handle.key().clone()).collect()
+    }
+
+    /// Test-only probe: the freshest published candidate's carrier
+    /// (read-set signature, self roots, generation stamp, admission
+    /// token) for `key` — the family-agnostic twin of
+    /// [`Self::relation_published_carrier`]. Lets a test drive the
+    /// store's batched SCC member publish with the SAME carrier the
+    /// production drain rides.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn published_carrier_for_tests(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Option<PublishedMemoCandidate> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        let entry = entries
+            .get(&family)?
+            .snapshot_slot(slot)
+            .into_iter()
+            .next_back()?;
+        Some(PublishedMemoCandidate {
+            read_set_signature: entry.read_set_signature.clone(),
+            self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
+            validated_at_generation: entry.validated_at_generation,
+            admission_seq: entry.admission_seq,
+        })
+    }
+
+    /// Test-only probe: drop `key`'s whole family from the warm memo the
+    /// way the global `memo_budget` FIFO drain does — the `entries`
+    /// removal plus each candidate's reverse-index prune, and NOTHING
+    /// else. The in-flight table is deliberately untouched, which is
+    /// exactly the production condition a leaked flight has to survive:
+    /// the warm entry is gone, so the next demand MUST re-admit cold.
+    /// Returns whether a family was present.
+    #[doc(hidden)]
+    pub fn evict_family_for_tests(&self, key: &SemanticQueryKey) -> bool {
+        let (family, _) = family_and_slot(key);
+        let mut entries = self.entries_lock_diagnosed();
+        let Some(slots) = entries.remove(&family) else {
+            return false;
+        };
+        reverse_index::drain_family_slots_registrations(
+            &self.canonical_to_entries,
+            &family,
+            &slots,
+        );
+        true
+    }
+
+    pub fn slot_candidate_count_for_tests(&self, key: &SemanticQueryKey) -> usize {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .map(|slots| slots.slot_candidate_count_for_test(slot))
+            .unwrap_or(0)
+    }
+
+    /// Test-only probe: the per-family bounded-retention candidate cap
+    /// (`FamilyKey::candidate_cap`) for `key`'s family. Backs the
+    /// per-family cap guard.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn family_candidate_cap_for_tests(&self, key: &SemanticQueryKey) -> usize {
+        let (family, _) = family_and_slot(key);
+        family.candidate_cap()
+    }
+
+    /// Test-only probe: `key`'s `(family, slot)` candidates'
+    /// `validated_at_generation` stamps in slot order (front =
+    /// least-recently admitted / validated-hit). Backs survivor/victim
+    /// identity and LRU-order assertions in the bounded-retention
+    /// guards.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn slot_candidate_generations_for_tests(&self, key: &SemanticQueryKey) -> Vec<u64> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .map(|slots| slots.slot_candidate_generations_for_test(slot))
+            .unwrap_or_default()
+    }
+
+    /// Test-only probe: exact admission tokens in one candidate slot, in LRU
+    /// order. Concurrency tests use these tokens to distinguish an admitted
+    /// candidate from a same-discriminant ABA replacement.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn slot_candidate_admission_seqs_for_tests(&self, key: &SemanticQueryKey) -> Vec<u64> {
+        let (family, slot) = family_and_slot(key);
+        let entries = self.entries_lock_diagnosed();
+        entries
+            .get(&family)
+            .map(|slots| {
+                slots
+                    .snapshot_slot(slot)
+                    .iter()
+                    .map(|candidate| candidate.admission_seq)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Test-support entries into the store's private admission steps. Each one
+/// delegates to the production step unchanged, so a suite drives exactly the
+/// path production admission runs; none is compiled into a production build.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
+impl SemanticGraphStore {
+    /// The production single-candidate warm publish.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn warm_publish_one_for_tests<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        prepared: &PreparedKeyHandle,
+        result: &QueryResult<SemanticQueryValue>,
+        walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+        dispatch_dep_signature: &DepSignature,
+        self_root_canonicals: &Arc<[Arc<str>]>,
+        satisfied_projection: &MaterializedSet,
+        inflight: &Arc<FlightCell>,
+    ) -> WarmPublishOutcome {
+        self.warm_publish_one(
+            ctx,
+            prepared,
+            result,
+            walker_diagnostics,
+            read_set_signature,
+            dispatch_dep_signature,
+            self_root_canonicals,
+            satisfied_projection,
+            inflight,
+        )
+    }
+
+    /// The production narrower-key backfill publish.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn warm_publish_one_if_absent_for_tests<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+        dispatch_dep_signature: DepSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        satisfied_projection: MaterializedSet,
+        parent_inflight: &Arc<FlightCell>,
+        admission_already_linearized: bool,
+    ) -> bool {
+        self.warm_publish_one_if_absent(
+            ctx,
+            key,
+            result,
+            read_set_signature,
+            dispatch_dep_signature,
+            self_root_canonicals,
+            satisfied_projection,
+            parent_inflight,
+            admission_already_linearized,
+        )
+    }
+
+    /// Claim an inline member's family flight exactly as the relation
+    /// drain does.
+    #[doc(hidden)]
+    pub fn begin_inline_member_flight_for_tests(
+        &self,
+        key: SemanticQueryKey,
+    ) -> Option<InlineMemberFlight> {
+        self.begin_inline_member_flight(key)
+    }
+
+    /// Whether the entries lock is currently held.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn entries_lock_is_held_for_tests(&self) -> bool {
+        self.entries.try_lock().is_none()
+    }
+
+    /// The store's execution-task registry.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn task_registry_for_tests(&self) -> &TaskRegistry {
+        &self.task_registry
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
+impl FlightCell {
+    /// Mark this flight aborted, as an invalidation racing its winner does.
+    #[doc(hidden)]
+    pub fn mark_aborted_for_tests(&self) {
+        self.state.lock().aborted = true;
+    }
+}

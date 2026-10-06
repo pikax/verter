@@ -143,7 +143,7 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         // The synthesized `default` carries the instance shape
         // (`{ $props: Props, …exports }`). A `.svelte` with no synth default
         // (no props, no exports) projects no public API.
-        let Some(crate::resolver_core::shallow_file_state::ExportTarget::Local {
+        let Some(verter_session_query::inputs::shallow::ExportTarget::Local {
             owner: component_owner,
             symbol_name: component_name,
         }) = shallow.exports.get("default")
@@ -202,9 +202,10 @@ impl ComponentApiProjector for SvelteComponentApiProjector {
         });
         let resolver_ctx = resolver_ctx
             .as_ref()
-            .map(|ctx| ctx as &dyn crate::resolver_core::ResolverContext);
-        let dispatch =
-            resolver_ctx.map(crate::project_semantic_dispatch::ProjectSemanticDispatch::new);
+            .map(|ctx| ctx as &dyn crate::resolver_core::HostRequestContext);
+        let dispatch = resolver_ctx.map(|ctx| {
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
+        });
         let script_fact_evidence = resolver_ctx
             .map(|ctx| host.resolve_svelte_script_facts_with_ctx(ctx, resolved_canonical));
         let script_fact_state =
@@ -609,8 +610,11 @@ fn public_component_name<'a>(
 /// resolved one-level rows. A partial outcome contributes its best safe rows
 /// and is never admitted by the executor's surface cache.
 fn resolve_public_props_text(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     script_syntax: Option<
         &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
@@ -737,8 +741,11 @@ fn resolve_public_props_text(
 /// dereferences it once and returns the one-level event rows; partial outcomes
 /// retain their best safe rows and are never admitted to the surface cache.
 fn resolve_public_dispatcher_text(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
 ) -> Option<String> {
     use crate::typeinfo::framework_surface::SvelteSurfaceSource;
@@ -775,8 +782,11 @@ fn resolve_public_dispatcher_text(
 /// binding's `typeof`, so an alias export keeps the public key while deriving
 /// its type from the real local identity.
 fn resolve_public_exports_text(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn crate::resolver_core::HostRequestContext,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
 ) -> Option<ResolvedPublicExports> {
@@ -820,7 +830,10 @@ fn resolve_public_exports_text(
 }
 
 fn resolve_public_module_exports(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner: &str,
     syntax: &verter_semantic::analysis::framework_facts::svelte::SvelteScriptSyntaxFacts,
 ) -> Vec<ResolvedPublicModuleExport> {
@@ -1190,7 +1203,7 @@ fn render_leaf_display(leaf: &LeafTypeFact) -> String {
 /// (`imported_name == "default"`) renders `import type <local> from '<source>'`.
 fn render_type_only_import(
     local: &str,
-    import: &crate::resolver_core::shallow_file_state::ImportTarget,
+    import: &verter_session_query::inputs::shallow::ImportTarget,
 ) -> String {
     let source = &import.source_specifier;
     if import.imported_name == "default" {

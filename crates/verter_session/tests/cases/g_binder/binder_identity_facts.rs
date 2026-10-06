@@ -21,20 +21,20 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::type_eval::AugmentationScopeKind;
-use verter_semantic::facts::FactKey;
+use verter_session_query::declarations::AugmentationScopeKind;
+use verter_session_query::facts::FactKey;
 
 use verter_session::binder_identity_facts::{
     negative_lookup_admission, BinderIdentityFacts, BinderIdentityFactsEntry,
 };
 use verter_session::for_tests::binder_identity_facts_get_or_compute_for_tests;
-use verter_session::resolver_core::FactVersionRef;
-use verter_session::semantic_query::admit::Admission;
-use verter_session::semantic_query::{
+use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_type_engine::semantic_query::admit::Admission;
+use verter_type_engine::semantic_query::{
     BinderScopeId, BinderScopeKind, DeclarationSlotSeed, ResolvedDeclSlotIdentity, ScopeId,
     SemanticQueryKey, SemanticSymbolSpace,
 };
-use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TopLevelOwnerId;
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -474,15 +474,35 @@ declare global { interface G1 {} }
     // Grep evidence — the provenance projection is computed ONLY by the
     // artifact module; no consumer re-walks raw `IndexedReady` header
     // inventories for overload-group / augmentation-order data.
+    // The session crate and the type engine it builds on are both scanned;
+    // engine paths are reported as `verter_type_engine/<path under src>`.
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src_dir = manifest_dir.join("src");
+    let engine_src_dir = manifest_dir
+        .join("..")
+        .join("verter_type_engine")
+        .join("src");
+    assert!(
+        engine_src_dir.is_dir(),
+        "source root {} is missing",
+        engine_src_dir.display()
+    );
     let mut offenders: Vec<String> = Vec::new();
-    for path in rust_files_under(&src_dir) {
-        let name = path
-            .strip_prefix(&src_dir)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+    let scanned = rust_files_under(&src_dir)
+        .into_iter()
+        .map(|path| (String::new(), src_dir.clone(), path))
+        .chain(rust_files_under(&engine_src_dir).into_iter().map(|path| {
+            (
+                "verter_type_engine/".to_string(),
+                engine_src_dir.clone(),
+                path,
+            )
+        }));
+    for (prefix, root, path) in scanned {
+        let name = format!(
+            "{prefix}{}",
+            path.strip_prefix(&root).unwrap().to_string_lossy()
+        );
         if name == "binder_identity_facts.rs" {
             continue;
         }
@@ -542,7 +562,7 @@ pub(crate) fn binder_scope_id_enters_context_sensitive_query_identity() {
     scope_beta.binder_scope_id = BinderScopeId::namespace_scope(owner, Arc::from("Beta"));
 
     let key = |scope: &ScopeId| {
-        SemanticQueryKey::ResolveDecl(verter_session::semantic_query::ResolveDeclKey {
+        SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {
             scope: scope.clone(),
             name: Arc::from("Foo"),
         })
@@ -594,46 +614,65 @@ pub(crate) fn binder_identity_facts_are_pre_u2_and_not_n0_owned() {
     // Not N0-owned: nothing named `n0` / `nav_location` may produce the
     // artifact; the only files referencing the substrate are the
     // artifact module itself, the store home (`project_type_store`),
-    // the crate root, and the test-support shim.
-    let src_dir = manifest_dir.join("src");
+    // the crate root, and the test-support shim. The session crate and
+    // the type engine it builds on are both scanned; allowlist entries
+    // are `<crate>/<path under src>`.
+    let crate_srcs = [
+        ("verter_session", manifest_dir.join("src")),
+        (
+            "verter_type_engine",
+            manifest_dir
+                .join("..")
+                .join("verter_type_engine")
+                .join("src"),
+        ),
+    ];
     let allowed = [
-        "binder_identity_facts.rs",
-        "project_type_store.rs",
-        "lib.rs",
-        "for_tests.rs",
+        "verter_session/binder_identity_facts.rs",
+        "verter_session/project_type_store.rs",
+        "verter_session/lib.rs",
+        "verter_session/for_tests.rs",
         // The query-identity type surface — hosts `BinderScopeId` /
         // `DeclarationSlotSeed` (the query-identity projection of the
         // substrate), not a producer.
-        "semantic_query.rs",
+        "verter_type_engine/semantic_query.rs",
         // The facade's family-A memo producer (`memo.rs`) and its engine
         // binding (`engine_binding.rs`) — they SERVE the demand-produced
         // artifact, they do not produce a second one.
-        "project_semantic_dispatch/memo.rs",
-        "project_semantic_dispatch/engine_binding.rs",
+        "verter_type_engine/project_semantic_dispatch/memo.rs",
+        "verter_type_engine/project_semantic_dispatch/engine_binding.rs",
     ];
     let mut offenders: Vec<String> = Vec::new();
-    for path in rust_files_under(&src_dir) {
-        // Normalise the separator so the allowlist below is one list for
-        // every platform (Windows yields `a\b.rs`, POSIX `a/b.rs`).
-        let name = path
-            .strip_prefix(&src_dir)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        if allowed.iter().any(|a| *a == name) {
-            continue;
-        }
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
-        if text.contains("BinderIdentityFacts") {
-            offenders.push(name.clone());
-        }
-        let lowered = name.to_ascii_lowercase();
+    for (krate, src_dir) in &crate_srcs {
         assert!(
-            !lowered.contains("n0") && !lowered.contains("nav_location"),
-            "no N0 navigation/location producer module may exist for the \
-             binder-identity substrate (found {name})"
+            src_dir.is_dir(),
+            "source root {} is missing",
+            src_dir.display()
         );
+        for path in rust_files_under(src_dir) {
+            // Normalise the separator so the allowlist below is one list for
+            // every platform (Windows yields `a\b.rs`, POSIX `a/b.rs`).
+            let rel = path
+                .strip_prefix(src_dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let name = format!("{krate}/{rel}");
+            if allowed.iter().any(|a| *a == name) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+            if text.contains("BinderIdentityFacts") {
+                offenders.push(name.clone());
+            }
+            let lowered = rel.to_ascii_lowercase();
+            assert!(
+                !lowered.contains("n0") && !lowered.contains("nav_location"),
+                "no N0 navigation/location producer module may exist for the \
+                 binder-identity substrate (found {name})"
+            );
+        }
     }
     assert!(
         offenders.is_empty(),
@@ -816,7 +855,7 @@ fn contributor_order_swap_warm_misses_cosmetic_between_overloads_stays_warm() {
             matches!(
                 key,
                 FactKey::DeclContributionOrder { name, space, .. }
-                    if name.as_ref() == "f" && matches!(space, verter_semantic::facts::SymbolSpace::Value)
+                    if name.as_ref() == "f" && matches!(space, verter_session_query::facts::SymbolSpace::Value)
             )
         }),
         "the signature must pin the DeclContributionOrder fact for the overload group"
@@ -1122,7 +1161,7 @@ fn empty_augmentation_target_first_contribution_warm_misses() {
             matches!(
                 key,
                 FactKey::AugmentationContributionSet {
-                    scope_kind_tag: verter_semantic::facts::AugmentationScopeKindTag::Module,
+                    scope_kind_tag: verter_session_query::facts::AugmentationScopeKindTag::Module,
                     specifier,
                     ..
                 } if specifier.as_ref() == "m"
@@ -1178,7 +1217,7 @@ fn empty_augmentation_target_first_contribution_warm_misses() {
             matches!(
                 key,
                 FactKey::AugmentationContributionSet {
-                    scope_kind_tag: verter_semantic::facts::AugmentationScopeKindTag::Global,
+                    scope_kind_tag: verter_session_query::facts::AugmentationScopeKindTag::Global,
                     ..
                 }
             )
@@ -1383,7 +1422,7 @@ fn registry_for(source: &str) -> verter_session::file_artifact_store::FileFacts 
     verter_session::fact_emission::emit_parse_facts(&indexed).facts
 }
 
-fn set_key(tag: verter_semantic::facts::AugmentationScopeKindTag, specifier: &str) -> FactKey {
+fn set_key(tag: verter_session_query::facts::AugmentationScopeKindTag, specifier: &str) -> FactKey {
     FactKey::AugmentationContributionSet {
         scope_kind_tag: tag,
         specifier: verter_session::file_artifact_store::InternedSpecifier::from(specifier),
@@ -1391,7 +1430,10 @@ fn set_key(tag: verter_semantic::facts::AugmentationScopeKindTag, specifier: &st
     }
 }
 
-fn order_key(tag: verter_semantic::facts::AugmentationScopeKindTag, specifier: &str) -> FactKey {
+fn order_key(
+    tag: verter_session_query::facts::AugmentationScopeKindTag,
+    specifier: &str,
+) -> FactKey {
     FactKey::AugmentationContributionOrder {
         scope_kind_tag: tag,
         specifier: verter_session::file_artifact_store::InternedSpecifier::from(specifier),
@@ -1425,7 +1467,7 @@ fn global_vs_module_global_target_set_hash_differs() {
 /// identities (tagged), so a lookup for the wrong tag misses.
 #[test]
 fn global_vs_module_global_fact_keys_are_typed_distinct() {
-    use verter_semantic::facts::AugmentationScopeKindTag;
+    use verter_session_query::facts::AugmentationScopeKindTag;
     let global = registry_for("declare global { interface X {} }\n");
     let module = registry_for("declare module \"$global\" { interface X {} }\n");
 
@@ -1452,7 +1494,7 @@ fn global_vs_module_global_fact_keys_are_typed_distinct() {
 /// tag is folded into the hash bytes, not only into the key).
 #[test]
 fn global_vs_module_global_rail_hash_content_differs() {
-    use verter_semantic::facts::AugmentationScopeKindTag;
+    use verter_session_query::facts::AugmentationScopeKindTag;
     let global = registry_for("declare global {}\n");
     let module = registry_for("declare module \"$global\" {}\n");
 

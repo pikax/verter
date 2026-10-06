@@ -1,6 +1,4 @@
-use verter_session::semantic_query::{
-    ObjectProjectionAlternative, PositiveAlternativeEvidence,
-};
+use verter_type_engine::semantic_query::{ObjectProjectionAlternative, PositiveAlternativeEvidence};
 
 fn positive_evidence_cannot_claim_exact_domain(evidence: PositiveAlternativeEvidence<'_>) {
     let _ = evidence.exact_keyof();
@@ -8,7 +6,7 @@ fn positive_evidence_cannot_claim_exact_domain(evidence: PositiveAlternativeEvid
 
 fn ordinary_alternative_cannot_claim_absence(alternative: &ObjectProjectionAlternative) {
     let _ = alternative.lookup(
-        &verter_session::semantic_query::PropertyKey::identifier("missing"),
+        &verter_type_engine::semantic_query::PropertyKey::identifier("missing"),
     );
 }
 

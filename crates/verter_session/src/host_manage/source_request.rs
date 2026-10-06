@@ -6,11 +6,11 @@ use crate::resolver_core::imported_root_db::{
 use crate::resolver_core::route_db::{
     emit_export_route_resolved_event, RouteDb, RouteFlightOutcome,
 };
-use crate::resolver_core::{
-    FactVersionRef, ResolverContext, RouteNameKey, RouteResult, SingleflightRole,
-    SingleflightRunResult, StoreView,
-};
+use crate::resolver_core::{RouteNameKey, RouteResult, SingleflightRole, SingleflightRunResult};
 use std::sync::Arc;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::resolver_core::ResolverContext;
 
 pub(crate) struct ImportedRootRequestDriver<'a> {
     db: &'a ImportedRootDb,
@@ -24,15 +24,15 @@ impl<'a> ImportedRootRequestDriver<'a> {
         provider_canonical: &str,
         imported_name: &str,
         view: &V,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
     ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 self.get_or_resolve_returning_facts_in_scope(
                     provider_canonical,
@@ -46,12 +46,16 @@ impl<'a> ImportedRootRequestDriver<'a> {
         .0
     }
 
-    fn get_or_resolve_returning_facts_in_scope<V, F>(
+    fn get_or_resolve_returning_facts_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         provider_canonical: &str,
         imported_name: &str,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<(Arc<ImportedRootResult>, Arc<[FactVersionRef]>)>
     where
@@ -103,11 +107,15 @@ impl<'a> ImportedRootRequestDriver<'a> {
     /// that receives it, whatever refused it and whichever producer supplied
     /// it. The mark is cache non-admission only, never request partiality: the
     /// value served is VALID (Complete).
-    fn resolve_root_singleflight_inner<V, F>(
+    fn resolve_root_singleflight_inner<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: (String, String),
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<crate::resolver_core::SingleflightRunResult<ImportedRootFlightOutcome>>
     where
@@ -211,8 +219,8 @@ impl<'a> ImportedRootRequestDriver<'a> {
                 // reason refused it and whichever producer supplied it. This is a
                 // VALID (Complete) root, NOT a partial result — cache non-admission
                 // only, never request partiality.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return Some(run_result);
             }
@@ -227,8 +235,8 @@ impl<'a> ImportedRootRequestDriver<'a> {
             // cannot root. This is a VALID (Complete) adopted root, NOT a
             // partial result — cache non-admission only, never request
             // partiality.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
             );
         }
         last_unadmitted
@@ -247,26 +255,30 @@ impl<'a> RouteRequestDriver<'a> {
         &self,
         key: RouteNameKey,
         view: &V,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| self.get_or_resolve_route_with_facts_in_scope(key, view, probe, resolve),
         )
         .0
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn get_or_resolve_route_with_facts_in_scope<V, F>(
+    fn get_or_resolve_route_with_facts_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: RouteNameKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
@@ -285,25 +297,29 @@ impl<'a> RouteRequestDriver<'a> {
         &self,
         key: RouteNameKey,
         view: &V,
-        ctx: &dyn ResolverContext,
+        ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
         V: StoreView + ?Sized,
         F: Fn() -> Option<(RouteResult, Vec<FactVersionRef>)>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| self.get_or_resolve_route_observing_facts_in_scope(key, view, probe, resolve),
         )
         .0
     }
 
-    fn get_or_resolve_route_observing_facts_in_scope<V, F>(
+    fn get_or_resolve_route_observing_facts_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: RouteNameKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<Arc<RouteResult>>
     where
@@ -312,7 +328,7 @@ impl<'a> RouteRequestDriver<'a> {
     {
         // Warm-hit fast path: validated cache lookup with fact bubbling.
         if let Some((value, facts)) = self.db.get_route_with_facts(&key, view) {
-            crate::fact_signature_helpers::observe_fact_signature(&facts);
+            verter_type_engine::fact_signature_helpers::observe_fact_signature(&facts);
             #[cfg(any(test, feature = "test-support"))]
             self.db
                 .route_warm_fact_bubble_emissions
@@ -334,7 +350,7 @@ impl<'a> RouteRequestDriver<'a> {
         // bubble fans the leader's facts into this thread's outer
         // tracer scope.
         if let Some((_value, facts)) = self.db.get_route_with_facts(&key, view) {
-            crate::fact_signature_helpers::observe_fact_signature(&facts);
+            verter_type_engine::fact_signature_helpers::observe_fact_signature(&facts);
             #[cfg(any(test, feature = "test-support"))]
             match run_result.role {
                 SingleflightRole::Leader => {
@@ -411,11 +427,15 @@ impl<'a> RouteRequestDriver<'a> {
     /// (callers that need to discriminate leader vs follower for provenance
     /// counter bumps inspect `role`), or `None` when the resolve closure
     /// returns `None`.
-    fn resolve_route_singleflight_inner<V, F>(
+    fn resolve_route_singleflight_inner<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: RouteNameKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         resolve: F,
     ) -> Option<SingleflightRunResult<RouteFlightOutcome>>
     where
@@ -524,8 +544,8 @@ impl<'a> RouteRequestDriver<'a> {
                 // floor that does not depend on a producer remembering it. This is a
                 // VALID (Complete) route, NOT a partial result — cache non-admission
                 // only, never request partiality.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return Some(run_result);
             }
@@ -540,8 +560,8 @@ impl<'a> RouteRequestDriver<'a> {
             // folding a route it cannot root. This is a VALID (Complete)
             // adopted route, NOT a partial result — cache non-admission
             // only, never request partiality.
-            crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
             );
         }
         last_unadmitted

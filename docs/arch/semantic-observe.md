@@ -86,12 +86,11 @@ items use `cfg(feature = "semantic-observe")` directly.
 ## Feature and generator constraints
 
 `semantic-observe` is a coordinated, default-off Cargo feature. The audit crate
-declares it; scheduler, workspace, semantic and compiler forward it through
-existing dependency edges without enabling it. The benchmark harness exposes
-the combined opt-in, including the session's existing attribution and currency
-probe features. Session forwarding and the extracted engine/source forwarding
-are owned by the extraction that changes those manifests; they are not
-prerequisites for using this policy.
+declares it; scheduler, workspace, semantic, compiler, the semantic source
+layer, the type engine and the session forward it through existing dependency
+edges without enabling it. The session forwarding also implies its existing
+attribution and currency probe features. The benchmark harness exposes the
+combined opt-in through the session.
 
 Existing measurement features remain available until consolidation. The
 coordinated opt-in implies attribution, currency probes and hotpath

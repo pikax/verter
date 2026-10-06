@@ -17,12 +17,8 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::types::{CompileProfile, DescriptorMin, Hash16, SliceHashes};
-
-pub(crate) fn hash_16(input: &[u8]) -> Hash16 {
-    verter_audit::attribute_n!(ContentHash, input.len());
-    xxhash_rust::xxh3::xxh3_128(input).to_le_bytes()
-}
+use crate::types::{CompileProfile, DescriptorMin, SliceHashes};
+use verter_session_query::analysis::types::Hash16;
 
 pub(crate) fn semantic_hash(slices: &SliceHashes, descriptor: &DescriptorMin) -> Hash16 {
     verter_audit::attribute!(SemanticHash);
@@ -88,6 +84,7 @@ pub(crate) fn diff_indices<T: PartialEq>(old: &[T], new: &[T]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_semantic_source::source_hash::hash_16;
 
     #[test]
     fn diff_indices_same_content() {
@@ -185,20 +182,6 @@ mod tests {
         assert_ne!(
             h1, h2,
             "adding scoped attribute should change semantic hash"
-        );
-    }
-
-    /// @ai-generated - hash_16 is deterministic and produces distinct hashes
-    #[test]
-    fn hash_16_deterministic_and_distinct() {
-        let h1 = hash_16(b"hello");
-        let h2 = hash_16(b"hello");
-        let h3 = hash_16(b"world");
-        assert_eq!(h1, h2, "same input should produce same hash");
-        assert_ne!(h1, h3, "different inputs should produce different hashes");
-        assert_ne!(
-            h1, [0u8; 16],
-            "hash should not be all zeros for non-empty input"
         );
     }
 

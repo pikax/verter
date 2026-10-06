@@ -18,24 +18,19 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use crate::instant::Instant;
+use verter_type_engine::instant::Instant;
 
-pub mod accumulator;
 pub mod assertions;
 pub mod audit_records_store;
 #[cfg(test)]
 pub(crate) mod expected_display_snapshots;
 pub mod footprint_miner;
 pub(crate) mod footprint_structural_hash;
-pub(crate) mod session_vfs_sink;
 pub mod structured_event;
 
 #[cfg(test)]
 mod mod_tests;
 
-pub use accumulator::{
-    AccumulatorState, FileParseTiming, FileReadTiming, RequestFootprintAccumulator,
-};
 pub use assertions::{
     render_chain_text, AssertionDiff, ChainTermination, ProvenanceChain, ProvenanceStep,
     WALKER_DEPTH_CAP,
@@ -75,7 +70,7 @@ pub use verter_audit::timing::RequestTimingAudit;
 // In-crate alias so existing TLS-stack call sites continue to read.
 pub use verter_audit::record::{Hash16 as AuditHash16, RequestKind, RequestKindPayload};
 
-/// Convert a session-owned [`crate::semantic_query::ProjectionMode`]
+/// Convert a session-owned [`verter_type_engine::semantic_query::ProjectionMode`]
 /// into the audit-side mirror enum.
 ///
 /// Replaces the `impl From<...> for ProjectionModeAudit` that used
@@ -85,9 +80,9 @@ pub use verter_audit::record::{Hash16 as AuditHash16, RequestKind, RequestKindPa
 /// explicitly.
 #[must_use]
 pub fn projection_mode_audit_from(
-    mode: crate::semantic_query::ProjectionMode,
+    mode: verter_type_engine::semantic_query::ProjectionMode,
 ) -> ProjectionModeAudit {
-    use crate::semantic_query::ProjectionMode;
+    use verter_type_engine::semantic_query::ProjectionMode;
     match mode {
         ProjectionMode::Identity => ProjectionModeAudit::Identity,
         ProjectionMode::Navigate => ProjectionModeAudit::Navigate,
@@ -97,26 +92,8 @@ pub fn projection_mode_audit_from(
     }
 }
 
-/// Convert a workspace-side `VfsAuditLayer` into the audit-side
-/// mirror.
-///
-/// Replaces `impl From<verter_workspace::audit_sink::VfsAuditLayer>
-/// for VfsLayer` for the same orphan-rule reason as
-/// [`projection_mode_audit_from`].
-#[must_use]
-pub fn vfs_layer_from_workspace(layer: verter_workspace::audit_sink::VfsAuditLayer) -> VfsLayer {
-    use verter_workspace::audit_sink::VfsAuditLayer as W;
-    match layer {
-        W::Overlay => VfsLayer::Overlay,
-        W::Snapshot => VfsLayer::Snapshot,
-        W::Disk => VfsLayer::Disk,
-        W::DirIndexNegative => VfsLayer::DirIndexNegative,
-        W::Missing => VfsLayer::Missing,
-    }
-}
-
 /// Record one `MaterializationRecord` against the currently-installed
-/// [`RequestFootprintAccumulator`].
+/// [`verter_type_engine::request_footprint::RequestFootprintAccumulator`].
 ///
 /// No-op when no accumulator is installed (the synthetic-record path
 /// and unaudited callers). Producers that materialise a payload of
@@ -130,7 +107,7 @@ pub fn vfs_layer_from_workspace(layer: verter_workspace::audit_sink::VfsAuditLay
 /// cold prepared-decl build.
 #[inline]
 pub fn record_materialization(subject: MaterializationSubject, duration_ms: f64) {
-    if let Some(acc) = crate::request_context::current_accumulator() {
+    if let Some(acc) = verter_type_engine::request_context::current_accumulator() {
         acc.push_materialization(MaterializationRecord {
             subject,
             duration_ms,
@@ -139,7 +116,7 @@ pub fn record_materialization(subject: MaterializationSubject, duration_ms: f64)
 }
 
 /// Snapshot the per-request cache counters from the currently
-/// installed [`crate::request_context::RequestContext`] into a
+/// installed [`verter_type_engine::request_context::RequestContext`] into a
 /// [`verter_audit::store::CacheLayerBreakdown`]. Used at request
 /// finalisation to attribute hits/misses to THIS request only.
 ///
@@ -150,10 +127,10 @@ pub fn record_materialization(subject: MaterializationSubject, duration_ms: f64)
 #[must_use]
 pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakdown {
     use verter_audit::store::{CacheLayerBreakdown, CacheLayerHitMiss};
-    let Some(ctx) = crate::request_context::current_request_context() else {
+    let Some(ctx) = verter_type_engine::request_context::current_request_context() else {
         return CacheLayerBreakdown::default();
     };
-    let snap = |hm: &crate::request_context::HitMiss| {
+    let snap = |hm: &verter_type_engine::request_context::HitMiss| {
         let (hits, misses) = hm.snapshot();
         CacheLayerHitMiss { hits, misses }
     };
@@ -175,7 +152,7 @@ pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakd
 }
 
 /// Snapshot the per-request bypass diagnostic counters
-/// from the currently installed [`crate::request_context::RequestContext`]
+/// from the currently installed [`verter_type_engine::request_context::RequestContext`]
 /// into a [`verter_audit::store::BypassDiagnostics`] DTO. Returns a
 /// default (all-zero) struct when no context is installed — the
 /// synthetic-record path lands here and emits zeros, which is the
@@ -184,7 +161,7 @@ pub fn snapshot_cache_layers_from_tls() -> verter_audit::store::CacheLayerBreakd
 #[must_use]
 pub fn snapshot_bypass_diagnostics_from_tls() -> verter_audit::store::BypassDiagnostics {
     use verter_audit::store::BypassDiagnostics;
-    let Some(ctx) = crate::request_context::current_request_context() else {
+    let Some(ctx) = verter_type_engine::request_context::current_request_context() else {
         return BypassDiagnostics::default();
     };
     let (builds, bare_engines, store_view_calls) = ctx.cache_counters.bypass_diagnostics.snapshot();
@@ -369,7 +346,7 @@ impl AuditBuilder {
     pub fn mark_joined_inflight(&mut self) {
         use std::sync::atomic::Ordering;
         self.from_cache = true;
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if ctx.request_id == self.request_id {
                 let layer = &ctx.cache_counters.component_meta;
                 // Undo the speculative miss bumped by the warm-cache
@@ -392,7 +369,7 @@ impl AuditBuilder {
     /// Finalize the builder into a [`RequestAuditRecord`] — captures
     /// the request-end RSS, computes the signed delta, fills the
     /// `total_ms` wall-clock, snapshots the per-request cache
-    /// counters from the currently installed [`crate::request_context::RequestContext`]
+    /// counters from the currently installed [`verter_type_engine::request_context::RequestContext`]
     /// into [`RequestStoreAudit::cache_layers`], and snapshots the
     /// per-request peak RSS slot maintained by the host-owned
     /// sampler thread (or `0` when the sampler never ran). The
@@ -422,7 +399,7 @@ impl AuditBuilder {
         // fixture path), the peak stays at 0, matching the WASM /
         // flag-off contract.
         let (parent_request_id, scheduler, waits, trace_id) =
-            match crate::request_context::current_request_context() {
+            match verter_type_engine::request_context::current_request_context() {
                 Some(ctx) if ctx.request_id == self.request_id => {
                     self.memory.process_rss_peak_bytes = ctx
                         .process_rss_peak_bytes
@@ -431,7 +408,7 @@ impl AuditBuilder {
                     // counters into the component-meta payload. The
                     // host-global counters (process-wide
                     // `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS` and the
-                    // `SemanticGraphStore::memo_size_in_test` delta)
+                    // `SemanticGraphStore::memo_entry_count` delta)
                     // remain the canonical signals; the per-request
                     // mirrors here let attribution tests assert
                     // "synthesis-attributable count == 0 for this
@@ -616,7 +593,7 @@ impl Drop for RequestAuditGuard {
 /// therefore receive `triggered_by_this_request = false` and all
 /// `*_ms = None`.
 pub fn build_file_audit_vec(
-    state: &accumulator::AccumulatorState,
+    state: &verter_type_engine::request_footprint::AccumulatorState,
     entry_canonical_id: &str,
     direct_import_canonicals: &rustc_hash::FxHashSet<String>,
     timing_capture_on: bool,
@@ -895,31 +872,17 @@ pub fn emit_json(record: &RequestAuditRecord) -> String {
     serde_json::to_string(record).unwrap_or_default()
 }
 
-/// Merge the `dep_signature` entries from a `CacheRead` (or any
-/// `&[(Arc<str>, DepVersion)]` slice) into a per-frame `local_fence`.
-///
-/// The `dep_signature_merges` / `dep_signature_intern_hits` audit
-/// counters are NOT bumped here — they are owned by the shared dispatch
-/// fact fan-in and the semantic signature interner.
-/// This helper is now a pure fence merge for its remaining
-/// non-dispatch-fan-in callers.
-pub fn merge_dep_signature_into_local_fence(
-    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
-) {
-    for entry in incoming {
-        local_fence.push(entry.clone());
-    }
-}
-
 /// Record a fresh [`IndexedReady`](crate::project_type_store::IndexedReady)
 /// insertion in the active request's accumulator. Pushes both a
 /// typed [`IndexedReadyBuildRecord`] (direct lane used by the miner
 /// on the happy path) and the equivalent [`StructuredAuditEvent`]
 /// (fallback lane when the direct records vec is empty). No-op when
 /// no request context is installed.
-pub fn record_indexed_ready_built(canonical_id: Arc<str>, whole_hash: crate::types::Hash16) {
-    if let Some(acc) = crate::request_context::current_accumulator() {
+pub fn record_indexed_ready_built(
+    canonical_id: Arc<str>,
+    whole_hash: verter_session_query::analysis::types::Hash16,
+) {
+    if let Some(acc) = verter_type_engine::request_context::current_accumulator() {
         acc.push_indexed_ready_build(IndexedReadyBuildRecord {
             canonical_id: Arc::clone(&canonical_id),
             whole_hash,
@@ -936,7 +899,7 @@ pub fn record_indexed_ready_built(canonical_id: Arc<str>, whole_hash: crate::typ
 // ----------------------------------------------------------------------------
 
 /// Produce a deterministic, human-readable key for a
-/// [`SemanticNodeId`](crate::semantic_query::SemanticNodeId)
+/// [`SemanticNodeId`](verter_type_engine::semantic_query::SemanticNodeId)
 /// suitable for audit trace output and
 /// `MaterializationSubject::Structure.node_key` field.
 ///
@@ -947,10 +910,10 @@ pub fn record_indexed_ready_built(canonical_id: Arc<str>, whole_hash: crate::typ
 /// prior generation).
 #[must_use]
 pub fn audit_key_for_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    id: crate::semantic_query::SemanticNodeId,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    id: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> Arc<str> {
-    use crate::semantic_query::{IndexKey, LiteralValue, SemanticNodeData};
+    use verter_type_engine::semantic_query::{IndexKey, LiteralValue, SemanticNodeData};
     let Some(data) = graph.node_data(id) else {
         return Arc::from(format!("<unknown:{}>", id.0));
     };

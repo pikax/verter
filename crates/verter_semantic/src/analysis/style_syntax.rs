@@ -8,12 +8,13 @@ use verter_css_syntax::{
 };
 use verter_span::Span;
 
-use super::style::{
-    compute_structured_specificity, AnalyzedAtRule, AnalyzedColorCandidate, AnalyzedCssClass,
-    AnalyzedCssId, AnalyzedCustomProperty, AnalyzedDeclaration, AnalyzedSelector,
-    AnalyzedSpecialPseudo, AnalyzedVarUsage, AtRuleKind, AttributeOperator, AttributeSelector,
-    ColorCandidateKind, CompoundSelector, CssAnalysis, CssVarFallback, CssVarReference, NumericArg,
-    SelectorCombinator, SelectorPseudoClass, SpecialPseudoKind, StructuredSelector,
+use super::style::compute_structured_specificity;
+use verter_session_query::analysis::style::{
+    AnalyzedAtRule, AnalyzedColorCandidate, AnalyzedCssClass, AnalyzedCssId,
+    AnalyzedCustomProperty, AnalyzedDeclaration, AnalyzedSelector, AnalyzedSpecialPseudo,
+    AnalyzedVarUsage, AtRuleKind, AttributeOperator, AttributeSelector, ColorCandidateKind,
+    CompoundSelector, CssAnalysis, CssVarFallback, CssVarReference, NumericArg, SelectorCombinator,
+    SelectorPseudoClass, SpecialPseudoKind, StructuredSelector,
 };
 
 pub(super) fn parse_style_block(

@@ -1,84 +1,47 @@
-error[E0603]: module `project_semantic_dispatch` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:17:25
+warning: unused import: `verter_type_engine::project_semantic_dispatch::semantic_operand as _`
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:15:9
    |
-17 |     use verter_session::project_semantic_dispatch::semantic_operand as _;
-   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^  ---------------- module `semantic_operand` is not publicly re-exported
-   |                         |
-   |                         private module
+15 |     use verter_type_engine::project_semantic_dispatch::semantic_operand as _;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-note: the module `project_semantic_dispatch` is defined here
-  --> src/lib.rs
-   |
-   | pub(crate) mod project_semantic_dispatch;
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-error[E0603]: module `project_semantic_dispatch` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:28:35
-   |
-28 |     let dispatch: verter_session::project_semantic_dispatch::ProjectSemanticDispatch = todo!();
-   |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^  ----------------------- struct `ProjectSemanticDispatch` is not publicly re-exported
-   |                                   |
-   |                                   private module
-   |
-note: the module `project_semantic_dispatch` is defined here
-  --> src/lib.rs
-   |
-   | pub(crate) mod project_semantic_dispatch;
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 error[E0624]: associated function `for_locator` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:10:34
-   |
-10 |     let _ = OperandLexicalScope::for_locator(todo!());
-   |                                  ^^^^^^^^^^^ private associated function
-   |
-  ::: src/semantic_query/operand.rs
-   |
-   |     fn for_locator(locator: &AuthoredBodyLocator) -> Self {
-   |     ----------------------------------------------------- private associated function defined here
+ --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:8:34
+  |
+8 |     let _ = OperandLexicalScope::for_locator(todo!());
+  |                                  ^^^^^^^^^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
+  |
+  |     fn for_locator(locator: &AuthoredBodyLocator) -> Self {
+  |     ----------------------------------------------------- private associated function defined here
 
 warning: unreachable call
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:10:13
-   |
-10 |     let _ = OperandLexicalScope::for_locator(todo!());
-   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
-   |             |
-   |             unreachable call
-   |
-   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-error[E0624]: associated function `new` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:11:30
-   |
-11 |       let _ = OperandSplitEnv::new(todo!(), todo!(), todo!(), todo!(), todo!(), todo!());
-   |                                ^^^ private associated function
-   |
-  ::: src/semantic_query/operand.rs
-   |
-   | /     pub(crate) const fn new(
-   | |         parse_env_hash: ParseEnvHash,
-   | |         resolve_env_hash: ResolveEnvHash,
-   | |         type_env_hash: TypeEnvHash,
-...  |
-   | |         _authority: SemanticOperandAuthority,
-   | |     ) -> Self {
-   | |_____________- private associated function defined here
+ --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:8:13
+  |
+8 |     let _ = OperandLexicalScope::for_locator(todo!());
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
+  |             |
+  |             unreachable call
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: unreachable expression
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:11:43
-   |
-11 |     let _ = OperandSplitEnv::new(todo!(), todo!(), todo!(), todo!(), todo!(), todo!());
-   |                                  -------  ^^^^^^^ unreachable expression
-   |                                  |
-   |                                  any code following this expression is unreachable
+ --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:9:43
+  |
+9 |     let _ = OperandSplitEnv::new(todo!(), todo!(), todo!(), todo!(), todo!(), todo!());
+  |                                  -------  ^^^^^^^ unreachable expression
+  |                                  |
+  |                                  any code following this expression is unreachable
 
 error[E0624]: associated function `node` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:12:30
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:10:30
    |
-12 |       let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!());
+10 |       let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!());
    |                                ^^^^ private associated function
    |
-  ::: src/semantic_query/operand.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
    |
    | /     pub(crate) fn node(
    | |         store_identity: u64,
@@ -90,39 +53,39 @@ error[E0624]: associated function `node` is private
    | |_____________- private associated function defined here
 
 warning: unreachable expression
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:12:50
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:10:50
    |
-12 |     let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!());
+10 |     let _ = SemanticOperand::node(0, 0, todo!(), todo!(), todo!());
    |                                         -------  ^^^^^^^ unreachable expression
    |                                         |
    |                                         any code following this expression is unreachable
 
 error[E0624]: associated function `new` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:13:42
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:11:42
    |
-13 |     let _ = SemanticOperandForceRequest::new(todo!());
+11 |     let _ = SemanticOperandForceRequest::new(todo!());
    |                                          ^^^ private associated function
    |
-  ::: src/semantic_query/operand.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
    |
    |     pub(crate) fn new(context: ProjectionReductionContext) -> Self {
    |     -------------------------------------------------------------- private associated function defined here
 
 warning: unreachable call
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:13:13
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:11:13
    |
-13 |     let _ = SemanticOperandForceRequest::new(todo!());
+11 |     let _ = SemanticOperandForceRequest::new(todo!());
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
    |             |
    |             unreachable call
 
 error[E0624]: associated function `projecting` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:14:42
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:12:42
    |
-14 |       let _ = SemanticOperandForceRequest::projecting(todo!(), todo!());
+12 |       let _ = SemanticOperandForceRequest::projecting(todo!(), todo!());
    |                                            ^^^^^^^^^^ private associated function
    |
-  ::: src/semantic_query/operand.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
    |
    | /     pub(crate) fn projecting(
    | |         context: ProjectionReductionContext,
@@ -131,39 +94,39 @@ error[E0624]: associated function `projecting` is private
    | |_____________- private associated function defined here
 
 warning: unreachable expression
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:14:62
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:12:62
    |
-14 |     let _ = SemanticOperandForceRequest::projecting(todo!(), todo!());
+12 |     let _ = SemanticOperandForceRequest::projecting(todo!(), todo!());
    |                                                     -------  ^^^^^^^ unreachable expression
    |                                                     |
    |                                                     any code following this expression is unreachable
 
 error[E0624]: associated function `key_domain` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:15:42
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:13:42
    |
-15 |     let _ = SemanticOperandForceRequest::key_domain(todo!());
+13 |     let _ = SemanticOperandForceRequest::key_domain(todo!());
    |                                          ^^^^^^^^^^ private associated function
    |
-  ::: src/semantic_query/operand.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/operand.rs
    |
    |     pub(crate) fn key_domain(context: ProjectionReductionContext) -> Self {
    |     --------------------------------------------------------------------- private associated function defined here
 
 warning: unreachable call
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:15:13
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:13:13
    |
-15 |     let _ = SemanticOperandForceRequest::key_domain(todo!());
+13 |     let _ = SemanticOperandForceRequest::key_domain(todo!());
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
    |             |
    |             unreachable call
 
 error[E0624]: method `force_semantic_operand` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:29:22
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:27:22
    |
-29 |       let _ = dispatch.force_semantic_operand(todo!(), todo!());
+27 |       let _ = dispatch.force_semantic_operand(todo!(), todo!());
    |                        ^^^^^^^^^^^^^^^^^^^^^^ private method
    |
-  ::: src/project_semantic_dispatch/semantic_operand.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/semantic_operand.rs
    |
    | /     pub(super) fn force_semantic_operand(
    | |         &self,
@@ -173,20 +136,20 @@ error[E0624]: method `force_semantic_operand` is private
    | |___________________________________________- private method defined here
 
 warning: unreachable expression
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:29:54
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:27:54
    |
-29 |     let _ = dispatch.force_semantic_operand(todo!(), todo!());
+27 |     let _ = dispatch.force_semantic_operand(todo!(), todo!());
    |                                             -------  ^^^^^^^ unreachable expression
    |                                             |
    |                                             any code following this expression is unreachable
 
 error[E0624]: method `mint_authored_semantic_operand` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:30:22
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:28:22
    |
-30 |       let _ = dispatch.mint_authored_semantic_operand(todo!(), todo!());
+28 |       let _ = dispatch.mint_authored_semantic_operand(todo!(), todo!());
    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
    |
-  ::: src/project_semantic_dispatch/semantic_operand.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/semantic_operand.rs
    |
    | /     pub(super) fn mint_authored_semantic_operand(
    | |         &self,
@@ -196,20 +159,20 @@ error[E0624]: method `mint_authored_semantic_operand` is private
    | |__________________________________________________________- private method defined here
 
 warning: unreachable expression
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:30:62
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:28:62
    |
-30 |     let _ = dispatch.mint_authored_semantic_operand(todo!(), todo!());
+28 |     let _ = dispatch.mint_authored_semantic_operand(todo!(), todo!());
    |                                                     -------  ^^^^^^^ unreachable expression
    |                                                     |
    |                                                     any code following this expression is unreachable
 
 error[E0624]: method `mint_node_semantic_operand` is private
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:31:22
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:29:22
    |
-31 |       let _ = dispatch.mint_node_semantic_operand(todo!());
+29 |       let _ = dispatch.mint_node_semantic_operand(todo!());
    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
    |
-  ::: src/project_semantic_dispatch/semantic_operand.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/semantic_operand.rs
    |
    | /     pub(super) fn mint_node_semantic_operand(
    | |         &self,
@@ -218,9 +181,9 @@ error[E0624]: method `mint_node_semantic_operand` is private
    | |__________________________________________________________- private method defined here
 
 warning: unreachable call
-  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:31:22
+  --> tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs:29:22
    |
-31 |     let _ = dispatch.mint_node_semantic_operand(todo!());
+29 |     let _ = dispatch.mint_node_semantic_operand(todo!());
    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^ ------- any code following this expression is unreachable
    |                      |
    |                      unreachable call

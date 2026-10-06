@@ -363,13 +363,19 @@ authorities:
 | **Placement** — where an insertion goes | an analyzer-minted `MacroAnchor`, SFC-absolute | `rfind`, brace-depth counting, `span.end ± N`, any offset not carried by an anchor |
 | **Revision** — may these anchors be applied to this buffer? | the **consumer boundary**, comparing `FileAnalysisSnapshot.anchor_revision` against `AnalysisSourceRevision::of_source(live_buffer)` | trusting `DocumentRegistry::get_analysis` to have matched (its host-fallback branch is gated on `AnalysisScope::BUILD` only, not on document version or content) |
 
-**Anchor vocabulary** (`verter_semantic::analysis::types`, re-exported from
-`analysis::mod`):
+**Anchor vocabulary** (`verter_session_query::analysis::types`):
 
-- `MemberListAnchor` — a private SFC-absolute `insert_offset` (the member list's
-  closing delimiter) plus `is_empty` (drives a consumer's separator choice).
-- `MacroAnchor::{Available(MemberListAnchor), Unsupported(MacroAnchorUnsupported)}`
-  — typed absence, never `Option<u32>`.
+- `MemberListAnchor` — the edit capability: a private SFC-absolute
+  `insert_offset` (the member list's closing delimiter) plus `is_empty` (drives a
+  consumer's separator choice). Serialize-only; `data()` returns its wire form.
+- `MemberListAnchorData { insert_offset, is_empty }` — the plain, public wire
+  record (Serialize + Deserialize). Decoding it yields no edit capability.
+- `MacroAnchor::{Available(MemberListAnchor), Decoded(MemberListAnchorData),
+  Unsupported(MacroAnchorUnsupported)}` — typed absence, never `Option<u32>`.
+  `Available` and `Decoded` encode to the same `available` wire arm, and
+  decoding always yields `Decoded`, so serialized analysis round-trips its bytes
+  but never its capability. `available()` / `is_available()` see only
+  `Available`; `data()` reads the position from either arm.
 - `MacroAnchorUnsupported::{NoTypeArgument, NotTypeBased, NamedTypeArgument,
   IntersectionTypeArgument, NoMemberList}` — one variant per authored shape;
   reasons never collapse. `NoTypeArgument` is the `Default`, so an anchor that
@@ -380,14 +386,14 @@ authorities:
   per-slot `AnalyzedSlotField.props_anchor` — structurally paired with the member
   it anchors, so no parallel-array ordinal can drift.
 
-Minted in `analysis/macros.rs` at the single `AnalyzedMacro` construction site
+Minted in `verter_semantic`'s `analysis/macros.rs` at the single `AnalyzedMacro` construction site
 from the OXC nodes already in scope (`type_argument_member_list_anchor`,
 `runtime_argument_array_anchor`) and inside `extract_slot_bindings_from_params`
 (`object_member_list_anchor`). Publication is a pure `match` — no traversal, no
 locator deref, no resolution, and no final-index stamping pass.
 
-`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (a newtype over
-`Hash16`) is stamped at every producer from the source node's own
+`FileAnalysisSnapshot.anchor_revision: AnalysisSourceRevision` (both owned by
+`verter_session_query::analysis::file_analysis`; a newtype over `Hash16`) is stamped at every producer from the source node's own
 `ParseSnapshot::whole_hash` — already `hash_16` of the whole file, so no
 producer re-hashes. A torn generation join leaves it `Default` (unstamped), which
 matches no live buffer and therefore fails closed.
@@ -399,17 +405,22 @@ landed-scanner bar):
    `action_utils::LiveEditTarget`, whose only capability is
    `anchor_position(&MemberListAnchor) -> Option<Position>`. With no `&str` in
    scope a brace scan is a compile error, not a convention.
-2. `MemberListAnchor`'s offset field is private and its constructor is
-   `pub(crate)` to `verter_semantic`, so no `verter_lsp` path — production or
-   test — can synthesize one via the ctor or a struct literal (`E0624`/`E0451`;
-   witnessed by the `member_list_anchor_*` trybuild fixtures under
-   `verter_session/tests/cases/compile-fail/`). One cross-crate construction
-   path DOES exist by wire mandate: the type derives `Deserialize`, so
-   `serde_json` can materialise an anchor from arbitrary bytes — deliberate
-   (protocol row), and the reason `LiveEditTarget::anchor_position`'s bounds +
-   char-boundary checks stay load-bearing rather than decorative. LSP fixtures
-   obtain anchors by running the real analyzer over fixture source
-   (`features/macro_fixture.rs`).
+2. `MemberListAnchor`'s fields are private, its constructor
+   `MemberListAnchor::new(MemberListAnchorMint, ..)` demands the
+   `verter_analyzer_mint` authority, and it implements no `Default` or
+   `Deserialize`. The mint is reachable only through a direct dependency on
+   `verter_analyzer_mint`, held by `verter_semantic` (the production producer)
+   and `verter_session_query` (the record crate); the dependency set is pinned by
+   `workspace_dependency_layers::analyzer_mint_authority_is_reachable_only_by_its_sanctioned_dependents`.
+   So no `verter_lsp` path — production or test — can synthesize an anchor via
+   the ctor, a struct literal, inference, or wire decoding (witnessed by the
+   `member_list_anchor_*` trybuild fixtures under
+   `verter_session/tests/cases/compile-fail/`: `_forge` E0433, `_struct_literal`
+   E0451, `_mint_by_inference` E0277, `_wire_decode` E0277). This is restricted
+   constructor access, not proof of syntax-tree provenance: a mint holder can
+   pass any offset, which is why `LiveEditTarget::anchor_position`'s bounds +
+   char-boundary checks stay load-bearing. LSP fixtures obtain anchors by running
+   the real analyzer over fixture source (`features/macro_fixture.rs`).
 
 `LiveEditTarget::anchor_position` is the single conversion point and fails closed
 on BOTH an offset past the live source's end and an offset off a UTF-8 character
@@ -596,7 +607,7 @@ When a carrier script imports through a non-carrier barrel (for example `compone
 
 `documents/diagnostics.rs` owns push ordering and completion receipts across coordinator, startup and request-side publishers. `ReadinessBasis` pins the document incarnation/revision, host diagnostics generation captured before computation and the canonical `PublishedRoot` identity. Replacing a workspace with a repeated scalar generation still invalidates the basis. `BackgroundPublication` reserves its typed `PublicationEpoch` before capture; completion additionally requires the queried provider surface stamp. Enqueue and semantic enrichment invalidate immediately; older in-flight work cannot restore readiness. Missing/stale provider surfaces and provider errors do not produce a completion receipt. The existing getStatistics response exposes per-URI version/readiness and carries no document identity; a `$/verter/getAnalysis {uri}` request is demand for that open document (`VerterLanguageServer::demand_document`: the coordinator touch, a dependency-readiness capture that enqueues its import publication when its receipt is not current, and the scanner's priority signal for it and its imported carriers), which is how a restarted E2E suite's status poll — it awaits the entry's `getAnalysis` before reading the unchanged statistics — puts its asserted document, one VS Code still holds and only replays, ahead of every other replayed open without a fresh open; editor-neutral and VS Code tests require a current receipt followed by the editor collection's quiet interval, and reject a deadline. A quiet native-only staging batch is not evidence that TypeScript checked the file. Dependency generation changes, surface retirement and close/reopen invalidate prior receipts.
 
-Provider-backed document requests settle their entire response through `ForegroundSettlement`, using the same `ReadinessBasis` in addition to each provider query's surface validation. Request-answering routes perform their existing current-file repair before capturing the basis; definition additionally settles its native fact hydration first and recomputes only its provider leg. Hover, definition, rename, prepare-rename, references, type-definition and signature help settle through the same generation retry as auxiliary responses: their own repair, a cold native child hover hydrating an imported declaration, a background sync, or an open importer re-armed by a dependency's settled edit during the provider await can advance the diagnostics generation, and when the document and workspace remain current the route repeats its current-file repair, then recomputes against a basis captured after that repair, discards the superseded payload and validates the full retry basis. Opening several imported files back to back re-arms the importer once per file, so a recomputation can itself observe the next move; the route keeps recomputing until one attempt observes no move, bounded by `GENERATION_ONLY_RECOMPUTE_LIMIT` against unending churn. Repairing first matters because a background sync that advances the generation can leave the IDE compile cold, and a recompute that compiled after its capture would advance the generation again. Passive decorations (document highlights, semantic tokens and inlay hints) retain their cache-only policy: highlights fire on cursor movement and use native results plus the already-published provider surface, so they do not run inline IDE repair. Auxiliary responses recompute the same way if background settlement advances only the diagnostics generation while the original document and workspace remain current. Superseded payloads are discarded, parameters are borrowed across attempts, and the full retry basis is validated; edits, close/reopen and ownership changes fail closed at once, and generation churn fails closed only past the bound. An invalidated value returns the LSP `ContentModified` outcome, including when its provider leg would otherwise fall back to captured native content; an already-empty fail-closed response stays empty. Completion spends its two current-basis attempts only on edit, close/reopen and workspace races; a generation-only move recomputes its provider leg against a fresh basis, bounded by the same `GENERATION_ONLY_RECOMPUTE_LIMIT`, so background settlement right after open never demotes a typed member list to the native-only list. Either budget running out ends in its synchronous native attempt under the document commit fence. Completion provider errors use the same one-repair/one-retry owner as positional queries: await the engine-specific write barrier, recapture the surface and remap the requested position. No sleep certifies readiness; persistent errors fail closed and never supply a provider result.
+Provider-backed document requests settle their entire response through `ForegroundSettlement`, using the same `ReadinessBasis` in addition to each provider query's surface validation. Request-answering routes perform their existing current-file repair before capturing the basis; definition additionally settles its native fact hydration first and recomputes only its provider leg. Hover, definition, rename, prepare-rename, references, type-definition and signature help settle through the same generation retry as auxiliary responses: their own repair, a cold native child hover hydrating an imported declaration, a background sync, or an open importer re-armed by a dependency's settled edit during the provider await can advance the diagnostics generation, and when the document and workspace remain current the route repeats its current-file repair, then recomputes against a basis captured after that repair, discards the superseded payload and validates the full retry basis. One observation of that basis decides the reply: a move landing after it is later than the answer and is never read a second time into `ContentModified`. Opening several imported files back to back re-arms the importer once per file, so a recomputation can itself observe the next move; the route keeps recomputing until one attempt observes no move, bounded by `GENERATION_ONLY_RECOMPUTE_LIMIT` against unending churn. Repairing first matters because a background sync that advances the generation can leave the IDE compile cold, and a recompute that compiled after its capture would advance the generation again. Passive decorations (document highlights, semantic tokens and inlay hints) retain their cache-only policy: highlights fire on cursor movement and use native results plus the already-published provider surface, so they do not run inline IDE repair. Auxiliary responses recompute the same way if background settlement advances only the diagnostics generation while the original document and workspace remain current. Superseded payloads are discarded, parameters are borrowed across attempts, and the full retry basis is validated; edits, close/reopen and ownership changes fail closed at once, and generation churn fails closed only past the bound. An invalidated value returns the LSP `ContentModified` outcome, including when its provider leg would otherwise fall back to captured native content; an already-empty fail-closed response stays empty. Completion spends its two current-basis attempts only on edit, close/reopen and workspace races; a generation-only move recomputes its provider leg against a fresh basis, bounded by the same `GENERATION_ONLY_RECOMPUTE_LIMIT`, so background settlement right after open never demotes a typed member list to the native-only list. Either budget running out ends in its synchronous native attempt under the document commit fence. The fence pins the document but not background settlement, so a generation-only move inside that attempt recomputes it against a fresh basis under the same fence, bounded by the same `GENERATION_ONLY_RECOMPUTE_LIMIT`; there only a workspace replacement or churn past the bound answers `ContentModified` (the fence already excludes edits and close/reopen). The attempt's one provider await is the bounded style `v-bind(|)` detail enrichment of its first computation; a recomputation stays native and keeps the native kind detail rather than repeating provider work while document commits wait on the fence. Completion provider errors use the same one-repair/one-retry owner as positional queries: await the engine-specific write barrier, recapture the surface and remap the requested position. No sleep certifies readiness; persistent errors fail closed and never supply a provider result.
 
 If workspace compilation advances the host diagnostics generation or replaces the canonical workspace root during publication, the rejected writer reserves one refresh epoch and wakes the coordinator for a diagnostics-only replacement. The coordinator atomically claims that epoch before cancelling or invalidating anything: a delayed refresh cannot displace a newer publication or reopened document. This is driven by basis changes, not a timer that repeatedly retries unchanged failures. Post-scan and importer scheduling still own changes that happen after a publication has finished.
 

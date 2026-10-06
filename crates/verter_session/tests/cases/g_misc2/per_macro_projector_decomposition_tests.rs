@@ -55,7 +55,7 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
@@ -133,7 +133,7 @@ defineEmits<Emits>()
 fn demand_prop_type(
     host: &VerterHost,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> verter_type_expr::TypeExpr {
     let source = prop
         .publication
@@ -422,7 +422,7 @@ defineProps<BigProps>()
 /// regressions.
 #[test]
 fn props_emits_slots_share_path_independent_cache() {
-    use verter_session::semantic_query::{ProjectionMode, SemanticNodeData};
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
     let host = build_host(&[
         ("/workspace/src/types.ts", SHARED_TYPES_TS),
@@ -505,8 +505,8 @@ fn props_emits_slots_share_path_independent_cache() {
 /// reduces to a concrete Object surface.
 #[test]
 fn evaluate_type_expression_for_vue_default_export_matches_props() {
-    use verter_session::semantic_query::{ProjectionMode, SemanticNodeData};
     use verter_session::typeinfo::types::EvaluateTypeExpressionRequest;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
     let host = build_host(&[
         ("/workspace/src/types.ts", SHARED_TYPES_TS),
@@ -597,8 +597,8 @@ fn evaluate_type_expression_for_vue_default_export_matches_props() {
 /// strictly tracks the caller.
 #[test]
 fn evaluate_indexed_access_terminal_in_navigate_stays_shallow() {
-    use verter_session::semantic_query::{ProjectionMode, SemanticNodeData};
     use verter_session::typeinfo::types::EvaluateTypeExpressionRequest;
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
     let host = build_host(&[
         ("/workspace/src/types.ts", SHARED_TYPES_TS),
@@ -649,7 +649,7 @@ fn evaluate_indexed_access_terminal_in_navigate_stays_shallow() {
                 | SemanticNodeData::InstantiationRef { .. }
                 | SemanticNodeData::Alias(_)
                 | SemanticNodeData::Opaque(
-                    verter_session::semantic_query::QueryError::DeclPlaceholder { .. }
+                    verter_type_engine::semantic_query::QueryError::DeclPlaceholder { .. }
                 )
         ),
         "Navigate `$props` terminal must stay a declaration/\

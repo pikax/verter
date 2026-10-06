@@ -35,19 +35,20 @@
 //! same-file self-cycle), and read an imported component's `$props` through
 //! the keyed query.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_type_expr::{PrimitiveName, TypeExpr};
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
+use crate::typeinfo::types::TypeInfoQueryLevel;
+use crate::types::{HostConfig, UpsertRequest};
+use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     ValueRootKey,
 };
-use crate::typeinfo::types::TypeInfoQueryLevel;
-use crate::types::{HostConfig, UpsertRequest};
-use crate::VerterHost;
 
 fn make_host_with_files(files: &[(&str, &str)]) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -107,17 +108,17 @@ fn vue_default_object_members(host: &VerterHost, canonical_id: &str) -> Vec<Stri
         .expect("indexed ready")
         .whole_hash;
     let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -160,17 +161,17 @@ fn vue_default_query_object_members(host: &VerterHost, canonical_id: &str) -> Op
         .expect("indexed ready")
         .whole_hash;
     let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -211,17 +212,17 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
         .expect("indexed ready")
         .whole_hash;
     let base = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -233,7 +234,11 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
     };
     let segments: Arc<[PathSegment]> = path
         .iter()
-        .map(|s| PathSegment::Member(crate::semantic_query::PropertyKey::identifier(*s)))
+        .map(|s| {
+            PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+                *s,
+            ))
+        })
         .collect::<Vec<_>>()
         .into();
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
@@ -258,7 +263,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
 /// comparable to other queries run on the same graph.
 fn instantiate_vue_default_node(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
 ) -> SemanticNodeId {
     let _whole_hash = host
@@ -266,17 +271,17 @@ fn instantiate_vue_default_node(
         .expect("indexed ready")
         .whole_hash;
     match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(canonical_id),
                 verter_type_expr::TopLevelOwnerId::instance(0),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -296,7 +301,7 @@ fn instantiate_vue_default_node(
 /// SUPPLIED `dispatch` so the returned `SemanticNodeId` is comparable.
 fn typeof_default_construct_return_node(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
 ) -> SemanticNodeId {
     let _ = host;
@@ -306,14 +311,14 @@ fn typeof_default_construct_return_node(
                 canonical_id: Arc::from(canonical_id),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::instance(0),
                 ),
             },
             name: Arc::from("default"),
         },
-        crate::semantic_query::ProjectionReductionContext::published(
-            crate::semantic_query::ProjectionMode::Expanded,
+        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
         ),
     )) {
         QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
@@ -430,17 +435,17 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
     let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-        crate::semantic_query::InstantiateKey::new(
-            crate::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
                 Arc::from(A),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 Arc::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
-            crate::semantic_query::InstantiateContext::non_file(
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
                 Default::default(),
-                crate::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
             ),
         ),
     )) {
@@ -451,7 +456,7 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
 
     assert!(
         !matches!(
-            crate::project_semantic_dispatch::node_data_for(crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx).graph(), node).as_deref(),
+            verter_type_engine::project_semantic_dispatch::node_data_for(verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx).graph(), node).as_deref(),
             Some(SemanticNodeData::Object(view))
                 if view.positive_members().iter().any(|member| member.string_name().expect("string-key fixture") == "$props")
         ),
@@ -954,7 +959,7 @@ defineProps<{ peer: E; f: string }>();
 
 #[test]
 fn typeof_construct_return_is_produced_by_instantiate_vue_default() {
-    use crate::semantic_query::OriginEdgeKind;
+    use verter_type_engine::semantic_query::OriginEdgeKind;
 
     const A: &str = "/w/A.vue";
     let host = make_host_with_files(&[(A, A_VUE)]);

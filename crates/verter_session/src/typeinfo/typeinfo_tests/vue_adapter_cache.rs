@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::types::{HostConfig, UpsertRequest};
@@ -32,7 +32,10 @@ fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
     });
 }
 
-fn whole_hash(host: &VerterHost, canonical_id: &str) -> verter_semantic::analysis::types::Hash16 {
+fn whole_hash(
+    host: &VerterHost,
+    canonical_id: &str,
+) -> verter_session_query::analysis::types::Hash16 {
     host.ensure_indexed_ready(canonical_id)
         .expect("indexed ready")
         .whole_hash
@@ -216,7 +219,9 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
     assert_eq!(host.vue_surface_store().len(), 0, "store starts empty");
 
     let request_props = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
-    let first = host.vue_macro_dtos(&request_props);
+    let first = host
+        .vue_macro_dtos(&request_props)
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         first.prop_fields().len(),
         2,
@@ -230,7 +235,9 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
 
     // Warm hit: same key, store does NOT grow, and the returned Arc is the SAME
     // cached value (pointer-equal).
-    let second = host.vue_macro_dtos(&request_props);
+    let second = host
+        .vue_macro_dtos(&request_props)
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         host.vue_surface_store().len(),
         1,
@@ -243,7 +250,9 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
 
     // A DIFFERENT macro (defineEmits) is a DISTINCT cache slot.
     let request_emits = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
-    let emits_dtos = host.vue_macro_dtos(&request_emits);
+    let emits_dtos = host
+        .vue_macro_dtos(&request_emits)
+        .expect("the Vue adapter is admitted");
     assert_eq!(
         emits_dtos.emit_fields().len(),
         1,
@@ -263,7 +272,9 @@ fn vue_macro_dtos_cache_keys_on_content_and_macro() {
         request_edited.root_identity, request_props.root_identity,
         "the content edit changed the .vue's whole_hash"
     );
-    let edited = host.vue_macro_dtos(&request_edited);
+    let edited = host
+        .vue_macro_dtos(&request_edited)
+        .expect("the Vue adapter is admitted");
     let mut edited_names: Vec<&str> = edited
         .prop_fields()
         .iter()
@@ -314,7 +325,9 @@ fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
     // Capture the v1 request (its `root_identity` is v1's whole_hash) and warm
     // the cache for the props macro.
     let stale_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
-    let v1 = host.vue_macro_dtos(&stale_request);
+    let v1 = host
+        .vue_macro_dtos(&stale_request)
+        .expect("the Vue adapter is admitted");
     let mut v1_names: Vec<&str> = v1
         .prop_fields()
         .iter()
@@ -339,7 +352,9 @@ fn vue_macro_dtos_rejects_stale_root_identity_after_edit() {
     // Re-query with the STALE request (its `root_identity` is the pre-edit
     // hash). `vue_macro_dtos` must derive `whole_hash` from the LIVE
     // `IndexedReady` and return the v2 props — never the stale v1 entry.
-    let after_edit = host.vue_macro_dtos(&stale_request);
+    let after_edit = host
+        .vue_macro_dtos(&stale_request)
+        .expect("the Vue adapter is admitted");
     let mut after_names: Vec<&str> = after_edit
         .prop_fields()
         .iter()
@@ -388,7 +403,9 @@ fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
     // COLD call with the lying kind. The derived kind (DefineProps) must win:
     // the bundle carries PROPS, not the emits the property-style fallback would
     // fabricate from the props surface.
-    let cold = host.vue_macro_dtos(&lying_request);
+    let cold = host
+        .vue_macro_dtos(&lying_request)
+        .expect("the Vue adapter is admitted");
     let mut cold_props: Vec<&str> = cold
         .prop_fields()
         .iter()
@@ -409,7 +426,9 @@ fn vue_macro_dtos_rejects_macro_kind_mismatch_without_poisoning_cache() {
     // slot (the kind was derived identically) and returns the SAME Arc — the
     // lying call did not poison or fork the slot.
     let truthful_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
-    let truthful = host.vue_macro_dtos(&truthful_request);
+    let truthful = host
+        .vue_macro_dtos(&truthful_request)
+        .expect("the Vue adapter is admitted");
     assert!(
         Arc::ptr_eq(&cold, &truthful),
         "the derived-kind slot is shared; the lying request did not poison a separate slot"
@@ -571,7 +590,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     let _call_signatures: &Arc<[TypeInfoSurfaceSignature]> = call_signatures;
     let _construct_signatures: &Arc<[TypeInfoSurfaceSignature]> = construct_signatures;
     let _index_signatures: &Arc<[TypeInfoIndexSignature]> = index_signatures;
-    let _keyspace: &Option<crate::semantic_query::SemanticNodeId> = keyspace;
+    let _keyspace: &Option<verter_type_engine::semantic_query::SemanticNodeId> = keyspace;
     let _has_index_signature: &bool = has_index_signature;
 
     for member in members.iter() {
@@ -592,8 +611,8 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
         } = member;
         // Typed key (not an owned type body) + node-id value (not an
         // expanded body).
-        let _key: &crate::semantic_query::AuthoredPropertyKey = key;
-        let _value: &crate::semantic_query::SemanticNodeId = value;
+        let _key: &verter_type_engine::semantic_query::AuthoredPropertyKey = key;
+        let _value: &verter_type_engine::semantic_query::SemanticNodeId = value;
         let _method_kind: &Option<verter_type_expr::ObjectMethodKind> = method_kind;
         let _has_implementation_body: &bool = has_implementation_body;
         // Every text-bearing field is a SPAN (`CanonicalSpan`), never a
@@ -619,7 +638,7 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
         } = origin;
         let _canonical_file: &Option<Arc<str>> = canonical_file;
         let _declaration_span: &Option<CanonicalSpan> = declaration_span;
-        let _merge_role: &crate::semantic_query::MemberMergeRole = merge_role;
+        let _merge_role: &verter_type_engine::semantic_query::MemberMergeRole = merge_role;
     }
 
     // The whole surface is `Eq + Hash` (a structural value of spans/ids/flags),
@@ -699,9 +718,9 @@ fn dto_partial_sfc() -> String {
 
 #[test]
 fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() {
-    use crate::request_context::{RequestContext, RequestContextGuard};
     use crate::resolver_core::{CanonicalCompletionOverlay, HostResolverContext};
     use crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     const HELPER: &str = "/w/dto_helper.ts";
     const FILE: &str = "/w/DtoPartial.vue";
@@ -716,7 +735,7 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
     upsert(&host, FILE, &dto_partial_sfc());
 
     // Build a request-bound ctx so `vue_macro_dtos_with_ctx` can read
-    // `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and observe its OWN per-request completeness (the bare
+    // `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and observe its OWN per-request completeness (the bare
     // `host.vue_macro_dtos` returner drops `.completeness`, so we drive the
     // ctx-bound entry directly to assert the partial flag).
     host.ensure_indexed_ready(FILE).expect("indexed");
@@ -754,8 +773,9 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
         let _g = install_budget(6);
 
         let fixture_dispatch_0 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         vue_macro_dtos_with_ctx(&ctx, &fixture_dispatch_0, &partial_request)
+            .expect("the Vue adapter is admitted")
     };
     let partial_len_after = store.len();
 
@@ -791,8 +811,9 @@ fn budget_partial_dto_bundle_returned_but_never_admitted_to_vue_surface_store() 
         // own (trivial) surface, never the partial call's exhausted counter.
         let _g = install_budget(100_000);
         let fixture_dispatch_0 =
-            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
         vue_macro_dtos_with_ctx(&ctx, &fixture_dispatch_0, &complete_request)
+            .expect("the Vue adapter is admitted")
     };
     let complete_len_after = store.len();
 

@@ -18,8 +18,8 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::{Fact, FactKey, SymbolSpace};
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::{Fact, FactKey, SymbolSpace};
 
 use verter_session::file_artifact_store::InternedName;
 use verter_session::member_display_fact_store::MemberDisplayFactKey;

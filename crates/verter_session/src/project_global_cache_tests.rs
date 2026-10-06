@@ -316,8 +316,10 @@ fn repeated_indexed_lookups_return_same_arc() {
 /// `ResolveDecl` keys populate distinct entries without aliasing.
 #[test]
 fn semantic_subqueries_dedup_across_request_boundaries() {
-    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::{
+        resolve_decl_key, ProjectSemanticDispatch,
+    };
+    use verter_type_engine::semantic_query::{
         QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     };
 
@@ -366,8 +368,10 @@ fn semantic_subqueries_dedup_across_request_boundaries() {
 /// provenance. Negative: the value is NOT any non-`TypeNode` domain.
 #[test]
 fn execute_returns_typed_type_node_with_clean_provenance() {
-    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::{
+        resolve_decl_key, ProjectSemanticDispatch,
+    };
+    use verter_type_engine::semantic_query::{
         QueryResult, ResultProvenance, ResultTaint, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryValue, SemanticQueryValueTag,
     };
@@ -410,8 +414,10 @@ fn execute_returns_typed_type_node_with_clean_provenance() {
 /// its `Value` arm for the same key.
 #[test]
 fn resolve_decl_wrapper_matches_execute_type_node_node() {
-    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::{
+        resolve_decl_key, ProjectSemanticDispatch,
+    };
+    use verter_type_engine::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
 
     let host = host();
     upsert_ts(&host, "/w/types.ts", "export type C = { foo: number }");
@@ -664,7 +670,7 @@ fn owner_import_surface_picks_up_barrel_retargeting() {
 /// against a stale cached surface.
 #[test]
 fn owner_import_surface_fact_signature_includes_barrel_route() {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
     upsert_ts(&host, "/w/barrel.ts", "export { Foo } from './a'");
@@ -695,7 +701,7 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
             fact,
             FactVersionRef::Parse(parse)
                 if parse.canonical_id == "/w/barrel.ts"
-                    && matches!(parse.key, verter_semantic::facts::FactKey::SyntacticRouteInterface)
+                    && matches!(parse.key, verter_session_query::facts::FactKey::SyntacticRouteInterface)
         )
     });
     assert!(
@@ -725,7 +731,7 @@ fn owner_import_surface_fact_signature_includes_barrel_route() {
 /// without `evict_canonical`.
 #[test]
 fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
-    use crate::resolver_core::FactVersionRef;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type Foo = { a: number }");
     upsert_ts(&host, "/w/b.ts", "export type Foo = { b: number }");
@@ -757,7 +763,7 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
                 if parse.canonical_id == "/w/barrel.ts"
                     && matches!(
                         parse.key,
-                        verter_semantic::facts::FactKey::SyntacticRouteInterface
+                        verter_session_query::facts::FactKey::SyntacticRouteInterface
                     ) =>
             {
                 Some(parse.expected_hash)
@@ -786,7 +792,7 @@ fn owner_import_surface_fact_signature_changes_on_barrel_retarget() {
                 if parse.canonical_id == "/w/barrel.ts"
                     && matches!(
                         parse.key,
-                        verter_semantic::facts::FactKey::SyntacticRouteInterface
+                        verter_session_query::facts::FactKey::SyntacticRouteInterface
                     ) =>
             {
                 Some(parse.expected_hash)
@@ -1037,25 +1043,26 @@ fn request_view_is_absent_from_crate_sources() {
 /// no ambient accessor to reintroduce.
 ///
 /// What this guard enforces is the compile-time half: the trait is used as
-/// `&dyn ResolverContext`, so its object safety must not regress. The
-/// `assert_obj_safe!(ResolverContext)` static check at the bottom of
-/// `resolver_context.rs` already fails the build; it is cross-checked here so
-/// the guard set surfaces the failure in one place. The FORBIDDEN
+/// `&dyn ResolverContext<C>`, so its object safety must not regress. The
+/// `assert_resolver_context_obj_safe` signature in `resolver_context.rs`,
+/// which names the trait object, already fails the build; it is cross-checked
+/// here so the guard set surfaces the failure in one place. The FORBIDDEN
 /// thread-local shape is asserted absent by
 /// `request_view_is_absent_from_crate_sources`.
 #[test]
 fn resolver_context_threads_session_view_via_view_accessor() {
-    let src = include_str!("resolver_core/resolver_context.rs");
+    let src = include_str!("../../verter_type_engine/src/resolver_core/resolver_context.rs");
 
-    // The trait must NOT regress to a generic / non-dyn-compat
-    // shape. The `assert_obj_safe!(ResolverContext)` static check at
-    // the bottom of `resolver_context.rs` enforces dyn-compatibility
-    // at compile time, but we cross-check here so the guard set
-    // surfaces the failure in one place.
+    // The trait must NOT regress to a non-dyn-compat shape. The
+    // `assert_resolver_context_obj_safe` signature in `resolver_context.rs`
+    // enforces dyn-compatibility at compile time, but we cross-check here
+    // so the guard set surfaces the failure in one place.
     assert!(
-        src.contains("static_assertions::assert_obj_safe!(ResolverContext)"),
-        "`assert_obj_safe!(ResolverContext)` static check must remain \
-         in `resolver_context.rs` (dyn-compatibility guard)."
+        src.contains(
+            "fn assert_resolver_context_obj_safe<C: ResolverCapabilities>(_: &dyn ResolverContext<C>) {}"
+        ),
+        "the `assert_resolver_context_obj_safe` dyn-compatibility signature must \
+         remain in `resolver_context.rs`."
     );
 }
 
@@ -1107,16 +1114,36 @@ fn the_base_store_serve_has_exactly_one_reader() {
         crate_src().display()
     );
 
+    // The port is declared by the type engine the session builds on, so an
+    // engine-side call is a reader too. Engine paths are reported as
+    // `verter_type_engine/src/...`; session paths stay crate-relative.
+    let engine_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("verter_type_engine")
+        .join("src");
+    let mut engine_files = Vec::new();
+    collect_rs(&engine_src, &mut engine_files);
+    assert!(
+        !engine_files.is_empty(),
+        "type engine source walk found no files under `{}`",
+        engine_src.display()
+    );
+    files.extend(engine_files);
+
     let mut sites: Vec<String> = Vec::new();
     for path in &files {
         let Ok(src) = std::fs::read_to_string(path) else {
             continue;
         };
-        let rel = path
-            .strip_prefix(crate_src())
-            .unwrap_or(path.as_path())
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = match path.strip_prefix(&engine_src) {
+            Ok(engine_rel) => format!("verter_type_engine/src/{}", engine_rel.to_string_lossy()),
+            Err(_) => path
+                .strip_prefix(crate_src())
+                .unwrap_or(path.as_path())
+                .to_string_lossy()
+                .into_owned(),
+        }
+        .replace('\\', "/");
         for (idx, line) in src.lines().enumerate() {
             // Skip line comments and doc-comment prose: only active code can
             // call the port method.
@@ -1160,7 +1187,7 @@ fn no_thread_local_session_view_storage_in_crate_sources() {
     let sources: &[(&str, &str)] = &[
         (
             "resolver_core/resolver_context.rs",
-            include_str!("resolver_core/resolver_context.rs"),
+            include_str!("../../verter_type_engine/src/resolver_core/resolver_context.rs"),
         ),
         ("session_view.rs", include_str!("session_view.rs")),
         ("meta.rs", include_str!("meta.rs")),
@@ -1246,7 +1273,7 @@ fn dep_version_for_whole_hash_returns_whole_hash_variant() {
     let store = crate::project_type_store::ProjectTypeStore::new();
     let v = store.dep_version_for([9u8; 16]);
     match v {
-        crate::semantic_query::DepVersion::WholeHash(h) => assert_eq!(h, [9u8; 16]),
+        verter_type_engine::semantic_query::DepVersion::WholeHash(h) => assert_eq!(h, [9u8; 16]),
         other => panic!("expected WholeHash, got {other:?}"),
     }
 }
@@ -1271,7 +1298,9 @@ fn analysis_scope_satisfaction_is_bitflag_based() {
             scope: AnalysisScope::BUILD,
             script_analysis: None,
             export_signatures: None,
-            snapshot: Arc::new(crate::types::FileAnalysisSnapshot::default()),
+            snapshot: Arc::new(
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default(),
+            ),
         }),
     );
 
@@ -1307,7 +1336,7 @@ fn empty_host_has_empty_project_type_store() {
 /// signature can build one with plain `DepVersion` variants.
 #[test]
 fn dep_signature_construction_is_caller_local() {
-    use crate::semantic_query::{DepSignature, DepVersion};
+    use verter_type_engine::semantic_query::{DepSignature, DepVersion};
 
     let entries: Vec<(Arc<str>, DepVersion)> = vec![
         (Arc::from("/w/a.ts"), DepVersion::WholeHash([1u8; 16])),
@@ -1398,8 +1427,10 @@ fn empty_import_routes_default_is_zero_len() {
 /// memo counter does not grow on the second ask.
 #[test]
 fn semantic_query_second_call_hits_warm_memo_slice11() {
-    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::{
+        resolve_decl_key, ProjectSemanticDispatch,
+    };
+    use verter_type_engine::semantic_query::{
         QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     };
 
@@ -1459,8 +1490,10 @@ fn semantic_query_second_call_hits_warm_memo_slice11() {
 /// canonical, so the targeted invalidation does not touch it.
 #[test]
 fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
-    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::{
+        resolve_decl_key, ProjectSemanticDispatch,
+    };
+    use verter_type_engine::semantic_query::{
         QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     };
 
@@ -1520,8 +1553,10 @@ fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
 /// fact.
 #[test]
 fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
-    use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
-    use crate::semantic_query::{DepVersion, SemanticQueryApi, SemanticQueryKey};
+    use verter_type_engine::project_semantic_dispatch::{
+        resolve_decl_key, ProjectSemanticDispatch,
+    };
+    use verter_type_engine::semantic_query::{DepVersion, SemanticQueryApi, SemanticQueryKey};
 
     let host = host();
     upsert_ts(&host, "/w/a.ts", "export type A = { x: number }");
@@ -1564,8 +1599,8 @@ fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
 /// valid across project-shape changes.
 #[test]
 fn derived_semantic_query_records_project_generation_anchor_slice11() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         DepVersion, PrimitiveKind, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
         SemanticQueryKey,
     };
@@ -1579,21 +1614,21 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
 
     let key = SemanticQueryKey::ReduceUnion {
         members: members.clone(),
-        nullability: crate::semantic_query::NullabilityPolicy::Strict,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
     };
     let _ = dispatch.execute_type_node(key.clone());
     // After canonicalization, the on-memo key holds the members in
     // `VerterStableV1` order — fetch via the same stable-key identity the
     // canonical layer sorted by, never the retired arena-id sort.
     let mut sorted: Vec<SemanticNodeId> = members.iter().copied().collect();
-    crate::semantic_query::stable_key::sort_by_stable_key(graph, &mut sorted);
+    verter_type_engine::semantic_query::stable_key::sort_by_stable_key(graph, &mut sorted);
     sorted.dedup_by(|a, b| {
-        crate::semantic_query::stable_key::stable_key_for_node(graph, *a)
-            == crate::semantic_query::stable_key::stable_key_for_node(graph, *b)
+        verter_type_engine::semantic_query::stable_key::stable_key_for_node(graph, *a)
+            == verter_type_engine::semantic_query::stable_key::stable_key_for_node(graph, *b)
     });
     let lookup_key = SemanticQueryKey::ReduceUnion {
         members: Arc::from(sorted.into_boxed_slice()),
-        nullability: crate::semantic_query::NullabilityPolicy::Strict,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
     };
     let warm = host
         .project_type_store()

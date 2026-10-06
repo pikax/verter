@@ -23,9 +23,9 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::CaptureToken;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::capture_token::CaptureToken;
 
 /// Build a host backed by an in-memory workspace populated with
 /// `files`. Mirrors the helper in
@@ -43,7 +43,8 @@ fn build_host(files: &[(&str, &str)]) -> Arc<VerterHost> {
             extensions: vec![],
             workspace_root: "/workspace".to_string(),
             workspace_aliases: vec![],
-            compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+            compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(
+            ),
             references: vec![],
             membership: verter_workspace::configured_membership_match_all_under_root(
                 &verter_workspace::CanonicalPath::new("/workspace"),
@@ -296,10 +297,10 @@ fn repo_first_pass_diagnosis_emits_capture_curves() {
 /// Interns a string-literal node with a process-unique payload so each
 /// call structurally dedups to a DISTINCT `SemanticNodeId`.
 fn mint_distinct_node(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-) -> crate::semantic_query::SemanticNodeId {
-    use crate::semantic_query::{LiteralValue, SemanticNodeData};
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+) -> verter_type_engine::semantic_query::SemanticNodeId {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let unique = NEXT.fetch_add(1, Ordering::Relaxed);
     graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
@@ -344,8 +345,8 @@ fn mint_distinct_node(
 /// `builder_fence` so the interned signature matches across calls.
 #[test]
 fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
-    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
-    use crate::semantic_query_memo::SemanticGraphStore;
+    use verter_type_engine::semantic_query::{OriginEdgeKind, OriginMeta};
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let graph = SemanticGraphStore::new();
     // Build two distinct interned nodes: a source and a target. The
@@ -353,17 +354,17 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
     let source = mint_distinct_node(&graph);
     let target = mint_distinct_node(&graph);
     // Build a non-empty fence so the interner returns a stable Arc.
-    let fence: crate::semantic_query::DepSignature = Arc::from(
+    let fence: verter_type_engine::semantic_query::DepSignature = Arc::from(
         vec![(
             Arc::<str>::from("/workspace/src/types.ts"),
-            crate::semantic_query::DepVersion::ProjectGeneration(7),
+            verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
         )]
         .into_boxed_slice(),
     );
-    let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
+    let sources: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
     let meta = OriginMeta::ProjectedMember {
-        key: crate::semantic_query::PropertyKey::identifier("initial"),
+        key: verter_type_engine::semantic_query::PropertyKey::identifier("initial"),
         provenance: verter_audit::MemberEdgeProvenance::PathProjection,
     };
 
@@ -414,21 +415,21 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
 /// against an over-aggressive dedup that would skip all emissions.
 #[test]
 fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
-    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
-    use crate::semantic_query_memo::SemanticGraphStore;
+    use verter_type_engine::semantic_query::{OriginEdgeKind, OriginMeta};
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let graph = SemanticGraphStore::new();
     let source = mint_distinct_node(&graph);
     let target_a = mint_distinct_node(&graph);
     let target_b = mint_distinct_node(&graph);
-    let fence: crate::semantic_query::DepSignature = Arc::from(
+    let fence: verter_type_engine::semantic_query::DepSignature = Arc::from(
         vec![(
             Arc::<str>::from("/workspace/src/types.ts"),
-            crate::semantic_query::DepVersion::ProjectGeneration(7),
+            verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
         )]
         .into_boxed_slice(),
     );
-    let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
+    let sources: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
 
     let snap = {
@@ -439,7 +440,7 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             OriginMeta::ProjectedMember {
-                key: crate::semantic_query::PropertyKey::identifier("a"),
+                key: verter_type_engine::semantic_query::PropertyKey::identifier("a"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
             Arc::clone(&fence),
@@ -449,7 +450,7 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             OriginMeta::ProjectedMember {
-                key: crate::semantic_query::PropertyKey::identifier("b"),
+                key: verter_type_engine::semantic_query::PropertyKey::identifier("b"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
             Arc::clone(&fence),
@@ -492,10 +493,10 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
 /// trace entries for the warm-prefix steps and this test fails.
 #[test]
 fn audit_mining_traces_dropped_prefix_edges() {
-    use crate::component_meta_audit::accumulator::RequestFootprintAccumulator;
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
-    use crate::semantic_query_memo::SemanticGraphStore;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_footprint::RequestFootprintAccumulator;
+    use verter_type_engine::semantic_query::{OriginEdgeKind, OriginMeta};
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     // Direct unit test. The dedup at `record_origin_edge` skips the
     // ledger write for the second emission of an identical edge, but
@@ -507,14 +508,14 @@ fn audit_mining_traces_dropped_prefix_edges() {
     let graph = SemanticGraphStore::new();
     let source = mint_distinct_node(&graph);
     let target = mint_distinct_node(&graph);
-    let fence: crate::semantic_query::DepSignature = Arc::from(
+    let fence: verter_type_engine::semantic_query::DepSignature = Arc::from(
         vec![(
             Arc::<str>::from("/workspace/src/types.ts"),
-            crate::semantic_query::DepVersion::ProjectGeneration(7),
+            verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
         )]
         .into_boxed_slice(),
     );
-    let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
+    let sources: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
 
     let acc = Arc::new(RequestFootprintAccumulator::new());
@@ -537,7 +538,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             OriginMeta::ProjectedMember {
-                key: crate::semantic_query::PropertyKey::identifier("initial"),
+                key: verter_type_engine::semantic_query::PropertyKey::identifier("initial"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
             Arc::clone(&fence),
@@ -547,7 +548,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
             OriginMeta::ProjectedMember {
-                key: crate::semantic_query::PropertyKey::identifier("initial"),
+                key: verter_type_engine::semantic_query::PropertyKey::identifier("initial"),
                 provenance: verter_audit::MemberEdgeProvenance::PathProjection,
             },
             Arc::clone(&fence),
@@ -579,20 +580,20 @@ fn audit_mining_traces_dropped_prefix_edges() {
 /// drives it to ~0%. This unit test gates the structural property.
 #[test]
 fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
-    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
-    use crate::semantic_query_memo::SemanticGraphStore;
+    use verter_type_engine::semantic_query::{OriginEdgeKind, OriginMeta};
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
     let graph = SemanticGraphStore::new();
     let source = mint_distinct_node(&graph);
     let target = mint_distinct_node(&graph);
-    let fence: crate::semantic_query::DepSignature = Arc::from(
+    let fence: verter_type_engine::semantic_query::DepSignature = Arc::from(
         vec![(
             Arc::<str>::from("/workspace/src/types.ts"),
-            crate::semantic_query::DepVersion::ProjectGeneration(7),
+            verter_type_engine::semantic_query::DepVersion::ProjectGeneration(7),
         )]
         .into_boxed_slice(),
     );
-    let sources: Arc<[crate::semantic_query::SemanticNodeId]> =
+    let sources: Arc<[verter_type_engine::semantic_query::SemanticNodeId]> =
         Arc::from(vec![source].into_boxed_slice());
 
     // Emit a burst of identical-identity edges plus a few unique
@@ -611,7 +612,7 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
                 OriginEdgeKind::ProjectMember,
                 Arc::clone(&sources),
                 OriginMeta::ProjectedMember {
-                    key: crate::semantic_query::PropertyKey::identifier("initial"),
+                    key: verter_type_engine::semantic_query::PropertyKey::identifier("initial"),
                     provenance: verter_audit::MemberEdgeProvenance::PathProjection,
                 },
                 Arc::clone(&fence),
@@ -626,7 +627,9 @@ fn repo_first_pass_diagnosis_dup_edge_ratio_under_5_percent() {
                 OriginEdgeKind::ProjectMember,
                 Arc::clone(&sources),
                 OriginMeta::ProjectedMember {
-                    key: crate::semantic_query::PropertyKey::identifier(format!("decoy_{i}")),
+                    key: verter_type_engine::semantic_query::PropertyKey::identifier(format!(
+                        "decoy_{i}"
+                    )),
                     provenance: verter_audit::MemberEdgeProvenance::PathProjection,
                 },
                 Arc::clone(&fence),
@@ -671,7 +674,7 @@ mod helpers {
     /// breaks this no-op test, surfacing the regression early.
     #[test]
     fn diagnosis_counter_fields_are_publicly_visible() {
-        use crate::for_tests::CaptureSnapshot;
+        use verter_type_engine::capture_token::CaptureSnapshot;
         // We only need the fields to be addressable in code; the
         // values are set via the harness path. Use a destructuring
         // pattern so any future field rename surfaces here too.

@@ -34,12 +34,13 @@ use super::route_admission::{self, AdmittedRouteProjectionNode};
 use super::surface::{compound_root_surface_view_via_dispatch, surface_view_from_semantic_node};
 use super::{
     empty_semantic_args, local_type_symbol_metadata_for_known_source, ComponentMetaQueryEngine,
-    DirectPreparedDeclarationResolver, ResolvedTypeDeclaration,
+    DirectPreparedDeclarationResolver,
 };
-use crate::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
-use crate::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
 use crate::resolver_core::RouteDemand;
-use crate::semantic_query::{
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+use verter_type_engine::project_semantic_dispatch::raise::node_raised_shape_facts_with_dispatch;
+use verter_type_engine::project_semantic_dispatch::{resolve_decl_key, ProjectSemanticDispatch};
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, QueryResult, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
     SemanticQueryOutput,
 };
@@ -103,12 +104,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         canonical_source: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         resolved_name: &str,
-    ) -> verter_semantic::analysis::type_solver::host::ResolvedRootIdentity {
+    ) -> verter_session_query::type_solver::host::ResolvedRootIdentity {
         if self
             .prepared_type_decl(canonical_source, owner, resolved_name)
             .is_some()
         {
-            return verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+            return verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
                 canonical_source,
                 owner,
                 resolved_name,
@@ -130,7 +131,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return target;
         }
 
-        verter_semantic::analysis::type_solver::host::ResolvedRootIdentity::new_in_owner(
+        verter_session_query::type_solver::host::ResolvedRootIdentity::new_in_owner(
             canonical_source,
             owner,
             resolved_name,
@@ -171,13 +172,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// still fans out to each enclosing tracer, so a producer bracketing this
     /// read still refuses its own shared-cache admission.
     ///
-    /// [`NonCacheableReadReason::LeaseMiss`]: crate::resolver_core::resolver_context::NonCacheableReadReason::LeaseMiss
+    /// [`NonCacheableReadReason::LeaseMiss`]: verter_session_query::facts::reuse::NonCacheableReadReason::LeaseMiss
     pub(crate) fn prepared_type_decl(
         &mut self,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<std::sync::Arc<verter_semantic::analysis::type_solver::PreparedTypeDecl>> {
+    ) -> Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>> {
         let key = (canonical_id.to_string(), owner, symbol_name.to_string());
         if let Some(cached) = self.prepared_type_decls.get(&key) {
             return cached.clone();
@@ -189,33 +190,34 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         }
 
         let ctx = self.ctx;
-        let (resolved, non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-            |_probe| match ctx.prepared_type_decl(canonical_id, owner, symbol_name) {
-                Ok(Some(prepared)) => Some(prepared),
-                Ok(None) => {
-                    // Lazy first-time loading (see scope_payload_for_scope comment).
-                    ctx.ensure_loaded(canonical_id)
-                        .then(|| {
-                            ctx.prepared_type_decl_return_only(canonical_id, owner, symbol_name)
-                        })
-                        .flatten()
-                }
-                Err(failure) => {
-                    crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                        crate::resolver_core::resolver_context::NonCacheableReadReason::PreparationFailure,
+        let (resolved, non_cacheable) =
+            verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+                &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
+                |_probe| match ctx.prepared_type_decl(canonical_id, owner, symbol_name) {
+                    Ok(Some(prepared)) => Some(prepared),
+                    Ok(None) => {
+                        // Lazy first-time loading (see scope_payload_for_scope comment).
+                        ctx.ensure_loaded(canonical_id)
+                            .then(|| {
+                                ctx.prepared_type_decl_return_only(canonical_id, owner, symbol_name)
+                            })
+                            .flatten()
+                    }
+                    Err(failure) => {
+                        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                        verter_session_query::facts::reuse::NonCacheableReadReason::PreparationFailure,
                     );
-                    tracing::error!(
-                        canonical_id,
-                        ?owner,
-                        symbol_name,
-                        ?failure,
-                        "prepared type declaration failed; leaving query scratch slot vacant"
-                    );
-                    None
-                }
-            },
-        );
+                        tracing::error!(
+                            canonical_id,
+                            ?owner,
+                            symbol_name,
+                            ?failure,
+                            "prepared type declaration failed; leaving query scratch slot vacant"
+                        );
+                        None
+                    }
+                },
+            );
         if resolved.is_none() && non_cacheable {
             // Degraded miss (broken decl-body lease / fenced serve): the symbol
             // may well exist. Leave the slot VACANT so a later lookup — after
@@ -232,7 +234,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// Out-of-seal-scope callers (`host_manage/*`) accept the trait
     /// object because every method they reach (project_type_store,
     /// prepared_decl_bundle, dispatch, etc.) is on the trait surface.
-    pub(crate) fn semantic_dispatch(&self) -> &'a ProjectSemanticDispatch<'a> {
+    pub(crate) fn semantic_dispatch(
+        &self,
+    ) -> &'a ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities> {
         self.dispatch
     }
 
@@ -254,18 +258,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // no `SessionSolverHost` construction. Matches the dispatch
         // lowering path in `shallow_lower_type_expr`.
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
-        let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self.ctx,
-            self.dispatch,
-            scope_canonical_id,
-            scope_owner,
-            scope_payload_arc.as_deref(),
-            symbol_name,
-        )
-        .unwrap_or_else(|| {
-            self.dispatch
-                .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
-        });
+        let resolved_root =
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                self.ctx,
+                self.dispatch,
+                scope_canonical_id,
+                scope_owner,
+                scope_payload_arc.as_deref(),
+                symbol_name,
+            )
+            .unwrap_or_else(|| {
+                self.dispatch
+                    .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
+            });
         let dispatch = self.semantic_dispatch();
         match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
             &resolved_root.canonical_id,
@@ -288,18 +293,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // no `SessionSolverHost` construction. Matches the dispatch
         // lowering path in `shallow_lower_type_expr`.
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
-        let resolved_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self.ctx,
-            self.dispatch,
-            scope_canonical_id,
-            scope_owner,
-            scope_payload_arc.as_deref(),
-            symbol_name,
-        )
-        .unwrap_or_else(|| {
-            self.dispatch
-                .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
-        });
+        let resolved_root =
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                self.ctx,
+                self.dispatch,
+                scope_canonical_id,
+                scope_owner,
+                scope_payload_arc.as_deref(),
+                symbol_name,
+            )
+            .unwrap_or_else(|| {
+                self.dispatch
+                    .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
+            });
         let dispatch = self.semantic_dispatch();
         let anchor =
             match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(resolve_decl_key(
@@ -323,12 +329,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         );
         let root_inst_ctx = dispatch.instantiate_context_for(
             &root_canonical,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Shallow,
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Shallow,
             ),
         );
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 base,
                 empty_semantic_args(),
                 // `dispatch_root_instantiated` feeds
@@ -362,7 +368,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_canonical_id: &str,
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
+    ) -> Option<(
+        verter_type_engine::semantic_query::SurfaceView,
+        SemanticNodeId,
+    )> {
         let root = self.dispatch_root_instantiated(scope_canonical_id, scope_owner, symbol_name)?;
         if let Some(surface) = surface_view_from_semantic_node(self.dispatch, root) {
             return Some((surface, root));
@@ -417,8 +426,8 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<verter_type_expr::facts::ProjectedSurfaceFact> {
-        use crate::project_semantic_dispatch::node_data_for;
-        use crate::semantic_query::SemanticNodeData;
+        use verter_type_engine::project_semantic_dispatch::node_data_for;
+        use verter_type_engine::semantic_query::SemanticNodeData;
         use verter_type_expr::facts::{ProjectedMemberFact, ProjectedSurfaceFact};
 
         if self.projection_op_budget_exhausted() {
@@ -427,18 +436,19 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // The declaration's resolved root identity (the same bare-name
         // resolution the decl-anchor dispatch performs).
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
-        let own_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self.ctx,
-            self.dispatch,
-            scope_canonical_id,
-            scope_owner,
-            scope_payload_arc.as_deref(),
-            symbol_name,
-        )
-        .unwrap_or_else(|| {
-            self.dispatch
-                .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
-        });
+        let own_root =
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                self.ctx,
+                self.dispatch,
+                scope_canonical_id,
+                scope_owner,
+                scope_payload_arc.as_deref(),
+                symbol_name,
+            )
+            .unwrap_or_else(|| {
+                self.dispatch
+                    .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
+            });
         // SHAPE classification runs on the raised DeclBody carrier (the
         // lowered body root) — the decl-anchor node is an identity
         // placeholder, not the body.
@@ -452,7 +462,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             dispatch
                 .raise_authored_locator_to_hot(
                     &body_locator,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
                 )
@@ -591,9 +601,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     path: query_path,
                     // Publication caller: intermediate hops navigate, the
                     // terminal hop publishes shallow-by-default.
-                    context: crate::semantic_query::ProjectionReductionContext::published(
-                        ProjectionMode::Navigate,
-                    ),
+                    context:
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                            ProjectionMode::Navigate,
+                        ),
                 }) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
                         // Node-domain materializedness gate (the typed
@@ -664,12 +675,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // a userland `Pick<…>` / `Omit<…>`, so fix-#1's public gate applies
         // and the L1 reducer decides closed→materialise path-precisely.
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.builtin_type_slot(builtin_name),
                 std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
                 dispatch.instantiate_context_for(
                     "__builtin__",
-                    crate::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 ),
@@ -696,7 +707,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 /// the cache value and every fallback arm publish an identical
 /// representation.
 pub(super) fn prepared_decl_authored_body_locator(
-    prepared: &verter_semantic::analysis::type_solver::PreparedTypeDecl,
+    prepared: &verter_session_query::type_solver::PreparedTypeDecl,
 ) -> verter_type_expr::locators::AuthoredBodyLocator {
     verter_type_expr::locators::AuthoredBodyLocator::DeclBody(prepared.body_facts.body_slot.clone())
 }

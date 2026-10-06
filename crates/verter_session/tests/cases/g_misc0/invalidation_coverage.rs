@@ -18,8 +18,8 @@
 //! `architecture_guards::guard 8` parses the source structure;
 //! this file exercises the macro-generated runtime surface.
 
-use verter_session::invalidation_domain::{InvalidationDomain, ParticipatesInInvalidation};
 use verter_session::project_type_store::{ProjectTypeStore, PROJECT_TYPE_STORE_DB_INVENTORY};
+use verter_type_engine::invalidation_domain::{InvalidationDomain, ParticipatesInInvalidation};
 
 /// Acceptance gate (test 1 of 2 — runtime surface).
 ///

@@ -1,0 +1,2241 @@
+//! `substitute_semantic_type_param` — generic type-parameter
+//! substitution into the semantic graph.
+//!
+//! The public substitute delegates to
+//! `substitute_with_change_tracking`, which returns `(result,
+//! changed)`. Each match arm short-circuits the rebuild when no
+//! descendant produced a different `SemanticNodeId`, skipping
+//! `intern_preserving_scope` and the per-arm `Vec<>` allocations.
+//! The output is identical to the all-rebuild path (the existing
+//! shard dedup collapses identical rebuilds back to the same id);
+//! the change-tracking avoids the wasted recursive walk and
+//! allocations on the hot substitute path.
+//!
+//! Both helpers operate on immutable `SemanticNodeData`. Non-composite
+//! shells (objects, arrays, tuples, aliases, `MergedDecl`, ...) publish
+//! rebuilt identity via [`SemanticGraphStore::intern_preserving_scope`]
+//! so the rebuilt shell's scope is preserved from the origin shell.
+//! Composite rebuilds SPLIT by carrier semantics: a changed union and a
+//! provably order-safe changed intersection are DERIVED composites and
+//! route through the canonical authority, which interns a multi-arm
+//! result under `Global` BY DESIGN (a derived composite has no lexical
+//! scope; its file dependence rides the canonical evidence deposit and
+//! observed self-roots, and the evidence-blind-replay fence below keeps
+//! the cross-request memo from replaying an under-rooted entry) — while
+//! a possibly-callable changed intersection is an overload-ordered
+//! carrier and keeps `intern_preserving_scope`. The caller's completion
+//! fence observes the new dep-signature through the shared memo once
+//! the substituted result enters a build flow.
+//!
+//! A class's polymorphic `this` rides a [`SemanticNodeData::TypeParam`]
+//! at [`THIS_BINDER_INDEX`] (see `this_binder`).
+//!
+//! **Binder identity contract.** Binder matching is done by
+//! `SemanticNodeId` equality (the binder's interned `TypeParam`
+//! node id) rather than by `display_name` string equality. This
+//! makes substitution correct even when two binders in the same
+//! file share a display name (`K`) but are otherwise distinct
+//! identities — the substitute only touches the binder whose node
+//! id matches the caller's `parameter_node` argument.
+
+/// The clause position a class's polymorphic `this` binder carries: no
+/// authored clause has this many parameters, so it names no authored one.
+pub(crate) const THIS_BINDER_INDEX: u16 = u16::MAX;
+
+/// The declaration name of the `this` binder an object literal's methods
+/// read the literal through: the literal's start offset identifies it.
+pub(crate) fn object_literal_this_name(offset: u32) -> String {
+    format!("(object literal)@{offset}")
+}
+
+use std::sync::Arc;
+
+use super::ProjectSemanticDispatch;
+use crate::request_context::RecursiveSubstituteIdentity;
+use crate::semantic_query::{
+    ConditionalPendingSubstitution, FunctionParam, IndexKey, IndexSignature, MapperKey,
+    PendingSubstitutionFrame, QueryError, SemanticNodeData, SemanticNodeId, SurfaceMember,
+    SurfaceView, TypeParamDecl,
+};
+
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    pub fn substitute_semantic_type_param(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> SemanticNodeId {
+        // Top-level substitute-call telemetry. Bumped at the
+        // entry of `substitute_semantic_type_param` (the public
+        // surface), so the snapshot reflects the number of distinct
+        // top-level substitutions issued for this request — NOT the
+        // recursive `substitute_with_change_tracking` walks. Paired
+        // with `SubstituteMemoHit` (next line) to expose the
+        // hit-rate of the hash-cons memo.
+        if let Some(observer) = verter_audit::current_observer() {
+            observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
+        }
+        // Hash-cons memo. The store-owned `substitute_memo` collapses
+        // identical `(value_expr, parameter_node, arg)` triples that
+        // reach this entry-point from different call paths (per-K
+        // materialiser loops on the SAME mapped-type instance reduced
+        // from multiple components, repeated `Pick<T, K>` projections
+        // across the corpus, etc.) to a single result. The store is
+        // arena-scoped, and semantic-node ids inside one arena are
+        // content-addressed integers — so a triple of ids is a
+        // complete identity for the substitution result. Substitution
+        // is a pure function of its three inputs, so the cache needs
+        // no fact-signature validation.
+        if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
+            if let Some(observer) = verter_audit::current_observer() {
+                observer.record_event(verter_audit::AuditEvent::SubstituteMemoHit);
+            }
+            return cached;
+        }
+        // Change-tracking through recursion. The internal helper
+        // returns (result, changed) so each branch can short-circuit
+        // the rebuild path when no descendant produced a different
+        // node id. The public signature is unchanged; callers see only
+        // the result id.
+        //
+        // Evidence-blind-replay fence: the store-owned memo is
+        // cross-request, so a walk whose canonical composite routing
+        // deposited NON-TRIVIAL evidence (file self-roots, or an
+        // incomplete comparison's warm suppression) must not be
+        // replayed to a later request that would then skip the deposit
+        // — a stale warm read served on an under-rooted entry. The
+        // epoch advancing across the walk suppresses the publish; the
+        // result itself still flows to the caller.
+        let epoch_before = self.canonical_evidence_epoch.get();
+        let result = self
+            .substitute_with_change_tracking(node, parameter_node, arg)
+            .0;
+        if self.canonical_evidence_epoch.get() == epoch_before && !self.cancellation.is_cancelled()
+        {
+            self.graph()
+                .substitute_memo_publish(node, parameter_node, arg, result);
+        }
+        result
+    }
+
+    /// A class's polymorphic `this` type as a class member body reads it:
+    /// a binder whose constraint is the class instance `instance` (none for
+    /// a class expression, whose instance is built from its members). A
+    /// member read off a receiver binds it to the receiver
+    /// ([`Self::bind_this_receiver`]), the checker's instantiation of a
+    /// class's `this` type with the reference it is accessed through.
+    pub(super) fn this_binder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &Arc<str>,
+        instance: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        self.graph().intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(canonical),
+                owner,
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::clone(class),
+            },
+            param_index: THIS_BINDER_INDEX,
+            constraint: instance,
+            default: None,
+            display_name: Arc::from("this"),
+        })
+    }
+
+    /// The class instance a polymorphic `this` binder stands for, when
+    /// `node` is one.
+    pub(super) fn this_binder_instance(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.graph().node_data(node)?.as_ref() {
+            SemanticNodeData::TypeParam {
+                param_index: THIS_BINDER_INDEX,
+                constraint,
+                ..
+            } => *constraint,
+            _ => None,
+        }
+    }
+
+    /// Whether `node` mentions `target` anywhere below it.
+    pub(super) fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if current == target {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(data) = self.graph().node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
+    }
+
+    /// Whether `node` holds a type parameter or an `infer` placeholder
+    /// anywhere below it: the checker's generic type, whose operators stay
+    /// deferred.
+    pub(super) fn mentions_binder(&self, node: SemanticNodeId) -> bool {
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                return true;
+            };
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::TypeParam { .. } | SemanticNodeData::Infer { .. }
+            ) {
+                return true;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        false
+    }
+
+    /// `node` with each `keyof` and indexed access its instantiation
+    /// closed evaluated, as the checker's instantiation reduces an
+    /// operator over non-generic operands (`getIndexType`,
+    /// `getIndexedAccessType`): `(keyof T)[]` with `T` an object literal
+    /// type `{ a: string }` is `"a"[]`, and `{ v: T[K] }` with `K` its key
+    /// `"a"` is `{ v: string }`. A `keyof` over a declaration keeps its
+    /// name (`keyof I`), as the checker keeps the operator it reduced for
+    /// display; an operator whose operands hold a type parameter, and one
+    /// whose evaluation does not complete, stay as they are. The walk
+    /// reads arrays, tuples, object member values, unions and a signature's
+    /// parameter types and declared return.
+    pub(super) fn reduce_instantiated_operators(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        // Post-order over the structure: a node is rebuilt once every part
+        // it reads has been, so authored nesting needs no call frames.
+        let mut done: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> =
+            rustc_hash::FxHashMap::default();
+        let mut stack: Vec<(SemanticNodeId, bool)> = vec![(node, false)];
+        while let Some((current, parts_done)) = stack.pop() {
+            if done.contains_key(&current) {
+                continue;
+            }
+            let Some(data) = graph.node_data(current) else {
+                done.insert(current, current);
+                continue;
+            };
+            let parts: Vec<SemanticNodeId> = match data.as_ref() {
+                SemanticNodeData::Array { element, .. } => vec![*element],
+                SemanticNodeData::Tuple { elements, .. } => {
+                    elements.iter().map(|element| element.value).collect()
+                }
+                SemanticNodeData::Object(surface) => surface
+                    .positive_members()
+                    .iter()
+                    .map(|member| member.value)
+                    .collect(),
+                SemanticNodeData::Union(members) => members.iter().copied().collect(),
+                // A signature's parameter types, then its declared return.
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+                    ..
+                } => params
+                    .iter()
+                    .map(|param| param.ty)
+                    .chain(std::iter::once(*return_type))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if !parts_done {
+                stack.push((current, true));
+                stack.extend(
+                    parts
+                        .into_iter()
+                        .filter(|part| !done.contains_key(part))
+                        .map(|part| (part, false)),
+                );
+                continue;
+            }
+            let reduced_part = |part: SemanticNodeId| done.get(&part).copied().unwrap_or(part);
+            let reduced = match data.as_ref() {
+                SemanticNodeData::KeyOf { base } => {
+                    let anonymous = matches!(
+                        graph.node_data(*base).as_deref(),
+                        Some(SemanticNodeData::Object(_))
+                    );
+                    if anonymous && !self.mentions_binder(*base) {
+                        self.evaluate_closed_operator(current)
+                    } else {
+                        current
+                    }
+                }
+                SemanticNodeData::IndexedAccess { .. } => {
+                    if self.mentions_binder(current) {
+                        current
+                    } else {
+                        self.evaluate_closed_operator(current)
+                    }
+                }
+                // An instantiated conditional reduces as the checker's
+                // `getConditionalType` does on instantiation; one still open
+                // stays the deferred shell the query hands back.
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    distributive,
+                    pending,
+                } => match crate::semantic_query::SemanticQueryApi::execute_type_node(
+                    self,
+                    crate::semantic_query::SemanticQueryKey::Conditional {
+                        check: *check,
+                        extends: *extends,
+                        true_branch: *true_branch_ref,
+                        false_branch: *false_branch_ref,
+                        distributive: *distributive,
+                        pending: pending.clone(),
+                    },
+                ) {
+                    crate::semantic_query::QueryResult::Value(output) => output.value,
+                    _ => current,
+                },
+                _ if parts.iter().all(|part| reduced_part(*part) == *part) => current,
+                SemanticNodeData::Array { readonly, .. } => graph.intern_preserving_scope(
+                    current,
+                    SemanticNodeData::Array {
+                        element: reduced_part(parts[0]),
+                        readonly: *readonly,
+                    },
+                ),
+                SemanticNodeData::Tuple { elements, readonly } => {
+                    let mut elements = elements.to_vec();
+                    for element in &mut elements {
+                        element.value = reduced_part(element.value);
+                    }
+                    graph.intern_preserving_scope(
+                        current,
+                        SemanticNodeData::Tuple {
+                            elements: Arc::from(elements.into_boxed_slice()),
+                            readonly: *readonly,
+                        },
+                    )
+                }
+                SemanticNodeData::Object(surface) => {
+                    let mut members = surface.positive_members().to_vec();
+                    for member in &mut members {
+                        member.value = reduced_part(member.value);
+                    }
+                    graph.intern_preserving_scope(
+                        current,
+                        SemanticNodeData::Object(
+                            surface
+                                .clone()
+                                .with_positive_members(Arc::from(members.into_boxed_slice())),
+                        ),
+                    )
+                }
+                SemanticNodeData::Union(_) => {
+                    let members: Vec<SemanticNodeId> =
+                        parts.iter().map(|part| reduced_part(*part)).collect();
+                    self.intern_normalized_union_or_intersection(&members, true)
+                }
+                SemanticNodeData::Signature {
+                    kind,
+                    params,
+                    type_parameters,
+                    occurrence,
+                    signature_span,
+                    return_type_span,
+                    predicate,
+                    is_abstract,
+                    ..
+                } => {
+                    let params: Vec<FunctionParam> = params
+                        .iter()
+                        .map(|param| FunctionParam {
+                            ty: reduced_part(param.ty),
+                            ..param.clone()
+                        })
+                        .collect();
+                    let return_type = reduced_part(parts[parts.len() - 1]);
+                    graph.intern_preserving_scope(
+                        current,
+                        SemanticNodeData::Signature {
+                            kind: *kind,
+                            params: Arc::from(params.into_boxed_slice()),
+                            return_type,
+                            type_parameters: Arc::clone(type_parameters),
+                            occurrence: occurrence.clone(),
+                            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(
+                                return_type,
+                            ),
+                            signature_span: *signature_span,
+                            return_type_span: *return_type_span,
+                            predicate: *predicate,
+                            is_abstract: *is_abstract,
+                        },
+                    )
+                }
+                _ => current,
+            };
+            done.insert(current, reduced);
+        }
+        done.get(&node).copied().unwrap_or(node)
+    }
+
+    /// An operator over closed operands, evaluated; the operator itself
+    /// when its evaluation does not complete.
+    fn evaluate_closed_operator(&self, operator: SemanticNodeId) -> SemanticNodeId {
+        self.evaluate_deferred_semantic_node_with_context(
+            operator,
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            ),
+        )
+        .into_complete_active_query_build_node(self)
+        .unwrap_or(operator)
+    }
+
+    /// Whether a member read off `node` binds a polymorphic `this`: a
+    /// reference to a class (or class expression) instance.
+    pub(super) fn is_this_receiver(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                    | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. }
+            )
+        )
+    }
+
+    /// The surface a structural read of the class-expression (or object
+    /// literal) instance `instance` reads through. An object literal's
+    /// `this` is the literal itself, never the reference it is read
+    /// through, so its surface reads with that `this` bound to the
+    /// instance.
+    pub(super) fn class_expression_read_surface(
+        &self,
+        instance: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let (surface, object_literal) = match self.graph().node_data(instance)?.as_ref() {
+            SemanticNodeData::ClassExpressionInstance {
+                identity, surface, ..
+            } => (*surface, identity.object_literal),
+            _ => return None,
+        };
+        Some(if object_literal {
+            self.bind_this_receiver(surface, instance)
+        } else {
+            surface
+        })
+    }
+
+    /// Whether `binder` is the `this` of the object literal `identity`
+    /// names — the binder its methods read the literal through.
+    pub(super) fn is_object_literal_this_binder(
+        &self,
+        identity: &crate::semantic_query::ClassExpressionIdentity,
+        binder: SemanticNodeId,
+    ) -> bool {
+        matches!(
+            self.graph().node_data(binder).as_deref(),
+            Some(SemanticNodeData::TypeParam { decl, param_index: THIS_BINDER_INDEX, .. })
+                if decl.canonical_id == identity.canonical_id
+                    && decl.owner == identity.owner
+                    && decl.decl_name.as_ref() == object_literal_this_name(identity.offset)
+        )
+    }
+
+    /// Bind every polymorphic `this` binder `node` mentions to
+    /// `receiver`, the reference its member was read through.
+    pub(super) fn bind_this_receiver(
+        &self,
+        node: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let mut binders: Vec<SemanticNodeId> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if let SemanticNodeData::TypeParam { param_index, .. } = data.as_ref() {
+                if *param_index == THIS_BINDER_INDEX && current != receiver {
+                    binders.push(current);
+                }
+                continue;
+            }
+            // An object literal's own `this` is bound by the literal's
+            // identity, never by a reference it is read through.
+            if let SemanticNodeData::ClassExpressionInstance { identity, .. } = data.as_ref() {
+                if identity.object_literal {
+                    continue;
+                }
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders.into_iter().fold(node, |result, binder| {
+            self.substitute_semantic_type_param(result, binder, receiver)
+        })
+    }
+
+    /// The bare `this` types a callee reads in its own signature positions —
+    /// a declared member's polymorphic `this` (`self(): this`,
+    /// `wrap(): Promise<this>`), which the reference the member is read
+    /// through binds. The walk stops at object surfaces and declaration
+    /// contributors: a `this` inside one belongs to that type.
+    pub(super) fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let mut found: Vec<SemanticNodeId> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if data
+                .bare_ref_head()
+                .is_some_and(|(name, _)| name.as_ref() == "this")
+            {
+                found.push(current);
+                continue;
+            }
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::Object(_)
+                    | SemanticNodeData::MergedDecl { .. }
+                    | SemanticNodeData::ClassExpressionInstance { .. }
+            ) {
+                continue;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        found
+    }
+
+    /// `callee` read through `receiver`: its polymorphic `this` — a class
+    /// member's `this` binder and a declared member's bare `this` — bound to
+    /// the receiver, the checker's instantiation of a member's `this` type
+    /// with the reference it is accessed through.
+    pub fn bind_callee_receiver(
+        &self,
+        callee: SemanticNodeId,
+        receiver: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let bound = self.bind_this_receiver(callee, receiver);
+        self.receiver_this_types(bound)
+            .into_iter()
+            .fold(bound, |result, this| {
+                self.substitute_semantic_type_param(result, this, receiver)
+            })
+    }
+
+    /// Rebind the ENCLOSING type parameters a body-derived return mentions
+    /// to what the declaration lowering reading it binds them to.
+    ///
+    /// The flow lane interns an enclosing clause's parameter (a class's
+    /// `H` in a method body) as the signature-scoped binder of the
+    /// defining file — `DeclIdentity::from_scope(scope, name)` at ordinal
+    /// 0 — while the lowering that reads the return binds the same name to
+    /// its own binder or to an instantiation argument (`GH<number>` binds
+    /// `H` to `number`). Every such binder of `canonical` whose name
+    /// `bind` answers is replaced by the answer. A signature's OWN
+    /// parameters are the caller's to refuse: the call resolver
+    /// instantiates those through the body-derived carrier itself.
+    pub(super) fn rebind_flow_return_binders(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        bind: impl Fn(&str) -> Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let mut binders: Vec<(SemanticNodeId, Arc<str>)> = Vec::new();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(current) else {
+                continue;
+            };
+            if let SemanticNodeData::TypeParam {
+                decl,
+                param_index: 0,
+                display_name,
+                ..
+            } = data.as_ref()
+            {
+                if decl.canonical_id.as_ref() == canonical && decl.decl_name == *display_name {
+                    binders.push((current, Arc::clone(display_name)));
+                }
+                continue;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders
+            .into_iter()
+            .fold(node, |result, (binder, name)| match bind(&name) {
+                Some(target) if target != binder => {
+                    self.substitute_semantic_type_param(result, binder, target)
+                }
+                _ => result,
+            })
+    }
+
+    /// Bind a function's OWN clause in its body-derived return by
+    /// declaration order, exactly as an instantiated frame's binder
+    /// environment binds it: every binder the flow lane interned for
+    /// `names[i]` in `canonical`'s `owner` scope becomes `args[i]`, all
+    /// at once.
+    ///
+    /// A nested function value's clause interns its own binder identities
+    /// (see the flow lane's binder environment), so a returned generic
+    /// function value re-declaring one of `names` keeps its own parameter.
+    /// A signature that declares one of the binders being replaced — the
+    /// same node, as a function TYPE written in the body with a same-name
+    /// clause lowers to — answers `None`, and so does an ordinal `args`
+    /// does not cover.
+    ///
+    /// The binding is simultaneous: `g<A, B>` instantiated at `[B, A]`
+    /// from a same-file `f<A, B>` (whose root clause shares `g`'s
+    /// name-keyed binders) swaps them, as the instantiated frame's
+    /// environment does, rather than collapsing both onto one.
+    pub(super) fn bind_flow_return_own_clause(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        names: &[Arc<str>],
+        args: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let mut binders: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        let mut declared: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let data = self.graph().node_data(current)?;
+            match data.as_ref() {
+                SemanticNodeData::TypeParam {
+                    decl,
+                    param_index: 0,
+                    display_name,
+                    ..
+                } => {
+                    if decl.canonical_id.as_ref() == canonical
+                        && decl.owner == owner
+                        && decl.decl_name == *display_name
+                    {
+                        if let Some(ordinal) = names.iter().position(|name| name == display_name) {
+                            binders.push((current, *args.get(ordinal)?));
+                        }
+                    }
+                    continue;
+                }
+                SemanticNodeData::Signature {
+                    type_parameters, ..
+                } => declared.extend(type_parameters.iter().map(|param| param.param)),
+                _ => {}
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        binders.retain(|(binder, argument)| binder != argument);
+        if binders.iter().any(|(binder, _)| declared.contains(binder)) {
+            return None;
+        }
+        let replaced: Vec<SemanticNodeId> = binders.iter().map(|(binder, _)| *binder).collect();
+        // One binder at a time is already simultaneous unless an argument
+        // mentions a binder being replaced; then every binder first moves
+        // to a placeholder no argument can mention.
+        if !binders
+            .iter()
+            .any(|(_, argument)| self.mentions_any(*argument, &replaced))
+        {
+            return Some(
+                binders
+                    .into_iter()
+                    .fold(node, |result, (binder, argument)| {
+                        self.substitute_semantic_type_param(result, binder, argument)
+                    }),
+            );
+        }
+        let placeholders: Vec<SemanticNodeId> = (0..binders.len())
+            .map(|ordinal| self.simultaneous_binding_placeholder(canonical, owner, ordinal))
+            .collect();
+        let parked =
+            binders
+                .iter()
+                .zip(&placeholders)
+                .fold(node, |result, ((binder, _), placeholder)| {
+                    self.substitute_semantic_type_param(result, *binder, *placeholder)
+                });
+        Some(binders.iter().zip(&placeholders).fold(
+            parked,
+            |result, ((_, argument), placeholder)| {
+                self.substitute_semantic_type_param(result, *placeholder, *argument)
+            },
+        ))
+    }
+
+    /// The `ordinal`-th placeholder binder of a simultaneous binding in
+    /// `canonical`'s `owner` scope: a `TypeParam` whose identity no
+    /// authored or flow-minted clause produces (its name begins with the
+    /// `\u{1}` separator no identifier can hold), interned once per
+    /// ordinal and never left in a bound value.
+    fn simultaneous_binding_placeholder(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        ordinal: usize,
+    ) -> SemanticNodeId {
+        let name: Arc<str> = Arc::from(format!("\u{1}{ordinal}").as_str());
+        self.graph().intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity {
+                canonical_id: Arc::from(canonical),
+                owner,
+                whole_hash: crate::semantic_query::HashValue::default(),
+                decl_name: Arc::clone(&name),
+            },
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: name,
+        })
+    }
+
+    /// Whether `node` is, or reaches through its children, any of `targets`.
+    fn mentions_any(&self, node: SemanticNodeId, targets: &[SemanticNodeId]) -> bool {
+        if targets.is_empty() {
+            return false;
+        }
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if targets.contains(&current) {
+                return true;
+            }
+            if !visited.insert(current) {
+                continue;
+            }
+            if let Some(data) = self.graph().node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
+    }
+
+    /// Apply a stored positional substitution frame to a demanded winner
+    /// (or to an open branch that a consumer has already selected). Empty
+    /// frames are identity.
+    pub(super) fn apply_pending_substitution_frame(
+        &self,
+        node: SemanticNodeId,
+        frame: &PendingSubstitutionFrame,
+    ) -> SemanticNodeId {
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        evidence.inspected_file_roots = self
+            .observed_self_roots_from_nodes(frame.pairs().iter().map(|&(_, argument)| argument));
+        self.deposit_canonical_evidence(evidence);
+        let mut result = node;
+        for &(param, arg) in frame.pairs() {
+            if self.cancellation.is_cancelled() {
+                return self.opaque(QueryError::Miss);
+            }
+            result = self.substitute_semantic_type_param(result, param, arg);
+        }
+        result
+    }
+
+    pub fn apply_conditional_branch_pending(
+        &self,
+        node: SemanticNodeId,
+        pending: Option<&ConditionalPendingSubstitution>,
+        true_branch: bool,
+    ) -> SemanticNodeId {
+        let Some(pending) = pending else {
+            return node;
+        };
+        let frame = if true_branch {
+            pending.true_branch()
+        } else {
+            pending.false_branch()
+        };
+        self.apply_pending_substitution_frame(node, frame)
+    }
+
+    /// Change-tracking internal helper for
+    /// [`Self::substitute_semantic_type_param`]. Returns
+    /// `(result, changed)` where `changed` is `true` if any
+    /// descendant produced a different `SemanticNodeId` from its
+    /// input. When `changed` is `false`, every recursive arm
+    /// returns `(node, false)` directly so the rebuild +
+    /// `intern_preserving_scope` allocations are skipped entirely.
+    ///
+    /// Identity preservation: the existing
+    /// `intern_preserving_scope` shard dedup also collapses
+    /// rebuilt-but-identical structures back to the same
+    /// `SemanticNodeId`, so the OUTPUT is identical between the
+    /// change-tracking fast path and the unconditional rebuild
+    /// path. The optimization removes the wasted recursive walk +
+    /// `Vec<>` allocations on the hot substitute path.
+    fn substitute_with_change_tracking(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> (SemanticNodeId, bool) {
+        // Classification + recursive hash-cons memo probe.
+        //
+        // Key insight: the recursive helper BYPASSES the
+        // top-level `substitute_memo` even though
+        // `(node, parameter_node, arg)` is a complete identity for
+        // the substitution result. Wiring the existing store-owned
+        // memo at the recursive entry collapses repeated structural
+        // sub-tree substitutions across one substitution walk and
+        // across substitution walks within one workspace generation.
+        //
+        // Classification (unique vs repeated triples) fires on every
+        // recursive entry — including the trivial-identity branch
+        // (`node == parameter_node` ⇒ return `arg`) because that
+        // branch is still a recursive arrival at the SAME logical
+        // identity tuple and the per-request audit footprint must
+        // report it. A `_repeated` bump on the identity branch is
+        // structurally correct: visiting the binder twice in
+        // `Foo<K, K>`-style fixtures IS the recursive memo's hit
+        // case at the boundary.
+        if let Some(ctx) = crate::request_context::current_request_context() {
+            ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
+                node: node.0,
+                parameter_node: parameter_node.0,
+                arg: arg.0,
+            });
+        }
+        // Trivial-identity short-circuit runs AFTER classification:
+        // the per-request audit needs to see every entry, but the
+        // identity branch returns `arg` without touching graph
+        // state.
+        if node == parameter_node {
+            return (arg, true);
+        }
+        if let Some(cached) = self.graph().substitute_memo_get(node, parameter_node, arg) {
+            if let Some(observer) = verter_audit::current_observer() {
+                observer.record_event(verter_audit::AuditEvent::RecursiveSubstituteMemoHit);
+            }
+            // The memo stores the substitution RESULT. `changed` is
+            // recovered cheaply from `result != node` — this is
+            // safe because substitution is a pure
+            // function of its three inputs and `intern_preserving_scope`
+            // already dedups structurally-equivalent rebuilds back
+            // to the same `SemanticNodeId`. A stored result that
+            // equals `node` is exactly the "no descendant changed"
+            // outcome the change-tracking short-circuit reports.
+            let changed = cached != node;
+            return (cached, changed);
+        }
+        // Same evidence-blind-replay fence as the top-level entry: a
+        // sub-walk whose canonical routing deposited non-trivial
+        // evidence is not replayable, and neither is any enclosing
+        // sub-walk (ancestors observe the same epoch advance).
+        let epoch_before = self.canonical_evidence_epoch.get();
+        let (result, changed) =
+            self.substitute_with_change_tracking_inner(node, parameter_node, arg);
+        if self.canonical_evidence_epoch.get() == epoch_before && !self.cancellation.is_cancelled()
+        {
+            self.graph()
+                .substitute_memo_publish(node, parameter_node, arg, result);
+        }
+        (result, changed)
+    }
+
+    /// Inner body of [`Self::substitute_with_change_tracking`].
+    /// Split out so the public wrapper owns the recursive
+    /// classification + hash-cons memo probe / publish, leaving
+    /// the structural match arms purely descent-focused.
+    fn substitute_with_change_tracking_inner(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> (SemanticNodeId, bool) {
+        // Node-id equality match BEFORE destructuring. A string-
+        // match arm
+        // (`TypeParam { display_name, .. } if display_name == parameter`)
+        // would substitute every binder sharing the parameter's
+        // display_name; under the complete identity model, only the
+        // binder whose `SemanticNodeId` matches gets substituted.
+        if node == parameter_node {
+            return (arg, true);
+        }
+        let Some(data) = self.graph().node_data(node) else {
+            return (self.opaque(QueryError::Miss), true);
+        };
+        // Infer substitution is exact-binder-only. A legitimate reference is
+        // an `InferRef` carrying the same opaque binder identity; a same-name
+        // `TypeParam` is an unrelated declaration and is never rewritten.
+        let parameter_infer_binder = match self.graph().node_data(parameter_node).as_deref() {
+            Some(SemanticNodeData::Infer { binder, .. }) => Some(binder.clone()),
+            _ => None,
+        };
+        let parameter_is_infer = parameter_infer_binder.is_some();
+        match data.as_ref() {
+            // Exact infer declaration/reference occurrence.
+            SemanticNodeData::Infer { binder, .. } | SemanticNodeData::InferRef { binder, .. }
+                if parameter_infer_binder == Some(binder.clone()) =>
+            {
+                (arg, true)
+            }
+            SemanticNodeData::Alias(target) => {
+                let (sub, changed) =
+                    self.substitute_with_change_tracking(*target, parameter_node, arg);
+                if !changed {
+                    return (node, false);
+                }
+                (
+                    self.graph()
+                        .intern_preserving_scope(node, SemanticNodeData::Alias(sub)),
+                    true,
+                )
+            }
+            // Instantiating a type parameter a class expression can see
+            // substitutes into the reference's type arguments and its
+            // instance surface; the class identity is unchanged.
+            SemanticNodeData::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => {
+                let mut any_changed = false;
+                let mut new_arguments = Vec::with_capacity(type_arguments.len());
+                for argument in type_arguments.iter() {
+                    let (sub, changed) =
+                        self.substitute_with_change_tracking(*argument, parameter_node, arg);
+                    any_changed |= changed;
+                    new_arguments.push(sub);
+                }
+                // An object literal's surface mentions no `this` but its
+                // own, which its identity binds.
+                let (sub, changed) = if identity.object_literal
+                    && self.is_object_literal_this_binder(identity, parameter_node)
+                {
+                    (*surface, false)
+                } else {
+                    self.substitute_with_change_tracking(*surface, parameter_node, arg)
+                };
+                if !changed && !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ClassExpressionInstance {
+                            identity: Arc::clone(identity),
+                            type_arguments: Arc::from(new_arguments.into_boxed_slice()),
+                            surface: sub,
+                        },
+                    ),
+                    true,
+                )
+            }
+            // Substitution is a composite CONSTRUCTION site (the ruling's
+            // "substitution and post-substitution finalization" inclusion
+            // arm): a CHANGED union routes through the canonical authority
+            // — substituting `T := string` into `T | string` yields two
+            // structurally equal arms the raw rebuild would keep (the
+            // duplicate-constituent class), and `T := never` leaves a
+            // `never` arm the lattice absorbs. The unchanged path still
+            // short-circuits (no rebuild, no canonicalization). Union arm
+            // order carries no overload precedence, so the commutative
+            // route is unconditionally safe here.
+            SemanticNodeData::Union(members) => {
+                let mut new_members = Vec::with_capacity(members.len());
+                let mut any_changed = false;
+                for member in members.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*member, parameter_node, arg);
+                    any_changed |= c;
+                    new_members.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.intern_normalized_union_or_intersection(&new_members, true),
+                    true,
+                )
+            }
+            // A CHANGED intersection splits by CARRIER SEMANTICS, exactly
+            // as the member-value merge does: a possibly-callable
+            // contributor makes the intersection an overload-ordered
+            // carrier (call resolution tries arms in declaration order),
+            // so the substituted rebuild PRESERVES the authored order and
+            // scope — the classification follows transparent carriers and
+            // fails CLOSED on anything undecidable from the graph alone.
+            // Otherwise (every substituted contributor provably
+            // order-safe) the derived instantiation routes through the
+            // canonical authority (structural dedup, `X & unknown = X`,
+            // the proven-disjoint scalar collapse).
+            SemanticNodeData::Intersection(members) => {
+                let mut new_members = Vec::with_capacity(members.len());
+                let mut any_changed = false;
+                for member in members.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*member, parameter_node, arg);
+                    any_changed |= c;
+                    new_members.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                // A heritage body is a declaration, not an intersection type:
+                // its substitution stays a heritage body whatever it carries.
+                let category = members.origin_category();
+                let rebuilt = if category
+                    == crate::semantic_query::composite::CompositeOriginCategory::Heritage
+                    || new_members.iter().any(|member| {
+                        crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
+                            self.graph(),
+                            *member,
+                        )
+                    }) {
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Intersection(
+                            crate::semantic_query::composite::CompositeList::rebuilt_from(
+                                category,
+                                Arc::from(new_members.into_boxed_slice()),
+                            ),
+                        ),
+                    )
+                } else {
+                    self.intern_normalized_union_or_intersection(&new_members, false)
+                };
+                (rebuilt, true)
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                // Substitute into each merged contributor, preserving the
+                // distinct carrier so the peer-merge reducer still applies to
+                // the instantiated declaration.
+                let mut new_contributors = Vec::with_capacity(contributors.len());
+                let mut any_changed = false;
+                for contributor in contributors.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*contributor, parameter_node, arg);
+                    any_changed |= c;
+                    new_contributors.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::MergedDecl {
+                            contributors: Arc::from(new_contributors.into_boxed_slice()),
+                        },
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::Array { element, readonly } => {
+                let (sub_element, changed) =
+                    self.substitute_with_change_tracking(*element, parameter_node, arg);
+                if !changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Array {
+                            element: sub_element,
+                            readonly: *readonly,
+                        },
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::Tuple { elements, readonly } => {
+                let mut new_elements = Vec::with_capacity(elements.len());
+                let mut any_changed = false;
+                for element in elements.iter() {
+                    let (sub_value, c) =
+                        self.substitute_with_change_tracking(element.value, parameter_node, arg);
+                    any_changed |= c;
+                    new_elements.push(crate::semantic_query::TupleElement {
+                        label: element.label.clone(),
+                        value: sub_value,
+                        optional: element.optional,
+                        rest: element.rest,
+                    });
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                // Normalize-on-intern (the variadic-spread rule): a
+                // substituted `rest` element whose value settled to a
+                // concrete tuple splices in place — `[...A, ...B]` with
+                // `A = [1, 2]`, `B = [3, 4]` rebuilds as `[1, 2, 3, 4]` —
+                // and a sole rest-of-array tuple collapses to the array.
+                // Open / unresolved rest values keep their carrier
+                // verbatim (no forced materialisation).
+                match self.normalize_tuple_spread(&new_elements, *readonly) {
+                    crate::project_semantic_dispatch::build::NormalizedTupleShape::Array(
+                        array_node,
+                    ) => (array_node, true),
+                    crate::project_semantic_dispatch::build::NormalizedTupleShape::Tuple(
+                        normalized,
+                    ) => (
+                        self.graph().intern_preserving_scope(
+                            node,
+                            SemanticNodeData::Tuple {
+                                elements: Arc::from(normalized.into_boxed_slice()),
+                                readonly: *readonly,
+                            },
+                        ),
+                        true,
+                    ),
+                }
+            }
+            SemanticNodeData::Object(surface) => {
+                let mut any_changed = false;
+                let mut new_members = Vec::with_capacity(surface.positive_members().len());
+                for member in surface.positive_members().iter() {
+                    let key = member.key.clone().map(
+                        |computed| {
+                            let (sub_key, changed) =
+                                self.substitute_with_change_tracking(computed, parameter_node, arg);
+                            any_changed |= changed;
+                            sub_key
+                        },
+                        |identity| identity,
+                    );
+                    let (sub_value, c) =
+                        self.substitute_with_change_tracking(member.value, parameter_node, arg);
+                    any_changed |= c;
+                    new_members.push(SurfaceMember {
+                        key,
+                        value: sub_value,
+                        optional: member.optional,
+                        readonly: member.readonly,
+                        method_kind: member.method_kind,
+                        has_implementation_body: member.has_implementation_body,
+                        // Type-parameter substitution preserves the source
+                        // member's declared accessibility and excess-property
+                        // provenance (substitution changes only the value's
+                        // type-param occurrences).
+                        visibility: member.visibility,
+                        excess_origin: member.excess_origin,
+                        // Type-parameter substitution preserves the
+                        // source member's structural shape — only the
+                        // value's type-param occurrences change.
+                        // Preserve the upstream
+                        // `declared_in_macro_type_arg` fact, merge role, the
+                        // member's OXC declaration-site spans, and its
+                        // declaration file (substitution does not move the
+                        // member's declaration site).
+                        spans: member.spans,
+                        declaration_origin: member.declaration_origin.clone(),
+                        declared_in_macro_type_arg: member.declared_in_macro_type_arg,
+                        merge_role: member.merge_role,
+                    });
+                }
+                let mut new_call_signatures = Vec::with_capacity(surface.call_signatures.len());
+                for signature in surface.call_signatures.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*signature, parameter_node, arg);
+                    any_changed |= c;
+                    new_call_signatures.push(sub);
+                }
+                let mut new_construct_signatures =
+                    Vec::with_capacity(surface.construct_signatures.len());
+                for signature in surface.construct_signatures.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*signature, parameter_node, arg);
+                    any_changed |= c;
+                    new_construct_signatures.push(sub);
+                }
+                let mut new_index_signatures = Vec::with_capacity(surface.index_signatures.len());
+                for signature in surface.index_signatures.iter() {
+                    let (sub_key, ck) = self.substitute_with_change_tracking(
+                        signature.key_type,
+                        parameter_node,
+                        arg,
+                    );
+                    let (sub_value, cv) = self.substitute_with_change_tracking(
+                        signature.value_type,
+                        parameter_node,
+                        arg,
+                    );
+                    any_changed |= ck || cv;
+                    new_index_signatures.push(IndexSignature {
+                        key_type: sub_key,
+                        value_type: sub_value,
+                        readonly: signature.readonly,
+                        // Preserve the index signature's OXC spans + declaration file.
+                        spans: signature.spans,
+                        declaration_origin: signature.declaration_origin.clone(),
+                    });
+                }
+                let new_keyspace = match surface.keyspace {
+                    Some(k) => {
+                        let (sub, c) = self.substitute_with_change_tracking(k, parameter_node, arg);
+                        any_changed |= c;
+                        Some(sub)
+                    }
+                    None => None,
+                };
+                if !any_changed {
+                    return (node, false);
+                }
+                let mut members = new_members.into_iter();
+                let mut calls = new_call_signatures.into_iter();
+                let mut constructs = new_construct_signatures.into_iter();
+                let mut indexes = new_index_signatures.into_iter();
+                let entries = surface
+                    .entries
+                    .iter()
+                    .map(|entry| match entry {
+                        crate::semantic_query::SurfaceEntry::Member(_) => {
+                            crate::semantic_query::SurfaceEntry::Member(
+                                members.next().expect("derived member index matches stream"),
+                            )
+                        }
+                        crate::semantic_query::SurfaceEntry::CallSignature(_) => {
+                            crate::semantic_query::SurfaceEntry::CallSignature(
+                                calls.next().expect("derived call index matches stream"),
+                            )
+                        }
+                        crate::semantic_query::SurfaceEntry::ConstructSignature(_) => {
+                            crate::semantic_query::SurfaceEntry::ConstructSignature(
+                                constructs
+                                    .next()
+                                    .expect("derived construct index matches stream"),
+                            )
+                        }
+                        crate::semantic_query::SurfaceEntry::IndexSignature(_) => {
+                            crate::semantic_query::SurfaceEntry::IndexSignature(
+                                indexes.next().expect("derived index matches stream"),
+                            )
+                        }
+                    })
+                    .collect();
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Object(SurfaceView::from_entries(
+                            entries,
+                            new_keyspace,
+                            surface.has_known_index_signature(),
+                        )),
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                let mut any_changed = false;
+                let rebuilt = program.map_child_nodes(|child| {
+                    let (substituted, changed) =
+                        self.substitute_with_change_tracking(child, parameter_node, arg);
+                    any_changed |= changed;
+                    substituted
+                });
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::ObjectSpreadProgram(rebuilt),
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            } => {
+                let mut new_expressions = Vec::with_capacity(expressions.len());
+                let mut any_changed = false;
+                for expr in expressions.iter() {
+                    let (sub, c) = self.substitute_with_change_tracking(*expr, parameter_node, arg);
+                    any_changed |= c;
+                    new_expressions.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::TemplateLiteral {
+                            quasis: Arc::clone(quasis),
+                            expressions: Arc::from(new_expressions.into_boxed_slice()),
+                        },
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::KeyOf { base } => {
+                let (sub_base, changed) =
+                    self.substitute_with_change_tracking(*base, parameter_node, arg);
+                if !changed {
+                    return (node, false);
+                }
+                (
+                    self.graph()
+                        .intern_preserving_scope(node, SemanticNodeData::KeyOf { base: sub_base }),
+                    true,
+                )
+            }
+            SemanticNodeData::IndexedAccess { object, index } => {
+                let (sub_object, oc) =
+                    self.substitute_with_change_tracking(*object, parameter_node, arg);
+                let (sub_index, ic) =
+                    self.substitute_index_key_with_change_tracking(index, parameter_node, arg);
+                if !(oc || ic) {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::IndexedAccess {
+                            object: sub_object,
+                            index: sub_index,
+                        },
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::Mapped { source, mapper } => {
+                // "mapped descents" counter.
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteMappedTypeDescend);
+                }
+                // Exact node identity is the sole shadowing axis. A mapped
+                // TypeParam that merely shares an infer display name is a
+                // distinct declaration and cannot match an exact InferRef.
+                let shadowed = mapper.parameter_node == parameter_node;
+                let (sub_source, source_changed) =
+                    self.substitute_with_change_tracking(*source, parameter_node, arg);
+                let (sub_key_space, key_space_changed) =
+                    self.substitute_with_change_tracking(mapper.key_space, parameter_node, arg);
+                let (sub_value_expr, value_expr_changed) = if shadowed {
+                    (mapper.value_expr, false)
+                } else {
+                    self.substitute_with_change_tracking(mapper.value_expr, parameter_node, arg)
+                };
+                let (sub_name_remap, name_remap_changed) = match mapper.name_remap {
+                    Some(n) if !shadowed => {
+                        let (sub, c) = self.substitute_with_change_tracking(n, parameter_node, arg);
+                        (Some(sub), c)
+                    }
+                    other => (other, false),
+                };
+                let any_changed =
+                    source_changed || key_space_changed || value_expr_changed || name_remap_changed;
+                if !any_changed {
+                    return (node, false);
+                }
+                // "Mapped rebuilt" counter.
+                // Distinct from `SubstituteMappedTypeDescend` (every
+                // visit) — fires only on the rebuild branch after at
+                // least one descendant sub-tree changed.
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteMappedRebuild);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Mapped {
+                            source: sub_source,
+                            mapper: MapperKey {
+                                parameter_node: mapper.parameter_node,
+                                key_space: sub_key_space,
+                                value_expr: sub_value_expr,
+                                optionality: mapper.optionality,
+                                readonly: mapper.readonly,
+                                name_remap: sub_name_remap,
+                                // Propagate the lowering-time mapper kind
+                                // through substitution. Identity classification
+                                // is preserved because substitution applies
+                                // uniformly to both `source` and
+                                // `value_expr.object` for non-shadowed
+                                // substitutions, so a mapper that lowered as
+                                // identity `T[K]` remains identity after the
+                                // type-parameter rewrite.
+                                kind: mapper.kind,
+                                // Substitution instantiates the type
+                                // variable; the mapping stays homomorphic
+                                // over its instantiation.
+                                over_type_variable: mapper.over_type_variable,
+                            },
+                        },
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::TypeOf(_) | SemanticNodeData::TypeOfNominal(_) => {
+                // The value-root + path are opaque to substitution (they are
+                // not node ids). Structural child-integrity requires descending
+                // into the instantiation `type_args` so a `T` inside
+                // `typeof f<T>` is rewritten — STRUCTURAL recursion only, NOT
+                // semantic instantiation application (that is a demand-time
+                // carrier-resolution reduction). An empty / no-change arg list
+                // returns unchanged and records the opaque counter, preserving
+                // the dormant-state behaviour. Descent reads the args through
+                // the shared `carrier_type_args` accessor; the rebuild
+                // preserves the head fields via `map_carrier_type_args`. The
+                // nominal terminal carries NO args, so it always takes the
+                // unchanged early return.
+                let type_args = data.carrier_type_args();
+                let mut new_args = Vec::with_capacity(type_args.len());
+                let mut any_changed = false;
+                for arg_node in type_args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    // "opaque TypeOf returns" counter.
+                    if let Some(observer) = verter_audit::current_observer() {
+                        observer.record_event(verter_audit::AuditEvent::SubstituteTypeOfOpaque);
+                    }
+                    return (node, false);
+                }
+                let rebuilt = data
+                    .map_carrier_type_args(Arc::from(new_args.into_boxed_slice()))
+                    .expect("TypeOf is a carrier");
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
+            }
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+                pending,
+            } => {
+                // Substitution rewrites check/extends only. Branch
+                // substitution is deferred onto the sealed pending frame
+                // so an undemanded loser is never traversed. Selection
+                // does not run here.
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteConditionalDescend);
+                }
+                // Capture-avoidance for an `Infer` binder — the same
+                // shadow rule the Mapped arm applies, here on the
+                // conditional-scope axis: a
+                // nested conditional whose OWN `extends` pattern DECLARES
+                // the same infer name RE-BINDS it — `Infer { name }` is
+                // name-identity, so the inner declaration IS the binder
+                // node. The re-binding scopes the extends pattern and the
+                // TRUE branch; the check and the FALSE branch stay in the
+                // OUTER binder's scope and still substitute. The
+                // detection is DECLARATION-scoped
+                // ([`Self::extends_pattern_declares_infer`]): a bare
+                // REFERENCE to the outer binder (a same-name `TypeParam`
+                // shell) does not shadow, and an `Infer` declared under a
+                // deeper `Conditional`/`Mapped` scope inside `extends`
+                // binds at THAT level, not here.
+                let shadowed_by_inner_infer = parameter_is_infer
+                    && self.extends_pattern_declares_infer(*extends, parameter_node);
+                let (sub_check, cc) =
+                    self.substitute_with_change_tracking(*check, parameter_node, arg);
+                let (sub_extends, ec) = if shadowed_by_inner_infer {
+                    (*extends, false)
+                } else {
+                    self.substitute_with_change_tracking(*extends, parameter_node, arg)
+                };
+                let mut next_pending = pending
+                    .as_ref()
+                    .map(|frame| frame.as_ref().clone())
+                    .unwrap_or_else(ConditionalPendingSubstitution::empty);
+                if shadowed_by_inner_infer {
+                    next_pending = next_pending.append_false(parameter_node, arg);
+                } else {
+                    next_pending = next_pending.append_both(parameter_node, arg);
+                    // A distributive conditional's check IS this parameter:
+                    // its branches see each member it distributes over.
+                    if *distributive && *check == parameter_node {
+                        next_pending = next_pending.distributing(parameter_node);
+                    }
+                }
+                let next_pending = if next_pending.is_empty() {
+                    None
+                } else {
+                    Some(Arc::new(next_pending))
+                };
+                if !cc && !ec && next_pending == *pending {
+                    return (node, false);
+                }
+                if let Some(observer) = verter_audit::current_observer() {
+                    observer.record_event(verter_audit::AuditEvent::SubstituteConditionalRebuild);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Conditional {
+                            check: sub_check,
+                            extends: sub_extends,
+                            true_branch_ref: *true_branch_ref,
+                            false_branch_ref: *false_branch_ref,
+                            distributive: *distributive,
+                            pending: next_pending,
+                        },
+                    ),
+                    true,
+                )
+            }
+            // InstantiationRef is a lazy carrier of `Helper<arg1, arg2>`
+            // where `base` is the declaration identity and `args` is the
+            // call-site type-argument vector. Substitution must descend
+            // into each arg so type-parameter references inside an
+            // unrealised instantiation (e.g. `Helper<TPlan, K>` inside a
+            // mapped-type binder loop) are rewritten when the outer
+            // binder fires per-key realisation. `base`/`DeclIdentity`
+            // carries no type-parameter references and is preserved
+            // verbatim. Without this descent, an unrealised
+            // `Instantiate { ExtendSlotWithPlan<TPlan, "badge"> }` body
+            // would re-bind its inner `TKey ← K-typeparam` instead of
+            // `TKey ← "badge"-literal`, and its Conditional payload
+            // would never close.
+            // An intrinsic application defers only because its operand is
+            // binder-dependent. Substitution MUST descend and rebuild it, so
+            // supplying the binder re-enters the owning query family and the
+            // operation reduces (`Awaited<T>` with `T := Promise<string>`
+            // becomes `string`). Without this the deferred carrier would be a
+            // dead end rather than a resumable semantic value.
+            SemanticNodeData::IntrinsicApplication { op, args } => {
+                let mut new_args = Vec::with_capacity(args.len());
+                let mut any_changed = false;
+                for arg_node in args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                // `NoInfer` over an operand that is no longer generic is
+                // that operand.
+                if matches!(op, crate::semantic_query::CompilerIntrinsicTypeOp::NoInfer)
+                    && !self.type_is_generic(new_args[0])
+                {
+                    return (new_args[0], true);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::intrinsic_application(
+                            *op,
+                            Arc::from(new_args.into_boxed_slice()),
+                        )
+                        .expect("substituted one-for-one from a well-formed application"),
+                    ),
+                    true,
+                )
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let mut new_args = Vec::with_capacity(args.len());
+                let mut any_changed = false;
+                for arg_node in args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::InstantiationRef {
+                            base: base.clone(),
+                            args: Arc::from(new_args.into_boxed_slice()),
+                        },
+                    ),
+                    true,
+                )
+            }
+            // Function arm. Substitution must descend into every
+            // parameter type and the return type so `T` / `infer X`
+            // references inside `(x: T, y: infer X) => R` are rewritten
+            // when the outer binder fires. This is the primary
+            // materialisation path for nested-infer in TS conditional
+            // `extends` clauses.
+            SemanticNodeData::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters,
+                occurrence,
+                return_carrier,
+                signature_span,
+                return_type_span,
+                predicate,
+                is_abstract,
+            } => {
+                // Signature-local TypeParams need no spelling-based stop:
+                // legitimate outer references carry an exact InferRef;
+                // locally shadowed occurrences carry the local TypeParam.
+                let mut any_changed = false;
+                let mut new_params = Vec::with_capacity(params.len());
+                for param in params.iter() {
+                    let (sub_ty, c) =
+                        self.substitute_with_change_tracking(param.ty, parameter_node, arg);
+                    any_changed |= c;
+                    new_params.push(FunctionParam {
+                        name: param.name.clone(),
+                        ty: sub_ty,
+                        optional: param.optional,
+                        rest: param.rest,
+                        // Substitution preserves the parameter's OXC span
+                        // and its declaration facts.
+                        span: param.span,
+                        declared_literal: param.declared_literal,
+                    });
+                }
+                let (mut sub_return, return_changed) =
+                    self.substitute_with_change_tracking(*return_type, parameter_node, arg);
+                any_changed |= return_changed;
+                // A generic predicate instantiates with the signature:
+                // `x is T` at `T := string` narrows to `string`.
+                let mut sub_predicate = predicate.map(|predicate| {
+                    predicate.map_type(|target| {
+                        let (sub, changed) =
+                            self.substitute_with_change_tracking(target, parameter_node, arg);
+                        any_changed |= changed;
+                        sub
+                    })
+                });
+                let mut new_type_parameters = Vec::with_capacity(type_parameters.len());
+                for tp in type_parameters.iter() {
+                    let new_constraint = match tp.constraint {
+                        Some(c) => {
+                            let (sub, ch) =
+                                self.substitute_with_change_tracking(c, parameter_node, arg);
+                            any_changed |= ch;
+                            Some(sub)
+                        }
+                        None => None,
+                    };
+                    let new_default = match tp.default {
+                        Some(d) => {
+                            let (sub, ch) =
+                                self.substitute_with_change_tracking(d, parameter_node, arg);
+                            any_changed |= ch;
+                            Some(sub)
+                        }
+                        None => None,
+                    };
+                    // The parameter's own binder node embeds its declaration-
+                    // local bounds: keep the binder verbatim when they are
+                    // untouched; re-intern it with the substituted bounds
+                    // (same decl identity + index + name) when they move, so
+                    // `param` stays the decl's own `TypeParam` node.
+                    let param = if new_constraint == tp.constraint && new_default == tp.default {
+                        tp.param
+                    } else {
+                        match self.graph().node_data(tp.param).as_deref() {
+                            Some(SemanticNodeData::TypeParam {
+                                decl, param_index, ..
+                            }) => self.graph().intern_preserving_scope(
+                                tp.param,
+                                SemanticNodeData::TypeParam {
+                                    decl: decl.clone(),
+                                    param_index: *param_index,
+                                    constraint: new_constraint,
+                                    default: new_default,
+                                    display_name: Arc::clone(&tp.name),
+                                },
+                            ),
+                            _ => tp.param,
+                        }
+                    };
+                    new_type_parameters.push(TypeParamDecl {
+                        name: Arc::clone(&tp.name),
+                        param,
+                        constraint: new_constraint,
+                        default: new_default,
+                        is_const: tp.is_const,
+                    });
+                }
+                // A binder re-interned with its moved bounds is still the
+                // parameter its signature's positions name: every occurrence
+                // of the old binder node follows it, so inference and
+                // substitution, which bind the exact binder node, reach them
+                // (`pick<S extends T>(x: S): S` over `Bx<string | number>`
+                // infers `S` from `x`).
+                for (old, new) in type_parameters
+                    .iter()
+                    .zip(new_type_parameters.iter())
+                    .filter(|(old, new)| old.param != new.param)
+                    .map(|(old, new)| (old.param, new.param))
+                {
+                    for param in new_params.iter_mut() {
+                        param.ty = self.substitute_with_change_tracking(param.ty, old, new).0;
+                    }
+                    sub_return = self.substitute_with_change_tracking(sub_return, old, new).0;
+                    sub_predicate = sub_predicate.map(|predicate| {
+                        predicate.map_type(|target| {
+                            self.substitute_with_change_tracking(target, old, new).0
+                        })
+                    });
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                (
+                    self.graph().intern_preserving_scope(
+                        node,
+                        SemanticNodeData::Signature {
+                            kind: *kind,
+                            params: Arc::from(new_params.into_boxed_slice()),
+                            return_type: sub_return,
+                            type_parameters: Arc::from(new_type_parameters.into_boxed_slice()),
+                            // Instantiation PRESERVES the occurrence — an
+                            // instantiated candidate is the same occurrence.
+                            occurrence: occurrence.clone(),
+                            // A declared carrier retargets the substituted
+                            // return node; a body-derived carrier is
+                            // untouched.
+                            return_carrier: match return_carrier {
+                                crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
+                                    crate::semantic_query::SignatureReturnCarrier::Declared(
+                                        sub_return,
+                                    )
+                                }
+                                crate::semantic_query::SignatureReturnCarrier::Function(source) => {
+                                    crate::semantic_query::SignatureReturnCarrier::Function(
+                                        source.clone(),
+                                    )
+                                }
+                            },
+                            // Substitution preserves the signature's OXC spans.
+                            signature_span: *signature_span,
+                            return_type_span: *return_type_span,
+                            predicate: sub_predicate,
+                            is_abstract: *is_abstract,
+                        },
+                    ),
+                    true,
+                )
+            }
+            // Unresolved bare-name carrier `Foo<arg…>`: descend into the
+            // structural `type_args` so a `T` inside an applied carrier is
+            // rewritten when the binder fires — structural child-integrity,
+            // NOT semantic instantiation application (a demand-time
+            // carrier-resolution concern). `name` / `scope` are preserved
+            // verbatim. An empty / no-change arg list returns unchanged.
+            SemanticNodeData::BareRef(_) => {
+                let type_args = data.carrier_type_args();
+                let mut new_args = Vec::with_capacity(type_args.len());
+                let mut any_changed = false;
+                for arg_node in type_args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                let rebuilt = data
+                    .map_carrier_type_args(Arc::from(new_args.into_boxed_slice()))
+                    .expect("BareRef is a carrier");
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
+            }
+            // Unresolved import-type carrier `import("m").Q<arg…>`: descend into
+            // the structural `type_args` so a `T` inside an applied import-type
+            // carrier is rewritten when the binder fires — same structural
+            // child-integrity as the `BareRef` arm, NOT semantic instantiation
+            // application or import resolution (a demand-time carrier-resolution
+            // concern). `specifier` / `qualifier` / `typeof_query` are preserved
+            // verbatim. An empty / no-change arg list returns unchanged.
+            SemanticNodeData::ImportType(_) => {
+                let type_args = data.carrier_type_args();
+                let mut new_args = Vec::with_capacity(type_args.len());
+                let mut any_changed = false;
+                for arg_node in type_args.iter() {
+                    let (sub, c) =
+                        self.substitute_with_change_tracking(*arg_node, parameter_node, arg);
+                    any_changed |= c;
+                    new_args.push(sub);
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                let rebuilt = data
+                    .map_carrier_type_args(Arc::from(new_args.into_boxed_slice()))
+                    .expect("ImportType is a carrier");
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
+            }
+            // The sealed index-composed carrier substitutes its OWN
+            // parameters and binder constraints/defaults; the occurrence
+            // and the deferred return carrier are preserved.
+            SemanticNodeData::DeferredCallable(callable) => {
+                let parts = callable.parts(&crate::semantic_query::ResolveCallConsumer::witness());
+                let mut any_changed = false;
+                let mut new_params = Vec::with_capacity(parts.params.len());
+                for param in parts.params.iter() {
+                    let (sub_ty, changed) =
+                        self.substitute_with_change_tracking(param.ty, parameter_node, arg);
+                    any_changed |= changed;
+                    new_params.push(FunctionParam {
+                        name: param.name.clone(),
+                        ty: sub_ty,
+                        optional: param.optional,
+                        rest: param.rest,
+                        span: param.span,
+                        declared_literal: param.declared_literal,
+                    });
+                }
+                let mut new_type_parameters = Vec::with_capacity(parts.type_parameters.len());
+                for tp in parts.type_parameters.iter() {
+                    let new_constraint = match tp.constraint {
+                        Some(constraint) => {
+                            let (sub, changed) = self.substitute_with_change_tracking(
+                                constraint,
+                                parameter_node,
+                                arg,
+                            );
+                            any_changed |= changed;
+                            Some(sub)
+                        }
+                        None => None,
+                    };
+                    let new_default = match tp.default {
+                        Some(default) => {
+                            let (sub, changed) =
+                                self.substitute_with_change_tracking(default, parameter_node, arg);
+                            any_changed |= changed;
+                            Some(sub)
+                        }
+                        None => None,
+                    };
+                    new_type_parameters.push(TypeParamDecl {
+                        name: Arc::clone(&tp.name),
+                        param: tp.param,
+                        constraint: new_constraint,
+                        default: new_default,
+                        is_const: tp.is_const,
+                    });
+                }
+                if !any_changed {
+                    return (node, false);
+                }
+                let rebuilt = SemanticNodeData::DeferredCallable(callable.with_substituted(
+                    Arc::from(new_params.into_boxed_slice()),
+                    Arc::from(new_type_parameters.into_boxed_slice()),
+                ));
+                (self.graph().intern_preserving_scope(node, rebuilt), true)
+            }
+            _ => (node, false),
+        }
+    }
+
+    /// Declaration-scoped shadow predicate for the Conditional
+    /// substitution arm: `true` iff `pattern` — a conditional's own
+    /// `extends` pattern — DECLARES the infer binder `binder` at THIS
+    /// pattern's level. Only a reachable `Infer` node with the binder's
+    /// name counts (name-identity interning makes the inner declaration
+    /// the binder node itself); explicitly NOT counted:
+    ///
+    /// - a bare REFERENCE to the name (a same-name `TypeParam` shell —
+    ///   references never re-bind);
+    /// - an `Infer` beneath a nested `Conditional` or `Mapped` inside the
+    ///   pattern — TS scopes `infer` to the NEAREST enclosing conditional
+    ///   (and a mapped type introduces its own binder scope), so such a
+    ///   declaration binds at that inner level, never at this one.
+    ///
+    /// This is deliberately a separate predicate from
+    /// [`Self::subtree_references_node`], whose unrestricted
+    /// reference-reachability semantics its other callers depend on.
+    pub fn extends_pattern_declares_infer(
+        &self,
+        pattern: SemanticNodeId,
+        binder: SemanticNodeId,
+    ) -> bool {
+        let Some(SemanticNodeData::Infer {
+            binder: target_binder,
+            ..
+        }) = self.graph().node_data(binder).as_deref().cloned()
+        else {
+            return false;
+        };
+        let graph = self.graph();
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack: Vec<SemanticNodeId> = vec![pattern];
+        while let Some(node) = stack.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::Infer { binder, .. } => {
+                    if *binder == target_binder {
+                        return true;
+                    }
+                }
+                // A nested CONDITIONAL is the only infer-binding
+                // boundary: an `infer` beneath it declares at THAT
+                // conditional's level — do not descend. A `Mapped` is NOT
+                // a boundary — an `infer` in its source / value /
+                // `as`-remap declares for the ENCLOSING conditional (the
+                // `conditional_binds_mapped_as_remap_infer_in_true_branch`
+                // producer contract).
+                SemanticNodeData::Conditional { .. } => {}
+                SemanticNodeData::Mapped { source, mapper } => {
+                    stack.push(*source);
+                    stack.push(mapper.key_space);
+                    stack.push(mapper.value_expr);
+                    if let Some(remap) = mapper.name_remap {
+                        stack.push(remap);
+                    }
+                }
+                // A construction program is not an infer-binding boundary:
+                // an `infer` inside a program effect declares for the
+                // ENCLOSING conditional (same rule as an `infer` inside an
+                // `Object` member value above). Mirrors the substitute
+                // engine's `map_child_nodes` descent and `absorb`'s
+                // `child_nodes` stack push.
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
+                }
+                SemanticNodeData::Alias(inner) => stack.push(*inner),
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
+                    for member in members.iter() {
+                        stack.push(*member);
+                    }
+                }
+                SemanticNodeData::Array { element, .. } => stack.push(*element),
+                SemanticNodeData::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        stack.push(element.value);
+                    }
+                }
+                SemanticNodeData::Object(surface) => {
+                    for member in surface.positive_members().iter() {
+                        stack.push(member.value);
+                    }
+                    for signature in surface.call_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.construct_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if let Some(k) = surface.keyspace {
+                        stack.push(k);
+                    }
+                }
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    type_parameters,
+                    predicate,
+                    ..
+                } => {
+                    for param in params.iter() {
+                        stack.push(param.ty);
+                    }
+                    stack.push(*return_type);
+                    for tp in type_parameters.iter() {
+                        if let Some(c) = tp.constraint {
+                            stack.push(c);
+                        }
+                        if let Some(d) = tp.default {
+                            stack.push(d);
+                        }
+                    }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
+                }
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    for arg in args.iter() {
+                        stack.push(*arg);
+                    }
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    for expr in expressions.iter() {
+                        stack.push(*expr);
+                    }
+                }
+                SemanticNodeData::KeyOf { base } => stack.push(*base),
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    stack.push(*object);
+                    if let crate::semantic_query::IndexKey::Computed(idx_node) = index {
+                        stack.push(*idx_node);
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Read-only walker that returns `true` iff `target` is structurally
+    /// reachable from `root` through the same recursion edges that
+    /// [`Self::substitute_with_change_tracking`] descends into. Mirrors
+    /// the substitute helper's structural recursion so the two stay in
+    /// lock-step: a `false` return here means an identical
+    /// `substitute_with_change_tracking(root, target, _)` would return
+    /// `(root, false)` — i.e. no descendant references `target` so
+    /// substitution is the identity on the entire subtree.
+    ///
+    /// Used by [`Self::build_mapped_type`] to hoist key-independent
+    /// `value_expr` reduction out of the per-K materialisation loop:
+    /// when the mapper's binder is not reachable inside `value_expr`,
+    /// the per-K substituted carrier collapses to `value_expr` itself
+    /// for every K, so the downstream evaluation is shared across the
+    /// entire key space and the materialiser runs ONCE per mapped type
+    /// rather than ONCE per enumerated key.
+    ///
+    /// **Recursion mirrors substitute exactly.** Every arm of
+    /// `substitute_with_change_tracking` that descends into child
+    /// `SemanticNodeId`s descends here too — including the three
+    /// unresolved carriers (`BareRef` / `TypeOf` / `ImportType`), whose
+    /// `type_args` slices ARE descended. As a read-only reachability SCAN
+    /// it reaches them through the shared
+    /// [`SemanticNodeData::carrier_type_args`] accessor in the catch-all
+    /// arm (so a future carrier added to that exhaustive accessor is
+    /// descended automatically, never silently dropped) — the mirror
+    /// contract. Arms that return `(node, false)` without recursion (leaf
+    /// TypeParam / Primitive / Literal / Opaque / DeclRef / Never /
+    /// Unknown / Any) terminate here too — the accessor
+    /// returns an empty slice for them. Cyclic graphs are guarded by a
+    /// `visited` set.
+    ///
+    /// **`Mapped` shadowing** is honoured: when a nested mapped binder
+    /// shadows the same `target` (`nested_mapper.parameter_node ==
+    /// target`), the walker does NOT recurse into the shadowed
+    /// `value_expr` / `name_remap` arms, matching substitute's
+    /// `shadowed` short-circuit.
+    ///
+    /// Infer reachability mirrors substitution exactly: only `Infer` /
+    /// `InferRef` nodes carrying the target declaration's opaque binder count.
+    /// Display names never participate.
+    pub fn subtree_references_node(&self, root: SemanticNodeId, target: SemanticNodeId) -> bool {
+        let target_infer_binder = match self.graph().node_data(target).as_deref() {
+            Some(SemanticNodeData::Infer { binder, .. }) => Some(binder.clone()),
+            _ => None,
+        };
+
+        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut stack: Vec<SemanticNodeId> = Vec::new();
+        stack.push(root);
+        while let Some(node) = stack.pop() {
+            if node == target {
+                return true;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            let Some(data) = self.graph().node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                // Exact declaration/reference binder match.
+                SemanticNodeData::Infer { binder, .. }
+                | SemanticNodeData::InferRef { binder, .. } => {
+                    if target_infer_binder == Some(binder.clone()) {
+                        return true;
+                    }
+                }
+                SemanticNodeData::TypeParam { .. } => {}
+                SemanticNodeData::Alias(t) => {
+                    stack.push(*t);
+                }
+                SemanticNodeData::ClassExpressionInstance {
+                    type_arguments,
+                    surface,
+                    ..
+                } => {
+                    stack.extend(type_arguments.iter().copied());
+                    stack.push(*surface);
+                }
+                composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                    let members = composite.composite_members().expect("composite arm");
+                    for member in members.iter() {
+                        stack.push(*member);
+                    }
+                }
+                SemanticNodeData::Array { element, .. } => {
+                    stack.push(*element);
+                }
+                SemanticNodeData::Tuple { elements, .. } => {
+                    for element in elements.iter() {
+                        stack.push(element.value);
+                    }
+                }
+                SemanticNodeData::Object(surface) => {
+                    for member in surface.positive_members().iter() {
+                        stack.push(member.value);
+                    }
+                    for signature in surface.call_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.construct_signatures.iter() {
+                        stack.push(*signature);
+                    }
+                    for signature in surface.index_signatures.iter() {
+                        stack.push(signature.key_type);
+                        stack.push(signature.value_type);
+                    }
+                    if let Some(k) = surface.keyspace {
+                        stack.push(k);
+                    }
+                }
+                SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                    for expr in expressions.iter() {
+                        stack.push(*expr);
+                    }
+                }
+                SemanticNodeData::KeyOf { base } => {
+                    stack.push(*base);
+                }
+                SemanticNodeData::IndexedAccess { object, index } => {
+                    stack.push(*object);
+                    if let IndexKey::Computed(idx_node) = index {
+                        stack.push(*idx_node);
+                    }
+                }
+                SemanticNodeData::Mapped { source, mapper } => {
+                    let shadowed = mapper.parameter_node == target;
+                    stack.push(*source);
+                    stack.push(mapper.key_space);
+                    if !shadowed {
+                        stack.push(mapper.value_expr);
+                        if let Some(remap) = mapper.name_remap {
+                            stack.push(remap);
+                        }
+                    }
+                }
+                SemanticNodeData::Conditional {
+                    check,
+                    extends,
+                    true_branch_ref,
+                    false_branch_ref,
+                    pending,
+                    ..
+                } => {
+                    if let Some(pending) = pending {
+                        stack.extend(pending.argument_nodes());
+                    }
+                    stack.push(*check);
+                    stack.push(*extends);
+                    stack.push(*true_branch_ref);
+                    stack.push(*false_branch_ref);
+                }
+                SemanticNodeData::InstantiationRef { args, .. } => {
+                    for arg in args.iter() {
+                        stack.push(*arg);
+                    }
+                }
+                // Substitute descends program effects via `map_child_nodes`;
+                // the scanner must descend the same children or it reports a
+                // program value holding the binder as K-independent (the
+                // `build_mapped_type` hoist) / binder-free (the
+                // `record_target_shape` generic-key gate).
+                SemanticNodeData::ObjectSpreadProgram(program) => {
+                    stack.extend(program.child_nodes());
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    for contributor in contributors.iter() {
+                        stack.push(*contributor);
+                    }
+                }
+                SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    type_parameters,
+                    predicate,
+                    ..
+                } => {
+                    for param in params.iter() {
+                        stack.push(param.ty);
+                    }
+                    stack.push(*return_type);
+                    for tp in type_parameters.iter() {
+                        if let Some(c) = tp.constraint {
+                            stack.push(c);
+                        }
+                        if let Some(d) = tp.default {
+                            stack.push(d);
+                        }
+                    }
+                    stack.extend(predicate.and_then(|predicate| predicate.ty));
+                }
+                // Unresolved carriers (`BareRef` / `TypeOf` / `ImportType`)
+                // descend into their structural `type_args` exactly as
+                // substitute's carrier arms do — the mirror contract. As a
+                // SCAN this routes through the shared `carrier_type_args`
+                // accessor in the catch-all below rather than hand-binding
+                // each carrier, so a future carrier added to the exhaustive
+                // accessor is descended here automatically and can never be
+                // silently dropped by the catch-all.
+                //
+                // The catch-all also covers substitute's `_ => (node, false)`
+                // leaf variants (Primitive, Literal, Opaque, DeclRef, Never,
+                // Unknown, Any): none have child
+                // semantic-node references, and the accessor returns an empty
+                // slice for them, so the walker pushes nothing.
+                other => {
+                    for arg in other.carrier_type_args() {
+                        stack.push(*arg);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Change-tracking companion of `substitute_index_key`.
+    /// Returns `(result, changed)` where `changed` is `true` iff
+    /// the underlying typed-node substitution actually rewrote the
+    /// key. The string / number key arms always return `false`
+    /// because their content is invariant under type-parameter
+    /// substitution.
+    fn substitute_index_key_with_change_tracking(
+        &self,
+        index: &IndexKey,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> (IndexKey, bool) {
+        match index {
+            IndexKey::String(text) => (IndexKey::String(Arc::clone(text)), false),
+            IndexKey::Number(number) => (IndexKey::Number(*number), false),
+            IndexKey::UniqueSymbol(identity) => (IndexKey::UniqueSymbol(identity.clone()), false),
+            IndexKey::Computed(node) => {
+                let (sub, changed) =
+                    self.substitute_with_change_tracking(*node, parameter_node, arg);
+                if !changed {
+                    return (IndexKey::Computed(*node), false);
+                }
+                let normalised = self.normalized_index_key_node(sub);
+                (normalised, true)
+            }
+        }
+    }
+}

@@ -16,16 +16,16 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 use verter_workspace::WorkspaceAccess;
 
 use crate::component_meta_audit::RequestAuditRecord;
 use crate::meta_resolve::ResolvedComponentMetaState;
-use crate::request_context::{
-    nested_audit_in_progress, requests_created_snapshot, reset_requests_created, NestedAuditGuard,
-};
 use crate::types::AnalysisLevel;
 use crate::{HostConfig, VerterHost};
+use verter_type_engine::request_context::{
+    nested_audit_in_progress, requests_created_snapshot, reset_requests_created, NestedAuditGuard,
+};
 
 /// Errors surfaced by [`AuditedRequestBuilder::resolve_component_meta`]
 /// and [`AuditedRequestBuilder::run_custom`].

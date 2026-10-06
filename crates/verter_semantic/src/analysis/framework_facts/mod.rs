@@ -323,7 +323,7 @@ pub struct ScriptCandidateCx<'a> {
     /// The OXC program for the file's (combined) script.
     pub program: &'a Program<'a>,
     /// Validated neutral owner coordinates for every top-level statement.
-    pub top_level_owners: &'a crate::analysis::top_level_owners::TopLevelOwnerTable,
+    pub top_level_owners: &'a verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     /// The byte range of the MODULE script block (`<script module>` /
     /// `context="module"`) in `source`, when the carrier has one. A carrier
     /// whose producer records script-region KINDS supplies it so a provider can
@@ -442,7 +442,9 @@ pub fn capture_script_candidates(
     program: &Program<'_>,
 ) -> FrameworkScriptCandidateSet {
     let owners =
-        crate::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(program.body.len());
+        verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+            program.body.len(),
+        );
     capture_script_candidates_with_context(active_providers, source, program, None, None, &owners)
 }
 
@@ -456,7 +458,7 @@ pub fn capture_script_candidates_with_module_region(
     source: &str,
     program: &Program<'_>,
     module_script_region: Option<(u32, u32)>,
-    top_level_owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
+    top_level_owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
 ) -> FrameworkScriptCandidateSet {
     capture_script_candidates_with_context(
         active_providers,
@@ -481,7 +483,7 @@ pub fn capture_script_candidates_with_context(
     program: &Program<'_>,
     module_script_region: Option<(u32, u32)>,
     framework_mode_hint: Option<FrameworkScriptModeHint>,
-    top_level_owners: &crate::analysis::top_level_owners::TopLevelOwnerTable,
+    top_level_owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
 ) -> FrameworkScriptCandidateSet {
     assert_eq!(
         top_level_owners.len(),

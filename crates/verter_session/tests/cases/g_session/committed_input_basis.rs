@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use verter_session::request_context::{RequestContext, RequestContextGuard};
 use verter_session::route_analysis_inputs::{
     build_route_analysis_inputs, commit_route_analysis_basis, project_route_analysis_inputs,
 };
@@ -11,6 +10,7 @@ use verter_session::{
     commit_workspace_canonical, retry_workspace_wave, InputBasis, LoadWave, Observation,
     ObserveError, RetryOutcome, SnapshotFence, TornSnapshot,
 };
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceRead};
 
 fn memory() -> MemoryWorkspace {

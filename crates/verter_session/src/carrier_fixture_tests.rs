@@ -6,7 +6,7 @@ pub(crate) fn publish_carrier_fixture(
     canonical_id: &str,
     source: &str,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>> {
     use verter_language::carrier_grammar::{
         CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
@@ -52,7 +52,7 @@ pub(crate) fn publish_carrier_fixture(
             crate::carrier_publication_store::PublicationRequestContext::new(
                 crate::carrier_publication_store::AuditRequestId::new(1),
                 crate::carrier_publication_store::PublicationSurface::ProjectionHost,
-                verter_scheduler::cancellation::CancellationToken::new(),
+                verter_execution::cancellation::CancellationToken::new(),
                 snapshot.snapshot_id().clone(),
             ),
         )

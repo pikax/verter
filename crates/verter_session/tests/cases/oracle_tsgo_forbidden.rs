@@ -38,6 +38,20 @@ fn tsgo_not_reachable_from_resolver() {
     if let Err(why) = tsgo_dep_is_generation_only(&parsed) {
         panic!("verter_session Cargo.toml violates the tsgo-generation-only rule: {why}");
     }
+
+    // The type engine is an unconditional dependency of the session, so its
+    // own manifest is part of the same default-build closure.
+    let engine_toml = fs::read_to_string(
+        Path::new(MANIFEST_DIR)
+            .join("..")
+            .join("verter_type_engine")
+            .join("Cargo.toml"),
+    )
+    .expect("read verter_type_engine Cargo.toml");
+    let engine_parsed: toml::Value = toml::from_str(&engine_toml).expect("parse Cargo.toml");
+    if let Err(why) = tsgo_dep_is_generation_only(&engine_parsed) {
+        panic!("verter_type_engine Cargo.toml violates the tsgo-generation-only rule: {why}");
+    }
 }
 
 /// PURE checker for the tsgo-generation-only rule (so it is discriminating over
@@ -426,6 +440,20 @@ fn no_tsgo_runtime_driver_anywhere_in_default_build() {
     let src_root = Path::new(MANIFEST_DIR).join("src");
     let mut files: Vec<PathBuf> = Vec::new();
     collect_rs(&src_root, &mut files);
+    // The type engine the session builds on is part of the same default-build
+    // resolver surface (it owns part of `resolver_core/` and the semantic
+    // dispatch), so it is scanned too.
+    let engine_root = Path::new(MANIFEST_DIR)
+        .join("..")
+        .join("verter_type_engine")
+        .join("src");
+    let engine_start = files.len();
+    collect_rs(&engine_root, &mut files);
+    assert!(
+        files.len() > engine_start,
+        "expected to scan the verter_type_engine src tree at {}",
+        engine_root.display()
+    );
 
     // The `oracle-gen`-gated generator + generation spike ARE the legitimate
     // tsgo-driving sites — all gated off the default build by `oracle-gen`. The

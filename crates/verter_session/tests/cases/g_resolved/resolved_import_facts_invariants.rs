@@ -25,9 +25,8 @@ use verter_session::resolved_import_facts::{
     ResolvedImportFacts, ResolvedImportFactsKey, RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
 use verter_session::session_view::{EnvHashes, HostView, SessionView};
-use verter_session::{
-    CompileErrorPolicy, FileLanguage, Hash16, HostConfig, UpsertRequest, VerterHost,
-};
+use verter_session::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::analysis::types::Hash16;
 
 /// Construct a fresh `VerterHost` for these unit tests. Hermetic —
 /// no external corpus, no workspace files. The host is wrapped in

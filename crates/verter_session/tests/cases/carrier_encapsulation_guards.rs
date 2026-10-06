@@ -81,8 +81,8 @@ fn read_workspace_file(rel: &str) -> String {
         .unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
-const SEMANTIC_QUERY_RS: &str = "crates/verter_session/src/semantic_query.rs";
-const CARRIER_RS: &str = "crates/verter_session/src/semantic_query/carrier.rs";
+const SEMANTIC_QUERY_RS: &str = "crates/verter_type_engine/src/semantic_query.rs";
+const CARRIER_RS: &str = "crates/verter_type_engine/src/semantic_query/carrier.rs";
 
 /// The carrier variants the anti-tail rule polices: the three structural
 /// shells (`Foo<Arg>` / `typeof f<Arg>` / `import("m").G<Arg>`) plus the
@@ -249,7 +249,7 @@ struct AccessorSpec {
 const ACCESSOR_SPECS: [AccessorSpec; 10] = [
     AccessorSpec {
         name: "carrier_type_args",
-        vis: "pub(crate)",
+        vis: "pub",
         sig: "fn carrier_type_args(&self) -> &[SemanticNodeId]",
     },
     AccessorSpec {
@@ -279,22 +279,22 @@ const ACCESSOR_SPECS: [AccessorSpec; 10] = [
     },
     AccessorSpec {
         name: "typeof_head",
-        vis: "pub(crate)",
+        vis: "pub",
         sig: "fn typeof_head(&self) -> Option<TypeOfHead<'_>>",
     },
     AccessorSpec {
         name: "typeof_nominal_identity",
-        vis: "pub(crate)",
+        vis: "pub",
         sig: "fn typeof_nominal_identity(&self) -> Option<&ValueDeclIdentityPart>",
     },
     AccessorSpec {
         name: "bare_ref_head",
-        vis: "pub(crate)",
+        vis: "pub",
         sig: "fn bare_ref_head(&self) -> Option<BareRefHead<'_>>",
     },
     AccessorSpec {
         name: "import_type_head",
-        vis: "pub(crate)",
+        vis: "pub",
         sig: "fn import_type_head(&self) -> Option<ImportTypeHead<'_>>",
     },
 ];
@@ -2018,16 +2018,16 @@ fn carrier_exact_shape_allowlist_discriminates() {
          accessor is pinned to its EXACT signature."
     );
 
-    // Bypass — a VISIBILITY drift on a sanctioned accessor (`carrier_type_args`
-    // made `pub`). Exact-visibility pinning rejects it.
+    // Bypass — a VISIBILITY drift on a sanctioned accessor (`map_carrier_type_args`
+    // widened to `pub`). Exact-visibility pinning rejects it.
     assert!(
         rejects_mutation(|f| {
             let im = find_impl_mut(f, "SemanticNodeData");
-            find_method_mut(im, "carrier_type_args").vis =
+            find_method_mut(im, "map_carrier_type_args").vis =
                 syn::parse_str::<syn::Visibility>("pub").unwrap();
         }),
         "DISCRIMINATION (POINT 9): a visibility drift (`pub` instead of `pub(crate)`) on \
-         `carrier_type_args` must be REJECTED."
+         `map_carrier_type_args` must be REJECTED."
     );
 
     // Bypass — a NON-PRIVATE carrier method (`pub(super)` re-exposes it to the

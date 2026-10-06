@@ -1,5 +1,5 @@
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -185,8 +185,13 @@ fn style_summary(analysis: &FileAnalysisSnapshot, block: &CarrierBlockView) -> S
 mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
-    use verter_semantic::analysis::types::VueApiCallSite;
     use verter_semantic::analysis::*;
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::AnalyzedImport;
+    use verter_session_query::analysis::types::ReactivityKind;
+    use verter_session_query::analysis::types::VueApiCallSite;
+    use verter_session_query::analysis::types::VueApiClassification;
 
     #[test]
     fn test_script_code_lens() {

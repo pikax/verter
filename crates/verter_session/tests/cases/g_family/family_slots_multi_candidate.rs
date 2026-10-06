@@ -21,13 +21,13 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::ReadSetSignature;
-use verter_session::resolver_core::FactVersionRef;
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::{
     DepSignature, PrimitiveKind, ProjectionMode, ProjectionReductionContext, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
-use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -56,7 +56,7 @@ fn instantiate_identity_key(host: &VerterHost, canonical: &str, symbol: &str) ->
     // populates EXACTLY one slot and the assertions stay single-slot.
     verter_session::for_tests::instantiate_key_for_tests(
         host,
-        verter_session::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+        verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
             Arc::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
             Arc::from(symbol),
@@ -172,7 +172,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
     let member = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let normalize_key = SemanticQueryKey::ReduceUnion {
         members: Arc::from(vec![member].into_boxed_slice()),
-        nullability: verter_session::semantic_query::NullabilityPolicy::Strict,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
     };
 
     // Policy probes — the exhaustive, wildcard-free per-family
@@ -523,7 +523,7 @@ pub(crate) fn family_eviction_prefers_invalid_then_lru_valid_hit() {
     // satisfying + valid candidate — the LRU front 100 — and PROMOTES
     // it to the back (freshest).
     assert!(
-        graph.get_validated_with_host_for_tests(&key, &host),
+        verter_session::for_tests::get_validated_with_host(graph, &key, &host),
         "fixture invariant: the warm read must hit (all eight \
          candidates are valid and self-satisfying)."
     );

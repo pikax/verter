@@ -17,7 +17,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use verter_scheduler::cancellation::CancellationToken;
+use verter_execution::cancellation::CancellationToken;
 
 /// A freshly constructed token reads as not cancelled.
 #[test]

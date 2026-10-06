@@ -9,14 +9,43 @@ authors.workspace = true
 description = "Query-boundary crate for the shared semantic engine — owns the host port the query layer demands of the session host; parser/compiler-free dependency closure"
 publish = false
 
+[features]
+# Exposes test-only observability accessors and constructors to cross-crate test code.
+# Production binaries MUST NOT enable this feature.
+test-support = []
+# Measurement-only: enables the `currency_probe` wall-clock/call-count rail
+# (`src/currency_probe.rs`). Absent from `default`; requested ONLY by
+# measurement harnesses, never by a production edge.
+currency_probe = []
+
 # Dependency closure is a FIREWALL contract: this crate must never reach the
 # parser/compiler front-end (`verter_parser`, `verter_compiler`,
-# `verter_session`, `verter_type_expr_oxc`, any `oxc_*` beyond the span
-# primitive `verter_span` wraps) — direct OR through any feature. Enforced
+# `verter_session`, `verter_type_expr_oxc`, any `oxc_*` crate) — direct OR
+# through any feature. Enforced
 # structurally by the resolve-graph closure guard in
 # `tests/cases/dependency_closure_guard.rs`.
 [dependencies]
+# Member-list anchors take the analyzer-only mint authority.
+verter_analyzer_mint = { workspace = true }
+verter_analysis_inputs = { path = "../verter_analysis_inputs" }
+verter_audit = { path = "../verter_audit" }
+verter_debug_assert = { workspace = true }
+verter_language = { path = "../verter_language" }
+verter_macro_dto = { workspace = true }
+verter_no_typeexpr = { workspace = true }
+verter_span = { path = "../verter_span" }
 verter_type_expr = { workspace = true }
+bitflags = "2.11"
+glob = "0.3.3"
+imbl = "7.0.1"
+parking_lot = "0.12.5"
+rustc-hash = { workspace = true }
+smallvec = "1.15"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [dev-dependencies]
+static_assertions = "1.1.0"
 serde_json = { workspace = true }

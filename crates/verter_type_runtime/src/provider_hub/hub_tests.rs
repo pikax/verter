@@ -42,11 +42,12 @@ async fn generated_unit_admission_is_exact_and_refusals_write_nothing() {
         AdmissionRefusal, OverlayFileKind, OverlayMutation, OverlayPriority, ProjectBasis,
         ProjectBindingInput,
     };
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
     use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
 
     let root = "d:/ws";
@@ -382,11 +383,12 @@ async fn replacement_install_announces_dropped_admitted_state() {
         AdmissionRefusal, DroppedAdmittedCarrier, DroppedAdmittedState, OverlayMutation,
         ProjectBasis, ProjectBindingInput,
     };
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
     use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
 
     let root = "d:/ws";
@@ -4173,12 +4175,13 @@ async fn forward_admitted_file_refusals_write_nothing() {
     use super::{
         AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
     };
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::decide_generated_unit_admission;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
     let root = "d:/ws";
     let project = "d:/ws/tsconfig.json";
@@ -4352,12 +4355,13 @@ async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring()
     use super::{
         AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
     };
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::decide_generated_unit_admission;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
     let root = "d:/ws";
     let project = "d:/ws/tsconfig.json";
@@ -4483,12 +4487,13 @@ async fn forward_admitted_file_compensates_a_basis_only_drift_without_retiring()
 #[tokio::test]
 async fn first_overlay_failed_compensation_retires_only_its_incarnation() {
     use super::{AdmissionRefusal, ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::decide_generated_unit_admission;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
     let root = "d:/ws";
     let project = "d:/ws/tsconfig.json";
@@ -4702,12 +4707,13 @@ async fn failed_compensation_settles_inside_the_request_deadline_and_leaves_reco
     use super::{
         AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
     };
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::decide_generated_unit_admission;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
     let root = "d:/ws";
     let project = "d:/ws/tsconfig.json";
@@ -4841,12 +4847,13 @@ async fn compensating_release_holds_the_serving_fence_through_the_receipt_remova
     use super::{
         AdmissionRefusal, OverlayFileKind, OverlayPriority, ProjectBasis, ProjectBindingInput,
     };
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::decide_generated_unit_admission;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
     let root = "d:/ws";
     let project = "d:/ws/tsconfig.json";
@@ -4991,12 +4998,13 @@ async fn compensating_release_holds_the_serving_fence_through_the_receipt_remova
 #[tokio::test]
 async fn applied_overlay_survives_a_content_only_drift_without_restarting_the_engine() {
     use super::{AdmissionRefusal, OverlayMutation, ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::decide_generated_unit_admission;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
     let root = "d:/ws";
     let project = "d:/ws/tsconfig.json";
@@ -5121,11 +5129,12 @@ async fn applied_overlay_survives_a_content_only_drift_without_restarting_the_en
 
 async fn admitted_overlay_fixture() -> (ResilientHarness, MockProvider, super::AdmittedRequest) {
     use super::{AdmissionRefusal, ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::canonical_path::CanonicalPath;
     use verter_workspace::memory::{MemoryOptions, MemoryWorkspace};
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
     use verter_workspace::{decide_generated_unit_admission, GeneratedUnitAdmission};
 
     let root = "d:/ws";
@@ -5209,9 +5218,10 @@ fn replay_drift_resolver_with_final_edit(
     final_edit: Option<bool>,
 ) -> Arc<super::GeneratedUnitResolver> {
     use super::{GeneratedUnitInput, ProjectBasis, ProjectBindingInput};
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
     use verter_workspace::{CanonicalPath, MemoryOptions, MemoryWorkspace};
 
     let root = "d:/ws";
@@ -5551,9 +5561,10 @@ async fn managed_recovery_rebinds_proof_and_interrupts_a_held_generated_write() 
     use super::{AdmissionRefusal, GeneratedUnitInput, ProjectBasis, ProjectBindingInput};
     use std::future::Future;
     use std::task::Poll;
+    use verter_session_query::resolution::ProjectId;
     use verter_workspace::published_state::PublishedRoot;
     use verter_workspace::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-    use verter_workspace::workspace_snapshot::{ProjectId, SnapshotGeneration};
+    use verter_workspace::workspace_snapshot::SnapshotGeneration;
     use verter_workspace::{CanonicalPath, MemoryOptions, MemoryWorkspace};
 
     let root = "d:/ws";

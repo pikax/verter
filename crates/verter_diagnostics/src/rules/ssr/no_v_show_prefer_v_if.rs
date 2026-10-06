@@ -1,7 +1,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::{TemplateDirective, TemplateElement};
+use verter_session_query::analysis::template::{TemplateDirective, TemplateElement};
 
 /// Suggests using `v-if` instead of `v-show` during SSR. `v-show` renders the
 /// element with `display: none` causing a visible flash on hydration.
@@ -51,7 +51,7 @@ mod tests {
     use crate::context::LintContext;
     use crate::diagnostic::LintDiagnostic;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::{
+    use verter_session_query::analysis::template::{
         TemplateAnalysisSnapshot, TemplateDirective, TemplateElement,
     };
     use verter_span::Span;

@@ -12,9 +12,10 @@
 
 use std::sync::Arc;
 
-use verter_session::file_artifact_store::{FileArtifactKey, FileArtifactStore};
+use verter_session::file_artifact_store::FileArtifactStore;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::EvictionPolicyConfig;
+use verter_session_query::source::artifact_key::FileArtifactKey;
 
 fn synthetic_indexed(content_hash_seed: u8) -> Arc<IndexedReady> {
     let mut h = [0u8; 16];

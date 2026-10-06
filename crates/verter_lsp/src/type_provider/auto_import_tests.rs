@@ -57,8 +57,8 @@ fn strict_mapped_preamble_fixture() -> (String, LineIndex, LineIndex, ProviderPo
 
 #[test]
 fn moved_existing_import_edit_uses_mapped_binding_witness_before_preamble_classification() {
-    use verter_semantic::analysis::types::{AnalyzedImportBinding, ImportBindingKind};
-    use verter_semantic::analysis::AnalyzedImport;
+    use verter_session_query::analysis::types::AnalyzedImport;
+    use verter_session_query::analysis::types::{AnalyzedImportBinding, ImportBindingKind};
 
     let carrier_source =
         "<script setup lang=\"ts\">\nimport { ref } from \"vue\";\nconst base = ref(1);\n</script>\n";

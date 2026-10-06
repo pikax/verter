@@ -27,7 +27,7 @@ impl VerterHost {
     fn owning_project_ownership(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_semantic::resolver_core::ProjectOwnership> {
+    ) -> Option<verter_session_query::resolution::ProjectOwnership> {
         use verter_workspace::workspace_snapshot::ConfiguredOwnerResolution;
         let root = self.ws().published_root()?;
         let snapshot = &root.snapshot;
@@ -39,7 +39,7 @@ impl VerterHost {
             }
         };
         let project = snapshot.project(id);
-        Some(verter_semantic::resolver_core::ProjectOwnership {
+        Some(verter_session_query::resolution::ProjectOwnership {
             project_root: project.root.as_str().to_string(),
             tsconfig_path: snapshot.tsconfig_path(id).map(|p| p.as_str().to_string()),
         })
@@ -64,8 +64,13 @@ impl VerterHost {
         &self,
         owner_canonical_id: &str,
         tag: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Option<Vec<IntrinsicSurfaceMember>> {
         let vue_canonical = self.resolve_project_intrinsic_canonical(owner_canonical_id, "vue")?;
         let jsx_canonical =
@@ -115,9 +120,9 @@ impl VerterHost {
             .resolve_import_for_project_outcome(
                 &owner,
                 specifier,
-                verter_semantic::resolver_core::ResolutionContext {
-                    phase: verter_semantic::resolver_core::ResolvePhase::ProviderGraph,
-                    kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                verter_session_query::resolution::ResolutionContext {
+                    phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                 },
             )
             .into_publication();
@@ -135,9 +140,14 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         type_name: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
-    ) -> Option<verter_semantic::analysis::type_expand::ExpandedObjectShape> {
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
+    ) -> Option<verter_session_query::analysis::type_expand::ExpandedObjectShape> {
         // The root shape resolves in NODE DOMAIN through the query engine's
         // intrinsic rail (`project_intrinsic_root_shape`): the root-symbol
         // whole-surface PRIMARY, then the Class-A FALLBACK for re-exported /
@@ -157,8 +167,13 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         tag: &str,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
     ) -> Option<Vec<IntrinsicSurfaceMember>> {
         let intrinsics_shape = self.expand_project_intrinsic_shape_for_canonical(
             canonical_id,
@@ -197,7 +212,7 @@ impl VerterHost {
     }
 
     fn intrinsic_members_from_shape(
-        shape: verter_semantic::analysis::type_expand::ExpandedObjectShape,
+        shape: verter_session_query::analysis::type_expand::ExpandedObjectShape,
     ) -> Vec<IntrinsicSurfaceMember> {
         let mut members = rustc_hash::FxHashMap::default();
         for property in shape.properties {

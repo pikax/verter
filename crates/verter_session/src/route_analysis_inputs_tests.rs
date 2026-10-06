@@ -214,7 +214,7 @@ fn a_rejected_bind_projects_the_bound_basis_instead_of_panicking() {
     let ws = memory_workspace();
     let root = "/proj";
     ws.inject_file(format!("{root}/package.json"), Arc::from(ROUTER_PACKAGE));
-    let ctx = crate::request_context::RequestContext::new(
+    let ctx = verter_type_engine::request_context::RequestContext::new(
         7,
         Arc::from("/proj/package.json"),
         false,

@@ -66,7 +66,7 @@ fn request(id: u64, accepted: &AcceptedRegisteredCarrierSource) -> PublicationRe
     PublicationRequestContext::new(
         AuditRequestId::new(id),
         PublicationSurface::ProjectionHost,
-        verter_scheduler::cancellation::CancellationToken::new(),
+        verter_execution::cancellation::CancellationToken::new(),
         accepted.source().snapshot_id().clone(),
     )
 }

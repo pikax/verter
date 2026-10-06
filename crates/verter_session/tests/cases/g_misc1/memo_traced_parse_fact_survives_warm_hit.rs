@@ -52,16 +52,19 @@
 use std::sync::Arc;
 
 use serial_test::serial;
-use verter_semantic::facts::registry::InternedName;
-use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
+use verter_session_query::facts::registry::InternedName;
+use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 use verter_session::for_tests::{
     dispatch_execute_type_node_for_tests, dispatch_inject_parse_fact_for_tests,
     install_fact_tracer_for_tests,
 };
-use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, ParseFactRef};
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 use verter_session::{CompileErrorPolicy, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::{
+    fact_cache::{FactVersionRef, ParseFactRef},
+    fact_read_set::FactReadSetFinalise,
+};
+use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig {
@@ -131,7 +134,7 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
             canonical_id: Arc::from("/w/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -154,7 +157,7 @@ fn dispatch_warm_hit_bubbles_traced_parse_fact_into_outer_tracer() {
     // result. Catches a regression where future refactoring turns the
     // dispatch into an unconditional short-circuit (which would mean
     // the inner build never ran and the injection hook never fired).
-    use verter_session::semantic_query::QueryResult;
+    use verter_type_engine::semantic_query::QueryResult;
     assert!(
         matches!(cold_result, QueryResult::Value(_)),
         "cold dispatch must return Value (the inner build must have run); got {cold_result:?}"

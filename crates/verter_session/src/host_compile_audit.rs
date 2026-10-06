@@ -185,9 +185,9 @@ fn request_from_target(
 }
 
 use crate::component_meta_audit::{RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit};
-use crate::instant::Instant;
-use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::VerterHost;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 /// The full requested product set, read directly off the `CompileRequest`
 /// — every product the request carries, not a collapsed "primary path".
@@ -322,7 +322,7 @@ impl VerterHost {
                 } else {
                     verter_audit::AuditCaptureState::AuditDisabled
                 };
-                let parent_request_id = verter_scheduler::request_context::current_request_id()
+                let parent_request_id = verter_execution::request_context::current_request_id()
                     .map(|id| id.to_string());
                 let record = noop_compile_record(
                     request_id,
@@ -381,7 +381,7 @@ impl VerterHost {
                 } else {
                     verter_audit::AuditCaptureState::AuditDisabled
                 };
-                let parent_request_id = verter_scheduler::request_context::current_request_id()
+                let parent_request_id = verter_execution::request_context::current_request_id()
                     .map(|id| id.to_string());
                 let record = noop_compile_record(
                     request_id,
@@ -448,7 +448,7 @@ impl VerterHost {
                 verter_audit::AuditCaptureState::AuditDisabled
             };
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             let record = noop_compile_record(
                 request_id,
                 canonical_id,
@@ -484,7 +484,7 @@ impl VerterHost {
                 verter_audit::AuditCaptureState::AuditDisabled
             };
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             return AuditedResult::ok(
                 rejected,
                 noop_compile_record(
@@ -543,7 +543,7 @@ impl VerterHost {
             };
             let request_id = self.next_request_id();
             let parent_request_id =
-                verter_scheduler::request_context::current_request_id().map(|id| id.to_string());
+                verter_execution::request_context::current_request_id().map(|id| id.to_string());
             let record = noop_compile_record(
                 request_id,
                 canonical_id,
@@ -560,7 +560,7 @@ impl VerterHost {
         //    correctly when a closure issues both a component-meta
         //    and compile call.
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         // 4. Construct the request context with the Compile kind.
         let footprint_capture = self.config.footprint_capture;
@@ -584,7 +584,7 @@ impl VerterHost {
             self,
             Arc::clone(&ctx),
         ));
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         // 6. Capture parent correlation off the RequestContext (sniffed
         //    from the scheduler TLS at construction). A compile issued
@@ -732,7 +732,7 @@ impl VerterHost {
         // `compile_with_audit_options`. The `RequestContextGuard`
         // outlives this call.
         let (parse_us, transform_us, codegen_us, css_us, sourcemap_us, ct_ops) =
-            match crate::request_context::current_request_context() {
+            match verter_type_engine::request_context::current_request_context() {
                 Some(ctx) => (
                     ctx.compile_parse_us.load(Ordering::Relaxed),
                     ctx.compile_transform_us.load(Ordering::Relaxed),
@@ -889,11 +889,17 @@ pub(crate) fn debug_assert_compile_bound_attribution(
 /// The result of a compile whose macro semantics were aborted: no compiled
 /// product, only the abort. A cancelled request, a shut down host or a
 /// superseded view publishes nothing of the compile it interrupted.
-fn aborted_compile(abort: crate::semantic_query::ExecutionAbort) -> VerterCompileResult {
+fn aborted_compile(
+    abort: verter_type_engine::semantic_query::ExecutionAbort,
+) -> VerterCompileResult {
     let what = match abort {
-        crate::semantic_query::ExecutionAbort::Cancelled => "the request was cancelled",
-        crate::semantic_query::ExecutionAbort::Superseded => "the source view was superseded",
-        crate::semantic_query::ExecutionAbort::Shutdown => "the host shut down",
+        verter_type_engine::semantic_query::ExecutionAbort::Cancelled => {
+            "the request was cancelled"
+        }
+        verter_type_engine::semantic_query::ExecutionAbort::Superseded => {
+            "the source view was superseded"
+        }
+        verter_type_engine::semantic_query::ExecutionAbort::Shutdown => "the host shut down",
     };
     registered_compile_rejected("VerterE005", format!("compile aborted: {what}"))
 }

@@ -795,7 +795,7 @@ fn batch_over_overlay_session_applies_overlay_o1_not_per_job() {
 /// non-overlapping members). Name discovery is shallow/Navigate-owned, so a
 /// budget trip does NOT shrink this set — see the test's contract comment.
 fn prop_names(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> std::collections::BTreeSet<String> {
     meta.props.iter().map(|p| p.name.clone()).collect()
 }

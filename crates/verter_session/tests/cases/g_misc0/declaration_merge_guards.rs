@@ -47,7 +47,7 @@ fn walk_rs(path: &PathBuf, out: &mut Vec<PathBuf>) {
 /// never a last-wins `FxHashMap<String, TypeDeclInfo>` / `…ValueDeclInfo>` map.
 #[test]
 fn eval_env_type_symbols_are_grouped_not_last_wins_map() {
-    let src = read("crates/verter_semantic/src/analysis/type_eval.rs");
+    let src = read("crates/verter_session_query/src/declarations.rs");
     // The owner-aware `DeclMap<..Group>` carrier preserves the ordered
     // contributor-GROUP semantics (values stay `TypeDeclGroup` /
     // `ValueDeclGroup`) while keying canonically by `(owner, name)`.
@@ -79,7 +79,7 @@ fn eval_env_type_symbols_are_grouped_not_last_wins_map() {
 /// `insert` over an existing mergeable-kind name).
 #[test]
 fn eval_env_add_decl_appends_not_overwrites() {
-    let src = read("crates/verter_semantic/src/analysis/type_eval.rs");
+    let src = read("crates/verter_session_query/src/declarations.rs");
     let appends = src.matches("group.contributors.push(decl)").count();
     assert!(
         appends >= 2,
@@ -89,15 +89,18 @@ fn eval_env_add_decl_appends_not_overwrites() {
 }
 
 /// (iii) No `raw_body = TypeExpr::intersection(...)` declaration-merge synthesis
-/// anywhere in `verter_session` — the merge is a distinct `MergedDecl` carrier,
+/// anywhere in `verter_session` or `verter_type_engine` — the merge is a distinct `MergedDecl` carrier,
 /// never an intersection fabricated on the shallow symbol.
 #[test]
 fn no_intersection_merge_synthesis_in_verter_session() {
+    // The session crate and the type engine it builds on (the engine owns
+    // the semantic dispatch and lowering the merge would flow through).
     let mut files = Vec::new();
-    walk_rs(
-        &workspace_root().join("crates/verter_session/src"),
-        &mut files,
-    );
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let root = workspace_root().join(krate);
+        assert!(root.is_dir(), "source root {} is missing", root.display());
+        walk_rs(&root, &mut files);
+    }
     let mut hits = Vec::new();
     for file in files {
         let Ok(text) = fs::read_to_string(&file) else {
@@ -134,8 +137,8 @@ fn no_intersection_merge_synthesis_in_verter_session() {
 fn merged_decl_lowers_to_distinct_carrier_not_intersection() {
     use std::sync::Arc;
 
-    use verter_session::semantic_query::{ProjectionMode, SemanticNodeData};
     use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+    use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData};
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = host

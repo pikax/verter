@@ -3,8 +3,8 @@
 //!
 //! When a sub-request is initiated while a parent context is on the
 //! current thread's TLS slot (set up via
-//! [`verter_session::request_context::RequestContextGuard::install`]),
-//! the new [`verter_session::request_context::RequestContext`] sniffs
+//! [`verter_type_engine::request_context::RequestContextGuard::install`]),
+//! the new [`verter_type_engine::request_context::RequestContext`] sniffs
 //! the scheduler's `current_request_id()` at construction and stores
 //! it as `parent_request_id`. `AuditBuilder::finish` reads that slot
 //! and stamps the record's envelope-level
@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use verter_audit::AuditObserver;
-use verter_session::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 /// Strict TLS-only test — exercises the `RequestContext` parent
 /// capture path without invoking the full scheduler / audit
@@ -29,7 +29,7 @@ use verter_session::request_context::{RequestContext, RequestContextGuard};
 fn request_context_constructed_under_installed_parent_records_parent_request_id() {
     // Empty TLS at start.
     assert_eq!(
-        verter_scheduler::request_context::current_request_id(),
+        verter_execution::request_context::current_request_id(),
         None
     );
 
@@ -44,7 +44,7 @@ fn request_context_constructed_under_installed_parent_records_parent_request_id(
     // Parent is now installed: `current_request_id()` returns
     // Some(4242).
     assert_eq!(
-        verter_scheduler::request_context::current_request_id(),
+        verter_execution::request_context::current_request_id(),
         Some(4242),
         "parent guard install must populate scheduler-side TLS",
     );
@@ -69,7 +69,7 @@ fn request_context_constructed_under_installed_parent_records_parent_request_id(
     // guard drops must NOT carry a parent (stack discipline).
     drop(_parent_guard);
     assert_eq!(
-        verter_scheduler::request_context::current_request_id(),
+        verter_execution::request_context::current_request_id(),
         None
     );
     let orphan = RequestContext::new(
@@ -187,7 +187,7 @@ fn audited_resolve_without_parent_context_publishes_none_parent_request_id() {
 
     // No parent installed on TLS.
     assert_eq!(
-        verter_scheduler::request_context::current_request_id(),
+        verter_execution::request_context::current_request_id(),
         None
     );
 

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use super::super::ComponentMetaQueryEngine;
-use crate::semantic_query::{DeclIdentity, SemanticNodeData, SemanticNodeId};
 use crate::{HostConfig, VerterHost};
+use verter_type_engine::semantic_query::{DeclIdentity, SemanticNodeData, SemanticNodeId};
 
 /// A nesting past any native-stack or depth bound.
 const DEPTH: usize = 10_000;
@@ -17,7 +17,7 @@ const SCOPE: &str = "/src/App.vue";
 
 /// `leaf` under `DEPTH` array types, read on a 1 MiB thread by `probe`.
 fn under_nested_arrays<R: Send + 'static>(
-    leaf: impl FnOnce(&crate::semantic_query_memo::SemanticGraphStore) -> SemanticNodeId
+    leaf: impl FnOnce(&verter_type_engine::semantic_query_memo::SemanticGraphStore) -> SemanticNodeId
         + Send
         + 'static,
     probe: impl FnOnce(&mut ComponentMetaQueryEngine<'_>, SemanticNodeId) -> R + Send + 'static,
@@ -36,7 +36,7 @@ fn under_nested_arrays<R: Send + 'static>(
             }
 
             let fixture_dispatch_0 =
-                crate::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
             let mut engine = ComponentMetaQueryEngine::new(&host, &fixture_dispatch_0);
             probe(&mut engine, node)
         })
@@ -50,7 +50,7 @@ fn foreign(name: &str) -> DeclIdentity {
     DeclIdentity {
         canonical_id: Arc::from("/src/elsewhere.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        whole_hash: crate::semantic_query::HashValue::default(),
+        whole_hash: verter_type_engine::semantic_query::HashValue::default(),
         decl_name: Arc::from(name),
     }
 }
@@ -89,7 +89,7 @@ fn an_imported_utility_route_is_found_at_any_depth() {
                 base: DeclIdentity {
                     canonical_id: Arc::from("__builtin__"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    whole_hash: crate::semantic_query::HashValue::default(),
+                    whole_hash: verter_type_engine::semantic_query::HashValue::default(),
                     decl_name: Arc::from("Partial"),
                 },
                 args: Arc::from([argument]),
@@ -113,7 +113,7 @@ fn an_imported_generic_route_is_found_at_any_depth() {
     let found = under_nested_arrays(
         |graph| {
             let argument = graph.intern_node(SemanticNodeData::Primitive(
-                crate::semantic_query::PrimitiveKind::String,
+                verter_type_engine::semantic_query::PrimitiveKind::String,
             ));
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: foreign("Box"),

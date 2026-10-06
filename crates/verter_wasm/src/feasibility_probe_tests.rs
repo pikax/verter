@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use verter_ffi::convert::{host_to_ffi_symbol_entry, HostResolvedCompileProfiles};
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 
 use crate::compile_request_response::compile_request_response_to_wasm;
 use crate::host_compile_request_from_wire;

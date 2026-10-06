@@ -74,7 +74,7 @@ pub fn process_import<'a>(
                         // `imported_is_string_literal`.
                         imported: Some(s.imported.name().as_str()),
                         imported_is_string_literal: !s.imported.is_identifier(),
-                        span: Span::from(s.local.span),
+                        span: Span::new(s.local.span.start, s.local.span.end),
                         is_type_only: s.import_kind.is_type(),
                         import_kind: Some(ImportSpecifierKind::Named),
                     });
@@ -84,7 +84,7 @@ pub fn process_import<'a>(
                         name: s.local.name.as_str(),
                         imported: None,
                         imported_is_string_literal: false,
-                        span: Span::from(s.local.span),
+                        span: Span::new(s.local.span.start, s.local.span.end),
                         is_type_only: false,
                         import_kind: Some(ImportSpecifierKind::Default),
                     });
@@ -94,7 +94,7 @@ pub fn process_import<'a>(
                         name: s.local.name.as_str(),
                         imported: None,
                         imported_is_string_literal: false,
-                        span: Span::from(s.local.span),
+                        span: Span::new(s.local.span.start, s.local.span.end),
                         is_type_only: false,
                         import_kind: Some(ImportSpecifierKind::Namespace),
                     });
@@ -104,9 +104,9 @@ pub fn process_import<'a>(
     }
 
     ScriptImport {
-        span: Span::from(import.span),
+        span: Span::new(import.span.start, import.span.end),
         source: import.source.value.as_str(),
-        source_span: Span::from(import.source.span),
+        source_span: Span::new(import.source.span.start, import.source.span.end),
         bindings,
         is_type_only: import.import_kind.is_type(),
     }
@@ -168,7 +168,7 @@ fn process_export_parts<'a>(
             name,
             imported: None,
             imported_is_string_literal: false,
-            span: Span::from(spec.exported.span()),
+            span: Span::new(spec.exported.span().start, spec.exported.span().end),
             is_type_only: false,
             import_kind: None,
         });
@@ -180,10 +180,10 @@ fn process_export_parts<'a>(
     }
 
     ScriptExport {
-        span: Span::from(span),
+        span: Span::new(span.start, span.end),
         bindings,
         source: source.map(|s| s.value.as_str()),
-        source_span: source.map(|s| Span::from(s.span)),
+        source_span: source.map(|s| Span::new(s.span.start, s.span.end)),
         is_type_only,
     }
 }
@@ -204,7 +204,7 @@ pub fn process_all_export<'a>(
             name,
             imported: None,
             imported_is_string_literal: false,
-            span: Span::from(exported.span()),
+            span: Span::new(exported.span().start, exported.span().end),
             is_type_only: false,
             import_kind: None,
         }]
@@ -213,10 +213,10 @@ pub fn process_all_export<'a>(
     };
 
     ScriptExport {
-        span: Span::from(export.span),
+        span: Span::new(export.span.start, export.span.end),
         bindings,
         source: Some(export.source.value.as_str()),
-        source_span: Some(Span::from(export.source.span)),
+        source_span: Some(Span::new(export.source.span.start, export.source.span.end)),
         is_type_only: export.export_kind.is_type(),
     }
 }
@@ -235,7 +235,7 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
                     name: id.name.as_str(),
                     imported: None,
                     imported_is_string_literal: false,
-                    span: Span::from(id.span),
+                    span: Span::new(id.span.start, id.span.end),
                     is_type_only: false,
                     import_kind: None,
                 });
@@ -247,7 +247,7 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
                     name: id.name.as_str(),
                     imported: None,
                     imported_is_string_literal: false,
-                    span: Span::from(id.span),
+                    span: Span::new(id.span.start, id.span.end),
                     is_type_only: false,
                     import_kind: None,
                 });
@@ -275,7 +275,7 @@ fn collect_binding_pattern_names<'a>(
                 name: id.name.as_str(),
                 imported: None,
                 imported_is_string_literal: false,
-                span: Span::from(id.span),
+                span: Span::new(id.span.start, id.span.end),
                 is_type_only: false,
                 import_kind: None,
             });
@@ -345,7 +345,7 @@ mod tests {
     fn test_span_from_oxc_span() {
         // Span::from() does a direct conversion without any offset
         let oxc_span = oxc_span::Span::new(5, 12);
-        let span = Span::from(oxc_span);
+        let span = Span::new(oxc_span.start, oxc_span.end);
         assert_eq!(span.start, 5);
         assert_eq!(span.end, 12);
     }

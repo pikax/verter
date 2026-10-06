@@ -6,8 +6,8 @@
 
 use super::super::published_source::published_source_for_node;
 use super::{authored_package_alias_for_carrier, reduce_field_value_node};
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::ProjectionMode;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// Run the shared field-value reducer over every published surface in
 /// `evaluated_types` so consumers see the same finalised sources the
@@ -33,7 +33,7 @@ use crate::semantic_query::ProjectionMode;
 pub(crate) fn reduce_published_field_types(
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
-    evaluated_types: &mut verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    evaluated_types: &mut verter_session_query::analysis::type_expand::ExpandedComponentTypes,
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
 ) {
     verter_audit::attribute_scope!(PublishFieldTypes);
@@ -46,7 +46,7 @@ pub(crate) fn reduce_published_field_types(
     // making no decision on any materialised value.
     let dispatch = query_engine.dispatch;
     let transit_ctx =
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
             ProjectionMode::Navigate,
         );
 
@@ -104,8 +104,8 @@ pub(crate) fn reduce_published_field_types(
 #[allow(clippy::too_many_arguments)]
 fn finalize_published_prop_source(
     query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
-    dispatch: &ProjectSemanticDispatch<'_>,
-    transit_ctx: crate::semantic_query::ProjectionReductionContext,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    transit_ctx: verter_type_engine::semantic_query::ProjectionReductionContext,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     position: &mut verter_type_expr::facts::SourcePosition,
@@ -140,7 +140,7 @@ fn finalize_published_prop_source(
     let Some(input) = dispatch
         .raise_semantic_type_source_to_hot(
             &current,
-            crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                 scope_canonical_id,
                 scope_owner,
                 context: transit_ctx,

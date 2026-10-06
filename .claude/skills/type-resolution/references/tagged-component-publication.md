@@ -12,5 +12,5 @@ Two things are NOT weakened by that split, and both admit nothing at all:
 
 There is deliberately no retrospective rollback of a committed root when a later member is refused: rolling back would alter established relation semantics without adding correctness, because the refused member is never readable as a stale value — it is simply absent.
 
-Guards: `mixed_component_member_publish_is_fenced_backfill_behind_a_committed_root`, `pre_linearization_cancellation_admits_nothing`, `genuine_component_failure_admits_neither_root_nor_member` (`crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs`).
+Guards: `mixed_component_member_publish_is_fenced_backfill_behind_a_committed_root`, `pre_linearization_cancellation_admits_nothing`, `genuine_component_failure_admits_neither_root_nor_member` (`crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tests.rs`).
 

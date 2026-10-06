@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
-use crate::resolver_core::{FactVersionRef, SingleflightGroup, StoreView, ValidatedFactCache};
+use crate::resolver_core::{SingleflightGroup, ValidatedFactCache};
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Result of resolving an imported type root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,11 +43,9 @@ impl ImportedRootResult {
         }
     }
 
-    pub fn as_identity(
-        &self,
-    ) -> Option<verter_semantic::analysis::type_solver::ResolvedRootIdentity> {
+    pub fn as_identity(&self) -> Option<verter_session_query::type_solver::ResolvedRootIdentity> {
         self.resolved().map(|(canonical, owner, symbol)| {
-            verter_semantic::analysis::type_solver::ResolvedRootIdentity::new_in_owner(
+            verter_session_query::type_solver::ResolvedRootIdentity::new_in_owner(
                 canonical, owner, symbol,
             )
         })
@@ -289,20 +289,20 @@ impl Default for ImportedRootDb {
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for ImportedRootDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for ImportedRootDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ResolverState, ProjectGeneration]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
             self.clear();
         }
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for ImportedRootDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for ImportedRootDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         self.evict_provider(canonical_id);
         0
@@ -321,7 +321,8 @@ fn test_host() -> &'static crate::VerterHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{FactVersionRef, StoreView, StoreViewCompatToken};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
     struct TestView {
         token: StoreViewCompatToken,

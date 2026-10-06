@@ -1,4 +1,4 @@
-﻿//! Rule: define-model-type-required
+//! Rule: define-model-type-required
 //!
 //! When `defineModel()` is called without a type parameter, report a warning.
 //! Type parameters improve type safety for v-model bindings.
@@ -24,7 +24,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct DefineModelTypeRequired;
 
@@ -69,8 +70,8 @@ impl LintRule for DefineModelTypeRequired {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::types::AnalyzedMacro;
 
-    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

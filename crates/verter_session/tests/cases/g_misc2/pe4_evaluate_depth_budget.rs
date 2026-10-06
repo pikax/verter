@@ -9,10 +9,10 @@
 use std::process::Command;
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{for_tests, HostConfig, VerterHost};
+use verter_type_engine::semantic_query::{
     PrimitiveKind, ProjectionMode, ProjectionReductionContext, ResultCompleteness, SemanticNodeData,
 };
-use verter_session::{for_tests, HostConfig, VerterHost};
 
 const CHILD_MARKER: &str = "VERTER_DEFERRED_HEAP_CHILD";
 const CHAIN_DEPTH: usize = 10_000;

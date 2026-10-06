@@ -123,7 +123,7 @@ fn test_binding(project: &str) -> ProjectBinding {
         "5.9.0",
         env_dims,
         Vec::new(),
-        verter_workspace::ProjectId(0),
+        verter_session_query::resolution::ProjectId(0),
         verter_workspace::SnapshotGeneration(1),
     )
 }
