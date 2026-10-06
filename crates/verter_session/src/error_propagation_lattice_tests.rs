@@ -8,17 +8,17 @@
 
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::ReadSetSignature;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef};
-use crate::semantic_query::admit::{admit_decision, Admission};
-use crate::semantic_query::{
+use crate::{CompileErrorPolicy, HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
+use verter_session_query::facts::registry::{
+    FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
+};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::admit::{admit_decision, Admission};
+use verter_type_engine::semantic_query::{
     BrokenInputClass, IndexKey, PathSegment, PrimitiveKind, QueryError, QueryResult,
     RelationResult, ResultTaint, SemanticNodeData, SemanticNodeId,
-};
-use crate::{CompileErrorPolicy, HostConfig, VerterHost};
-use verter_semantic::facts::registry::{
-    FactKey, FactLane, InternedName, InternedSpecifier, SymbolSpace,
 };
 
 fn host() -> VerterHost {
@@ -37,7 +37,7 @@ fn import_route_fact() -> FactVersionRef {
     // The import-route rooting rail is a REAL resolve-domain resolution
     // witness (a forged one is impossible by design — `ResolutionFactRef`'s
     // fields are sealed to `verter_workspace`).
-    crate::fact_signature_helpers::resolution_witness_fact_for_tests()
+    crate::for_tests::resolution_witness_fact_for_tests()
 }
 
 fn negative_resolved_import_fact() -> FactVersionRef {
@@ -48,7 +48,7 @@ fn negative_resolved_import_fact() -> FactVersionRef {
             binding: InternedName::from("X"),
             space: SymbolSpace::Type,
             resolved_canonical: Arc::from(
-                crate::resolved_import_facts_producer::UNRESOLVED_SENTINEL,
+                verter_session_query::resolution::unresolved::UNRESOLVED_SENTINEL,
             ),
             resolved_source_name: InternedName::from("X"),
         },
@@ -58,7 +58,9 @@ fn negative_resolved_import_fact() -> FactVersionRef {
 }
 
 /// Resolve the absorbed result node id from a reducer's `QueryBuildOutput`.
-fn absorbed_node(out: crate::project_semantic_dispatch::walk::QueryBuildOutput) -> SemanticNodeId {
+fn absorbed_node(
+    out: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput,
+) -> SemanticNodeId {
     match out.result {
         QueryResult::Value(id) => id,
         other => panic!("expected an absorbed Value, got {other:?}"),
@@ -172,12 +174,12 @@ fn error_any_never_propagation_lattice() {
     // algebra; every construction routes through the one canonical
     // builder pair, so the laws are exercised at the authority itself —
     // not via retired per-reducer hooks.
-    use crate::project_semantic_dispatch::canonical_algebra;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra;
     // union: X | never = X (the `never` arm is dropped, singleton folds).
     let u = canonical_algebra::intern_ordered_union(
         graph,
         &[string, never],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
     .node;
     assert_eq!(
@@ -189,7 +191,7 @@ fn error_any_never_propagation_lattice() {
     let u = canonical_algebra::intern_ordered_union(
         graph,
         &[string, any],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
     .node;
     assert_eq!(
@@ -201,7 +203,7 @@ fn error_any_never_propagation_lattice() {
     let u = canonical_algebra::intern_ordered_union(
         graph,
         &[string, unknown],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
     .node;
     assert_eq!(
@@ -214,7 +216,7 @@ fn error_any_never_propagation_lattice() {
     let u = canonical_algebra::intern_ordered_union(
         graph,
         &[string, number],
-        crate::semantic_query::NullabilityPolicy::Strict,
+        verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
     .node;
     assert!(
@@ -305,11 +307,17 @@ fn error_any_never_propagation_lattice() {
 
     // The single-segment indexed-access shape is recognised; a member path is
     // NOT (member projection is a distinct surface).
-    assert!(ProjectSemanticDispatch::project_path_is_indexed_access(&[
+    assert!(ProjectSemanticDispatch::<
+        crate::resolver_core::HostCapabilities,
+    >::project_path_is_indexed_access(&[
         PathSegment::Index(IndexKey::String(Arc::from("k")))
     ]));
-    assert!(!ProjectSemanticDispatch::project_path_is_indexed_access(&[
-        PathSegment::Member(crate::semantic_query::PropertyKey::identifier("foo"))
+    assert!(!ProjectSemanticDispatch::<
+        crate::resolver_core::HostCapabilities,
+    >::project_path_is_indexed_access(&[
+        PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
+            "foo"
+        ))
     ]));
 
     // mapped over never = {} (empty object); a DIRECT mapping over unknown is
@@ -463,7 +471,7 @@ fn conditional_any_check_unions_both_branches() {
 /// infer-binding path (`absorb_conditional` returns `None`).
 #[test]
 fn conditional_any_check_detects_nested_infer_patterns() {
-    use crate::semantic_query::{DeclIdentity, SurfaceMember};
+    use verter_type_engine::semantic_query::{DeclIdentity, SurfaceMember};
 
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -497,19 +505,19 @@ fn conditional_any_check_detects_nested_infer_patterns() {
 
     // (2) infer nested inside an `Object` property value:
     //     `any extends { x: infer U } ? U : Y`.
-    let obj_surface = crate::test_surface_view! {
+    let obj_surface = verter_type_engine::test_surface_view! {
         members: Arc::from(
             vec![SurfaceMember {
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 visibility: verter_type_expr::MemberVisibility::Public,
-                key: crate::semantic_query::AuthoredPropertyKey::string("x"),
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("x"),
                 value: infer_u,
                 optional: false,
                 readonly: false,
                 method_kind: None,
                 has_implementation_body: false,
-                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                declared_in_macro_type_arg: verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
                 spans: Default::default(),
                 declaration_origin: None,
             }]

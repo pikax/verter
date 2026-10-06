@@ -27,12 +27,13 @@
 //! assertion that a count is zero is paired with a control proving the
 //! count moves when work does run.
 
+use crate::file_artifact_store::FileArtifactKeySource;
 use std::sync::Arc;
 
-use crate::resolver_core::StoreView;
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_scheduler::stage::Priority;
+use verter_session_query::facts::store_view::StoreView;
 
 const DEP_ID: &str = "/proj/dep.ts";
 const DEP_SRC: &str = "export const d = 1\nexport interface D { x: number }\n";
@@ -111,10 +112,10 @@ fn host_with_n_materialized_files(n: usize) -> Arc<VerterHost> {
         let indexed = Arc::new(crate::project_type_store::IndexedReady::new_for_test(
             whole_hash,
         ));
-        let key = crate::file_artifact_store::FileArtifactKey::for_indexed(
+        let key = verter_session_query::source::artifact_key::FileArtifactKey::for_indexed(
             Arc::clone(&canonical),
             &indexed,
-            crate::file_artifact_store::BASE_PARSE_ENV_HASH,
+            verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         );
         host.project_type_store().indexed().insert_artifacts(
             key,
@@ -339,8 +340,8 @@ fn view_answers_the_premutation_world_for_a_dependency_it_never_observed() {
 
 #[test]
 fn a_point_miss_rejects_and_enumerates_nothing() {
-    use verter_semantic::facts::registry::{FactLane, InternedName, SymbolSpace};
-    use verter_semantic::facts::FactKey;
+    use verter_session_query::facts::registry::{FactLane, InternedName, SymbolSpace};
+    use verter_session_query::facts::FactKey;
     use verter_type_expr::facts::FactPropertyKey;
 
     let host = host_with_n_materialized_files(250);
@@ -358,7 +359,7 @@ fn a_point_miss_rejects_and_enumerates_nothing() {
     assert!(
         !StoreView::validates_parse_domain(
             &view,
-            &crate::resolver_core::ParseFactRef {
+            &verter_session_query::facts::fact_cache::ParseFactRef {
                 canonical_id: ABSENT.to_string(),
                 key: FactKey::MemberPresence {
                     exporter: InternedName::from("Missing"),

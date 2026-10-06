@@ -40,9 +40,12 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::{FactVersionRef, StoreView};
-use crate::types::{FileLanguage, Hash16, HostConfig, ProjectionMode, UpsertRequest};
+use crate::types::{FileLanguage, HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// `/src/types.ts` — a cross-file dep imported by the owner. Its export
 /// route is a genuine cross-file route dependency of the owner's
@@ -282,7 +285,7 @@ fn explicit_overlay_owner_never_reloads_evicted_base_and_uses_overlay_hash() {
     host.evict(owner);
 
     let overlay_source: Arc<str> = Arc::from(OVERLAY);
-    let overlay_hash = crate::hash::hash_16(OVERLAY.as_bytes());
+    let overlay_hash = verter_semantic_source::source_hash::hash_16(OVERLAY.as_bytes());
     let mut overlays = rustc_hash::FxHashMap::default();
     overlays.insert(owner.to_string(), overlay_source);
     let mut overlay_hashes = rustc_hash::FxHashMap::default();
@@ -341,7 +344,7 @@ fn has_syntactic_route_fact(facts: &[FactVersionRef], canonical: &str) -> bool {
             f,
             FactVersionRef::Parse(parse)
                 if parse.canonical_id == canonical
-                    && parse.key == verter_semantic::facts::FactKey::SyntacticRouteInterface
+                    && parse.key == verter_session_query::facts::FactKey::SyntacticRouteInterface
         )
     })
 }
@@ -368,7 +371,7 @@ fn syntactic_route_hash(facts: &[FactVersionRef], owner: &str) -> Option<Hash16>
     facts.iter().find_map(|fact| match fact {
         FactVersionRef::Parse(parse)
             if parse.canonical_id == owner
-                && parse.key == verter_semantic::facts::FactKey::SyntacticRouteInterface =>
+                && parse.key == verter_session_query::facts::FactKey::SyntacticRouteInterface =>
         {
             Some(parse.expected_hash)
         }
@@ -377,7 +380,7 @@ fn syntactic_route_hash(facts: &[FactVersionRef], owner: &str) -> Option<Hash16>
 }
 
 fn prop_names(
-    meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Vec<String> {
     let mut names: Vec<String> = meta.props.iter().map(|p| p.name.clone()).collect();
     names.sort_unstable();

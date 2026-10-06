@@ -1,4 +1,4 @@
-﻿//! Rule: conditional-root-complex
+//! Rule: conditional-root-complex
 //!
 //! Warns when a root `v-if`/`v-else-if` condition is too complex for generic
 //! narrowing. Only active when `conditional_root_narrowing` is enabled in config.
@@ -11,7 +11,7 @@ use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{FileContext, LintRule, RuleCategory};
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::types::AnalyzedMacroKind;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct ConditionalRootComplex;
 
@@ -194,11 +194,13 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateElement;
+
+    use verter_session_query::analysis::types::{
         AnalyzedMacro, AnalyzedMacroKind, AnalyzedPropField, TypeResolutionSource,
     };
-    use verter_semantic::analysis::ScriptAnalysisSnapshot;
     use verter_span::Span;
 
     fn make_script_with_props(prop_names: &[&str]) -> ScriptAnalysisSnapshot {

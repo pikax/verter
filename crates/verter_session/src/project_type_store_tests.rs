@@ -141,7 +141,8 @@ fn seed_all_three_sub_states(host: &super::VerterHost, canonical: &str) {
                 },
                 diagnostics: Default::default(),
                 last_access_tick: 0,
-                fact_dep_signature: crate::fact_signature_helpers::ReadSetSignature::empty(),
+                fact_dep_signature:
+                    verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
             },
         );
     }
@@ -845,10 +846,10 @@ fn compile_cache_lives_on_project_type_store() {
 fn semantic_db_evict_canonical_invalidates_via_unified_cascade() {
     use crate::types::HostConfig;
     use crate::VerterHost;
-    use verter_semantic::facts::component::ComponentSurface;
     use verter_semantic::query::Completeness;
     use verter_semantic::refs::FileRef;
     use verter_semantic::revision::RevisionMarker;
+    use verter_session_query::facts::component::ComponentSurface;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let canonical = "/probe-semantic-evict.ts";
@@ -906,10 +907,10 @@ fn semantic_db_evict_canonical_invalidates_via_unified_cascade() {
 fn bump_project_generation_evicts_all_rehomed_caches() {
     use crate::types::{HostConfig, ProfileState};
     use crate::VerterHost;
-    use verter_semantic::facts::component::ComponentSurface;
     use verter_semantic::query::Completeness;
     use verter_semantic::refs::FileRef;
     use verter_semantic::revision::RevisionMarker;
+    use verter_session_query::facts::component::ComponentSurface;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let canonical = "/probe-bump-all-four.ts";

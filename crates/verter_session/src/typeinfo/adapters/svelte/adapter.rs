@@ -377,8 +377,8 @@ mod tests {
     }
 
     /// One slot field with the given name (an otherwise-empty fixture).
-    fn slot_field(name: &str) -> verter_semantic::analysis::types::AnalyzedSlotField {
-        verter_semantic::analysis::types::AnalyzedSlotField {
+    fn slot_field(name: &str) -> verter_session_query::analysis::types::AnalyzedSlotField {
+        verter_session_query::analysis::types::AnalyzedSlotField {
             props_anchor: Default::default(),
             name: name.to_string(),
             is_required: false,
@@ -438,7 +438,7 @@ mod tests {
             .expect("svelte registered");
         let ctx = FrameworkAdapterCtx::new(registration, &host);
 
-        let prop = |name: &str| verter_semantic::analysis::types::AnalyzedPropField {
+        let prop = |name: &str| verter_session_query::analysis::types::AnalyzedPropField {
             name: name.to_string(),
             is_optional: false,
             span: verter_span::Span::default(),
@@ -447,7 +447,7 @@ mod tests {
             type_expr_scope: None,
             description: None,
             tags: Vec::new(),
-            resolution_source: verter_semantic::analysis::types::TypeResolutionSource::Rust,
+            resolution_source: verter_session_query::analysis::types::TypeResolutionSource::Rust,
             resolution_error: None,
             declared_in_macro_type_arg: false,
             constructor_bindings: Vec::new(),

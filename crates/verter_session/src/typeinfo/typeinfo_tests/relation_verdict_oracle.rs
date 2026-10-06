@@ -150,11 +150,11 @@ fn relation_infer_rows_capture_ordered_bindings_with_projected_bounds() {
 
 #[test]
 fn relate_family_execute_is_the_live_relation_authority() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use std::sync::Arc;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionMode, QueryResult, RelationOutcome, SemanticQueryApi, SemanticQueryValue,
     };
-    use std::sync::Arc;
 
     let host = make_host_with_footprint();
     let canonical = "/fixtures/relate_family_guard.ts";
@@ -207,12 +207,12 @@ fn relate_family_execute_is_the_live_relation_authority() {
 /// a type node); a generation bump misses the warm read and recomputes.
 #[test]
 fn relate_family_execute_warm_replays_decided_payload() {
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
+    use std::sync::Arc;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
         ProjectionMode, QueryError, QueryResult, RelationOutcome, SemanticQueryApi,
         SemanticQueryValue,
     };
-    use std::sync::Arc;
 
     let host = make_host_with_footprint();
     let canonical = "/fixtures/relate_family_warm_replay.ts";

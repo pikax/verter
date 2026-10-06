@@ -12,7 +12,7 @@
 
 use super::*;
 
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_resolution::ModuleResolverCore;
 
 /// The owner's root, or `None` for the terminal `NoProject` answer.
 fn owned_root(ownership: &ProjectOwnership) -> Option<&str> {

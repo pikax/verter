@@ -58,7 +58,7 @@ const PROP_STEPS: &str = r#"[
 /// [`super::nested_v_for_runtime_proof`] so the assertion and its fixture
 /// stay together.
 fn assemble_inline_client_module(source: &str, canonical_id: &str) -> String {
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let (snapshot, artifact) = crate::parse::parse_vue_snapshot(
         canonical_id,
         source,

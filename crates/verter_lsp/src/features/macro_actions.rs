@@ -1,8 +1,9 @@
 // Macro code actions: generate/augment defineSlots and defineEmits from template usage.
 
 use tower_lsp_server::ls_types::*;
-use verter_semantic::analysis::types::{AnalysisFlags, AnalyzedBinding, AnalyzedMacroKind};
-use verter_session::{AnalysisSourceRevision, FileAnalysisSnapshot};
+use verter_session_query::analysis::file_analysis::AnalysisSourceRevision;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::{AnalysisFlags, AnalyzedBinding, AnalyzedMacroKind};
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -41,7 +42,7 @@ fn resolve_binding_type(ctx: Option<&SlotTypeContext<'_>>, expression: &str) -> 
 
 /// Build the slot member text for a single slot in the defineSlots type literal.
 fn build_slot_member(
-    slot: &verter_semantic::analysis::template::DefinedSlot,
+    slot: &verter_session_query::analysis::template::DefinedSlot,
     type_ctx: Option<&SlotTypeContext<'_>>,
 ) -> String {
     let mut member = String::new();
@@ -235,7 +236,7 @@ fn generate_define_slots_action(
     source: &str,
     analysis: &FileAnalysisSnapshot,
     setup_block: &CarrierBlockView,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     line_index: &LineIndex,
     type_ctx: &SlotTypeContext<'_>,
 ) -> Option<CodeActionOrCommand> {
@@ -302,7 +303,7 @@ fn generate_define_emits_action(
 /// runtime macro) yields no action — never a fallback offset.
 fn add_missing_slots_action(
     analysis: &FileAnalysisSnapshot,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     edit_target: &LiveEditTarget<'_>,
     type_ctx: &SlotTypeContext<'_>,
 ) -> Option<CodeActionOrCommand> {
@@ -355,7 +356,7 @@ fn add_missing_slots_action(
 /// of the slot it belongs to.
 fn prop_mismatch_actions(
     analysis: &FileAnalysisSnapshot,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     edit_target: &LiveEditTarget<'_>,
     type_ctx: &SlotTypeContext<'_>,
 ) -> Vec<CodeActionOrCommand> {
@@ -467,7 +468,7 @@ fn prop_mismatch_actions(
 /// element list, so it is fail-closed rather than emitting invalid code.
 fn add_missing_emits_action(
     analysis: &FileAnalysisSnapshot,
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     edit_target: &LiveEditTarget<'_>,
 ) -> Option<CodeActionOrCommand> {
     // Find the defineEmits macro

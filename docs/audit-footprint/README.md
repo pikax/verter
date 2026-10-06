@@ -28,7 +28,7 @@ schema absence rather than a fourth identity state.
 ### Request context
 
 Every audited request installs a thread-local
-[`RequestContext`](https://github.com/pikax/verter/blob/main/crates/verter_session/src/request_context.rs)
+[`RequestContext`](https://github.com/pikax/verter/blob/main/crates/verter_type_engine/src/request_context.rs)
 that carries:
 
 - `request_id: u64` — monotonic; zero reserved for "not populated".

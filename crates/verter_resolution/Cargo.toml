@@ -1,0 +1,23 @@
+[package]
+name = "verter_resolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Reusable module-resolution kernel for workspace authority"
+publish = false
+
+[dependencies]
+verter_session_query = { workspace = true }
+verter_audit = { path = "../verter_audit" }
+verter_language = { path = "../verter_language" }
+verter_type_expr = { workspace = true }
+rustc-hash = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+verter_span = { path = "../verter_span" }
+verter_session_query = { workspace = true, features = ["test-support"] }
+static_assertions = "1.1.0"

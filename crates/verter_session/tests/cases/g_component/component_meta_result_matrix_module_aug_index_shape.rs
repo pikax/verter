@@ -9,12 +9,12 @@
 use std::sync::Arc;
 use std::{fs, path};
 
-use verter_semantic::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
-use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::component_meta_result_db::ComponentMetaResultEntry;
-use verter_session::resolver_core::{
-    FactVersionRef, PermissiveStoreView, RouteSurfaceFactRef, StoreView,
-};
+use verter_session::resolver_core::PermissiveStoreView;
+use verter_session_query::facts::fact_cache::{FactVersionRef, RouteSurfaceFactRef};
+use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_session_query::facts::store_view::StoreView;
+use verter_session_query::facts::{FactKey, FactLane};
 
 fn read_session_src(rel: &str) -> String {
     let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -36,8 +36,9 @@ fn component_meta_result_signature_carries_module_aug_index_shape() {
         .expect("ComponentMetaResultEntry struct close");
     let window = &src[idx..idx + end];
     assert!(
-        window.contains("read_set_signature: crate::fact_signature_helpers::ReadSetSignature")
-            || window.contains("read_set_signature: ReadSetSignature"),
+        window.contains(
+            "read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature"
+        ) || window.contains("read_set_signature: ReadSetSignature"),
         "Matrix slice: ComponentMetaResultEntry must carry \
          `read_set_signature: ReadSetSignature`. Window:\n{window}"
     );
@@ -57,9 +58,9 @@ fn component_meta_result_signature_carries_module_aug_index_shape() {
 
     let entry: ComponentMetaResultEntry<u32> = ComponentMetaResultEntry {
         payload: Arc::new(0u32),
-        read_set_signature: verter_session::for_tests::ReadSetSignature::new(Arc::clone(
-            &signature,
-        )),
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            Arc::clone(&signature),
+        ),
         validated_at_generation: 0,
     };
     assert!(

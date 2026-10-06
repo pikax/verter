@@ -5,7 +5,7 @@
 //! Wires the shared
 //! [`crate::audited_request::AuditedRequestBuilder::run`] generic
 //! harness to the host-bound
-//! [`crate::project_semantic_dispatch::ProjectSemanticDispatch`] so
+//! [`verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch`] so
 //! consumers (component-meta, LSP hover, MCP) can drive a query
 //! through `SemanticQueryApi` and receive the matching
 //! [`verter_audit::RequestAuditRecord`] in the same call.
@@ -17,11 +17,11 @@
 //!    `RequestKind::TypeResolution`.
 //! 2. Branch on the registration's `Active` / `Noop` arm to install
 //!    the matching observer in TLS (real
-//!    [`crate::request_context::RequestContextGuard`] or
+//!    [`verter_type_engine::request_context::RequestContextGuard`] or
 //!    [`verter_audit::install_noop_observer`]).
 //! 3. Run the resolver query through `ProjectSemanticDispatch::execute`.
 //! 4. Snapshot the per-request type-resolution counters from the
-//!    active [`crate::request_context::RequestContext`].
+//!    active [`verter_type_engine::request_context::RequestContext`].
 //! 5. Build the [`verter_audit::RequestAuditRecord`] with
 //!    [`verter_audit::RequestKindPayload::TypeResolution`].
 //! 6. Finalise through the registration and return an
@@ -38,11 +38,13 @@ use verter_audit::{
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
-use crate::instant::Instant;
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::{ProjectionMode, SemanticNodeId, SemanticQueryApi, SemanticQueryKey};
 use crate::VerterHost;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::{
+    ProjectionMode, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
+};
 
 /// Outcome of a type-resolution query — the resolved
 /// [`SemanticNodeId`] (or `None` if dispatch returned a miss). The
@@ -54,15 +56,15 @@ pub type TypeResolutionResult = SemanticNodeId;
 /// Closed request-fault taxonomy for the type-resolution entry-points.
 ///
 /// Distilled from the FAULT arms of
-/// [`crate::semantic_query::QueryError`]. A `QueryError` describes
+/// [`verter_type_engine::semantic_query::QueryError`]. A `QueryError` describes
 /// every way a semantic query can fail to produce a value, but only a
 /// subset of those are *request faults* the public API surfaces as an
 /// `Err`:
 ///
 /// - The non-fault arms classified by `from_query_error` —
-///   [`crate::semantic_query::QueryError::Miss`],
-///   [`crate::semantic_query::QueryError::RecursiveRef`],
-///   [`crate::semantic_query::QueryError::DeclPlaceholder`], and the
+///   [`verter_type_engine::semantic_query::QueryError::Miss`],
+///   [`verter_type_engine::semantic_query::QueryError::RecursiveRef`],
+///   [`verter_type_engine::semantic_query::QueryError::DeclPlaceholder`], and the
 ///   typed semantic-sentinel control carriers (cycle / miss /
 ///   unrepresentable / macro-placeholder) — are NOT faults: they
 ///   ride the success arm as `Ok(None)` (no resolved node, but the
@@ -88,7 +90,7 @@ pub enum TypeResolutionRequestError {
         name: Arc<str>,
     },
     /// The resolver hit one of its structured safety rails.
-    BudgetExceeded(crate::semantic_query::BudgetExceededFailure),
+    BudgetExceeded(verter_session_query::inputs::budget::BudgetExceededFailure),
     /// The completion fence exhausted its retry budget.
     UnstableState {
         /// Number of retry attempts the fence made before giving up.
@@ -104,7 +106,7 @@ pub enum TypeResolutionRequestError {
 }
 
 impl TypeResolutionRequestError {
-    /// Classify a [`crate::semantic_query::QueryError`] as either a
+    /// Classify a [`verter_type_engine::semantic_query::QueryError`] as either a
     /// request fault (`Some(err)` → carrier `Err`) or a non-fault miss
     /// (`None` → carrier `Ok(None)`).
     ///
@@ -121,8 +123,8 @@ impl TypeResolutionRequestError {
     /// `AliasCycle` / `Other` / `ValueDomainMismatch` (the last has no
     /// dedicated arm — it rides the text-bearing `Other` carrier).
     #[must_use]
-    pub fn from_query_error(err: &crate::semantic_query::QueryError) -> Option<Self> {
-        use crate::semantic_query::QueryError;
+    pub fn from_query_error(err: &verter_type_engine::semantic_query::QueryError) -> Option<Self> {
+        use verter_type_engine::semantic_query::QueryError;
         match err {
             QueryError::Miss
             | QueryError::RecursiveRef { .. }
@@ -164,7 +166,7 @@ impl TypeResolutionRequestError {
             QueryError::IncompleteSemanticOperand { reasons } => Some(Self::Other(Arc::from(
                 format!(
                     "incomplete semantic operand force: {}",
-                    crate::semantic_query::compat_spelling::spell_partial_reasons(*reasons)
+                    verter_type_engine::semantic_query::compat_spelling::spell_partial_reasons(*reasons)
                 )
                 .as_str(),
             ))),
@@ -226,7 +228,7 @@ impl VerterHost {
         // Stamp a fresh request id and bookkeeping for the harness'
         // multi-request guard. Mirrors the component-meta entry-point.
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         // Determine the projection mode from the query so the audit
         // payload reports the caller's intent (Identity for queries
@@ -263,7 +265,7 @@ impl VerterHost {
             ctx.audit_registration.get().is_none(),
             "freshly-constructed RequestContext must have no audit_registration",
         );
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         // Install the matching TLS observer at the audit boundary.
         // Active registrations install the real
@@ -292,8 +294,9 @@ impl VerterHost {
                     &current_view,
                     overlay,
                 );
-                let host_ctx_ref: &dyn crate::resolver_core::resolver_context::ResolverContext =
-                    &host_ctx;
+                let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+                    crate::resolver_core::HostCapabilities,
+                > = &host_ctx;
                 match registration.as_ref() {
                     AuditRequestRegistration::Active(_) => {
                         let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
@@ -307,8 +310,8 @@ impl VerterHost {
                     }
                 }
             }
-            None => crate::semantic_query::QueryResult::Error(
-                crate::semantic_query::QueryError::UnstableState {
+            None => verter_type_engine::semantic_query::QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::UnstableState {
                     attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
                 },
             ),
@@ -321,11 +324,11 @@ impl VerterHost {
         // - Error(request fault) → Err(fault).
         let outcome: Result<Option<TypeResolutionResult>, TypeResolutionRequestError> =
             match &result {
-                crate::semantic_query::QueryResult::Value(
-                    crate::semantic_query::SemanticQueryOutput { value: node, .. },
+                verter_type_engine::semantic_query::QueryResult::Value(
+                    verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
                 ) => Ok(Some(*node)),
-                crate::semantic_query::QueryResult::Recursive(node) => Ok(Some(*node)),
-                crate::semantic_query::QueryResult::Error(err) => {
+                verter_type_engine::semantic_query::QueryResult::Recursive(node) => Ok(Some(*node)),
+                verter_type_engine::semantic_query::QueryResult::Error(err) => {
                     match TypeResolutionRequestError::from_query_error(err) {
                         Some(fault) => Err(fault),
                         None => Ok(None),
@@ -548,9 +551,9 @@ fn query_projection_mode(key: &SemanticQueryKey) -> ProjectionMode {
 #[cfg(test)]
 mod request_error_classification_tests {
     use super::TypeResolutionRequestError;
-    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
-    use crate::semantic_query::QueryError;
     use std::sync::Arc;
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+    use verter_type_engine::semantic_query::QueryError;
 
     fn budget_failure() -> BudgetExceededFailure {
         BudgetExceededFailure {

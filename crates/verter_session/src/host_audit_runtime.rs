@@ -36,7 +36,7 @@ use rustc_hash::FxHashMap;
 use verter_audit::{AuditConfig, RequestAuditRecord};
 
 use crate::component_meta_audit::AuditRecordsStore;
-use crate::request_context::RequestContext;
+use verter_type_engine::request_context::RequestContext;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
@@ -616,6 +616,12 @@ pub enum AuditRequestRegistration {
     /// No-op registration — the audit-config filter rejected the
     /// request kind. No record will be produced.
     Noop,
+}
+
+impl verter_type_engine::request_context::RequestAuditFinalization for AuditRequestRegistration {
+    fn finalize(&self, record: RequestAuditRecord) -> bool {
+        AuditRequestRegistration::finalize(self, record)
+    }
 }
 
 impl AuditRequestRegistration {

@@ -1,0 +1,72 @@
+[package]
+name = "verter_type_engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Verter's semantic type engine: the semantic query vocabulary and graph store, the project semantic dispatch, the signature kernel, the cache runtime, and the request context and fact-tracing runtime"
+publish = false
+
+[features]
+# Exposes the engine's test seams (forcing knobs, inspectors, fixture
+# constructors) to cross-crate test code. Production builds MUST NOT enable
+# this feature; `verter_session`'s own `test-support` forwards it so one
+# session opt-in turns on the matching seams here.
+test-support = ["verter_execution/test-support", "verter_session_query/test-support"]
+# Measurement-only instrumentation, forwarded by `verter_session`'s `hotpath`.
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md).
+# Forwarded by `verter_session`; no production edge enables it.
+semantic-observe = ["verter_audit/semantic-observe", "hotpath"]
+
+# Dependency closure is a layering contract: the engine depends only on the
+# shared query vocabulary, the execution substrate and parser-free leaves — never
+# on a parser, the compiler, the session, the workspace, the source-lowering
+# layer, module resolution, the concrete scheduler, the protocol or a provider.
+[dependencies]
+verter_analysis_inputs = { path = "../verter_analysis_inputs" }
+verter_audit = { path = "../verter_audit" }
+verter_debug_assert = { workspace = true }
+verter_ecma = { workspace = true }
+verter_execution = { path = "../verter_execution" }
+verter_identity = { path = "../verter_identity" }
+verter_language = { path = "../verter_language" }
+verter_no_typeexpr = { workspace = true }
+verter_session_query = { workspace = true }
+verter_span = { path = "../verter_span" }
+verter_type_expr = { workspace = true }
+arc-swap = "1.9"
+boxcar = "=0.2.14"
+dashmap = "6.2"
+hotpath = { version = "0.23", optional = true }
+imbl = "7.0.1"
+indexmap = "2.14"
+parking_lot = "0.12.5"
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smallvec = "1.15"
+static_assertions = "1.1.0"
+tracing = "0.1.44"
+uuid = { version = "1.23", features = ["v4"] }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1.1"
+uuid = { version = "1.23", features = ["js"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+uuid = { version = "1.23", features = ["rng-getrandom"] }
+
+# Generator for the SemanticQueryKeySpec table artifact (sole writer of
+# `src/semantic_query/query_key_spec_table.txt`). Run via the pnpm script
+# `gen:query-key-spec`; the diff-test only re-renders + compares.
+[[bin]]
+name = "gen-query-key-spec"
+path = "src/bin/gen_query_key_spec.rs"
+
+[dev-dependencies]
+verter_session_query = { workspace = true, features = ["test-support"] }
+verter_type_engine = { path = ".", features = ["test-support"] }

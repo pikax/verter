@@ -37,12 +37,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use verter_scheduler::execution::owner_command::OwnerCommand;
-use verter_scheduler::execution::pool::SchedulerIoPool;
-use verter_scheduler::request_context::{
+use verter_execution::request_context::{
     CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
-use verter_session::request_context::{
+use verter_scheduler::execution::owner_command::OwnerCommand;
+use verter_scheduler::execution::pool::SchedulerIoPool;
+use verter_type_engine::request_context::{
     current_request_context, RequestContext, RequestContextGuard,
 };
 
@@ -78,7 +78,7 @@ fn run_on_io_worker_with_context(
 /// Run a closure on the IO worker (mirroring the production IO dispatch
 /// closure's `install_tls` step) wrapping a session-side
 /// `RequestContext` as an `OpaqueRequestContext`. Inside the worker,
-/// assert that `verter_session::request_context::current_request_context()`
+/// assert that `verter_type_engine::request_context::current_request_context()`
 /// returns `Some` carrying the same `request_id`.
 ///
 /// The worker calls `Arc::clone(&opaque.0).install_tls()`; for the session
@@ -184,7 +184,7 @@ fn opaque_context_guard_install_does_not_recurse() {
 
     // If install had recursed, control would never reach this point.
     assert_eq!(
-        verter_scheduler::request_context::current_request_id(),
+        verter_execution::request_context::current_request_id(),
         Some(84),
         "scheduler-side TLS slot must hold the installed context's request id",
     );
@@ -199,7 +199,7 @@ fn opaque_context_guard_install_does_not_recurse() {
 /// thread runs the dispatch closure's `install_tls` call, which routes
 /// through the session trait impl and populates BOTH TLS slots.
 ///
-/// A custom `StageExecutor` probes `verter_session::request_context::
+/// A custom `StageExecutor` probes `verter_type_engine::request_context::
 /// current_request_context()` inside each stage and records the
 /// observed `request_id` into shared atomics. The test thread then
 /// asserts every stage observed the expected id (non-zero) — they would
@@ -346,7 +346,7 @@ fn scheduler_worker_without_context_observes_no_session_context() {
 /// Outer-thread → worker propagation: install a session-side
 /// `RequestContextGuard` on the test thread, capture the active
 /// scheduler-side `OpaqueRequestContext` via
-/// `verter_scheduler::request_context::current_context()`, hand it to
+/// `verter_execution::request_context::current_context()`, hand it to
 /// the worker via the `run_on_io_worker_with_context` harness, and
 /// assert the worker sees the SAME `request_id` on both the
 /// scheduler-side and session-side TLS slots. Mirrors the production
@@ -360,7 +360,7 @@ fn outer_session_guard_propagates_through_pool_submission() {
 
     // Capture the now-active scheduler-side opaque context, just like
     // the scheduler's `winner_ctx.or_else(...)` plumbing does.
-    let opaque = verter_scheduler::request_context::current_context()
+    let opaque = verter_execution::request_context::current_context()
         .expect("RequestContextGuard::install populates the scheduler TLS slot");
 
     let observed_session_id = Arc::new(AtomicU64::new(0));
@@ -372,7 +372,7 @@ fn outer_session_guard_propagates_through_pool_submission() {
         if let Some(ctx) = current_request_context() {
             session_clone.store(ctx.request_id, Ordering::SeqCst);
         }
-        if let Some(id) = verter_scheduler::request_context::current_request_id() {
+        if let Some(id) = verter_execution::request_context::current_request_id() {
             scheduler_clone.store(id, Ordering::SeqCst);
         }
     });

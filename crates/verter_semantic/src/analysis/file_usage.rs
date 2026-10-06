@@ -4,7 +4,7 @@
 //! information into a single file-level summary, suitable for caching,
 //! serialization, and cross-file queries.
 
-use crate::analysis::types::{AnalyzedMacroKind, StoreApiClassification};
+use verter_session_query::analysis::types::{AnalyzedMacroKind, StoreApiClassification};
 
 // =============================================================================
 // File Usage Flags
@@ -60,21 +60,18 @@ bitflags::bitflags! {
     }
 }
 
-impl AnalyzedMacroKind {
-    /// Get the corresponding `FileUsageFlags` flag for this macro kind.
-    pub const fn usage_flag(&self) -> FileUsageFlags {
-        match self {
-            Self::DefineProps => FileUsageFlags::HAS_DEFINE_PROPS,
-            Self::DefineEmits => FileUsageFlags::HAS_DEFINE_EMITS,
-            Self::DefineModel => FileUsageFlags::HAS_DEFINE_MODEL,
-            Self::DefineExpose => FileUsageFlags::HAS_DEFINE_EXPOSE,
-            Self::DefineOptions => FileUsageFlags::HAS_DEFINE_OPTIONS,
-            Self::DefineSlots => FileUsageFlags::HAS_DEFINE_SLOTS,
-            Self::WithDefaults => FileUsageFlags::HAS_WITH_DEFAULTS,
-        }
+/// The `FileUsageFlags` flag for one macro kind.
+pub const fn macro_usage_flag(kind: &AnalyzedMacroKind) -> FileUsageFlags {
+    match kind {
+        AnalyzedMacroKind::DefineProps => FileUsageFlags::HAS_DEFINE_PROPS,
+        AnalyzedMacroKind::DefineEmits => FileUsageFlags::HAS_DEFINE_EMITS,
+        AnalyzedMacroKind::DefineModel => FileUsageFlags::HAS_DEFINE_MODEL,
+        AnalyzedMacroKind::DefineExpose => FileUsageFlags::HAS_DEFINE_EXPOSE,
+        AnalyzedMacroKind::DefineOptions => FileUsageFlags::HAS_DEFINE_OPTIONS,
+        AnalyzedMacroKind::DefineSlots => FileUsageFlags::HAS_DEFINE_SLOTS,
+        AnalyzedMacroKind::WithDefaults => FileUsageFlags::HAS_WITH_DEFAULTS,
     }
 }
-
 // =============================================================================
 // Owned Types for Serialization / Cross-file Caching
 // =============================================================================
@@ -382,15 +379,15 @@ mod tests {
     #[test]
     fn macro_kind_flags() {
         assert_eq!(
-            AnalyzedMacroKind::DefineProps.usage_flag(),
+            macro_usage_flag(&AnalyzedMacroKind::DefineProps),
             FileUsageFlags::HAS_DEFINE_PROPS
         );
         assert_eq!(
-            AnalyzedMacroKind::DefineEmits.usage_flag(),
+            macro_usage_flag(&AnalyzedMacroKind::DefineEmits),
             FileUsageFlags::HAS_DEFINE_EMITS
         );
         assert_eq!(
-            AnalyzedMacroKind::DefineModel.usage_flag(),
+            macro_usage_flag(&AnalyzedMacroKind::DefineModel),
             FileUsageFlags::HAS_DEFINE_MODEL
         );
     }
@@ -518,37 +515,37 @@ const data = await fetchData();
                 end: 0,
             });
             flags |= FileUsageFlags::HAS_MACROS;
-            flags |= m.kind.usage_flag();
+            flags |= macro_usage_flag(&m.kind);
         }
 
         // Derive flags from snapshot
         if snapshot
             .flags
-            .contains(crate::analysis::types::AnalysisFlags::ASYNC_SETUP)
+            .contains(verter_session_query::analysis::types::AnalysisFlags::ASYNC_SETUP)
         {
             flags |= FileUsageFlags::IS_ASYNC_SETUP;
         }
         if snapshot
             .flags
-            .contains(crate::analysis::types::AnalysisFlags::HAS_PROVIDE)
+            .contains(verter_session_query::analysis::types::AnalysisFlags::HAS_PROVIDE)
         {
             flags |= FileUsageFlags::HAS_PROVIDE;
         }
         if snapshot
             .flags
-            .contains(crate::analysis::types::AnalysisFlags::HAS_INJECT)
+            .contains(verter_session_query::analysis::types::AnalysisFlags::HAS_INJECT)
         {
             flags |= FileUsageFlags::HAS_INJECT;
         }
         if snapshot
             .flags
-            .contains(crate::analysis::types::AnalysisFlags::HAS_LIFECYCLE_HOOKS)
+            .contains(verter_session_query::analysis::types::AnalysisFlags::HAS_LIFECYCLE_HOOKS)
         {
             flags |= FileUsageFlags::HAS_LIFECYCLE_HOOKS;
         }
         if snapshot
             .flags
-            .contains(crate::analysis::types::AnalysisFlags::HAS_REACTIVE_STATE)
+            .contains(verter_session_query::analysis::types::AnalysisFlags::HAS_REACTIVE_STATE)
         {
             flags |= FileUsageFlags::HAS_REACTIVE_STATE;
         }

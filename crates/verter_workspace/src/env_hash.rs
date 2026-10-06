@@ -44,8 +44,8 @@ use verter_scheduler::invalidation::Hash16;
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::module_resolution::{ConditionSet, ModuleResolutionMode};
-use verter_semantic::resolver_core::ConfiguredMembership;
-use verter_semantic::resolver_core::{
+use verter_session_query::resolution::ConfiguredMembership;
+use verter_session_query::resolution::{
     IdeProjectCompilerOptions, IdeProjectConfig, SemanticCompilerOptions,
 };
 

@@ -9,7 +9,7 @@ error[E0308]: mismatched types
    = note: expected struct `CompositeList<IntersectionKind>`
               found struct `CompositeList<UnionKind>`
 note: tuple variant defined here
-  --> src/semantic_query.rs
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
    |
    |     Intersection(composite::CompositeList<composite::IntersectionKind>),
    |     ^^^^^^^^^^^^

@@ -9,8 +9,8 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, DiagnosticTag, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::TemplateAnalysisSnapshot;
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
 pub struct NoDeprecatedEventsApi;
 
@@ -75,8 +75,13 @@ mod tests {
     use super::*;
     use crate::config::LintConfig;
     use crate::visitor::LintVisitor;
-    use verter_semantic::analysis::template::*;
-    use verter_semantic::analysis::types::*;
+    use verter_session_query::analysis::template::BindingUsageKind;
+    use verter_session_query::analysis::template::TemplateBindingOccurrence;
+
+    use verter_session_query::analysis::types::AnalyzedBinding;
+    use verter_session_query::analysis::types::AnalyzedBindingKind;
+    use verter_session_query::analysis::types::ReactivityKind;
+
     use verter_span::Span;
 
     fn run_template(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

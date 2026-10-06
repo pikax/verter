@@ -46,14 +46,14 @@ const LARGE_SPECIFIERS: usize = 180;
 /// cap that the same shape roots and warms.
 const SMALL_SPECIFIERS: usize = 8;
 
-fn decision_fact_count(facts: &[crate::resolver_core::FactVersionRef]) -> usize {
+fn decision_fact_count(facts: &[verter_session_query::facts::fact_cache::FactVersionRef]) -> usize {
     facts
         .iter()
         .filter(|fact| {
             matches!(
                 fact,
-                crate::resolver_core::FactVersionRef::ResolveImports(
-                    crate::resolver_core::ResolveImportsFactRef::Resolution(resolution)
+                verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(
+                    verter_session_query::facts::fact_cache::ResolveImportsFactRef::Resolution(resolution)
                 ) if resolution.is_decision()
             )
         })
@@ -185,10 +185,10 @@ fn large_positive_chunk_owner_is_compacted_and_warms() {
         "the owner witness must grow by the bounded post-DAG unit; observed {observed}"
     );
     assert!(
-        observed <= verter_workspace::FACT_SIGNATURE_CAP,
+        observed <= verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP,
         "Decision compaction must keep the {LARGE_SPECIFIERS}-specifier witness within \
          FACT_SIGNATURE_CAP ({}); observed {observed}",
-        verter_workspace::FACT_SIGNATURE_CAP
+        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP
     );
     let witness = host
         .owner_import_route_witness_for_tests(&owner)
@@ -239,7 +239,7 @@ fn large_positive_chunk_owner_is_compacted_and_warms() {
                 && facts.iter().any(|fact| {
                     matches!(
                         fact,
-                        crate::resolver_core::FactVersionRef::FileWholeHash {
+                        verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                             canonical_id,
                             ..
                         } if canonical_id == &owner
@@ -265,10 +265,10 @@ fn below_cap_positive_chunk_owner_roots_and_admits() {
         .owner_import_route_observation_count_for_tests(&owner)
         .expect("the control owner's observation set must be built");
     assert!(
-        observed <= verter_workspace::FACT_SIGNATURE_CAP,
+        observed <= verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP,
         "control invariant: {SMALL_SPECIFIERS} chunk specifiers must stay within \
          FACT_SIGNATURE_CAP ({}); observed {observed}",
-        verter_workspace::FACT_SIGNATURE_CAP
+        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP
     );
     assert!(
         host.owner_import_route_witness_for_tests(&owner).is_some(),

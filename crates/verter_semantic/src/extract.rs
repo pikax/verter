@@ -3,16 +3,19 @@
 //! Converts `verter_semantic::analysis` types into `verter_semantic` fact types.
 //! This is the bridge between the raw analysis layer and the semantic DB.
 
-use crate::input::{AnalyzedMacro, AnalyzedMacroKind, ReactivityKind, ScriptAnalysisSnapshot};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind, ReactivityKind};
 
-use crate::facts::binding::{BindingDeclaration, BindingKind, BindingUsage, UsageBlock, UsageKind};
-use crate::facts::boundary::ComponentInstanceEdge;
-use crate::facts::component::{
+use verter_session_query::facts::binding::{
+    BindingDeclaration, BindingKind, BindingUsage, UsageBlock, UsageKind,
+};
+use verter_session_query::facts::boundary::ComponentInstanceEdge;
+use verter_session_query::facts::component::{
     ComponentSurface, DeclaredSurface, EventFact, ExposeFact, ModelFact, PropFact, SlotBindingFact,
     SlotFact,
 };
-use crate::facts::reactivity::{ReactivityFact, ReactivitySource, ReactivityStatus};
-use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+use verter_session_query::facts::reactivity::{ReactivityFact, ReactivitySource, ReactivityStatus};
+use verter_session_query::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
 
 /// Extract the declared component surface from a script analysis snapshot.
 ///
@@ -194,12 +197,20 @@ pub fn extract_bindings(
         .iter()
         .map(|b| {
             let kind = match b.kind {
-                crate::input::AnalyzedBindingKind::Const => BindingKind::Const,
-                crate::input::AnalyzedBindingKind::Let => BindingKind::Let,
-                crate::input::AnalyzedBindingKind::Var => BindingKind::Var,
-                crate::input::AnalyzedBindingKind::Function => BindingKind::Function,
-                crate::input::AnalyzedBindingKind::AsyncFunction => BindingKind::AsyncFunction,
-                crate::input::AnalyzedBindingKind::Class => BindingKind::Class,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Const => {
+                    BindingKind::Const
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::Let => BindingKind::Let,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Var => BindingKind::Var,
+                verter_session_query::analysis::types::AnalyzedBindingKind::Function => {
+                    BindingKind::Function
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::AsyncFunction => {
+                    BindingKind::AsyncFunction
+                }
+                verter_session_query::analysis::types::AnalyzedBindingKind::Class => {
+                    BindingKind::Class
+                }
             };
 
             let mut usages = Vec::new();
@@ -233,7 +244,9 @@ pub fn extract_bindings(
 }
 
 /// Classify the reactivity of an analyzed binding.
-fn classify_reactivity(binding: &crate::input::AnalyzedBinding) -> ReactivityFact {
+fn classify_reactivity(
+    binding: &verter_session_query::analysis::types::AnalyzedBinding,
+) -> ReactivityFact {
     let (status, source) = match binding.reactivity_kind {
         ReactivityKind::Ref => (ReactivityStatus::Reactive, Some(ReactivitySource::Ref)),
         ReactivityKind::Computed => (ReactivityStatus::Reactive, Some(ReactivitySource::Computed)),
@@ -255,13 +268,13 @@ fn classify_reactivity(binding: &crate::input::AnalyzedBinding) -> ReactivityFac
 
 /// Try to determine reactivity source from the binding's initializer.
 fn classify_source_from_initializer(
-    binding: &crate::input::AnalyzedBinding,
+    binding: &verter_session_query::analysis::types::AnalyzedBinding,
 ) -> Option<ReactivitySource> {
-    use crate::input::BindingInitializer;
+    use verter_session_query::analysis::types::BindingInitializer;
 
     match &binding.initializer {
         Some(BindingInitializer::FunctionCall { vue_api, .. }) => {
-            use crate::input::VueApiClassification;
+            use verter_session_query::analysis::types::VueApiClassification;
             match vue_api.as_ref()? {
                 VueApiClassification::Ref
                 | VueApiClassification::ShallowRef
@@ -301,13 +314,21 @@ pub fn extract_import_graph(analysis: &ScriptAnalysisSnapshot) -> FileImportGrap
 
         for binding in &imp.bindings {
             let kind = match binding.kind {
-                crate::input::ImportBindingKind::Named => ImportKind::Named,
-                crate::input::ImportBindingKind::Default => ImportKind::Default,
-                crate::input::ImportBindingKind::Namespace => ImportKind::Namespace,
+                verter_session_query::analysis::types::ImportBindingKind::Named => {
+                    ImportKind::Named
+                }
+                verter_session_query::analysis::types::ImportBindingKind::Default => {
+                    ImportKind::Default
+                }
+                verter_session_query::analysis::types::ImportBindingKind::Namespace => {
+                    ImportKind::Namespace
+                }
             };
 
             let exported_name = match binding.kind {
-                crate::input::ImportBindingKind::Default => "default".to_string(),
+                verter_session_query::analysis::types::ImportBindingKind::Default => {
+                    "default".to_string()
+                }
                 _ => binding
                     .imported_name
                     .clone()
@@ -381,8 +402,8 @@ pub fn extract_boundary_edges(
 
 // ── Prop constness extraction ──────────────────────────────────────────────
 
-use crate::facts::component::{PropConstness, PropConstnessFact};
-use crate::input::{PropValueConstness, TemplateAnalysisSnapshot};
+use verter_session_query::analysis::template::{PropValueConstness, TemplateAnalysisSnapshot};
+use verter_session_query::facts::component::{PropConstness, PropConstnessFact};
 
 /// Compute per-prop constness for a child component across all call sites
 /// in a single parent template.
@@ -460,7 +481,7 @@ pub fn compute_prop_constness_for_child(
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use crate::input::{
+    use verter_session_query::analysis::types::{
         AnalyzedEmitField, AnalyzedExposeField, AnalyzedPropField, AnalyzedSlotField,
         AnalyzedSlotFieldBinding, TypeResolutionSource,
     };
@@ -723,7 +744,7 @@ mod tests {
 
     #[test]
     fn with_defaults_merges_default_values() {
-        use crate::input::AnalyzedDefaultValue;
+        use verter_session_query::analysis::types::AnalyzedDefaultValue;
 
         let props_mac = make_props_macro(vec![
             make_prop("color", false), // required
@@ -814,10 +835,10 @@ mod tests {
 
     fn make_binding(
         name: &str,
-        kind: crate::input::AnalyzedBindingKind,
+        kind: verter_session_query::analysis::types::AnalyzedBindingKind,
         reactivity: ReactivityKind,
-    ) -> crate::input::AnalyzedBinding {
-        crate::input::AnalyzedBinding {
+    ) -> verter_session_query::analysis::types::AnalyzedBinding {
+        verter_session_query::analysis::types::AnalyzedBinding {
             name: name.to_string(),
             kind,
             is_reactive: !matches!(reactivity, ReactivityKind::None | ReactivityKind::Mutable),
@@ -839,7 +860,7 @@ mod tests {
 
     #[test]
     fn extract_bindings_classifies_reactivity() {
-        use crate::input::AnalyzedBindingKind;
+        use verter_session_query::analysis::types::AnalyzedBindingKind;
 
         let mut snapshot = make_snapshot(vec![]);
         snapshot.bindings = vec![
@@ -894,7 +915,7 @@ mod tests {
 
     #[test]
     fn extract_bindings_tracks_usage_flags() {
-        use crate::input::AnalyzedBindingKind;
+        use verter_session_query::analysis::types::AnalyzedBindingKind;
 
         let mut snapshot = make_snapshot(vec![]);
         let mut binding = make_binding("count", AnalyzedBindingKind::Const, ReactivityKind::Ref);
@@ -914,7 +935,9 @@ mod tests {
 
     #[test]
     fn extract_bindings_enriches_source_from_initializer() {
-        use crate::input::{AnalyzedBindingKind, BindingInitializer, VueApiClassification};
+        use verter_session_query::analysis::types::{
+            AnalyzedBindingKind, BindingInitializer, VueApiClassification,
+        };
 
         let mut snapshot = make_snapshot(vec![]);
         let mut binding = make_binding("count", AnalyzedBindingKind::Const, ReactivityKind::None);
@@ -946,7 +969,9 @@ mod tests {
 
     #[test]
     fn extract_import_graph_named_imports() {
-        use crate::input::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+        use verter_session_query::analysis::types::{
+            AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+        };
 
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![AnalyzedImport {
@@ -999,7 +1024,9 @@ mod tests {
 
     #[test]
     fn extract_import_graph_default_import() {
-        use crate::input::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+        use verter_session_query::analysis::types::{
+            AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+        };
 
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![AnalyzedImport {
@@ -1031,7 +1058,9 @@ mod tests {
 
     #[test]
     fn extract_import_graph_unresolved_source() {
-        use crate::input::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+        use verter_session_query::analysis::types::{
+            AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+        };
 
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![AnalyzedImport {
@@ -1065,7 +1094,9 @@ mod tests {
 
     #[test]
     fn extract_import_graph_namespace_import() {
-        use crate::input::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+        use verter_session_query::analysis::types::{
+            AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+        };
 
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![AnalyzedImport {
@@ -1094,7 +1125,9 @@ mod tests {
 
     #[test]
     fn extract_import_graph_type_only_propagation() {
-        use crate::input::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+        use verter_session_query::analysis::types::{
+            AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+        };
 
         let mut snapshot = make_snapshot(vec![]);
         // Declaration-level type-only: `import type { Foo } from "..."`
@@ -1122,7 +1155,9 @@ mod tests {
 
     #[test]
     fn extract_import_graph_specifier_level_type_only() {
-        use crate::input::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+        use verter_session_query::analysis::types::{
+            AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+        };
 
         let mut snapshot = make_snapshot(vec![]);
         // `import { type Foo, bar } from "..."`
@@ -1163,7 +1198,9 @@ mod tests {
 
     #[test]
     fn extract_import_graph_multiple_sources() {
-        use crate::input::{AnalyzedImport, AnalyzedImportBinding, ImportBindingKind};
+        use verter_session_query::analysis::types::{
+            AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
+        };
 
         let mut snapshot = make_snapshot(vec![]);
         snapshot.imports = vec![
@@ -1210,7 +1247,7 @@ mod tests {
     // ── Prop constness tests ───────────────────────────────────────────────
 
     fn make_template_with_component_usage(
-        usages: Vec<crate::input::TemplateComponentUsage>,
+        usages: Vec<verter_session_query::analysis::template::TemplateComponentUsage>,
     ) -> TemplateAnalysisSnapshot {
         let mut template = TemplateAnalysisSnapshot::default();
         template.components = usages;
@@ -1219,9 +1256,9 @@ mod tests {
 
     fn make_component_usage(
         name: &str,
-        props: Vec<crate::input::TemplatePropUsage>,
-    ) -> crate::input::TemplateComponentUsage {
-        crate::input::TemplateComponentUsage {
+        props: Vec<verter_session_query::analysis::template::TemplatePropUsage>,
+    ) -> verter_session_query::analysis::template::TemplateComponentUsage {
+        verter_session_query::analysis::template::TemplateComponentUsage {
             name: name.to_string(),
             import_source: None,
             is_dynamic: false,
@@ -1241,8 +1278,8 @@ mod tests {
     fn make_prop_usage(
         name: &str,
         constness: PropValueConstness,
-    ) -> crate::input::TemplatePropUsage {
-        crate::input::TemplatePropUsage {
+    ) -> verter_session_query::analysis::template::TemplatePropUsage {
+        verter_session_query::analysis::template::TemplatePropUsage {
             name: name.to_string(),
             is_bound: constness != PropValueConstness::Const,
             expression: None,
@@ -1332,7 +1369,7 @@ mod tests {
 
     #[test]
     fn extract_boundary_edges_resolves_child_from_imports() {
-        use crate::facts::symbol::{ImportKind, ImportedSymbol};
+        use verter_session_query::facts::symbol::{ImportKind, ImportedSymbol};
 
         let template = make_template_with_component_usage(vec![make_component_usage(
             "Button",
@@ -1386,7 +1423,7 @@ mod tests {
 
     #[test]
     fn extract_boundary_edges_v_model_creates_update_event() {
-        use crate::input::TemplateComponentVModel;
+        use verter_session_query::analysis::template::TemplateComponentVModel;
 
         let mut usage = make_component_usage("Input", vec![]);
         usage.v_models = vec![TemplateComponentVModel {

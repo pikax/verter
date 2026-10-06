@@ -109,6 +109,7 @@ fn shape_cache_len(host: &Arc<VerterHost>) -> usize {
 /// of "did the semantic memo cold-rebuild or warm-hit".
 fn semantic_memo_cold_builds(host: &Arc<VerterHost>) -> u64 {
     host.provenance()
+        .engine
         .memo_entry_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed)
 }

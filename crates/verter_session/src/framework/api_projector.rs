@@ -16,9 +16,9 @@
 use verter_language::FileLanguage;
 
 use crate::framework::public_contract::ComponentContractAvailability;
-use crate::resolver_core::StoreView as _;
 use crate::types::{CompileProfile, PublicApiMode, PublicApiProjectionError, TscResponse};
 use crate::VerterHost;
+use verter_session_query::facts::store_view::StoreView as _;
 
 /// Opaque proof that a structured component contract was projected from one
 /// admitted component-meta result and one separately-cacheable output
@@ -29,11 +29,11 @@ use crate::VerterHost;
 #[derive(Clone)]
 pub struct ComponentApiProjectionWitness {
     owner_canonical: std::sync::Arc<str>,
-    owner_whole_hash: verter_semantic::analysis::Hash16,
+    owner_whole_hash: verter_session_query::analysis::types::Hash16,
     result_key: crate::component_meta_result_db::ComponentMetaResultKey,
     producer_project_generation: u64,
-    admitted_read_set: crate::fact_signature_helpers::ReadSetSignature,
-    output_read_set: crate::fact_signature_helpers::ReadSetSignature,
+    admitted_read_set: verter_session_query::facts::fact_cache::ReadSetSignature,
+    output_read_set: verter_session_query::facts::fact_cache::ReadSetSignature,
 }
 
 impl std::fmt::Debug for ComponentApiProjectionWitness {
@@ -126,18 +126,18 @@ impl ComponentApiProjectionWitness {
         augmenter_canonical: &str,
     ) -> ((bool, bool), (bool, bool)) {
         fn observes(
-            signature: &crate::fact_signature_helpers::ReadSetSignature,
+            signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
             target_canonical: &str,
             augmenter_canonical: &str,
         ) -> (bool, bool) {
             let shape = signature.facts.iter().any(|fact| {
                 matches!(
                     fact,
-                    crate::resolver_core::FactVersionRef::RouteSurface(route)
+                    verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(route)
                         if matches!(
                             &route.key,
-                            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                                target_kind_tag: verter_semantic::facts::registry::AugmentationTargetKindTag::ResolvedRelativeCanonical,
+                            verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
+                                target_kind_tag: verter_session_query::facts::registry::AugmentationTargetKindTag::ResolvedRelativeCanonical,
                                 resolved_relative_canonical: Some(canonical),
                                 ..
                             } if canonical.as_ref() == target_canonical
@@ -147,7 +147,7 @@ impl ComponentApiProjectionWitness {
             let contributor = signature.facts.iter().any(|fact| {
                 matches!(
                     fact,
-                    crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                         if canonical_id == augmenter_canonical
                 )
             });

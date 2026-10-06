@@ -161,7 +161,7 @@ fn legacy_trace_env_vars_not_consumed_anywhere() {
 }
 
 /// Every literal `StructuredAuditEvent::Custom { … }`
-/// construction site in the session crate must carry a
+/// construction site in the session crate and the type engine must carry a
 /// `// Custom justified: …` comment within the preceding 3 lines.
 ///
 /// Pattern-match sites (`Custom { .. }`, `Custom { name, detail } =>`)
@@ -170,15 +170,21 @@ fn legacy_trace_env_vars_not_consumed_anywhere() {
 #[test]
 fn every_custom_variant_construction_site_has_justification_comment() {
     let crates = crates_dir();
-    let session_src = crates.join("verter_session").join("src");
-    let files = walk_rs_files(&session_src);
     let mut violations = Vec::new();
-
-    // Also search tests dirs since test-side Custom construction is
-    // allowed but must carry justification too.
-    let session_tests = crates.join("verter_session").join("tests");
-    let mut all_files = files;
-    all_files.extend(walk_rs_files(&session_tests));
+    let mut all_files = Vec::new();
+    // The session crate and the type engine it builds on. Also search
+    // tests dirs since test-side Custom construction is allowed but must
+    // carry justification too.
+    for krate in ["verter_session", "verter_type_engine"] {
+        let crate_src = crates.join(krate).join("src");
+        assert!(
+            crate_src.is_dir(),
+            "source root {} is missing",
+            crate_src.display()
+        );
+        all_files.extend(walk_rs_files(&crate_src));
+        all_files.extend(walk_rs_files(&crates.join(krate).join("tests")));
+    }
 
     for file in &all_files {
         let text = read_file(file);
@@ -273,17 +279,17 @@ fn is_struct_event_alias(text: &str, _line_idx: usize) -> bool {
 #[test]
 fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace() {
     let crates = crates_dir();
-    let host_manage = crates
-        .join("verter_session")
+    let observers = crates
+        .join("verter_type_engine")
         .join("src")
-        .join("host_manage.rs");
-    let text = read_file(&host_manage);
+        .join("request_observers.rs");
+    let text = read_file(&observers);
     // Find the push_structured_event fn body and check it has no
     // stderr/file writes. Visibility is irrelevant to the no-I/O
     // contract; locate by signature suffix only.
     let signature_suffix = " fn push_structured_event(";
     let Some(suffix_offset) = text.find(signature_suffix) else {
-        panic!("push_structured_event not found in host_manage.rs");
+        panic!("push_structured_event not found in request_observers.rs");
     };
     // Walk back to the start of the line so the snippet captures the
     // visibility prefix and the surrounding context (matching the
@@ -317,13 +323,12 @@ fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace(
 #[test]
 fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
     use std::sync::Arc;
-    use verter_session::component_meta_audit::{
-        accumulator::RequestFootprintAccumulator, StructuredAuditEvent,
-    };
-    use verter_session::request_context::{RequestContext, RequestContextGuard};
+    use verter_session::component_meta_audit::StructuredAuditEvent;
     use verter_session::{
         file_artifact_store::FileArtifactStore, project_type_store::IndexedReady,
     };
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 
     let acc = Arc::new(RequestFootprintAccumulator::new());
     let ctx = RequestContext::new(1, Arc::from("/owner"), true, Some(Arc::clone(&acc)));
@@ -364,13 +369,12 @@ fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
 #[test]
 fn indexed_ready_built_event_fires_per_new_content_version_not_on_same_content_reinsert() {
     use std::sync::Arc;
-    use verter_session::component_meta_audit::{
-        accumulator::RequestFootprintAccumulator, StructuredAuditEvent,
-    };
-    use verter_session::request_context::{RequestContext, RequestContextGuard};
+    use verter_session::component_meta_audit::StructuredAuditEvent;
     use verter_session::{
         file_artifact_store::FileArtifactStore, project_type_store::IndexedReady,
     };
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 
     let db = FileArtifactStore::new();
     let mut whole_hash_a = [0u8; 16];

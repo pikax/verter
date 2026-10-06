@@ -45,7 +45,7 @@ pub(crate) struct StableUnitKey {
     language: FileLanguage,
     grammar_fingerprint: verter_language::carrier_grammar::CarrierGrammarFingerprint,
     parse_key: verter_language::ParseKey,
-    build_toolchain_fingerprint: crate::build_toolchain_fingerprint::BuildToolchainFingerprint,
+    build_toolchain_fingerprint: verter_session_query::source::toolchain::BuildToolchainFingerprint,
 }
 
 impl StableUnitKey {
@@ -59,7 +59,7 @@ impl StableUnitKey {
             grammar_fingerprint: accepted.grammar().fingerprint(),
             parse_key: id.parse_key.clone(),
             build_toolchain_fingerprint:
-                crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+                verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         }
     }
 }
@@ -361,7 +361,7 @@ mod tests {
         assert_eq!(unit_key.parse_key, parse_key);
         assert_eq!(
             unit_key.build_toolchain_fingerprint,
-            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
         );
         assert_eq!(
             unit_key.language,

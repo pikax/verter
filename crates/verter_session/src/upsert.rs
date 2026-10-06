@@ -3,6 +3,7 @@
 //! Contains the logic for comparing old and new file states during `upsert()`,
 //! computing granular slice-level diffs, and assembling the final
 //! [`HostUpdateResult`](crate::HostUpdateResult).
+use verter_session_query::analysis::types::Hash16;
 
 use crate::cache::{compute_changed_removed_nodes, sorted_nodes};
 use crate::hash::diff_indices;
@@ -97,11 +98,12 @@ fn compute_upsert_changes_core(
 pub(crate) struct UpsertResultData {
     pub(crate) new_meta: FileMeta,
     pub(crate) parse_diagnostics: DiagnosticsSnapshot,
-    pub(crate) imports: Vec<verter_semantic::analysis::AnalyzedImport>,
-    pub(crate) module_references: Vec<verter_semantic::analysis::AnalyzedModuleReference>,
+    pub(crate) imports: Vec<verter_session_query::analysis::types::AnalyzedImport>,
+    pub(crate) module_references:
+        Vec<verter_session_query::analysis::types::AnalyzedModuleReference>,
     pub(crate) external_requests: Vec<ExternalSourceRequest>,
     pub(crate) preprocessor_requests: Vec<PreprocessorRequest>,
-    pub(crate) export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
 }
 
 /// Render bundler and LSP IDs for a list of virtual nodes.

@@ -16,7 +16,7 @@ use verter_language::carrier_versions::{
     CARRIER_SOURCE_MAP_SCHEMA_VERSION, CARRIER_SOURCE_SPACE_SCHEMA_VERSION,
 };
 
-use crate::build_toolchain_fingerprint::{
+use verter_session_query::source::toolchain::{
     current_build_toolchain_fingerprint, BuildToolchainFingerprint,
 };
 
@@ -222,7 +222,7 @@ mod tests {
             verter_protocol::consumer_compatibility_manifest::current_consumer_compatibility_manifest();
         assert_eq!(
             manifest.cache_cluster_schema_version.get(),
-            crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
+            verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION
         );
     }
 }

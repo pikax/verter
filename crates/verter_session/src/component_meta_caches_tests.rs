@@ -62,11 +62,11 @@ use crate::meta::MetaProject;
 use crate::resolver_core::{
     run_component_meta_request, CanonicalCompletionOverlay, ComponentMetaCacheLookup,
     ComponentMetaRequestHost, RequestRunResult, RequestSource, ResolutionNodeKey, SingleflightRole,
-    StoreView,
 };
 use crate::session_view::HostViewRef;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_session_query::facts::store_view::StoreView;
 
 const NODE_COUNT_GROWTH_LIMIT: f64 = 1.20;
 
@@ -169,7 +169,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     upsert_simple_props_fixture(&project);
     let session = project.open_session_batch().unwrap();
     let host = session.host();
-    let mode = crate::types::ProjectionMode::Expanded;
+    let mode = verter_type_engine::semantic_query::ProjectionMode::Expanded;
     let canonical = host.resolve_alias_or_canonical("/Simple.vue");
     let view = HostViewRef::new(host);
     let request_host = ViewBoundRequestHost {
@@ -188,9 +188,9 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     // not claim this named one-shot and therefore remain ordinarily
     // cacheable; the test discriminates the request-level refusal rail from
     // any inner cache's independent admission policy.
-    crate::host_test_force::arm_fact_tracer_overflow_once(
-        crate::host_test_force::TracerScope::ComponentMetaRequest,
-        crate::resolver_core::FACT_SIGNATURE_CAP + 1,
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
+        verter_type_engine::engine_test_knobs::TracerScope::ComponentMetaRequest,
+        verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1,
     );
     let first = run_component_meta_request(
         &request_host,
@@ -208,7 +208,7 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     );
     assert_eq!(
         first.completeness,
-        crate::semantic_query::ResultCompleteness::Complete,
+        verter_type_engine::semantic_query::ResultCompleteness::Complete,
         "targeted cache refusal must not masquerade as structural partiality"
     );
     assert_eq!(
@@ -487,7 +487,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
     fn resolution_completeness(
         &self,
         result: &Self::Resolution,
-    ) -> crate::semantic_query::ResultCompleteness {
+    ) -> verter_type_engine::semantic_query::ResultCompleteness {
         self.inner.resolution_completeness(result)
     }
 
@@ -624,7 +624,7 @@ fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
     let session = project.open_session_batch().unwrap();
     let host = session.host();
 
-    let mode = crate::types::ProjectionMode::Expanded;
+    let mode = verter_type_engine::semantic_query::ProjectionMode::Expanded;
     let canonical = host.resolve_alias_or_canonical("/EditorToolbar.vue");
 
     // Derive the lane identity (key + compat token) exactly as the
@@ -971,14 +971,16 @@ defineProps<{ x: Lib }>()
 /// helper observes the scope and runs the engine fact-signature builder
 /// exactly as the projector pipeline does.
 fn shape_value_and_fact_sig_for_scope(
-    ctx: &dyn crate::resolver_core::ResolverContext,
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
     scope_canonical: &str,
     result_is_partial: bool,
 ) -> (
-    crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
-    Arc<[crate::resolver_core::FactVersionRef]>,
+    verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr,
+    Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
 ) {
-    use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
+    use verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
     // Force the scope's `IndexedReady` artifact to materialise so the
     // scheduler reports a live scope and `observe_materialize_scope`
     // returns a tear-free observation (an upsert alone does not eagerly
@@ -995,19 +997,22 @@ fn shape_value_and_fact_sig_for_scope(
     let value = MaterializedOutputTypeExpr::from_type_expr_for_test(
         None,
         verter_type_expr::TypeExpr::string_literal("ok".to_string()),
-        Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
+        Arc::from([] as [(Arc<str>, verter_type_engine::semantic_query::DepVersion); 0]),
         result_is_partial,
     );
-    let fact_sig = match crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_materialize_memo(
-        &observed,
-        parse_fact,
-        value.dep_signature(),
-    ) {
-        crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
-        crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
-            panic!("fixture invariant: signature must build for a real scope, got {reason:?}")
-        }
-    };
+    let fact_sig =
+        match verter_type_engine::fact_signature_helpers::engine_fact_signature_for_materialize_memo(
+            &observed,
+            parse_fact,
+            value.dep_signature(),
+        ) {
+            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                sig.facts
+            }
+            verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(reason) => {
+                panic!("fixture invariant: signature must build for a real scope, got {reason:?}")
+            }
+        };
     (value, fact_sig)
 }
 
@@ -1022,8 +1027,8 @@ fn shape_value_and_fact_sig_for_scope(
 /// "live count unchanged" / "peek misses" assertions fail.
 #[test]
 fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
-    use crate::component_meta_caches::ShapeCacheKey;
-    use crate::types::ProjectionMode;
+    use verter_type_engine::component_meta_caches::ShapeCacheKey;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     let project = make_project();
     project
@@ -1033,13 +1038,15 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
         )
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
     let db = host.project_type_store().shape_cache_db();
 
     // Baseline: a COMPLETE value admits.
     let complete_key = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/m3_shape.ts"),
-        crate::semantic_query::SemanticNodeId(8101),
+        verter_type_engine::semantic_query::SemanticNodeId(8101),
         ProjectionMode::Expanded,
     );
     let (complete_value, complete_sig) =
@@ -1067,7 +1074,7 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
     // The fix: a PARTIAL value is refused.
     let partial_key = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/m3_shape.ts"),
-        crate::semantic_query::SemanticNodeId(8102),
+        verter_type_engine::semantic_query::SemanticNodeId(8102),
         ProjectionMode::Expanded,
     );
     let (partial_value, partial_sig) =
@@ -1114,21 +1121,23 @@ fn shape_cache_db_refuses_partial_admit_but_admits_complete() {
 /// the "MUST admit / MUST be peekable" assertions then fail.
 #[test]
 fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
-    use crate::component_meta_caches::ShapeCacheKey;
-    use crate::request_context::{RequestContext, RequestContextGuard};
-    use crate::types::ProjectionMode;
+    use verter_type_engine::component_meta_caches::ShapeCacheKey;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     let project = make_project();
     project
         .upsert_base("/m3_int.ts", "export type Member = { z: boolean };")
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
     let db = host.project_type_store().shape_cache_db();
 
     let key = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/m3_int.ts"),
-        crate::semantic_query::SemanticNodeId(8103),
+        verter_type_engine::semantic_query::SemanticNodeId(8103),
         ProjectionMode::Expanded,
     );
 
@@ -1140,7 +1149,7 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
     {
         let rctx = RequestContext::new(7, Arc::from("/m3_int.ts"), false, None);
         let _guard = RequestContextGuard::install(rctx);
-        crate::request_context::mark_request_result_partial();
+        verter_type_engine::request_context::mark_request_result_partial();
         let (value, sig) = shape_value_and_fact_sig_for_scope(ctx, "/m3_int.ts", false);
         let _ = db
             .fixture(ctx)
@@ -1180,8 +1189,8 @@ fn shape_cache_db_admits_value_complete_shape_regardless_of_request_sticky() {
 /// entry.
 #[test]
 fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
-    use crate::component_meta_caches::ShapeCacheKey;
-    use crate::types::ProjectionMode;
+    use verter_type_engine::component_meta_caches::ShapeCacheKey;
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     let project = make_project();
     project
@@ -1191,13 +1200,16 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
         )
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
     let db = host.project_type_store().shape_cache_db();
+    let source_port: &dyn crate::resolver_core::HostRequestContext = host;
 
     // CONTROL — the same funnel, the same shape, a LIVE decl-body lease: admits.
     let control_key = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/m3_hole.ts"),
-        crate::semantic_query::SemanticNodeId(8201),
+        verter_type_engine::semantic_query::SemanticNodeId(8201),
         ProjectionMode::Expanded,
     );
     let (control_value, control_sig) =
@@ -1222,7 +1234,7 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
     // INSIDE the closure.
     let poison_key = ShapeCacheKey::member_value_node_whole_for_test(
         Arc::from("/m3_hole.ts"),
-        crate::semantic_query::SemanticNodeId(8202),
+        verter_type_engine::semantic_query::SemanticNodeId(8202),
         ProjectionMode::Expanded,
     );
     let (poison_value, poison_sig) = shape_value_and_fact_sig_for_scope(ctx, "/m3_hole.ts", false);
@@ -1246,12 +1258,13 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
         .shallow_state
         .clone();
     assert!(
-        ctx.lowered_type_decl(
-            &state,
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            "Pin"
-        )
-        .is_some(),
+        source_port
+            .lowered_type_decl(
+                &state,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "Pin"
+            )
+            .is_some(),
         "fixture invariant: the pin demand must acquire the retained-snapshot lease",
     );
     raw_state.decl_bodies().release_retained_snapshot_for_test();
@@ -1262,7 +1275,7 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
         .get_or_compute_traced_for_test(&poison_key, || {
             // The non-cacheable read happens HERE — inside `compute()`, i.e. AFTER a
             // funnel-entry check would have run and passed.
-            let leased = ctx.lowered_type_decl(
+            let leased = source_port.lowered_type_decl(
                 &state,
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 "Probe",
@@ -1313,17 +1326,20 @@ fn non_cacheable_read_inside_the_compute_closure_refuses_shape_admission() {
 /// second-read assertion read a re-compute rather than a preserved value.
 #[test]
 fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
-    use crate::component_meta_caches::ComputedEntry;
     use crate::resolver_core::component_meta_query_engine::engine_fact_signature_for_exported_type;
-    use crate::resolver_core::{ResolvedDeclarationKind, ResolvedTypeDeclaration};
     use std::cell::Cell;
+    use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+    use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
+    use verter_type_engine::component_meta_caches::ComputedEntry;
 
     let project = make_project();
     project
         .upsert_base("/m6_refusal.ts", "export type Probe = { q: string };")
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
     let db = host.project_type_store().declaration_db();
 
     let declaration = |text: &str| ResolvedTypeDeclaration {
@@ -1345,8 +1361,10 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         .expect("fixture invariant: the owner has an observable content version");
     let facts =
         match engine_fact_signature_for_exported_type(ctx, "/m6_refusal.ts", "Probe", observed) {
-            crate::cache_runtime::SignatureAdmission::Cacheable(sig) => sig.facts,
-            crate::cache_runtime::SignatureAdmission::NonCacheable(reason) => {
+            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(sig) => {
+                sig.facts
+            }
+            verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(reason) => {
                 panic!("fixture invariant: a real exported type must root, got {reason:?}")
             }
         };
@@ -1407,7 +1425,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         computes.set(computes.get() + 1);
         ComputedEntry::Unrooted(
             declaration("computed-once"),
-            crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+            verter_audit::NonAdmissionReason::SignatureOverflow,
         )
     });
     assert_eq!(
@@ -1436,7 +1454,7 @@ fn unrootable_declaration_is_returned_to_the_winner_and_computed_once() {
         computes.set(computes.get() + 1);
         ComputedEntry::Unrooted(
             declaration("computed-again"),
-            crate::cache_runtime::NonAdmissionReason::SignatureOverflow,
+            verter_audit::NonAdmissionReason::SignatureOverflow,
         )
     });
     assert_eq!(
@@ -1512,7 +1530,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
         fn resolution_completeness(
             &self,
             result: &Self::Resolution,
-        ) -> crate::semantic_query::ResultCompleteness {
+        ) -> verter_type_engine::semantic_query::ResultCompleteness {
             self.inner.resolution_completeness(result)
         }
         fn current_view_supersession_fingerprint(&self) -> u64 {
@@ -1576,7 +1594,7 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
     upsert_simple_props_fixture(&project);
     let session = project.open_session_batch().unwrap();
     let host = session.host();
-    let mode = crate::types::ProjectionMode::Expanded;
+    let mode = verter_type_engine::semantic_query::ProjectionMode::Expanded;
     let canonical = host.resolve_alias_or_canonical("/Simple.vue");
 
     // Fully warm the component-meta so the cold compute's internal resolver
@@ -1644,9 +1662,9 @@ fn view_bound_cold_compute_seeds_from_executor_snapshot_not_a_second_read() {
 /// entries (`live_count` 3, both peeks `Some`).
 #[test]
 fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entries() {
-    use crate::component_meta_caches::ShapeCacheKey;
-    use crate::semantic_query::{NodeScopeId, PrimitiveKind, SemanticNodeData};
-    use crate::types::ProjectionMode;
+    use verter_type_engine::component_meta_caches::ShapeCacheKey;
+    use verter_type_engine::semantic_query::ProjectionMode;
+    use verter_type_engine::semantic_query::{NodeScopeId, PrimitiveKind, SemanticNodeData};
 
     let project = make_project();
     project
@@ -1656,7 +1674,9 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
         .upsert_base("/rel_b.ts", "export type B = { y: number };")
         .unwrap();
     let host = project.host();
-    let ctx: &dyn crate::resolver_core::ResolverContext = host;
+    let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    > = host;
     let store = host.project_type_store();
     let db = store.shape_cache_db();
     let graph = store.semantic_graph();
@@ -1679,7 +1699,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
 
     let (value_a, sig_a) = shape_value_and_fact_sig_for_scope(ctx, "/rel_a.ts", false);
     let (value_b, sig_b) = shape_value_and_fact_sig_for_scope(ctx, "/rel_b.ts", false);
-    let sig_b_and_a: Arc<[crate::resolver_core::FactVersionRef]> = Arc::from(
+    let sig_b_and_a: Arc<[verter_session_query::facts::fact_cache::FactVersionRef]> = Arc::from(
         sig_b
             .iter()
             .chain(sig_a.iter())
@@ -1782,7 +1802,7 @@ fn shape_cache_release_canonical_drops_rooted_released_node_and_dependent_entrie
 /// `== 0` assertion failed (and `node_count` did not drop).
 #[test]
 fn host_evict_releases_the_closed_documents_semantic_nodes_and_the_reopen_recomputes() {
-    use crate::semantic_query::SemanticNodeId;
+    use verter_type_engine::semantic_query::SemanticNodeId;
 
     let project = make_project();
     upsert_editor_toolbar_fixture(&project);
@@ -1887,7 +1907,7 @@ defineProps<{
     // any semantic release — verified by running this sequence with the
     // release hook disabled) is deliberately outside the comparison.
     let published_sources =
-        |meta: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis| {
+        |meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis| {
             meta.props
                 .iter()
                 .map(|prop| {

@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 
-/// 128-bit hash, same as `verter_session::types::Hash16`.
+/// 128-bit hash, same as `verter_session_query::analysis::types::Hash16`.
 pub type Hash16 = [u8; 16];
 
 /// Result of invalidation check for a single dependent.

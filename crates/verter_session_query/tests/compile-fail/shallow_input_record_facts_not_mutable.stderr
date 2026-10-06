@@ -1,0 +1,7 @@
+error[E0596]: cannot borrow data in dereference of `ShallowInputRecord` as mutable
+ --> tests/compile-fail/shallow_input_record_facts_not_mutable.rs:6:5
+  |
+6 |     record.exports.clear();
+  |     ^^^^^^^^^^^^^^ cannot borrow as mutable
+  |
+  = help: trait `DerefMut` is required to modify through a dereference, but it is not implemented for `ShallowInputRecord`

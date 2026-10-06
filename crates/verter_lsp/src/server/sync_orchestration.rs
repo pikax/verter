@@ -312,14 +312,14 @@ impl VerterLanguageServer {
             let direct_carrier = import
                 .resolved_canonical_id
                 .as_deref()
-                .filter(|resolved| verter_semantic::resolver_core::path_is_carrier(resolved))
+                .filter(|resolved| verter_session_query::resolution::path_is_carrier(resolved))
                 .map(str::to_string)
                 .or_else(|| {
-                    (verter_semantic::resolver_core::is_relative_specifier(&import.source)
-                        && verter_semantic::resolver_core::path_is_carrier(&import.source))
+                    (verter_session_query::resolution::is_relative_specifier(&import.source)
+                        && verter_session_query::resolution::path_is_carrier(&import.source))
                     .then(|| {
-                        verter_semantic::resolver_core::join_paths(
-                            &verter_semantic::resolver_core::parent_dir(parent_canonical_id),
+                        verter_session_query::resolution::join_paths(
+                            &verter_session_query::resolution::parent_dir(parent_canonical_id),
                             &import.source,
                         )
                     })
@@ -1247,7 +1247,7 @@ impl VerterLanguageServer {
             .iter()
             .filter(|dependency| {
                 dependency.provider_target
-                    == verter_semantic::resolver_core::ProviderTarget::CarrierPublicApi
+                    == verter_session_query::resolution::ProviderTarget::CarrierPublicApi
             })
             .map(|dependency| dependency.source_id.clone())
             .collect::<Vec<_>>();
@@ -1261,9 +1261,9 @@ impl VerterLanguageServer {
             .iter()
             .filter(|dependency| {
                 dependency.provider_target
-                    == verter_semantic::resolver_core::ProviderTarget::ShadowSourceFile
+                    == verter_session_query::resolution::ProviderTarget::ShadowSourceFile
                     || (dependency.provider_target
-                        == verter_semantic::resolver_core::ProviderTarget::SourceFile
+                        == verter_session_query::resolution::ProviderTarget::SourceFile
                         && dependency.source_id.contains("node_modules"))
             })
             .map(|dependency| dependency.source_id.clone())
@@ -1370,16 +1370,16 @@ impl VerterLanguageServer {
 
             for dependency in resolved_dependencies {
                 if dependency.provider_target
-                    == verter_semantic::resolver_core::ProviderTarget::CarrierPublicApi
+                    == verter_session_query::resolution::ProviderTarget::CarrierPublicApi
                 {
                     self.sync_carrier_public_api_by_canonical_id(&dependency.source_id)
                         .await;
                 } else if dependency.provider_target
-                    == verter_semantic::resolver_core::ProviderTarget::ShadowSourceFile
+                    == verter_session_query::resolution::ProviderTarget::ShadowSourceFile
                 {
                     pending.push(dependency.source_id.clone());
                 } else if dependency.provider_target
-                    == verter_semantic::resolver_core::ProviderTarget::SourceFile
+                    == verter_session_query::resolution::ProviderTarget::SourceFile
                     && dependency.source_id.contains("node_modules")
                 {
                     // Follow node_modules dependencies transitively
@@ -1796,7 +1796,7 @@ impl VerterLanguageServer {
                     return;
                 }
                 (
-                    verter_semantic::resolver_core::carrier_ide_provider_path(
+                    verter_session_query::resolution::carrier_ide_provider_path(
                         &canonical_id,
                         is_jsx,
                     ),
@@ -2701,7 +2701,7 @@ impl VerterLanguageServer {
     ) -> Option<String> {
         carrier_language_for(self.documents.language_classifier(), canonical_id)
             .is_some()
-            .then(|| verter_semantic::resolver_core::carrier_api_provider_path(canonical_id))
+            .then(|| verter_session_query::resolution::carrier_api_provider_path(canonical_id))
     }
 
     pub(super) async fn sync_carrier_ide_unresolved(
@@ -2721,7 +2721,7 @@ impl VerterLanguageServer {
         // `Foo.svelte.tsx`), never a hardcoded `.vue` suffix. This bootstrap
         // unresolved path already knows it holds a carrier.
         let ide_path =
-            verter_semantic::resolver_core::carrier_ide_provider_path(canonical_id, is_jsx);
+            verter_session_query::resolution::carrier_ide_provider_path(canonical_id, is_jsx);
 
         let mut state = self
             .provider_sync_state_for_source(canonical_id)
@@ -3012,7 +3012,7 @@ impl VerterLanguageServer {
                 carrier_language_for(self.documents.language_classifier(), &canonical)
                     .is_some()
                     .then(|| {
-                        verter_semantic::resolver_core::carrier_ide_provider_path(
+                        verter_session_query::resolution::carrier_ide_provider_path(
                             &canonical, is_jsx,
                         )
                     })

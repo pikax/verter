@@ -35,9 +35,9 @@
 use std::sync::Arc;
 
 use verter_audit::{RequestKind, RequestKindPayload, WorkspaceOp};
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_session::tests::audit_tls_harness::assert_observer_reaches;
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 use verter_workspace::{
     MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };

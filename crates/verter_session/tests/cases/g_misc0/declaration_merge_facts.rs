@@ -11,11 +11,11 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::{FactKey, SymbolSpace};
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::InternedName;
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
+use verter_session_query::facts::{FactKey, SymbolSpace};
 
 /// Build an `IndexedReady` from AUTHORED same-name `interface Foo` parts
 /// (each part is a list of `(member, type-text)` pairs), constructed through

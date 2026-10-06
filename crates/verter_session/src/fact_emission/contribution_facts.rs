@@ -6,9 +6,9 @@
 //! declaration body lowering, no cross-file resolution.
 
 use rustc_hash::FxHashSet;
-use verter_semantic::analysis::decl_headers::MemberHeader;
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::{Fact, FactKey, FactRegistry, SymbolSpace};
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::declarations::header_index::MemberHeader;
+use verter_session_query::facts::{Fact, FactKey, FactRegistry, SymbolSpace};
 
 use crate::file_artifact_store::{InternedName, InternedSpecifier};
 use crate::project_type_store::IndexedReady;
@@ -18,11 +18,13 @@ use crate::resolver_core::shallow_file_state::ShallowFileState;
 /// augmentation facts: the `$global` sentinel for `declare global`,
 /// the raw authored specifier for `declare module "X"`.
 pub(super) fn specifier_for(
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
 ) -> InternedSpecifier {
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
     match scope {
-        AugmentationScopeKind::Global => InternedSpecifier::from(super::GLOBAL_AUGMENTATION_TAG),
+        AugmentationScopeKind::Global => InternedSpecifier::from(
+            verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG,
+        ),
         AugmentationScopeKind::Module(spec) => InternedSpecifier::from(spec.as_str()),
     }
 }
@@ -160,7 +162,7 @@ pub(super) fn emit_decl_contribution_order_facts(
     let header_index = &shallow.headers;
     let mut emit_for =
         |key: &verter_type_expr::DeclBindingKey,
-         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
          space: SymbolSpace| {
             let mut buf: Vec<u8> = Vec::with_capacity(64 + 24 * contributors.len());
             buf.extend_from_slice(DECL_CONTRIBUTION_ORDER_SALT);
@@ -218,7 +220,7 @@ pub(super) fn emit_augmentation_contribution_facts(
     // one record per contributor position (duplicates preserved in
     // authored order).
     struct ContributionRecord {
-        scope_kind_tag: verter_semantic::facts::AugmentationScopeKindTag,
+        scope_kind_tag: verter_session_query::facts::AugmentationScopeKindTag,
         specifier: InternedSpecifier,
         owner: verter_type_expr::TopLevelOwnerId,
         name: String,
@@ -229,11 +231,11 @@ pub(super) fn emit_augmentation_contribution_facts(
     let mut set_records_all: Vec<ContributionRecord> = Vec::new();
     let mut order_records_all: Vec<ContributionRecord> = Vec::new();
     let mut collect =
-        |scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
+        |scope: &verter_session_query::declarations::AugmentationScopeKind,
          key: &verter_type_expr::DeclBindingKey,
          kind: &str,
          members: &[MemberHeader],
-         contributors: &[verter_semantic::analysis::decl_headers::DeclHeaderContributor],
+         contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
          space: SymbolSpace| {
             let fingerprint = super::augmentation_header_fingerprint(
                 scope,
@@ -294,7 +296,7 @@ pub(super) fn emit_augmentation_contribution_facts(
     }
 
     let targets: FxHashSet<(
-        verter_semantic::facts::AugmentationScopeKindTag,
+        verter_session_query::facts::AugmentationScopeKindTag,
         InternedSpecifier,
         verter_type_expr::TopLevelOwnerId,
     )> = header_index
@@ -393,13 +395,15 @@ pub(super) fn emit_augmentation_contribution_facts(
 /// augmentation target identity (`declare module "$global"` never
 /// collides with `declare global`).
 fn scope_kind_tag_for(
-    scope: &verter_semantic::analysis::type_eval::AugmentationScopeKind,
-) -> verter_semantic::facts::AugmentationScopeKindTag {
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    scope: &verter_session_query::declarations::AugmentationScopeKind,
+) -> verter_session_query::facts::AugmentationScopeKindTag {
+    use verter_session_query::declarations::AugmentationScopeKind;
     match scope {
-        AugmentationScopeKind::Global => verter_semantic::facts::AugmentationScopeKindTag::Global,
+        AugmentationScopeKind::Global => {
+            verter_session_query::facts::AugmentationScopeKindTag::Global
+        }
         AugmentationScopeKind::Module(_) => {
-            verter_semantic::facts::AugmentationScopeKindTag::Module
+            verter_session_query::facts::AugmentationScopeKindTag::Module
         }
     }
 }
@@ -423,7 +427,7 @@ pub(super) fn emit_scope_inventory_facts(registry: &mut FactRegistry, shallow: &
     let header_index = &shallow.headers;
 
     let mut targets: Vec<(
-        verter_semantic::facts::AugmentationScopeKindTag,
+        verter_session_query::facts::AugmentationScopeKindTag,
         InternedSpecifier,
         verter_type_expr::TopLevelOwnerId,
     )> = header_index

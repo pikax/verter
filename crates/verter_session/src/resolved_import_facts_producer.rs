@@ -5,7 +5,7 @@
 //! (`AnalyzedImport` / `AnalyzedImportBinding`) and the
 //! admitted-route map on `DerivedRawState::import_routes`,
 //! classifies each binding into
-//! [`verter_semantic::facts::registry::SymbolSpace`]
+//! [`verter_session_query::facts::registry::SymbolSpace`]
 //! (`Type` / `Value` / `Namespace` — v8 AMENDMENT-S), composes the
 //! cache key from real per-canonical env hashes
 //! (`VerterHost::host_view_env_hashes_for`), constructs one
@@ -38,7 +38,7 @@
 //! is `None` on the admitted entry. The `Fact.key` for negative
 //! entries uses the `UNRESOLVED_SENTINEL` (`"\0unresolved\0"`) so
 //! the fact key namespace stays in
-//! [`verter_semantic::facts::registry::FactDomain::ResolveImports`]
+//! [`verter_session_query::facts::registry::FactDomain::ResolveImports`]
 //! (`FactKey::ResolvedImportClause`) while remaining distinguishable
 //! from any real canonical path.
 //!
@@ -57,29 +57,23 @@
 //! Arch-guard
 //! `crates/verter_session/tests/cases/g_misc1/lib_env_hash_excluded_from_resolved_import_facts.rs`
 //! pins this absence.
+use verter_session_query::resolution::unresolved::UNRESOLVED_SENTINEL;
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::ImportBindingKind;
-use verter_semantic::facts::registry::{
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::registry::{
     Fact, FactKey, InternedName, InternedSpecifier, SymbolSpace,
 };
-use verter_workspace::FactVersionRef;
 
-use crate::hash::hash_16;
 use crate::host_executor::HostSourceData;
 use crate::resolved_import_facts::{
     ResolvedImportClauseEntry, ResolvedImportFacts, ResolvedImportFactsKey, ResolvedSpecifier,
     RESOLVED_IMPORT_FACTS_RESOLVER_VERSION,
 };
 use crate::VerterHost;
-
-/// Sentinel canonical placed on a negative
-/// [`FactKey::ResolvedImportClause`] entry so the fact key stays
-/// non-`Option` while remaining distinguishable from any real
-/// canonical path. The NUL bytes prevent collision with any
-/// filesystem path on every platform Verter supports.
-pub(crate) const UNRESOLVED_SENTINEL: &str = "\0unresolved\0";
+use verter_semantic_source::source_hash::hash_16;
 
 impl VerterHost {
     /// Production producer for
@@ -355,7 +349,7 @@ impl VerterHost {
     pub(crate) fn resolved_import_facts_witness(
         &self,
         canonical: &str,
-        content_hash: crate::types::Hash16,
+        content_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<Vec<FactVersionRef>> {
         let mut witness = vec![FactVersionRef::FileWholeHash {
             canonical_id: canonical.to_string(),
@@ -373,7 +367,7 @@ impl VerterHost {
     pub fn resolved_import_facts_witness_for(
         &self,
         canonical: &str,
-        content_hash: crate::types::Hash16,
+        content_hash: verter_session_query::analysis::types::Hash16,
     ) -> Option<Vec<FactVersionRef>> {
         self.resolved_import_facts_witness(canonical, content_hash)
     }
@@ -399,7 +393,7 @@ struct ClassifiedBinding {
 /// `script_analysis.imports` vector (`AnalyzedImport` with full
 /// kind + `is_type_only` info).
 fn collect_analyzed_bindings(
-    imports: &[verter_semantic::analysis::types::AnalyzedImport],
+    imports: &[verter_session_query::analysis::types::AnalyzedImport],
 ) -> Vec<ClassifiedBinding> {
     let mut out = Vec::new();
     for imp in imports {

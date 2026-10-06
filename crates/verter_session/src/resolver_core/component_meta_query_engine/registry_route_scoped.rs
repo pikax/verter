@@ -10,7 +10,7 @@
 
 use super::surface::compound_root_surface_view_via_dispatch;
 use super::ComponentMetaQueryEngine;
-use crate::semantic_query::{ProjectionMode, SemanticNodeId};
+use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 
 impl ComponentMetaQueryEngine<'_> {
     /// Select the graph-backed registry surface for both initial observation
@@ -121,18 +121,19 @@ impl ComponentMetaQueryEngine<'_> {
         // The declaration's resolved root identity + raised body root — the
         // same resolution the heritage encoder performs.
         let scope_payload_arc = self.scope_payload_for_scope(scope_canonical_id, scope_owner);
-        let own_root = crate::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
-            self.ctx,
-            self.dispatch,
-            scope_canonical_id,
-            scope_owner,
-            scope_payload_arc.as_deref(),
-            symbol_name,
-        )
-        .unwrap_or_else(|| {
-            self.dispatch
-                .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
-        });
+        let own_root =
+            verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
+                self.ctx,
+                self.dispatch,
+                scope_canonical_id,
+                scope_owner,
+                scope_payload_arc.as_deref(),
+                symbol_name,
+            )
+            .unwrap_or_else(|| {
+                self.dispatch
+                    .intern_resolved_identity(scope_canonical_id, scope_owner, symbol_name)
+            });
         let body_locator = self.named_decl_body(
             own_root.canonical_id.as_ref(),
             own_root.owner,
@@ -143,12 +144,12 @@ impl ComponentMetaQueryEngine<'_> {
             dispatch
                 .raise_authored_locator_to_hot(
                     &body_locator,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                    verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
                 )
                 .at_optional_boundary()
-                .map(|hot: crate::semantic_query::HotTypeRef| hot.node())?
+                .map(|hot: verter_type_engine::semantic_query::HotTypeRef| hot.node())?
         };
         // The one-level view through the shared empty-path Shallow surface
         // walker (member values stay shallow nodes).
@@ -230,8 +231,8 @@ impl ComponentMetaQueryEngine<'_> {
         symbol: &str,
         member_key: &verter_type_expr::facts::FactPropertyKey,
     ) -> Option<(verter_type_expr::facts::PreparedMemberFact, bool)> {
-        use crate::project_semantic_dispatch::node_data_for;
-        use crate::semantic_query::SemanticNodeData;
+        use verter_type_engine::project_semantic_dispatch::node_data_for;
+        use verter_type_engine::semantic_query::SemanticNodeData;
 
         let peel_alias = |mut node: SemanticNodeId| {
             while let Some(SemanticNodeData::Alias(inner)) =

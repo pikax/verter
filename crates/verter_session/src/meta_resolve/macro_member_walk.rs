@@ -5,7 +5,7 @@
 //! reduction is owned by the projector via
 //! `materialize_component_meta_type_expr_until_stable`.
 
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 /// Capture-token counter name recorded every time the slot-binding
 /// registry-collection skip predicate fires for a slot binding rooted
@@ -46,11 +46,14 @@ pub(crate) const PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER: &str =
 /// composite shapes do not produce a root name (the predicate
 /// downstream falls back to `false` for those cases).
 pub(crate) fn collect_define_props_root_names(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     snapshot: &FileAnalysisSnapshot,
 ) -> rustc_hash::FxHashSet<String> {
-    use verter_semantic::analysis::AnalyzedMacroKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
 
     let mut names: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
@@ -66,9 +69,10 @@ pub(crate) fn collect_define_props_root_names(
         let Some(product) = dispatch.macro_type_arg_hot_ref(owner_canonical, macro_index) else {
             continue;
         };
-        let Some(data) =
-            crate::project_semantic_dispatch::node_data_for(dispatch.graph(), product.hot.node())
-        else {
+        let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
+            dispatch.graph(),
+            product.hot.node(),
+        ) else {
             continue;
         };
         if let Some((name, _)) = data.bare_ref_head() {
@@ -102,13 +106,16 @@ pub(crate) fn collect_define_props_root_names(
 /// - `Primitive(_)` / `Object(_)` / fully-expanded fields whose
 ///   raw type was None → does NOT fire (no work to skip).
 pub(crate) fn slot_binding_targets_define_props_root(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
-    field: &verter_semantic::analysis::type_expand::ExpandedField,
+    field: &verter_session_query::analysis::type_expand::ExpandedField,
     define_props_roots: &rustc_hash::FxHashSet<String>,
 ) -> bool {
-    use crate::semantic_query::{IndexKey, SemanticNodeData};
+    use verter_type_engine::semantic_query::{IndexKey, SemanticNodeData};
 
     if define_props_roots.is_empty() {
         return false;
@@ -119,8 +126,8 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // source. Both raise through the shared dispatch bridge — the root
     // extraction below runs in NODE DOMAIN off the raised carrier.
     let transit_ctx =
-        crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-            crate::semantic_query::ProjectionMode::Navigate,
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+            verter_type_engine::semantic_query::ProjectionMode::Navigate,
         );
     let raised = field
         .authored_evidence
@@ -134,7 +141,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
             dispatch
                 .raise_semantic_type_source_to_hot(
                     field.authority.source()?,
-                    crate::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: owner_canonical,
                         scope_owner: owner,
                         context: transit_ctx,
@@ -150,16 +157,19 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // carrier classifies through its SAME-GENERATION value-node seed (the
     // carrier's value-side provenance): the seed IS the lowered binding value
     // (`Props['avatar']`), exactly the node the root extraction below walks.
-    let subject =
-        match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), raised.node())
-            .as_deref()
-        {
-            Some(SemanticNodeData::SyntheticBinding { value_node, .. }) => {
-                crate::semantic_query::SemanticNodeId(*value_node)
-            }
-            _ => raised.node(),
-        };
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
+    let subject = match verter_type_engine::project_semantic_dispatch::node_data_for(
+        dispatch.graph(),
+        raised.node(),
+    )
+    .as_deref()
+    {
+        Some(SemanticNodeData::SyntheticBinding { value_node, .. }) => {
+            verter_type_engine::semantic_query::SemanticNodeId(*value_node)
+        }
+        _ => raised.node(),
+    };
+    let Some(data) =
+        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
     else {
         return false;
     };
@@ -178,20 +188,22 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // `Pick<Props, …>`) when the raised carrier is structurally a path
     // projection rooted at a single reference. Parens are structurally
     // transparent in the graph.
-    let root_name = |node: crate::semantic_query::SemanticNodeId| -> Option<String> {
-        let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let root_name = |node: verter_type_engine::semantic_query::SemanticNodeId| -> Option<String> {
+        let data =
+            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
         // A builtin object-filter utility application (`Pick<Props, …>` /
         // `Omit<Props, …>`): the root is the SOURCE argument's reference head.
         if let Some((name, _)) = data.bare_ref_head() {
             let args = data.carrier_type_args();
-            let is_utility =
-                verter_semantic::analysis::type_solver::builtin::BuiltinUtility::from_name(
-                    name.as_ref(),
-                )
-                .is_some();
+            let is_utility = verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
+                name.as_ref(),
+            )
+            .is_some();
             if is_utility && !args.is_empty() {
-                let source =
-                    crate::project_semantic_dispatch::node_data_for(dispatch.graph(), args[0])?;
+                let source = verter_type_engine::project_semantic_dispatch::node_data_for(
+                    dispatch.graph(),
+                    args[0],
+                )?;
                 let (source_name, _) = source.bare_ref_head()?;
                 return Some(source_name.as_ref().to_string());
             }
@@ -199,34 +211,38 @@ pub(crate) fn slot_binding_targets_define_props_root(
         }
         None
     };
-    let indexed_access_root = |node: crate::semantic_query::SemanticNodeId| -> Option<String> {
-        let mut current = node;
-        loop {
-            let data = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), current)?;
-            match data.as_ref() {
-                SemanticNodeData::IndexedAccess { object, index } => {
-                    if !matches!(index, IndexKey::String(_) | IndexKey::Number(_)) {
+    let indexed_access_root =
+        |node: verter_type_engine::semantic_query::SemanticNodeId| -> Option<String> {
+            let mut current = node;
+            loop {
+                let data = verter_type_engine::project_semantic_dispatch::node_data_for(
+                    dispatch.graph(),
+                    current,
+                )?;
+                match data.as_ref() {
+                    SemanticNodeData::IndexedAccess { object, index } => {
+                        if !matches!(index, IndexKey::String(_) | IndexKey::Number(_)) {
+                            return None;
+                        }
+                        current = *object;
+                    }
+                    _ => {
+                        if let Some((name, _)) = data.bare_ref_head() {
+                            return data
+                                .carrier_type_args()
+                                .is_empty()
+                                .then(|| name.as_ref().to_string());
+                        }
+                        // A root the lowering already RESOLVED interns the
+                        // `DeclRef` identity carrier — same root, same name.
+                        if let SemanticNodeData::DeclRef { identity } = data.as_ref() {
+                            return Some(identity.decl_name.as_ref().to_string());
+                        }
                         return None;
                     }
-                    current = *object;
-                }
-                _ => {
-                    if let Some((name, _)) = data.bare_ref_head() {
-                        return data
-                            .carrier_type_args()
-                            .is_empty()
-                            .then(|| name.as_ref().to_string());
-                    }
-                    // A root the lowering already RESOLVED interns the
-                    // `DeclRef` identity carrier — same root, same name.
-                    if let SemanticNodeData::DeclRef { identity } = data.as_ref() {
-                        return Some(identity.decl_name.as_ref().to_string());
-                    }
-                    return None;
                 }
             }
-        }
-    };
+        };
 
     let root = root_name(subject).or_else(|| {
         // The indexed-access route fires only for a genuine access chain, not

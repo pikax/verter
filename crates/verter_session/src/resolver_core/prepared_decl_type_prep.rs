@@ -44,7 +44,7 @@ pub(super) fn prepare_type_decl_from_lowered(
     lowered: &LoweredTypeDecl,
     deps: Option<&ClassifiedTypeDeps>,
     dep_edges: Option<&FxHashMap<String, String>>,
-    origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
+    origin: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     import_canonicalization: &ImportCanonicalization,
     shared_name_resolution_base: Option<&SharedNameResolutionBase>,
     interner: &IdentityInterner,
@@ -477,10 +477,10 @@ fn add_namespace_sibling_resolutions(
     owner: verter_type_expr::TopLevelOwnerId,
     symbol_name: &str,
     canonical_id: &Arc<str>,
-    origin: Option<&verter_semantic::analysis::type_eval::AugmentationScopeKind>,
+    origin: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     interner: &IdentityInterner,
 ) {
-    use verter_semantic::analysis::type_eval::AugmentationScopeKind;
+    use verter_session_query::declarations::AugmentationScopeKind;
     let Some((namespace_prefix, _)) = symbol_name.rsplit_once('.') else {
         return;
     };

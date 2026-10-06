@@ -58,7 +58,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The scan roots (relative to the crate `src/`): the resolution / routing
+/// The scan roots (relative to each scanned crate `src/`): the resolution / routing
 /// trees where a carrier-neutral `.vue` / `is_vue()` gate is a genuine parity
 /// bug — the `resolver_core/` semantic resolver and the `host_resolve/`
 /// live-host resolver chain.
@@ -108,10 +108,22 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The type engine's `src/`: part of the resolver tree (`resolver_core/`)
+/// lives there, so the same scan roots apply to it.
+fn engine_src() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("verter_type_engine")
+        .join("src")
+}
+
 fn scan_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for dir in SCAN_DIRS {
-        collect_rs(&crate_src().join(dir), &mut files);
+    for root in [crate_src(), engine_src()] {
+        assert!(root.is_dir(), "scan root {} is missing", root.display());
+        for dir in SCAN_DIRS {
+            collect_rs(&root.join(dir), &mut files);
+        }
     }
     files.sort();
     files

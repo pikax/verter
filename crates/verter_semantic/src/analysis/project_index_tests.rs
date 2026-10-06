@@ -985,7 +985,7 @@ fn template_id_remove_file_cleans_index() {
 // =============================================================================
 
 use crate::analysis::file_usage::{StoreDefinitionOwned, StoreUsageOwned};
-use crate::analysis::types::StoreApiClassification;
+use verter_session_query::analysis::types::StoreApiClassification;
 
 fn make_file_with_store_usage(callee: &str, import_source: &str) -> FileUsageInfoOwned {
     let mut info = make_file_info();

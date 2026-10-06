@@ -12,7 +12,7 @@
 //! admitted entry's facts VALIDATE on every warm read, forever. No later edit
 //! moves a hash that would evict it. "It re-resolves eventually" is false here.
 //!
-//! The rail is the unforgeable [`CacheabilityProbe`](crate::fact_signature_helpers::CacheabilityProbe):
+//! The rail is the unforgeable [`CacheabilityProbe`](verter_type_engine::fact_signature_helpers::CacheabilityProbe):
 //! the funnels REQUIRE one and sample it AFTER the compute, and its scope
 //! ENCLOSES that compute. The completeness rail cannot substitute for it — a
 //! fenced serve is `Complete` by construction (non-cacheability is never
@@ -184,9 +184,13 @@ fn fenced_serve_fallthrough_node_is_not_admitted() {
     let host = build_child_root_host();
     let before = node_count(&host);
 
-    let rctx =
-        crate::request_context::RequestContext::new(1, Arc::from("/src/Button.vue"), false, None);
-    let _guard = crate::request_context::RequestContextGuard::install(rctx);
+    let rctx = verter_type_engine::request_context::RequestContext::new(
+        1,
+        Arc::from("/src/Button.vue"),
+        false,
+        None,
+    );
+    let _guard = verter_type_engine::request_context::RequestContextGuard::install(rctx);
 
     host.test_force
         .force_indexed_ready_serve_fence_for_tests
@@ -207,7 +211,7 @@ fn fenced_serve_fallthrough_node_is_not_admitted() {
     // why the completeness rail cannot catch it, and why the probe rail is the only
     // thing standing between the fence and the cache.
     assert!(
-        !crate::request_context::current_request_result_is_partial(),
+        !verter_type_engine::request_context::current_request_result_is_partial(),
         "a fenced serve is non-cacheable, NOT partial — non-cacheability routes through the fact \
          tracer, never the partial sticky",
     );

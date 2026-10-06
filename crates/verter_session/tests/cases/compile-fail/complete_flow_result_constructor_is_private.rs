@@ -5,7 +5,7 @@
 //! widened (`pub` or `pub(crate)` with a test-support re-export of it), this
 //! fixture would COMPILE and trybuild would turn red.
 
-use verter_session::for_tests::CompleteFlowResult;
+use verter_type_engine::project_semantic_dispatch::flow_solve::CompleteFlowResult;
 
 fn main() {
     let _ = CompleteFlowResult::new(todo!());

@@ -48,6 +48,7 @@
 //! - [`parse`] â€” SFC tokenization â†’ [`ParseSnapshot`](types::ParseSnapshot), non-SFC hashing
 //! - [`shared`] â€” feature-gated `RwLock`/`RefCell` abstraction
 //! - [`upsert`] â€” change detection, result building, export signature diffing
+use crate::meta_provenance::MetaProvenance;
 
 #[macro_use]
 extern crate verter_debug_assert;
@@ -63,9 +64,7 @@ mod audited_request_tests;
 mod authored_evidence_producer;
 pub mod binder_identity_facts;
 mod block_content;
-pub mod build_toolchain_fingerprint;
 mod cache;
-pub mod cache_schema;
 pub mod carrier_artifact_cohort;
 #[cfg(test)]
 mod carrier_fixture_tests;
@@ -121,13 +120,12 @@ mod template_slot_generation_rail_tests;
 #[cfg(test)]
 mod unrootable_route_admission_tests;
 // tests/cases/g_misc0/invalidation_perf.rs — InvalidationByCanonical impl on ImportedRegistryDb is exercised by the §12.A12 perf gate.
-pub(crate) mod bounded_query_retention;
-pub(crate) mod cache_runtime;
+#[cfg(test)]
+mod cache_runtime_tests;
 pub(crate) mod compile_cache_mode;
 pub(crate) mod compile_fact_emission;
 #[cfg(test)]
 mod component_meta_abort_tests;
-pub mod component_meta_caches;
 #[cfg(test)]
 mod component_meta_caches_tests;
 #[cfg(test)]
@@ -160,6 +158,7 @@ mod component_meta_repo_first_pass_diagnosis_tests;
 pub mod component_meta_resolution_policy;
 #[cfg(test)]
 mod component_meta_resolve_owner_route_strip_tests;
+pub(crate) mod component_meta_result_admission;
 pub mod component_meta_result_db;
 #[cfg(test)]
 mod component_meta_slot_binding_skip_tests;
@@ -182,61 +181,34 @@ pub mod cross_file;
 mod cross_file_augmentation_merge_equivalence_tests;
 #[cfg(test)]
 mod decl_body_dispatch_equivalence_tests;
-pub(crate) mod decl_body_memo;
-pub(crate) mod decl_lowering;
+#[cfg(test)]
+mod decl_body_memo_tests;
 pub mod fact_emission;
-pub mod flow_return_audit;
 pub mod framework;
 pub mod global_contributors;
+pub(crate) mod host_source_demand;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
+#[cfg(test)]
+mod mutation_stability_tests;
 #[cfg(test)]
 mod value_symbol_depth_equivalence_tests;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
 // implementation detail. The only externally-needed type is
 // `ReadSetSignature` — the return type of the public inspector
 // `compile_slot_fact_dep_signature` — selectively re-exported below.
-pub(crate) mod fact_signature_helpers;
-pub use crate::fact_signature_helpers::ReadSetSignature;
+#[cfg(test)]
+mod fact_signature_helpers_host_tests;
+pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 #[cfg(test)]
 mod error_propagation_lattice_tests;
 pub mod external_ts;
 pub mod file_artifact_store;
-/// The closed, code-first inventory of every carrier that transports a
-/// flow-completion fact. Crate-private: the completion fact's opaque
-/// carrier and its construction / discharge vocabularies are substrate
-/// internals, and nothing outside the flow pipeline may mint or read one.
-pub(crate) mod flow_completion_inventory;
 #[cfg(test)]
 mod flow_completion_inventory_tests;
-pub(crate) mod flow_slice_content;
 #[cfg(test)]
 mod flow_slice_content_tests;
-pub(crate) mod graph_walk;
 mod hash;
-pub(crate) mod instant;
-/// Session-side key identities for locator-backed body lowering
-/// (`LocatorLoweringKey` + the sealed R6 key-dimension witness +
-/// `SessionDemandIdentity`). Crate-private: the substrate is B1-internal;
-/// only the two R6-witness compile-fail helpers below are re-exported.
-pub(crate) mod locator_identity;
-/// R6-witness compile-fail test surface. `assert_r6_key_dimension` /
-/// `assert_r6_key_safe` are consumed ONLY by the out-of-crate `r6_key_*`
-/// trybuild fixtures (`tests/cases/compile-fail/`), which prove a forbidden
-/// dimension cannot occupy a session query-identity key position. Nothing
-/// else external names `locator_identity`, so the module itself stays
-/// `pub(crate)` and only these two witnesses enter the public surface.
-pub use crate::locator_identity::{assert_r6_key_dimension, assert_r6_key_safe};
-/// Sealed locator-shape lowering context. Public NAME only (private fields,
-/// in-crate construction): the out-of-crate trybuild fixtures prove it
-/// neither contains nor converts to a `ProjectionReductionContext`, so the
-/// reducing lowering entry is unreachable from the locator path by type.
-pub use crate::project_semantic_dispatch::locator_shape::LocatorShapeCtx;
-/// Snapshot-backed span-recovery helpers (recover authored spans from a
-/// retained parse via a producer-emitted origin locator, before identity).
-pub(crate) mod locator_span_recovery;
-#[cfg(test)]
-mod locator_span_recovery_tests;
 pub mod member_display_fact_store;
 pub mod member_semantic_fact_store;
 pub mod parse_stable_hash;
@@ -326,20 +298,14 @@ pub mod host_resolve_type_audit;
 mod host_semantic;
 #[cfg(test)]
 pub(crate) mod host_test_audit;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod host_test_force;
 mod host_upsert;
 mod host_views;
 mod host_workspace_audit;
 mod id;
-pub(crate) mod identity_interner;
-pub(crate) mod intrinsic_registry;
-pub mod invalidation_domain;
-/// Loop-5 inner-dispatch instrumentation counters. Inert in production —
-/// callers bump atomic counters at named call sites and dump aggregates
-/// via `dump_loop5_instrumentation_counters()`.
-pub mod loop5_instrumentation;
-pub(crate) mod mapper_binder_registry;
+#[cfg(test)]
+mod intrinsic_registry_sdk_audit_tests;
 pub mod meta;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod runtime_render_lane_tests;
@@ -348,37 +314,41 @@ mod test_worker_pools;
 
 #[cfg(test)]
 mod artifact_root_retention_tests;
+pub(crate) mod compile_output_node;
+pub(crate) mod component_meta_cached_result;
 pub mod input_basis;
 /// Asynchronous input acquisition to committed-snapshot handoff: one
 /// immutable committed `InputBasis` per acquisition wave, typed
 /// `NeedInputs` for unacquired keys, no acquisition capability inside
 /// the seam.
 pub mod input_handoff;
+pub(crate) mod meta_provenance;
 pub mod meta_resolve;
 #[cfg(test)]
 mod negative_import_route_tests;
+pub(crate) mod output_sinks;
 pub mod owned_artifacts;
 pub mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
 mod parse;
-mod parsed_eval_program;
 /// Portable platform-services boundary: the per-target inventory of
 /// the io/time/scheduling/persistence/process service classes and the
 /// browser-closure dependency guard.
 pub mod platform_services;
 #[cfg(test)]
 mod project_global_cache_tests;
-pub(crate) mod project_semantic_dispatch;
+#[cfg(test)]
+mod project_semantic_dispatch_tests;
 pub mod project_type_store;
 #[cfg(test)]
 mod project_type_store_tests;
 #[cfg(test)]
 mod public_api_batch_fixed_view_tests;
 pub mod query_host_port;
-mod request_budget;
-pub mod request_context;
 pub mod resolver_core;
+#[cfg(test)]
+mod resolver_core_tests;
 mod resolver_store;
 #[cfg(test)]
 mod resolver_store_tests;
@@ -387,19 +357,19 @@ pub mod route_analysis_inputs;
 /// closed capability catalog and the certified engine binding that is the
 /// sole route a TypeScript engine's answer enters the semantic plane.
 pub mod semantic_capability;
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod semantic_execution;
-pub mod semantic_query;
-pub(crate) mod semantic_query_memo;
+#[cfg(test)]
+mod semantic_query_memo_tests;
+#[cfg(test)]
+mod semantic_query_tests;
 /// The one PROCESS-wide aggregate retention account: public so the LSP
 /// provider-surface store charges THIS one, not a second per-crate ceiling.
-pub mod semantic_retention_account;
 #[cfg(test)]
 mod semantic_retention_account_tests;
+pub(crate) mod session_attachment;
 pub(crate) mod session_runtime;
+pub(crate) mod session_vfs_sink;
 pub mod session_view;
 mod shared;
-pub(crate) mod signature_kernel;
 #[cfg(test)]
 mod source_root_retention_tests;
 #[cfg(test)]
@@ -407,7 +377,8 @@ mod store_view_manager_tests;
 #[cfg(test)]
 mod store_view_non_current_contract_tests;
 mod store_view_roots;
-pub(crate) mod structural_carrier_producer;
+#[cfg(test)]
+mod structural_carrier_producer_tests;
 pub(crate) mod template_convert;
 /// Test-only re-exports for integration tests in `tests/`.
 ///
@@ -434,8 +405,6 @@ pub use crate::typeinfo::oracle_core::gen::{run_oracle_gen, upgrade_snapshots_to
 // Capture-token test/diagnosis instrumentation. Gated by the explicit
 // `test-support` feature used by this crate's dev-only self dependency;
 // ordinary debug builds are production builds and must not expose it.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) mod capture_token;
 
 // Test-support submodules accessible to integration tests under
 // `crates/verter_session/tests/*.rs`. Gated by explicit test support so
@@ -469,7 +438,6 @@ pub use verter_language::{
 // Per-call-site instrumentation accessors. Production-on; the counter map is bumped on every `HostStoreView::from_host` invocation.
 // The coherent-build sweep counter is the batch-saturation gate's actual base-view sweep count; warm batches sweep ~O(1).
 #[cfg(not(target_arch = "wasm32"))]
-pub use decl_lowering::{dump_decl_handoff_stats, reset_decl_handoff_stats, DeclHandoffSnapshot};
 pub use resolver_store::{
     dump_from_host_call_sites, reset_from_host_call_sites, reset_store_view_coherent_build_sweeps,
     store_view_coherent_build_sweeps,
@@ -489,10 +457,9 @@ use std::sync::Arc;
 pub use id::resolve_external;
 pub use input_basis::{
     commit_workspace_canonical, retry_workspace_wave, CommitError, DirectoryEntry, InputBasis,
-    LoadWave, NegativeFact, NegativeKind, Observation, ObservationKind, ObserveError,
-    RequestInputBinding, RetryError, RetryOutcome, SnapshotFence, TornSnapshot,
+    LoadWave, NegativeFact, NegativeKind, Observation, ObservationKind, ObserveError, RetryError,
+    RetryOutcome, SnapshotFence, TornSnapshot,
 };
-pub(crate) use parsed_eval_program::ParsedEvalProgram;
 use rustc_hash::FxHashMap;
 #[cfg(test)]
 use shared::default_shared;
@@ -719,7 +686,7 @@ pub struct VerterHost {
     /// a parse-env-moving configuration change mid-flight. **Compiled
     /// out in production builds.**
     #[cfg(test)]
-    pub(crate) parse_env_override: parking_lot::Mutex<Option<crate::types::Hash16>>,
+    pub(crate) parse_env_override: parking_lot::Mutex<Option<verter_session_query::analysis::types::Hash16>>,
     /// Host-owned LRU cache for the typeinfo `evaluate_type_expression`
     /// scratch URIs. See `typeinfo::scratch_cache` for the LRU policy
     /// and §5.3 of the typeinfo plan for the deterministic-URI
@@ -735,6 +702,10 @@ pub struct VerterHost {
     /// authority cannot describe different framework sets. Built ONCE at host
     /// construction and immutable thereafter. See `framework::registry::HostServices`.
     pub(crate) framework_services: std::sync::Arc<crate::framework::HostServices>,
+    /// Host-owned state a request reaches beside the engine (the framework
+    /// surface DTO stores), selected once from the registry rows that own
+    /// them. See [`crate::session_attachment::SessionAttachment`].
+    pub(crate) session_attachment: crate::session_attachment::SessionAttachment,
     /// Host-owned framework script-fact caches — the resolved-validation half
     /// of the script-fact seam. The content-addressed candidate store + the
     /// resolved-fact store the registry's active providers write through.
@@ -775,7 +746,7 @@ pub struct VerterHost {
     /// field, so the retained snapshot lives in a single-thread
     /// thread-local shard (`WASM_DECL_LOWERING_SHARD`) the job runs
     /// inline against — still lease-pinned, NOT a re-parse per demand.
-    pub(crate) decl_lowering: Arc<crate::decl_lowering::DeclLoweringService>,
+    pub(crate) decl_lowering: Arc<verter_semantic_source::decl_lowering::DeclLoweringService>,
     /// Per-host test-injection knob for the compile-tier cold-build
     /// path. When set to `N > 0`, the `Session` cold-compute closure
     /// observes `N` synthetic `FileWholeHash` facts via `observe_fan_out`
@@ -794,10 +765,10 @@ pub struct VerterHost {
     /// takes locks, so the cost is in the noise.
     pub(crate) compile_force_overflow_observations: std::sync::atomic::AtomicUsize,
     /// Per-host relation-engine knobs: the overflow / budget test-injection
-    /// triggers — see [`crate::host_construction::RelationHostKnobs`].
-    pub(crate) relation_knobs: Arc<host_construction::RelationHostKnobs>,
+    /// triggers — see [`verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs`].
+    pub(crate) relation_knobs: Arc<verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs>,
     /// Per-host test-injection knob for the cross-file declaration-augmentation
-    /// folder ([`crate::project_semantic_dispatch`]'s
+    /// folder ([`verter_type_engine::project_semantic_dispatch`]'s
     /// `collect_augmentation_contributions`). When `true`, EVERY augmenter in
     /// the target's augmenter set is treated as a torn / unobservable
     /// contributor (skipped, `source_env_unobservable = true`) — the exact
@@ -813,21 +784,14 @@ pub struct VerterHost {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool,
     /// Per-host (never process-global) flow-admission fault slots — see
-    /// [`crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection`].
+    /// [`verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_fault_injection`].
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) flow_fault_injection:
-        Arc<project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs>,
-    /// Test-only force-injection knobs, grouped so the root struct stays thin;
-    /// `#[cfg(test)]`-gated. See [`crate::host_test_force::TestForceKnobs`].
-    #[cfg(test)]
+        Arc<verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs>,
+    /// Test force-injection knobs, grouped so the root struct stays thin;
+    /// test-support gated. See [`crate::host_test_force::TestForceKnobs`].
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) test_force: Arc<crate::host_test_force::TestForceKnobs>,
-    /// Per-host count of macro-hot-mirror COLD builds (`build_macro_hot_ref`
-    /// entries). The per-slot singleflight guarantee is that concurrent first
-    /// demands of ONE macro collapse onto ONE cold build; a test asserts this
-    /// counter is `1` after a barrier-synchronised concurrent demand burst.
-    /// `#[cfg(test)]`-gated: no production reader.
-    #[cfg(test)]
-    pub(crate) macro_hot_lowering_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Per-host invocation counter for
     /// [`VerterHost::prefetch_compile_tier_observation_targets`].
     /// Incremented once per actual call to the prefetch. The cold-compute
@@ -843,7 +807,7 @@ pub struct VerterHost {
     /// `install_fact_tracer` boundary. Monotonically increasing for the
     /// host's lifetime; reset only when the host is dropped. Readable
     /// from tests via
-    /// [`crate::fact_signature_helpers::read_signature_overflow_at_install`].
+    /// [`verter_type_engine::fact_signature_helpers::read_signature_overflow_at_install`].
     /// Per-host so an overflow forced on one host's tracer never bumps
     /// the counter a different host's delta assertion reads.
     pub(crate) signature_overflow_at_install: Arc<std::sync::atomic::AtomicU64>,

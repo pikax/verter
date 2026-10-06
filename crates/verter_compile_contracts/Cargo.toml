@@ -24,6 +24,7 @@ identity = []
 language = []
 semantic = []
 session = []
+session-query = []
 type-runtime = []
 workspace = []
 

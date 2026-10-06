@@ -5,7 +5,9 @@
 //! type aliases, and a handful of standalone scope-selection and
 //! transitive-cycle-reachability helpers.
 
-use crate::types::{FileAnalysisSnapshot, Hash16, ProjectionMode};
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::Hash16;
+use verter_type_engine::semantic_query::ProjectionMode;
 
 // `ResolvedDeclarationKind`, `ResolvedTypeDeclaration`,
 // `ResolvedTypeRegistryMeta`, `ResolvedMacroMeta`, `ResolvedNativeProp`,
@@ -36,15 +38,15 @@ use super::{ResolvedComponentMetaComputeAudit, ResolvedMacroMeta, ResolvedTypeRe
 #[derive(Debug, Clone, Default)]
 pub struct SurfaceNodeIdentities {
     /// Index-aligned with `ExpandedComponentTypes.props`.
-    pub prop_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub prop_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
     /// Index-aligned with `ExpandedComponentTypes.emits`.
-    pub emit_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub emit_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
     /// Index-aligned with `ExpandedComponentTypes.slot_bindings`.
-    pub slot_binding_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub slot_binding_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
     /// Index-aligned with `ExpandedComponentTypes.bindings`.
-    pub binding_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub binding_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
     /// Index-aligned with `ResolvedComponentMetaState.resolved_type_registry`.
-    pub registry_node_ids: Vec<Option<crate::semantic_query::SemanticNodeId>>,
+    pub registry_node_ids: Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,13 +61,14 @@ pub struct ResolvedComponentMetaState {
     pub resolved_macros: Vec<ResolvedMacroMeta>,
     /// Resolved type registry entries (populated in `Expanded` mode).
     pub resolved_type_registry:
-        Vec<verter_semantic::analysis::component_meta::ResolvedTypeAnalysis>,
+        Vec<verter_session_query::analysis::component_meta::ResolvedTypeAnalysis>,
     /// Native declaration metadata for each resolved type-registry entry.
     pub resolved_type_registry_meta: Vec<ResolvedTypeRegistryMeta>,
     /// Expanded types (populated in `Expanded` mode only).
-    pub evaluated_types: Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    pub evaluated_types:
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     /// Semantic fact versions consumed while producing this resolved state.
-    pub fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+    pub fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     /// Non-semantic compute audit captured only when native audit is enabled.
     pub compute_audit: Option<ResolvedComponentMetaComputeAudit>,
     /// Surface-id sidecar. Populated only
@@ -91,7 +94,7 @@ pub struct ResolvedComponentMetaState {
     /// and projected onto the audit substrate via
     /// [`crate::host_audit_bridge::macro_expansion_to_audit_entries`].
     pub synthesis_diagnostics:
-        Vec<verter_semantic::analysis::component_meta::MacroExpansionDiagnostics>,
+        Vec<verter_session_query::analysis::component_meta::MacroExpansionDiagnostics>,
     /// Typed per-result completeness — `Complete` when this resolved state is
     /// the full surface, `Partial` (with its reason set) when a budget
     /// exhaustion / fatal `QueryError` / partial macro surface produced a
@@ -103,7 +106,7 @@ pub struct ResolvedComponentMetaState {
     /// is RETURNED to the caller but is refused warm admission to the
     /// `ComponentMetaResultDb` / resolved-meta caches (the no-poison
     /// invariant).
-    pub completeness: crate::semantic_query::ResultCompleteness,
+    pub completeness: verter_type_engine::semantic_query::ResultCompleteness,
     /// `true` when graph-native slot-binding synthesis observed a fatal
     /// `QueryError` (`BudgetExceeded`, `UnstableState`, walker
     /// `cache_suppress`) during the cold compute. Gates
@@ -123,7 +126,7 @@ impl ResolvedComponentMetaState {
     /// append in producer order with deterministic equality-based dedup.
     pub(crate) fn merge_extraction_fact_versions(
         &mut self,
-        extraction_facts: Option<&[crate::resolver_core::FactVersionRef]>,
+        extraction_facts: Option<&[verter_session_query::facts::fact_cache::FactVersionRef]>,
     ) -> bool {
         let Some(extraction_facts) = extraction_facts else {
             return false;

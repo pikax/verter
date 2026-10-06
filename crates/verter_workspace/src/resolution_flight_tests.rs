@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use verter_semantic::resolver_core::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
 use crate::engine::resolution_test_hooks::{self, ResolutionPhase};
 use crate::engine::ResolutionOperation;

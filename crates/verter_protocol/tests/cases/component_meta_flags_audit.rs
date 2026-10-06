@@ -21,10 +21,11 @@ fn workspace_root() -> PathBuf {
 fn component_meta_flags_has_macro_failure_field_present() {
     // ── Side 1: Rust struct ─────────────────────────────────────────
     // `ComponentMetaFlags` (defined in
-    // `crates/verter_semantic/src/analysis/component_meta.rs`) MUST
+    // `crates/verter_session_query/src/analysis/component_meta.rs`) MUST
     // declare a `has_macro_failure: bool` field. We parse the file
     // with syn and walk the struct's fields.
-    let rust_path = workspace_root().join("crates/verter_semantic/src/analysis/component_meta.rs");
+    let rust_path =
+        workspace_root().join("crates/verter_session_query/src/analysis/component_meta.rs");
     let rust_body = std::fs::read_to_string(&rust_path).expect("read component_meta.rs");
     let parsed: syn::File = syn::parse_str(&rust_body).expect("parse component_meta.rs");
 

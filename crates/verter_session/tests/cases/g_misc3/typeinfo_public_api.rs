@@ -14,11 +14,11 @@
 use std::sync::Arc;
 
 use verter_audit::{RequestKind, RequestKindPayload};
-use verter_session::semantic_query::ProjectionMode;
 use verter_session::typeinfo::types::{
     EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolKind,
 };
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 const TS_FIXTURE: &str = r#"
 export interface IFoo { a: number }

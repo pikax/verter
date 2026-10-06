@@ -46,8 +46,8 @@
 
 use std::sync::Arc;
 
-use crate::fact_signature_helpers::install_fact_tracer;
 use crate::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::fact_signature_helpers::install_fact_tracer;
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -119,12 +119,12 @@ fn unrootable_route_walk_marks_the_enclosing_traced_compute() {
     // The enclosing traced compute: a shared-cache producer that folds this
     // route into its own result and then decides admission from its rails.
     let (resolved, finalise) = install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || host.resolve_named_type_export_target(provider, "Missing"),
     );
     let non_cacheable = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     assert!(
@@ -145,12 +145,12 @@ fn unrootable_imported_root_walk_marks_the_enclosing_traced_compute() {
     let host = host_with_unrootable_provider(provider);
 
     let (_root, finalise) = install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || host.resolve_imported_type_root(provider, "Missing"),
     );
     let non_cacheable = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     assert!(
@@ -180,12 +180,12 @@ fn rootable_route_walk_leaves_the_enclosing_traced_compute_clean() {
     );
 
     let (resolved, finalise) = install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
         || host.resolve_named_type_export_target("/ws/clean_provider.ts", "Foo"),
     );
     let non_cacheable = matches!(
         finalise,
-        crate::resolver_core::FactReadSetFinalise::NonCacheable(_)
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
     );
 
     assert_eq!(

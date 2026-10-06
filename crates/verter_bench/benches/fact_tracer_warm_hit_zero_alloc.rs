@@ -60,10 +60,12 @@ fn bench_cold_compute_install_uninstall(c: &mut Criterion) {
     let host = make_host();
     c.bench_function("fact_tracer/cold_compute_install_uninstall", |b| {
         b.iter(|| {
-            let ((), set) =
-                host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            let ((), set) = host.with_fact_tracer(
+                verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                || {
                     // Empty body — measures the install+drop overhead.
-                });
+                },
+            );
             black_box(set);
         });
     });
@@ -76,18 +78,20 @@ fn bench_cold_compute_one_observation(c: &mut Criterion) {
     let host = make_host();
     // Construct a representative fact once outside the loop; cloning
     // a `FactVersionRef::FileWholeHash` is the cheapest variant.
-    let fact = verter_session::resolver_core::FactVersionRef::FileWholeHash {
+    let fact = verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
         canonical_id: "/m.ts".to_string(),
         hash: [0; 16],
     };
     c.bench_function("fact_tracer/cold_compute_one_observation", |b| {
         b.iter(|| {
-            let ((), set) =
-                host.with_fact_tracer(verter_workspace::AggregateBasisSeed::Unvouched, || {
+            let ((), set) = host.with_fact_tracer(
+                verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+                || {
                     if let Some(cell) = host.current_fact_tracer() {
                         cell.observe(fact.clone());
                     }
-                });
+                },
+            );
             black_box(set);
         });
     });

@@ -30,7 +30,7 @@ fn make_project_config(root: &str) -> verter_workspace::VfsProjectConfig {
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
@@ -247,7 +247,7 @@ defineProps<{ greeting: string }>()
 // - `cancellation_does_not_poison_cache`: the scheduler's
 //   cancellation primitive is not exposed at a useful level via
 //   the host API. Authoring a discriminating test would require
-//   either touching `crates/verter_session/src/capture_token.rs`
+//   either touching `crates/verter_type_engine/src/capture_token.rs`
 //   (B-A0 territory, forbidden by the sidecar's "DO NOT" list)
 //   or adding a public cancellation API (forbidden by §17.7
 //   deviation triggers).

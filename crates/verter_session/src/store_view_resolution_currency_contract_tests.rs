@@ -47,8 +47,8 @@ fn set_exact_target(host: &VerterHost, target: Option<&str>) {
         .map(|target| {
             vec![verter_workspace::ExactResolution {
                 specifier: SPECIFIER.to_string(),
-                phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                kind: verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
                 resolved_canonical_id: Some(target.to_string()),
                 possible_canonical_ids: vec![target.to_string()],
             }]

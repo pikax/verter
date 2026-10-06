@@ -85,7 +85,10 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
     let _ = host
         .get_component_meta("/src/Comp.vue")
         .expect("first call resolves");
-    let tracer_after_prime = prov.slot_binding_graph_fact_tracer_emissions.load(Relaxed);
+    let tracer_after_prime = prov
+        .engine
+        .slot_binding_graph_fact_tracer_emissions
+        .load(Relaxed);
     assert!(
         tracer_after_prime >= 1,
         "the prime call must publish slot-binding-graph dependencies \
@@ -112,7 +115,10 @@ fn unrelated_edit_does_not_advance_slot_binding_graph_emission_counters() {
         .expect("second call resolves via warm hit");
 
     let hits_after_unrelated = prov.component_meta_result_cache_hits.load(Relaxed);
-    let tracer_after_unrelated = prov.slot_binding_graph_fact_tracer_emissions.load(Relaxed);
+    let tracer_after_unrelated = prov
+        .engine
+        .slot_binding_graph_fact_tracer_emissions
+        .load(Relaxed);
 
     assert!(
         hits_after_unrelated > hits_before_warm,

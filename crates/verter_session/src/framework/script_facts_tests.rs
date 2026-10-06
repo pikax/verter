@@ -5,8 +5,10 @@
 //! fact-signature overflow).
 
 use super::*;
-use crate::cache_runtime::SignatureAdmission;
-use crate::resolver_core::{FactVersionRef, PermissiveStoreView, StoreView, StoreViewCompatToken};
+use crate::resolver_core::PermissiveStoreView;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::fact_cache::SignatureAdmission;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
 /// This module's tests belong here, not to any evidence suite's floor.
 ///
@@ -31,11 +33,11 @@ fn candidate_key(canonical: &str, content: [u8; 16]) -> CandidateSlotKey {
         canonical: Arc::from(canonical),
         content_hash: content,
         parse_env_hash: [0u8; 16],
-        parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(canonical, 1),
+        parse_key: verter_session_query::source::toolchain::parse_key_for_test(canonical, 1),
         build_toolchain_fingerprint:
-            crate::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+            verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         file_language_id:
-            crate::file_artifact_store::FileArtifactKey::synthetic_file_language_for_test(canonical),
+            verter_session_query::source::artifact_key::FileArtifactKey::synthetic_file_language_for_test(canonical),
         provider_id: FrameworkAdapterId::new("fixture-fw"),
         provider_version: 1,
     }
@@ -91,7 +93,9 @@ fn stale_build_fingerprint_candidate_is_rejected_by_current_key() {
         ..candidate_key("/Fixture.vue", [3u8; 16])
     };
     let stale = CandidateSlotKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(4),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            4,
+        ),
         ..current.clone()
     };
     store.insert(stale.clone(), fixture_candidates());
@@ -115,7 +119,9 @@ fn another_stale_build_fingerprint_candidate_is_rejected_by_current_key() {
     let store = FrameworkScriptCandidateStore::new();
     let current = candidate_key("/AuthoredImport.vue", [6u8; 16]);
     let stale = CandidateSlotKey {
-        build_toolchain_fingerprint: crate::build_toolchain_fingerprint::fingerprint_for_test(5),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            5,
+        ),
         ..current.clone()
     };
     store.insert(stale.clone(), fixture_candidates());
@@ -198,8 +204,9 @@ fn overflowed_admission_never_warms_the_store_return_only() {
     let key = resolved_fact_key("/a.ts");
     // An overflowed (NonCacheable) admission: the value is returned to the
     // caller but the store is NOT warmed (the no-poison invariant).
-    let admission =
-        SignatureAdmission::from_finalise(crate::resolver_core::FactReadSetFinalise::Overflow);
+    let admission = SignatureAdmission::from_finalise(
+        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow,
+    );
     let stored = store.publish_if_cacheable(
         key.clone(),
         ExactScriptFacts::new(fixture_payload()),
@@ -488,7 +495,7 @@ fn fixture_provider_resolves_validates_and_caches_end_to_end() {
     let has_import_route_fact = stored.read_set_signature.facts.iter().any(|f| {
         matches!(
             f,
-            crate::resolver_core::FactVersionRef::ResolveImports(inner)
+            verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner)
                 if inner.resolution_fact().is_some()
         )
     });
@@ -615,7 +622,7 @@ fn fenced_import_serve_refuses_script_facts_publication() {
 fn import_route_tracer_overflow_refuses_script_facts_publication() {
     use std::sync::atomic::Ordering;
 
-    let over_cap = crate::resolver_core::FACT_SIGNATURE_CAP + 1;
+    let over_cap = verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1;
     let registration = fixtures::import_gated_capability_free_fixture_registration();
 
     // Control — with no knob armed the fixture PUBLISHES, so the refusal below
@@ -641,7 +648,7 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
     // cap. The target is an identity, not a position: whatever else the flow opens,
     // before or after, this scope is the one that overflows.
     let host = host_with_files();
-    crate::host_test_force::arm_fact_tracer_overflow_once(
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
         TracerScope::ScriptFactsImportRoute,
         over_cap,
     );
@@ -655,14 +662,14 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
     // one-shot was consumed would leave the boundary unattributed — the exact hole a
     // positional knob hides behind.
     assert_eq!(
-        crate::host_test_force::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
         Some(TracerScope::ScriptFactsImportRoute),
         "the forced overflow must be claimed BY the import-route scope — the boundary under \
              test. Any other claimant (or none) means the assertions below characterise a \
              different scope",
     );
     assert_eq!(
-        crate::host_test_force::peek_fact_tracer_overflow_once(),
+        verter_type_engine::engine_test_knobs::peek_fact_tracer_overflow_once(),
         None,
         "fixture invariant: the one-shot overflow knob must be CLAIMED inside the entry-point \
              (otherwise nothing overflowed and the assertions below are vacuous)",
@@ -729,21 +736,22 @@ fn import_route_tracer_overflow_refuses_script_facts_publication() {
 /// observations, so the facts entry PUBLISHES).
 #[test]
 fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
-    let over_cap = crate::resolver_core::FACT_SIGNATURE_CAP + 1;
+    let over_cap = verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP + 1;
     let registration = fixtures::import_gated_capability_free_fixture_registration();
     let host = host_with_files();
 
-    crate::host_test_force::arm_fact_tracer_overflow_once(
+    verter_type_engine::engine_test_knobs::arm_fact_tracer_overflow_once(
         TracerScope::ScriptFactsImportRoute,
         over_cap,
     );
 
     // The silent-retarget hazard: an UNRELATED tracer scope opens first. Under an
     // order-keyed one-shot this scope consumes the count and overflows itself.
-    let ((), unrelated_non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
-        |_probe| (),
-    );
+    let ((), unrelated_non_cacheable) =
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
+            |_probe| (),
+        );
     assert!(
         !unrelated_non_cacheable,
         "an UNRELATED tracer scope that merely happens to open first must NOT claim a one-shot \
@@ -752,12 +760,12 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
          green",
     );
     assert_eq!(
-        crate::host_test_force::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
         None,
         "no scope may claim the one-shot before the NAMED target is entered",
     );
     assert_eq!(
-        crate::host_test_force::peek_fact_tracer_overflow_once(),
+        verter_type_engine::engine_test_knobs::peek_fact_tracer_overflow_once(),
         Some((TracerScope::ScriptFactsImportRoute, over_cap)),
         "the one-shot must survive an unrelated upstream scope intact, still armed for its \
          intended claimant",
@@ -771,7 +779,7 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
         "/proj/Consumer.ts",
     );
     assert_eq!(
-        crate::host_test_force::fact_tracer_overflow_claimed_by(),
+        verter_type_engine::engine_test_knobs::fact_tracer_overflow_claimed_by(),
         Some(TracerScope::ScriptFactsImportRoute),
         "the overflow must land on the NAMED import-route scope even though a foreign scope ran \
          first",

@@ -2,9 +2,9 @@
 //! `SchedulerAudit::worker_pool` discriminating coverage.
 //!
 //! Drives 16 concurrent requests through the real scheduler with
-//! a session-side [`verter_session::request_context::RequestContext`]
+//! a session-side [`verter_type_engine::request_context::RequestContext`]
 //! attached to each submission. Each context's
-//! [`verter_session::request_context::RequestContext::scheduler_audit`]
+//! [`verter_type_engine::request_context::RequestContext::scheduler_audit`]
 //! slot must end up populated with a non-empty `worker_thread_id`
 //! and a `worker_pool` of either `Cpu` or `Io`.
 //!
@@ -17,14 +17,14 @@ use std::sync::Arc;
 use std::thread;
 
 use verter_audit::WorkerPool;
+use verter_execution::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_language::FileLanguage as SchedFileKind;
 use verter_scheduler::execution::executor::{StageError, StageExecutor};
 use verter_scheduler::node::{AnalysisSnapshot, ArtifactSnapshot, SourceSnapshot};
-use verter_scheduler::request_context::{OpaqueRequestContext, RequestContextLike};
 use verter_scheduler::scheduler::{Request, Scheduler, SchedulerConfig};
 use verter_scheduler::source_loader::{MemorySourceLoader, SourceLoader};
 use verter_scheduler::stage::{Priority, TargetStage};
-use verter_session::request_context::RequestContext;
+use verter_type_engine::request_context::RequestContext;
 
 const THREADS: usize = 16;
 

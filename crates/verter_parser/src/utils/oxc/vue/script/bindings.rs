@@ -300,7 +300,10 @@ fn extract_destructured_props<'a>(
         BindingPattern::BindingIdentifier(ident) => {
             // Plain identifier `const props = defineProps()` — the variable IS the
             // props object itself. It's a setup binding, not an individual prop.
-            entries.push((Span::from(ident.span), BindingType::SetupConst));
+            entries.push((
+                Span::new(ident.span.start, ident.span.end),
+                BindingType::SetupConst,
+            ));
         }
         _ => {}
     }

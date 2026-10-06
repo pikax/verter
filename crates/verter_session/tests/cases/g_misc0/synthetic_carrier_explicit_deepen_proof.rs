@@ -1,6 +1,6 @@
 //! Positive executable proof of the synthetic-carrier explicit
 //! deepening route through the content-free
-//! [`verter_session::semantic_query::SyntheticBindingId`] cache identity.
+//! [`verter_type_engine::semantic_query::SyntheticBindingId`] cache identity.
 //!
 //! Contract under proof (per `[[component-meta-shallow-by-default-rule]]`
 //! and the `TypeExpr::SyntheticSlotBinding` rustdoc): the ONLY legitimate
@@ -63,8 +63,8 @@
 
 use std::sync::Arc;
 
-use verter_session::component_meta_caches::ShapeCacheDb;
-use verter_session::semantic_query::{ProjectionMode, SyntheticBindingId};
+use verter_type_engine::component_meta_caches::ShapeCacheDb;
+use verter_type_engine::semantic_query::{ProjectionMode, SyntheticBindingId};
 use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr};
 
 /// Construct a synthetic carrier with a distinct `value_node`. The

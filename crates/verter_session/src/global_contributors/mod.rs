@@ -11,21 +11,26 @@
 //!
 //! Lookup of a global symbol reads the published population and returns
 //! that symbol's contributor fingerprint, including a proved-empty set.
+use verter_session_query::inputs::contributors::{
+    classify_shallow_module_kind, fingerprint_of, is_automatic_lib_canonical, ContributorEntry,
+    ContributorOrigin, FileModuleKind, SymbolContributors,
+};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::Hash16;
-use verter_semantic::facts::SymbolSpace;
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::SymbolSpace;
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::file_artifact_store::{
-    AugmentationTargetKind, FileArtifactKey, FileArtifacts, InternedName, InternedSpecifier,
-    GLOBAL_AUGMENTATION_TAG,
+    AugmentationTargetKind, FileArtifacts, InternedName, InternedSpecifier,
 };
 use crate::project_type_store::IndexedReady;
+use verter_session_query::source::artifact_key::FileArtifactKey;
+use verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
 
 #[cfg(test)]
 mod ac1_tests;
@@ -33,36 +38,6 @@ mod ac1_tests;
 mod ac2_tests;
 #[cfg(test)]
 mod ac3_tests;
-
-/// TypeScript script vs external-module classification of one file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FileModuleKind {
-    /// No import/export syntax: top-level interfaces and namespaces
-    /// contribute to the global object.
-    Script,
-    /// Has import or export syntax: only `declare global` / module
-    /// augmentations contribute globally.
-    Module,
-}
-
-/// How one file contributes one global (or ambient-module) symbol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ContributorOrigin {
-    DeclareGlobal,
-    ModuleAugmentation,
-    FileScopeInterface,
-    /// Top-level `namespace N` in a script (or automatic lib). Lowered
-    /// through the same retained-body path as file-scope interfaces.
-    FileScopeNamespace,
-    /// Top-level TYPE declaration other than an interface (`class`,
-    /// `type`, `enum`) in a script: global by name, the one declaration
-    /// of its type (no other file's declaration merges into it).
-    FileScopeType,
-    /// Top-level VALUE declaration (`var` / `let` / `const` / `function` /
-    /// `class` / `enum`) in a script: global by name. An automatic lib's
-    /// values are the lib environment's own and are not recorded.
-    FileScopeValue,
-}
 
 /// One per-file contribution to a resolved global / ambient symbol.
 #[derive(Debug, Clone)]
@@ -83,39 +58,6 @@ pub struct FileContributionRecord {
     pub is_automatic_lib: bool,
     pub parse_stable_hash: Hash16,
     pub facts: Arc<[GlobalContributionFact]>,
-}
-
-/// One contributor in a published population. Precedence is applied at
-/// lookup from the project's configured `files` sequence when present,
-/// otherwise a stable canonical-path normalize of unordered discovery.
-#[derive(Debug, Clone)]
-pub struct ContributorEntry {
-    pub artifact_key: FileArtifactKey,
-    pub parse_stable_hash: Hash16,
-    pub owner: TopLevelOwnerId,
-    pub origin: ContributorOrigin,
-    pub specifier: Option<InternedSpecifier>,
-    pub symbol: InternedName,
-    pub space: SymbolSpace,
-    pub is_automatic_lib: bool,
-    pub module_kind: FileModuleKind,
-    pub contribution_fingerprint: Hash16,
-}
-
-/// Per-symbol contributor set plus its fingerprint (empty set included).
-#[derive(Debug, Clone)]
-pub struct SymbolContributors {
-    pub entries: Arc<[ContributorEntry]>,
-    pub fingerprint: Hash16,
-}
-
-impl SymbolContributors {
-    fn empty() -> Self {
-        Self {
-            entries: Arc::from(Vec::new().into_boxed_slice()),
-            fingerprint: fingerprint_of(&[]),
-        }
-    }
 }
 
 /// Immutable snapshot complete at membership epoch `S` / revision `E`.
@@ -310,7 +252,7 @@ impl SymbolKey {
                     (3, Arc::from(GLOBAL_AUGMENTATION_TAG))
                 } else if spec.contains('*') {
                     (2, Arc::from(spec))
-                } else if verter_semantic::resolver_core::is_relative_specifier(spec) {
+                } else if verter_session_query::resolution::is_relative_specifier(spec) {
                     (1, Arc::from(spec))
                 } else {
                     (0, Arc::from(spec))
@@ -324,45 +266,6 @@ impl SymbolKey {
             space: fact.space,
         })
     }
-}
-
-impl ContributorEntry {
-    fn matches_overlay(&self, overlay_discriminator: Option<Hash16>) -> bool {
-        match overlay_discriminator {
-            None => self.artifact_key.is_base(),
-            Some(discriminator) => {
-                self.artifact_key.is_base() || self.artifact_key.parse_env_hash == discriminator
-            }
-        }
-    }
-}
-
-fn fingerprint_of(entries: &[ContributorEntry]) -> Hash16 {
-    use std::hash::{BuildHasher, Hasher};
-    let salt_lo = rustc_hash::FxBuildHasher;
-    let salt_hi = rustc_hash::FxBuildHasher;
-    let mut h_lo = salt_lo.build_hasher();
-    let mut h_hi = salt_hi.build_hasher();
-    h_lo.write_u64(0xC4A1_C4A1_4A1C_4A1C);
-    h_hi.write_u64(0x9E37_79B9_7F4A_7C15);
-    for entry in entries {
-        h_lo.write(entry.artifact_key.canonical.as_bytes());
-        h_lo.write(&entry.contribution_fingerprint);
-        h_lo.write_u8(entry.space.tag());
-        h_lo.write_u8(entry.module_kind as u8);
-        h_lo.write_u8(entry.origin as u8);
-        h_hi.write(entry.artifact_key.canonical.as_bytes());
-        h_hi.write(&entry.contribution_fingerprint);
-        h_hi.write_u8(entry.space.tag());
-        h_hi.write_u8(entry.module_kind as u8);
-        h_hi.write_u8(entry.origin as u8);
-    }
-    let lo = h_lo.finish();
-    let hi = h_hi.finish();
-    let mut out = [0u8; 16];
-    out[..8].copy_from_slice(&lo.to_le_bytes());
-    out[8..].copy_from_slice(&hi.to_le_bytes());
-    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -713,7 +616,7 @@ pub fn collect_file_contributions(
 fn collect_from_indexed(
     key: &FileArtifactKey,
     indexed: &IndexedReady,
-    augmentations: &[crate::file_artifact_store::ModuleAugmentationFact],
+    augmentations: &[verter_session_query::source::augmentation::ModuleAugmentationFact],
     parse_stable_hash: Hash16,
 ) -> FileContributionRecord {
     let module_kind = classify_module_kind(indexed);
@@ -740,16 +643,16 @@ fn collect_from_indexed(
         let headers = &indexed.shallow_state.headers;
         for (binding, header) in headers.type_headers.iter() {
             let (origin, kind) = match header.kind {
-                verter_semantic::analysis::type_eval::TypeDeclKind::Interface => {
+                verter_session_query::declarations::TypeDeclKind::Interface => {
                     (ContributorOrigin::FileScopeInterface, "Interface")
                 }
                 // A script's class, type alias or enum is a global type too;
                 // an automatic lib's are the lib environment's own.
                 _ if is_automatic_lib || binding.name.contains('.') => continue,
-                verter_semantic::analysis::type_eval::TypeDeclKind::Class => {
+                verter_session_query::declarations::TypeDeclKind::Class => {
                     (ContributorOrigin::FileScopeType, "Class")
                 }
-                verter_semantic::analysis::type_eval::TypeDeclKind::Alias => {
+                verter_session_query::declarations::TypeDeclKind::Alias => {
                     (ContributorOrigin::FileScopeType, "Alias")
                 }
             };
@@ -760,7 +663,7 @@ fn collect_from_indexed(
                 origin,
                 specifier: None,
                 fingerprint: crate::fact_emission::augmentation_header_fingerprint(
-                    &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                    &verter_session_query::declarations::AugmentationScopeKind::Global,
                     binding.owner,
                     binding.name.as_ref(),
                     kind,
@@ -800,7 +703,7 @@ fn collect_from_indexed(
                 origin: ContributorOrigin::FileScopeValue,
                 specifier: None,
                 fingerprint: crate::fact_emission::augmentation_header_fingerprint(
-                    &verter_semantic::analysis::type_eval::AugmentationScopeKind::Global,
+                    &verter_session_query::declarations::AugmentationScopeKind::Global,
                     binding.owner,
                     binding.name.as_ref(),
                     format!("{:?}", header.kind).as_str(),
@@ -827,33 +730,6 @@ fn collect_from_indexed(
 #[must_use]
 pub(crate) fn classify_module_kind(indexed: &impl IndexedModuleFacts) -> FileModuleKind {
     classify_shallow_module_kind(indexed.shallow_inputs())
-}
-
-/// [`classify_module_kind`] over the retained shallow inventory alone.
-#[must_use]
-pub(crate) fn classify_shallow_module_kind(
-    shallow: &crate::resolver_core::shallow_file_state::ShallowInputRecord,
-) -> FileModuleKind {
-    if !shallow.exports.is_empty()
-        || !shallow.wildcard_reexports.is_empty()
-        || !shallow.import_targets.is_empty()
-        || shallow.export_assignment_target().is_some()
-    {
-        return FileModuleKind::Module;
-    }
-    let routes = shallow.route_inventory.as_ref();
-    if !routes.imports.is_empty()
-        || !routes.bindingless_imports.is_empty()
-        || !routes.reexports.is_empty()
-        || !routes.wildcard_reexports.is_empty()
-        || !routes.local_exports.is_empty()
-        || !routes.export_assignments.is_empty()
-        || routes.has_module_syntax
-    {
-        FileModuleKind::Module
-    } else {
-        FileModuleKind::Script
-    }
 }
 
 /// File-level `declare global` / `declare module` (quoted or ambient
@@ -1373,64 +1249,14 @@ fn is_ident_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
-/// Automatic library files are ambient-lib virtual ids (`ambient:/…`).
-/// `noLib` disables these only; a user file whose basename happens to
-/// look like `lib.*.d.ts` stays a program declaration.
-#[must_use]
-pub fn is_automatic_lib_canonical(canonical: &str) -> bool {
-    canonical.starts_with("ambient:/")
-}
-
-/// Route-surface fact key for the per-symbol population fingerprint.
-/// Extra optional fields carry `decl_name` so this is distinct from the
-/// target-wide augmenter-set `ModuleAugmentationIndexShape` observation.
-#[must_use]
-pub fn population_contributor_fact_key(
-    target: &AugmentationTargetKind,
-    decl_name: &str,
-) -> verter_semantic::facts::FactKey {
-    use verter_semantic::facts::registry::{
-        AugmentationTargetKindTag, InternedGlobPattern, InternedSpecifier,
-    };
-    use verter_semantic::facts::FactKey;
-    match target {
-        AugmentationTargetKind::GlobalAugmentation => FactKey::ModuleAugmentationIndexShape {
-            target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
-            external_specifier: Some(InternedSpecifier::from(decl_name)),
-            resolved_relative_canonical: None,
-            wildcard_pattern: None,
-        },
-        AugmentationTargetKind::ExternalSpecifier(spec) => FactKey::ModuleAugmentationIndexShape {
-            target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
-            external_specifier: Some(spec.clone()),
-            resolved_relative_canonical: None,
-            wildcard_pattern: Some(InternedGlobPattern::from(decl_name)),
-        },
-        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
-            FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::ResolvedRelativeCanonical,
-                external_specifier: None,
-                resolved_relative_canonical: Some(Arc::clone(canon)),
-                wildcard_pattern: Some(InternedGlobPattern::from(decl_name)),
-            }
-        }
-        AugmentationTargetKind::WildcardAmbient(pat) => FactKey::ModuleAugmentationIndexShape {
-            target_kind_tag: AugmentationTargetKindTag::WildcardAmbient,
-            external_specifier: Some(InternedSpecifier::from(decl_name)),
-            resolved_relative_canonical: None,
-            wildcard_pattern: Some(pat.clone()),
-        },
-    }
-}
-
 /// `decl_name` encoded on a population fingerprint observation, if any.
 #[must_use]
 pub fn population_fact_decl_name<'a>(
-    target_kind_tag: verter_semantic::facts::registry::AugmentationTargetKindTag,
+    target_kind_tag: verter_session_query::facts::registry::AugmentationTargetKindTag,
     external_specifier: Option<&'a str>,
     wildcard_pattern: Option<&'a str>,
 ) -> Option<&'a str> {
-    use verter_semantic::facts::registry::AugmentationTargetKindTag;
+    use verter_session_query::facts::registry::AugmentationTargetKindTag;
     match target_kind_tag {
         AugmentationTargetKindTag::GlobalAugmentation => external_specifier,
         AugmentationTargetKindTag::ExternalSpecifier => wildcard_pattern,
@@ -1440,21 +1266,21 @@ pub fn population_fact_decl_name<'a>(
 }
 
 pub(crate) trait IndexedModuleFacts {
-    fn shallow_inputs(&self) -> &crate::resolver_core::shallow_file_state::ShallowInputRecord;
+    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly;
 }
 impl IndexedModuleFacts for IndexedReady {
-    fn shallow_inputs(&self) -> &crate::resolver_core::shallow_file_state::ShallowInputRecord {
+    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly {
         &self.shallow_state
     }
 }
-impl IndexedModuleFacts for crate::resolver_core::request_inputs::IndexedInputRecord {
-    fn shallow_inputs(&self) -> &crate::resolver_core::shallow_file_state::ShallowInputRecord {
+impl IndexedModuleFacts for verter_session_query::inputs::indexed::IndexedInputRecord {
+    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly {
         &self.shallow_state
     }
 }
 
 impl<T: IndexedModuleFacts> IndexedModuleFacts for Arc<T> {
-    fn shallow_inputs(&self) -> &crate::resolver_core::shallow_file_state::ShallowInputRecord {
+    fn shallow_inputs(&self) -> &verter_session_query::inputs::shallow::ShallowInputAssembly {
         self.as_ref().shallow_inputs()
     }
 }

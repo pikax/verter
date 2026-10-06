@@ -5,7 +5,7 @@ pub(crate) mod global_classes;
 
 use tower_lsp_server::ls_types::*;
 use verter_semantic::analysis::{match_selector, MatchResult};
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -231,8 +231,8 @@ fn is_declaration_value_position(
 /// the declaration position maps). Never a word-fallback item.
 pub fn v_bind_scope_completions(analysis: &FileAnalysisSnapshot) -> Option<Vec<CompletionItem>> {
     let mut items: Vec<CompletionItem> = Vec::new();
-    let mut reactive: Vec<&verter_semantic::analysis::AnalyzedBinding> = Vec::new();
-    let mut plain: Vec<&verter_semantic::analysis::AnalyzedBinding> = Vec::new();
+    let mut reactive: Vec<&verter_session_query::analysis::types::AnalyzedBinding> = Vec::new();
+    let mut plain: Vec<&verter_session_query::analysis::types::AnalyzedBinding> = Vec::new();
     for binding in &analysis.bindings {
         if binding.span.start == 0 && binding.span.end == 0 {
             continue;
@@ -344,13 +344,13 @@ pub fn css_hover(
         for pseudo in &style.special_pseudos {
             if offset >= pseudo.start as usize && offset <= pseudo.end as usize {
                 let desc = match pseudo.kind {
-                    verter_semantic::analysis::style::SpecialPseudoKind::Deep => {
+                    verter_session_query::analysis::style::SpecialPseudoKind::Deep => {
                         "**:deep()** — Targets child component elements, bypassing scoped CSS encapsulation."
                     }
-                    verter_semantic::analysis::style::SpecialPseudoKind::Global => {
+                    verter_session_query::analysis::style::SpecialPseudoKind::Global => {
                         "**:global()** — Makes this selector apply globally, ignoring scoped CSS."
                     }
-                    verter_semantic::analysis::style::SpecialPseudoKind::Slotted => {
+                    verter_session_query::analysis::style::SpecialPseudoKind::Slotted => {
                         "**:slotted()** — Targets slotted content from the parent component."
                     }
                 };
@@ -464,7 +464,7 @@ fn selector_hover(
 
 /// Format a single element match for hover display.
 fn format_element_match(
-    el: &verter_semantic::analysis::TemplateElement,
+    el: &verter_session_query::analysis::template::TemplateElement,
     line_index: &LineIndex,
 ) -> String {
     let line = line_index
@@ -486,7 +486,7 @@ fn format_element_match(
 
 /// Compute the LSP range for a selector's span.
 fn selector_range(
-    selector: &verter_semantic::analysis::style::AnalyzedSelector,
+    selector: &verter_session_query::analysis::style::AnalyzedSelector,
     line_index: &LineIndex,
 ) -> Option<Range> {
     let start = line_index.offset_to_position(selector.span.start)?;
@@ -538,7 +538,11 @@ static COMMON_CSS_PROPERTIES: &[&str] = &[
 mod tests {
     use super::*;
     use crate::documents::carrier_structure::test_carrier_blocks;
-    use verter_semantic::analysis::*;
+
+    use verter_session_query::analysis::template::ElementNamespace;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+    use verter_session_query::analysis::template::TemplateAttribute;
+    use verter_session_query::analysis::template::TemplateElement;
 
     #[test]
     fn test_css_completions_in_style() {
@@ -609,7 +613,7 @@ mod tests {
     fn build_style(
         source: &str,
         blocks: &[CarrierBlockView],
-    ) -> verter_semantic::analysis::StyleBlockAnalysis {
+    ) -> verter_session_query::analysis::style::StyleBlockAnalysis {
         let style_block = blocks.iter().find(|b| b.tag_name == "style").unwrap();
         build_style_for_block(source, style_block)
     }
@@ -617,7 +621,7 @@ mod tests {
     fn build_style_for_block(
         source: &str,
         style_block: &CarrierBlockView,
-    ) -> verter_semantic::analysis::StyleBlockAnalysis {
+    ) -> verter_session_query::analysis::style::StyleBlockAnalysis {
         let (content_start, content_end) = style_block.content_range();
         let css_content = &source[content_start as usize..content_end as usize];
         let scoped = style_block.is_scoped();

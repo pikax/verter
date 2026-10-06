@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use verter_scheduler::cancellation::CancellationToken;
+use verter_execution::cancellation::CancellationToken;
 use verter_scheduler::job::{CompletionHandle, CompletionState, RequestResult};
 use verter_scheduler::scheduler::{Request, Scheduler};
 

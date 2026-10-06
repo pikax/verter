@@ -3,16 +3,18 @@
 //! two-frontier rule (effect edges live past definite value writes), the
 //! right-to-left definite-write stop, spread/unknown-key reachability,
 //! multi-origin unions, typed budget refusal, and arena-freedom.
+use verter_session_query::flow::skeleton::SkeletonBindingId;
+use verter_session_query::flow::skeleton::SkeletonExprSiteId;
 
 use std::sync::Arc;
 
-use super::*;
-use crate::analysis::flow::flow_graph::{
+use verter_session_query::flow::flow_graph::{
     build_function_flow_graph_for_test as build_function_flow_graph, FlowEdgeKind, FlowNodeId,
     FlowNodeKind, FunctionFlowGraph,
 };
-use crate::analysis::flow::flow_ir::ReturnSlicePlan;
-use crate::analysis::flow::{
+use verter_session_query::flow::flow_ir::ReturnSlicePlan;
+use verter_session_query::flow::peeker::*;
+use verter_session_query::flow::skeleton::{
     FunctionBodySkeleton, SkeletonPathSegment, SkeletonReturnSiteId, SkeletonWriteCertainty,
 };
 
@@ -35,7 +37,7 @@ fn planner_composes_member_reads_with_the_demanded_suffix() {
         let plan = plan_return(&skeleton, &graph, &["b"]);
         for (literal, selected) in [("'wanted'", true), ("'sibling'", false)] {
             let start = source.find(literal).unwrap() as u32;
-            let span = crate::analysis::flow::FrameSpan::rebase(
+            let span = verter_session_query::flow::frame_span::FrameSpan::rebase(
                 0,
                 verter_span::Span::new(start, start + literal.len() as u32),
             );
@@ -79,7 +81,7 @@ fn planner_consumed_member_input_keeps_its_path_without_the_result_suffix() {
     let plan = plan_return(&skeleton, &graph, &["result"]);
     for (literal, selected) in [("'input'", true), ("'unrelated'", false)] {
         let start = source.find(literal).unwrap() as u32;
-        let span = crate::analysis::flow::FrameSpan::rebase(
+        let span = verter_session_query::flow::frame_span::FrameSpan::rebase(
             0,
             verter_span::Span::new(start, start + literal.len() as u32),
         );
@@ -107,7 +109,7 @@ fn planner_source_type_query_selects_whole_current_subject_without_result_suffix
     assert!(!plan.is_value(binding_node(&skeleton, &graph, "unused")));
     for literal in ["'first'", "'second'", "'next'", "'last'"] {
         let start = source.find(literal).unwrap() as u32;
-        let span = crate::analysis::flow::FrameSpan::rebase(
+        let span = verter_session_query::flow::frame_span::FrameSpan::rebase(
             0,
             verter_span::Span::new(start, start + literal.len() as u32),
         );
@@ -415,7 +417,7 @@ fn planner_multi_origin_unions_conditional_returns() {
     let graph = build_function_flow_graph(&skeleton);
     let plan = plan_return(&skeleton, &graph, &["b"]);
 
-    assert_eq!(plan.origins.len(), 2, "both return sites are origins");
+    assert_eq!(plan.origins().len(), 2, "both return sites are origins");
     for (index, _site) in skeleton.return_sites.iter().enumerate() {
         let node = graph.return_site_node(SkeletonReturnSiteId::from_index(index as u32));
         assert!(plan.is_value(node), "return site {index} is selected");
@@ -621,7 +623,7 @@ fn planner_names_every_parameter_nothing_assigns_as_a_predicate_origin() {
             .bindings
             .iter()
             .position(|binding| {
-                binding.kind == crate::analysis::flow::SkeletonBindingKind::Param
+                binding.kind == verter_session_query::flow::skeleton::SkeletonBindingKind::Param
                     && skeleton.name(binding.name) == "x"
             })
             .expect("the fixture's parameter");

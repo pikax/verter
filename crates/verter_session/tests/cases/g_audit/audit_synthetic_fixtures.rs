@@ -17,7 +17,7 @@
 //!    `MaterializeSkipReason` variants individually (the audit
 //!    pipeline mines `structured_events` into shape-aware records).
 //! 2. The cycle-gate verdicts themselves are unit-tested directly:
-//!    - `project_semantic_dispatch::cycle_gate_tests::cycle_gate_decided_stop_on_nuxt_dotpathkeys_shape`
+//!    - `project_semantic_dispatch_tests::cycle_gate_tests::cycle_gate_decided_stop_on_nuxt_dotpathkeys_shape`
 //!      verifies the sealed gate returns `Decided(Stop)`
 //!      on the canonical nuxt-ui DotPathKeys shape.
 //!    - `meta_resolve_tests::node_predicates_tests::cycle_guard_roots_at_utility_source_type_argument`

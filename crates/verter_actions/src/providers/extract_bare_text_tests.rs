@@ -1,8 +1,16 @@
 use super::*;
 use crate::provider::ActionContext;
 use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
-use verter_semantic::analysis::template::*;
-use verter_semantic::analysis::types::*;
+use verter_session_query::analysis::template::TemplateDirective;
+use verter_session_query::analysis::template::VForDirective;
+use verter_session_query::analysis::types::AnalyzedBinding;
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImportBinding;
+use verter_session_query::analysis::types::AnalyzedMacro;
+use verter_session_query::analysis::types::AnalyzedPropField;
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::analysis::types::TypeResolutionSource;
 use verter_type_expr::TopLevelOwnerId;
 
 fn setup_owner() -> TopLevelOwnerId {

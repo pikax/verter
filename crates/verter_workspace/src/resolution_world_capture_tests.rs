@@ -15,8 +15,9 @@ use std::time::Duration;
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::resolution_currency::CapturedResolutionWorld;
 use crate::traits::{WorkspaceAccess, WorkspaceRead};
-use crate::{ReadSetSignature, ResolutionPublication};
-use verter_semantic::resolver_core::{
+use crate::ResolutionPublication;
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_session_query::resolution::{
     ResolutionContext, ResolutionPopulation, ResolvePhase, ResolveRequestKind, SessionFingerprint,
 };
 

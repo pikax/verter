@@ -4,11 +4,10 @@ use rustc_hash::FxHashMap;
 use std::hash::Hash;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
-use crate::semantic_query::ResultCompleteness;
+use verter_type_engine::semantic_query::ResultCompleteness;
 
-pub(crate) mod ambient_resolve;
-pub(crate) mod bare_name_resolve;
 pub(crate) mod bracketed_generation;
 pub(crate) mod component_meta;
 pub mod component_meta_query_engine;
@@ -34,21 +33,17 @@ pub mod svelte_default_synth;
 pub mod vue_default_synth;
 
 pub mod fact_read_set;
-mod fact_tracer_tls;
-pub(crate) mod fact_validation_port;
-pub mod fuses;
 pub(crate) mod host_resolver_context;
 pub mod imported_root_db;
 mod owned_lowering_port;
-pub(crate) mod request_ports;
+pub(crate) mod request_bound;
 pub(crate) mod request_store_view;
-pub(crate) mod resolver_context;
-pub(crate) mod reuse;
 pub mod route_db;
-pub(crate) mod scope_shadowing;
 pub(crate) mod session_resolver_context;
 
-pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
+pub use verter_session_query::facts::fact_read_set::{
+    FactReadSet, FactReadSetCell, FactReadSetFinalise,
+};
 // Substrate re-export. Hot-path callers construct the
 // request-bound wrapper at entry points; the wiring lands in the
 // hot-path conversion commit (C).
@@ -56,14 +51,12 @@ pub use fact_read_set::{FactReadSet, FactReadSetCell, FactReadSetFinalise};
 pub(crate) use host_resolver_context::with_bare_host_ctx_for_test;
 #[allow(unused_imports)]
 pub(crate) use host_resolver_context::HostResolverContext;
+pub(crate) use owned_lowering_port::HostRequestContext;
+pub(crate) use request_bound::HostCapabilities;
 #[allow(unused_imports)]
 pub(crate) use request_store_view::{CanonicalCompletionOverlay, RequestStoreView};
-pub(crate) use resolver_context::{
-    MaterializeScopeObservation, RequestBoundResolverContext, ResolverContext,
-};
 pub(crate) use session_resolver_context::SessionResolverContext;
 
-pub use fuses::{FuseBudgets, FuseState, FuseTrip};
 pub use import_binding::ImportBindingKind;
 pub use imported_root_db::{ImportedRootDb, ImportedRootResult};
 pub use route_db::{
@@ -71,7 +64,6 @@ pub use route_db::{
     ROUTE_DB_RESOLVER_VERSION,
 };
 
-pub type ResolverHash16 = verter_semantic::analysis::Hash16;
 pub(crate) use component_meta::component_meta_resolved_macros;
 pub use component_meta::{
     collect_local_constructor_binding_keys, collect_requested_binding_demands,
@@ -92,27 +84,16 @@ pub(crate) use component_meta_request::{
 // reach them via `super::surface::`; out-of-subtree callers route through the
 // engine's sink-local methods (`materialize_registry_whole_surface_candidate`
 // for the whole-surface candidate / the routed-surface methods).
+pub use component_meta::ResolvedNativeProp;
 pub(crate) use component_meta_query_engine::{
     lower_and_project_to_expanded_node, project_class_a_published, project_class_a_terminal_node,
     AdmittedRouteProjectionNode,
-};
-// `type_expr_contains_semantic_miss` and `type_expr_root_is_unmaterialized_sentinel`
-// survive only as the `#[cfg(test)]` parity oracles for the node-domain
-// whole-tree-miss / root-sentinel facts (production reads
-// `node_contains_semantic_miss_with_dispatch` /
-// `node_root_is_unmaterialized_sentinel_with_dispatch`); the raised-shape suite
-// imports them through these re-exports.
-pub use component_meta::ResolvedNativeProp;
-#[cfg(test)]
-pub(crate) use component_meta_query_engine::{
-    type_expr_contains_semantic_miss, type_expr_root_is_unmaterialized_sentinel,
 };
 pub(crate) use component_meta_request::run_component_meta_request;
 pub(crate) use component_meta_request::ComponentMetaRequestHost;
 pub use declaration_metadata::{
     resolve_direct_local_type_declaration, resolve_local_type_declaration,
-    resolve_type_declaration, DeclarationMetadataResolver, ResolvedDeclarationKind,
-    ResolvedExportTarget, ResolvedLocalTypeSymbolMetadata, ResolvedTypeDeclaration,
+    resolve_type_declaration, DeclarationMetadataResolver,
 };
 pub use export_graph::{
     get_export_span_follow_reexports_from_graph, resolve_exports_from_graph,
@@ -146,492 +127,12 @@ pub use route_demand::{
     RoutedSymbolResult, RoutedSymbolStatus, SymbolSpace,
 };
 pub use runtime_values::{
-    materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver, ValueDeclIdentity,
+    materialize_imported_runtime_values_into_env, ImportedRuntimeValueResolver,
 };
 pub use shallow_file_state::{
-    BudgetDomain, BudgetExceededFailure, ClassifiedTypeDeps, ExportTarget, ExternalSymbolRef,
-    ImportTarget, LocalClosureResult, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
-    ShallowFileState, ShallowTypeSymbol, ShallowTypeView, ShallowValueSymbol, WildcardReexport,
+    LocalClosureResult, LocalClosureStatus, ResolutionBudgets, ResolutionCounters,
+    ShallowFileState, ShallowTypeView,
 };
-
-/// Lane-identity token for singleflight / stability-request
-/// deduplication.
-///
-/// This token is the SOLE identity `run_stable_request` (and the
-/// `SingleflightGroup` lanes it drives) coalesce on, and a FOLLOWER
-/// receives the LEADER's stable result WITHOUT revalidating it against
-/// the follower's own view. The token must therefore be a COMPLETE
-/// validity oracle: two requests may coalesce onto one lane ONLY if
-/// their views are validation-equivalent.
-///
-/// `epoch` + `session` alone are NOT complete — a view's EXTERNAL
-/// validity can change (env-hash / project-identity / project-generation /
-/// overlay) WITHOUT moving the `store_view_epoch`. `validity_fingerprint`
-/// closes that hole: the production
-/// [`crate::resolver_store::HostStoreView`] folds the EXTERNAL-supersession
-/// dimensions of its `StoreViewValidationToken` into it (the SAME oracle
-/// the executors' promotion fence `is_stable` compares), so two views that
-/// would externally-supersede each other get distinct lane identities and
-/// never wrongly coalesce. Test / permissive stubs leave it `0` (their
-/// views are validation-trivial).
-///
-/// The additive `artifact_generation` /
-/// `load_generation` are DELIBERATELY EXCLUDED from the fold: a cold
-/// compute advances those generations as its OWN work (publishing
-/// artifacts, loading dependencies), so two concurrent identical cold
-/// requests legitimately observe different additive generations. Folding
-/// them would split those identical requests across distinct lanes and
-/// spawn multiple cold winners instead of one leader + N-1 dedup-joining
-/// followers — the same self-fencing the promotion oracle avoids. A
-/// follower on the same external lane IS validation-equivalent: the leader
-/// only promotes when the external dimensions are coherent.
-///
-/// `epoch` and `session` are retained as separate fields because callers
-/// read them directly (e.g. the route-surface validator inspects
-/// `session` to reject session views; the snapshot identity threads
-/// `epoch`). `validity_fingerprint` is additive: it tightens lane
-/// identity without changing what those reads observe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StoreViewCompatToken {
-    pub epoch: u64,
-    pub session: Option<u64>,
-    /// Fold of the EXTERNAL-supersession dimensions of the
-    /// `StoreViewValidationToken` the view was built under (epoch,
-    /// project-generation, env-hash, project-identity, overlay). `0` for
-    /// validation-trivial stub views. Folds every external validity-
-    /// affecting dimension that `epoch` alone does not cover — and excludes
-    /// the additive artifact / load generations a cold
-    /// compute advances as its own work — so the singleflight / stability
-    /// coalescing lane is the SAME oracle the promotion fence applies.
-    pub validity_fingerprint: u64,
-}
-
-pub trait StoreView {
-    fn compat_token(&self) -> StoreViewCompatToken;
-
-    /// Validate a fact reference under this view. Implementers MUST
-    /// supply this method; the trait does NOT provide a default
-    /// because legacy substrate variants (`FileWholeHash`,
-    /// `DerivedFactHash`) need an implementer-specific check.
-    /// Per-domain implementers route the per-domain variants here
-    /// via the matching `validates_*_domain` methods.
-    fn validates(&self, fact: &FactVersionRef) -> bool;
-
-    /// Validate a parse-domain fact reference (R26). Default impl
-    /// returns `false`; implementers that emit parse-domain facts
-    /// override.
-    fn validates_parse_domain(&self, _fact: &ParseFactRef) -> bool {
-        false
-    }
-
-    /// Validate a resolve-imports-domain fact reference (R26).
-    /// Default impl returns `false`; the resolver implementer
-    /// overrides.
-    fn validates_resolve_imports_domain(&self, _fact: &ResolveImportsFactRef) -> bool {
-        false
-    }
-
-    /// Validate a route-surface-domain fact reference (R26). Default
-    /// impl returns `false`; the `RouteDb` implementer overrides.
-    fn validates_route_surface_domain(&self, _fact: &RouteSurfaceFactRef) -> bool {
-        false
-    }
-
-    /// Validate a program-analysis-domain fact reference (R26).
-    /// Default impl returns `false` (fail closed); the production
-    /// [`crate::resolver_store::HostStoreView`] overrides with the live
-    /// `FunctionProgramIndex` whole-body hash comparison.
-    fn validates_program_analysis_domain(&self, _fact: &ProgramAnalysisFactRef) -> bool {
-        false
-    }
-
-    /// Validate a recorded contributor source-env identity
-    /// ([`FactVersionRef::FileSourceEnv`]) STRICTLY against the
-    /// view-current artifact identity.
-    ///
-    /// Returns `true` only when the view tracks a current artifact
-    /// identity for `canonical_id` whose `parse_env_hash`,
-    /// `parse_key`, and `file_language_id` all equal the recorded
-    /// values. A differing, missing, tombstoned, or untracked
-    /// contributor identity rejects — there is deliberately NO
-    /// untracked-file optimistic accept here (unlike the lazy
-    /// `FileWholeHash` arm): a contributor whose source-env identity
-    /// the view cannot confirm must miss and recompute. Content
-    /// validity stays on the separate `FileWholeHash` fact.
-    ///
-    /// Default impl returns `false` (fail closed); the production
-    /// [`crate::resolver_store::HostStoreView`] overrides with the
-    /// snapshot comparison.
-    fn validates_file_source_env(
-        &self,
-        _canonical_id: &str,
-        _parse_env_hash: crate::locator_identity::ParseEnvHash,
-        _parse_key: &verter_language::ParseKey,
-        _file_language_id: &verter_language::FileLanguage,
-    ) -> bool {
-        false
-    }
-
-    /// Validate a **self-root** `FileWholeHash` fact strictly.
-    ///
-    /// A self-root is the whole-hash fact for a query-identity cache
-    /// entry's OWN keyed canonical (as opposed to a cross-file
-    /// dependency fact). [`Self::validates`] applies a lazy
-    /// "untracked file → optimistically accept" rule to a plain
-    /// `FileWholeHash`: a file loaded as a dependency after the view
-    /// snapshot has no tracked hash, and forcing every such dependency
-    /// through a permissive recheck would be expensive. That
-    /// permissiveness is unsafe for a self-root: an untracked self-root
-    /// canonical means the cache entry's own file is gone (or its
-    /// content is unknown to this view), which must FAIL validation —
-    /// otherwise the entry survives a same-canonical content edit.
-    ///
-    /// This method is the strict counterpart: an untracked or
-    /// hash-mismatched self-root canonical returns `false`. The default
-    /// impl delegates to [`Self::validates`] so non-production
-    /// `StoreView` stubs keep their existing behavior; the production
-    /// [`crate::resolver_store::HostStoreView`] overrides it to reject
-    /// the untracked case. Callers that hold the explicit self-root
-    /// canonical set route through
-    /// [`crate::fact_signature_helpers::validate_fact_signature_with_self_roots`].
-    fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
-        self.validates(&FactVersionRef::FileWholeHash {
-            canonical_id: canonical_id.to_string(),
-            hash: *hash,
-        })
-    }
-
-    /// Exact O(1) identity of the strict self-root world represented by this
-    /// view, or `None` when the view cannot vouch for one.
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
-        None
-    }
-
-    /// Whether `canonical_id` has a versioned authority that can safely be
-    /// represented by a strict-self-root world witness.
-    fn strict_self_root_is_witnessable(&self, _canonical_id: &str) -> bool {
-        false
-    }
-
-    /// Strictly validate every observed root in one stable authority world and
-    /// mint its terminal witness. The before/after identity comparison closes
-    /// transitions that straddle the validation loop.
-    fn mint_strict_self_root_world(
-        &self,
-        roots: &[(&str, ResolverHash16)],
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
-        let before = self.strict_self_root_world_identity()?;
-        if !roots.iter().all(|(canonical, hash)| {
-            self.strict_self_root_is_witnessable(canonical)
-                && self.validates_self_root_whole_hash(canonical, hash)
-        }) {
-            return None;
-        }
-        (self.strict_self_root_world_identity() == Some(before)).then_some(before)
-    }
-
-    /// Whether the view tracks a specific file through its captured roots.
-    ///
-    /// Used by self-root attribution and route-derived cache paths to
-    /// distinguish an absent canonical from a hash mismatch.
-    fn tracks_file(&self, _canonical_id: &str) -> bool {
-        false
-    }
-
-    /// Direct read of a view's parse-domain `DerivedFactHash` for a
-    /// `(canonical, kind)` pair.
-    ///
-    /// Returns `Some(hash)` when the captured roots answer the pair (currently
-    /// `Route`), `None` otherwise. Used by per-rejection attribution helpers
-    /// (e.g. `attribute_prepared_decl_bundle_rejection`) to
-    /// distinguish "entry absent" from "entry present, hash differs"
-    /// without re-probing the validator with synthetic hashes.
-    ///
-    /// Default returns `None` so test-only / permissive views inherit
-    /// "no derived fact" semantics; production `HostStoreView` overrides it.
-    fn derived_hash_for(
-        &self,
-        _canonical_id: &str,
-        _kind: DerivedFactKind,
-    ) -> Option<ResolverHash16> {
-        None
-    }
-
-    /// This view's contribution to a fact tracer's compaction basis,
-    /// captured ONCE at tracer installation.
-    ///
-    /// The projection exists so a tracer scope never READS a store view:
-    /// composing a basis needs the two composite stamps' key dimensions
-    /// and the resolution-root identity, which only a view holds, but
-    /// building a view per tracer scope is an `O(store-view read)` cost on
-    /// the installation path and — far hotter — on every admission
-    /// boundary's movement re-check. A caller that already HOLDS a bound
-    /// view borrows it here for free; the live half is composed from the
-    /// host's atomics. See
-    /// [`AggregateGenerations::from_seed`](verter_workspace::AggregateGenerations::from_seed).
-    ///
-    /// The default is [`AggregateBasisSeed::Unvouched`]: a view that does
-    /// not answer vouches for nothing, so scopes it seeds compact nothing
-    /// and detect no movement. That is the fail-safe direction — the
-    /// alternative, a fabricated stamp, is a witness the wrong view can
-    /// satisfy.
-    #[inline]
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
-        verter_workspace::AggregateBasisSeed::Unvouched
-    }
-
-    /// **The single whole-signature validation entry point.** Every warm
-    /// read that validates a stored signature goes through here.
-    ///
-    /// Returns `Ok(())` when every fact validates, or `Err(index)` naming
-    /// the FIRST rejecting fact — the attribution the rejection-reporting
-    /// readers need, so they do not re-run the loop to find it.
-    ///
-    /// `self_root_canonicals` names the canonicals whose `FileWholeHash`
-    /// facts are the entry's OWN roots. Those route through the strict
-    /// [`Self::validates_self_root_whole_hash`] — an untracked keyed
-    /// canonical means the entry's own file is gone and the entry must
-    /// miss — while every other fact, INCLUDING a `FileWholeHash` for a
-    /// non-listed cross-file dependency, routes through the lazy
-    /// [`Self::validates`], preserving cross-file permissiveness. An
-    /// empty slice is therefore exactly plain whole-signature validation,
-    /// which is why [`Self::validates_fact_signature`] can be a wrapper
-    /// rather than a second rule.
-    ///
-    /// **Why one method and not eleven loops.** The default body IS
-    /// `sig.iter().all(...)`, so a caller that inlines it is
-    /// indistinguishable TODAY. It stops being indistinguishable the
-    /// moment a view needs a rule the per-fact predicate cannot express —
-    /// a whole-signature overlay snapshot or lease, a mixed-domain
-    /// aggregate refusal — because a view can only state such a rule
-    /// HERE. An inlined loop silently opts its cache out of it, and the
-    /// symptom is a stale serve at one cache and not the others.
-    ///
-    /// Implementers override THIS. The two `bool` forms below are thin
-    /// wrappers and exist so no caller has to spell the `Result`.
-    #[inline]
-    fn validate_fact_signature(
-        &self,
-        sig: &[FactVersionRef],
-        self_root_canonicals: &[&str],
-    ) -> Result<(), usize> {
-        let mut walk = verter_workspace::ReceiptWalk::default();
-        for (index, fact) in sig.iter().enumerate() {
-            let ok =
-                verter_workspace::validates_through_receipts(fact, &mut walk, |leaf| match leaf {
-                    FactVersionRef::FileWholeHash { canonical_id, hash }
-                        if self_root_canonicals.contains(&canonical_id.as_str()) =>
-                    {
-                        self.validates_self_root_whole_hash(canonical_id, hash)
-                    }
-                    other => self.validates(other),
-                });
-            if !ok {
-                return Err(index);
-            }
-        }
-        Ok(())
-    }
-
-    /// Validate every fact in `sig` under this view; `true` iff all
-    /// validate. Empty signatures trivially return `true`.
-    ///
-    /// Wrapper over [`Self::validate_fact_signature`] with no self-roots.
-    #[inline]
-    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
-        self.validate_fact_signature(sig, &[]).is_ok()
-    }
-
-    /// Validate `sig`, treating every `FileWholeHash` whose canonical is
-    /// listed in `self_root_canonicals` as a STRICT self-root.
-    ///
-    /// Wrapper over [`Self::validate_fact_signature`].
-    #[inline]
-    fn validates_fact_signature_with_self_roots(
-        &self,
-        sig: &[FactVersionRef],
-        self_root_canonicals: &[&str],
-    ) -> bool {
-        self.validate_fact_signature(sig, self_root_canonicals)
-            .is_ok()
-    }
-
-    /// Promote a lazily-materialised canonical's route facts into the
-    /// request-scoped completion overlay.
-    ///
-    /// Called by the cold prepared-decl-bundle materialiser for
-    /// declaration files (`.d.ts` / `.d.mts` / `.d.cts`) whose
-    /// `IndexedReady` materialised AFTER the request-entry
-    /// [`crate::resolver_store::HostStoreView`] snapshot was built —
-    /// entries published after that snapshot are invisible to the
-    /// view, so every subsequent warm-validation read of the bundle's
-    /// stored derived-fact hashes would route through the base view's
-    /// untracked-canonical reject and trigger a fresh cold rebuild.
-    /// With promotion the next read sees the canonical as tracked, the
-    /// warm validation matches, and the bundle's cold/warm ratio
-    /// collapses from O(N) cold rebuilds to the expected 1:N (one cold
-    /// + N-1 warm).
-    ///
-    /// The producer-side caller is responsible for the epoch guard
-    /// (skip the call if the host's `current_store_view_epoch` no
-    /// longer matches the base view's `mutation_epoch`) — keeping
-    /// the trait off the concrete `VerterHost` type to preserve the
-    /// request-port boundary (the six ports in `request_ports`).
-    ///
-    /// Implementers writing into a per-request overlay must:
-    /// - Insert `whole_hash` into the overlay's `whole_hashes` map
-    ///   (so `validates_self_root_whole_hash` accepts the bundle's
-    ///   `FileWholeHash` self-root).
-    /// - Insert `route_hash` into the overlay's `derived_hashes` under
-    ///   the `Route` kind when `Some`.
-    ///
-    /// The owner's import-route dependency is deliberately NOT promoted:
-    /// it is a resolve-domain resolution witness validated against the
-    /// base view's captured immutable resolution world, not a
-    /// per-canonical derived hash the overlay can carry.
-    ///
-    /// Default impl is no-op so non-request views (the bare
-    /// [`crate::resolver_store::HostStoreView`], test-only
-    /// [`PermissiveStoreView`], etc.) inherit "no overlay" semantics
-    /// — they have no per-request append-only side maps to mutate.
-    fn promote_route_completion(
-        &self,
-        _canonical: &str,
-        _whole_hash: crate::types::Hash16,
-        _route_hash: Option<crate::types::Hash16>,
-    ) {
-    }
-}
-
-impl verter_workspace::FactVersionValidator for dyn StoreView + '_ {
-    #[inline]
-    fn validates_fact_version(&self, fact: &FactVersionRef) -> bool {
-        StoreView::validates(self, fact)
-    }
-
-    /// The view's own whole-signature rule, one receipt walk shared by
-    /// the signature, never a fresh walk per fact.
-    #[inline]
-    fn validates_fact_signature(&self, facts: &[FactVersionRef]) -> bool {
-        StoreView::validates_fact_signature(self, facts)
-    }
-}
-
-/// Forward [`StoreView`] through a shared reference, including the unsized
-/// `&dyn StoreView` form.
-///
-/// This lets a generic `view: &V where V: StoreView` validator accept a
-/// `&crate::resolver_core::fact_validation_port::FactValidationView::new(ctx)` borrow (`&dyn StoreView`) directly — e.g. the
-/// fallthrough resolver validates per-element / per-child / per-root
-/// node-cache entries through `&crate::resolver_core::fact_validation_port::FactValidationView::new(self.ctx)` so the validation
-/// rides the request-bound, currentness-gated `RequestStoreView` rather
-/// than a separately-rebuilt raw `HostStoreView`. Every method just
-/// re-dispatches to the referent.
-impl<T: StoreView + ?Sized> StoreView for &T {
-    #[inline]
-    fn compat_token(&self) -> StoreViewCompatToken {
-        (**self).compat_token()
-    }
-    #[inline]
-    fn validates(&self, fact: &FactVersionRef) -> bool {
-        (**self).validates(fact)
-    }
-    #[inline]
-    fn validates_parse_domain(&self, fact: &ParseFactRef) -> bool {
-        (**self).validates_parse_domain(fact)
-    }
-    #[inline]
-    fn validates_resolve_imports_domain(&self, fact: &ResolveImportsFactRef) -> bool {
-        (**self).validates_resolve_imports_domain(fact)
-    }
-    #[inline]
-    fn validates_route_surface_domain(&self, fact: &RouteSurfaceFactRef) -> bool {
-        (**self).validates_route_surface_domain(fact)
-    }
-    #[inline]
-    fn validates_program_analysis_domain(&self, fact: &ProgramAnalysisFactRef) -> bool {
-        (**self).validates_program_analysis_domain(fact)
-    }
-    #[inline]
-    fn validates_file_source_env(
-        &self,
-        canonical_id: &str,
-        parse_env_hash: crate::locator_identity::ParseEnvHash,
-        parse_key: &verter_language::ParseKey,
-        file_language_id: &verter_language::FileLanguage,
-    ) -> bool {
-        (**self).validates_file_source_env(
-            canonical_id,
-            parse_env_hash,
-            parse_key,
-            file_language_id,
-        )
-    }
-    #[inline]
-    fn validates_self_root_whole_hash(&self, canonical_id: &str, hash: &ResolverHash16) -> bool {
-        (**self).validates_self_root_whole_hash(canonical_id, hash)
-    }
-    #[inline]
-    fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
-        (**self).strict_self_root_world_identity()
-    }
-    #[inline]
-    fn strict_self_root_is_witnessable(&self, canonical_id: &str) -> bool {
-        (**self).strict_self_root_is_witnessable(canonical_id)
-    }
-    #[inline]
-    fn mint_strict_self_root_world(
-        &self,
-        roots: &[(&str, ResolverHash16)],
-    ) -> Option<verter_workspace::StrictSelfRootWorld> {
-        (**self).mint_strict_self_root_world(roots)
-    }
-    #[inline]
-    fn tracks_file(&self, canonical_id: &str) -> bool {
-        (**self).tracks_file(canonical_id)
-    }
-    #[inline]
-    fn derived_hash_for(
-        &self,
-        canonical_id: &str,
-        kind: DerivedFactKind,
-    ) -> Option<ResolverHash16> {
-        (**self).derived_hash_for(canonical_id, kind)
-    }
-    #[inline]
-    fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
-        (**self).aggregate_basis_seed()
-    }
-    #[inline]
-    fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
-        (**self).validates_fact_signature(sig)
-    }
-    #[inline]
-    fn validate_fact_signature(
-        &self,
-        sig: &[FactVersionRef],
-        self_root_canonicals: &[&str],
-    ) -> Result<(), usize> {
-        (**self).validate_fact_signature(sig, self_root_canonicals)
-    }
-    #[inline]
-    fn validates_fact_signature_with_self_roots(
-        &self,
-        sig: &[FactVersionRef],
-        self_root_canonicals: &[&str],
-    ) -> bool {
-        (**self).validates_fact_signature_with_self_roots(sig, self_root_canonicals)
-    }
-    #[inline]
-    fn promote_route_completion(
-        &self,
-        canonical: &str,
-        whole_hash: crate::types::Hash16,
-        route_hash: Option<crate::types::Hash16>,
-    ) {
-        (**self).promote_route_completion(canonical, whole_hash, route_hash)
-    }
-}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PermissiveStoreView;
@@ -678,7 +179,7 @@ pub struct ResolveRequest {
     pub target: ResolveRequestTarget,
 }
 
-pub use verter_workspace::{
+pub use verter_session_query::facts::fact_cache::{
     DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
     ProgramAnalysisFunctionRef, ResolveImportsFactRef, RouteSurfaceFactRef,
 };
@@ -842,14 +343,14 @@ pub(crate) struct StableExecutionValue<V> {
     /// generic driver, retained as a joinable rendezvous. It rides the
     /// VALUE rather than a side channel so a FOLLOWER that adopts a
     /// retained rendezvous observes the refusal atomically with the value
-    /// and can [`replay_refusal`](reuse::ReuseClass::replay_refusal) it
+    /// and can replay it ([`verter_type_engine::fact_tracing::replay_reuse_refusal`])
     /// into its OWN tracer stack — the leader's original fan-out ran on
     /// the leader's thread and never touched the follower's.
     ///
     /// Orthogonal to `completeness`: this field is the REFUSAL axis and
     /// `completeness` is the COMPLETENESS axis; admission requires both
     /// to be clean.
-    pub reuse: reuse::ReuseClass,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
 }
 
 /// Sealed evidence that the stable-request driver observed a current,
@@ -979,7 +480,9 @@ where
 
     /// Typed cache-only refusal captured by the cold compute. Unlike
     /// completeness, this does not make the value structurally partial.
-    fn capture_cache_refusal(&self) -> Option<fact_read_set::NonCacheablePropagation> {
+    fn capture_cache_refusal(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_read_set::NonCacheablePropagation> {
         None
     }
 
@@ -1050,7 +553,7 @@ where
                     executor.store_stable(&value, StableAdmission { _private: () });
                 }
                 if let Some(propagation) = cache_refusal {
-                    resolver_context::note_non_cacheable_propagation(propagation);
+                    verter_type_engine::fact_tracing::note_non_cacheable_propagation(propagation);
                 }
                 return Ok(RequestRunResult {
                     value,
@@ -1069,7 +572,7 @@ where
             // result now.
             if executor.snapshot_is_immutable() {
                 if let Some(propagation) = executor.capture_cache_refusal() {
-                    resolver_context::note_non_cacheable_propagation(propagation);
+                    verter_type_engine::fact_tracing::note_non_cacheable_propagation(propagation);
                 }
                 return Ok(RequestRunResult {
                     value,
@@ -1142,7 +645,7 @@ where
                         completeness: ResultCompleteness::Complete,
                         // A warm hit came out of a shared cache: it was
                         // admitted, so nothing refused it.
-                        reuse: reuse::ReuseClass::Shared,
+                        reuse: verter_session_query::facts::reuse::ReuseClass::Shared,
                     });
                 }
 
@@ -1163,7 +666,10 @@ where
                     stable,
                     computed: true,
                     completeness,
-                    reuse: reuse::ReuseClass::from_captured_propagation(cache_refusal),
+                    reuse:
+                        verter_session_query::facts::reuse::ReuseClass::from_captured_propagation(
+                            cache_refusal,
+                        ),
                 })
             },
             // Retain ONLY stable results as a joinable rendezvous. An
@@ -1204,7 +710,7 @@ where
             if matches!(flight.role, SingleflightRole::Follower) {
                 executor.fold_follower_completeness(flight.value.completeness);
             }
-            flight.value.reuse.replay_refusal();
+            verter_type_engine::fact_tracing::replay_reuse_refusal(&flight.value.reuse);
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source,
@@ -1222,7 +728,7 @@ where
         // result now instead of recomputing it every remaining attempt plus
         // the fallback.
         if executor.snapshot_is_immutable() {
-            flight.value.reuse.replay_refusal();
+            verter_type_engine::fact_tracing::replay_reuse_refusal(&flight.value.reuse);
             return Ok(RequestRunResult {
                 value: flight.value.value.clone(),
                 source: RequestSource::Fallback,
@@ -1239,7 +745,7 @@ where
     let value = executor.compute(&store_view)?;
     let completeness = executor.capture_completeness();
     if let Some(propagation) = executor.capture_cache_refusal() {
-        resolver_context::note_non_cacheable_propagation(propagation);
+        verter_type_engine::fact_tracing::note_non_cacheable_propagation(propagation);
     }
     Ok(RequestRunResult {
         value,
@@ -1386,13 +892,13 @@ impl<V> ValidatedFactAdmission<V> {
 /// of the oldest candidate. Owned by the dependency-neutral carrier
 /// module so the workspace resolution slot and this slot share one
 /// bound.
-pub use verter_workspace::CANDIDATE_CAP;
+pub use verter_session_query::facts::fact_cache::CANDIDATE_CAP;
 
 /// Per-candidate `fact_dep_signature` size cap. Larger signatures
 /// are admitted as `NonCacheable` (the candidate is dropped and the
 /// `FactSignatureOverflow` audit event fires). Callers fall back to
 /// cold recompute; correctness is preserved.
-pub use verter_workspace::FACT_SIGNATURE_CAP;
+pub use verter_session_query::facts::fact_read_set::FACT_SIGNATURE_CAP;
 
 fn compute_signature_fingerprint(facts: &[FactVersionRef]) -> [u8; 16] {
     use std::hash::{BuildHasher, Hash, Hasher};
@@ -1673,7 +1179,7 @@ where
             // observer / accumulator installed on the current
             // thread) are silent — the counter is the authoritative
             // signal.
-            crate::host_manage::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
                     candidate_size: facts.len() as u32,
                     cap: FACT_SIGNATURE_CAP as u32,
@@ -1688,7 +1194,7 @@ where
             if facts.is_empty() {
                 self.admission_refused
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                crate::host_manage::push_structured_event(
+                verter_type_engine::request_observers::push_structured_event(
                     crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                         cache_kind: Arc::from(cache_kind),
                         reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1745,7 +1251,7 @@ where
         if facts.len() > FACT_SIGNATURE_CAP {
             self.signature_overflow
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::host_manage::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureOverflow {
                     candidate_size: facts.len() as u32,
                     cap: FACT_SIGNATURE_CAP as u32,
@@ -1756,7 +1262,7 @@ where
         if facts.is_empty() {
             self.admission_refused
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::host_manage::push_structured_event(
+            verter_type_engine::request_observers::push_structured_event(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                     cache_kind: Arc::from(cache_kind),
                     reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -2046,7 +1552,7 @@ where
         let archive_checks = self
             .archive_checks
             .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
-        crate::host_manage::push_structured_event(
+        verter_type_engine::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::FactValidationSummary {
                 request_id,
                 cache_kind: Arc::from(cache_kind),
@@ -3366,8 +2872,9 @@ mod tests {
                         value: 7usize,
                         stable: true,
                         computed: true,
-                        completeness: crate::semantic_query::ResultCompleteness::Complete,
-                        reuse: reuse::ReuseClass::Shared,
+                        completeness:
+                            verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                        reuse: verter_session_query::facts::reuse::ReuseClass::Shared,
                     })
                 },
                 |sev| sev.stable,
@@ -3733,7 +3240,9 @@ mod tests {
 
         fn capture_completeness(&self) -> ResultCompleteness {
             if self.partial {
-                ResultCompleteness::partial(crate::semantic_query::PartialReasonSet::PROPAGATED)
+                ResultCompleteness::partial(
+                    verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED,
+                )
             } else {
                 ResultCompleteness::Complete
             }
@@ -4993,8 +4502,8 @@ mod tests {
 #[cfg(test)]
 mod file_source_env_fact_rail_tests {
     use super::*;
-    use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     fn source_env_fact(
         canonical: &str,
@@ -5005,7 +4514,7 @@ mod file_source_env_fact_rail_tests {
         FactVersionRef::FileSourceEnv {
             canonical_id: canonical.to_string(),
             parse_env_hash: ParseEnvHash::from_env_hash([env_byte; 16]),
-            parse_key: crate::build_toolchain_fingerprint::parse_key_for_test(
+            parse_key: verter_session_query::source::toolchain::parse_key_for_test(
                 language_of,
                 parse_marker,
             ),
@@ -5126,9 +4635,9 @@ mod fact_signature_fingerprint_pins {
     //! implementation; they lock the contract, not the byte values.
 
     use super::*;
-    use crate::file_artifact_store::FileArtifactKey;
-    use crate::locator_identity::ParseEnvHash;
-    use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
+    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
+    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     fn export_key(name: &str) -> FactKey {
         FactKey::Export {
@@ -5171,7 +4680,9 @@ mod fact_signature_fingerprint_pins {
             FactVersionRef::FileSourceEnv {
                 canonical_id: "/w/env.ts".to_string(),
                 parse_env_hash: ParseEnvHash::from_env_hash([6u8; 16]),
-                parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/dep.ts", 2),
+                parse_key: verter_session_query::source::toolchain::parse_key_for_test(
+                    "/dep.ts", 2,
+                ),
                 file_language_id: FileArtifactKey::synthetic_file_language_for_test("/w/env.ts"),
             },
             FactVersionRef::ProjectGeneration { generation: 7 },
@@ -5246,7 +4757,9 @@ mod fact_signature_fingerprint_pins {
                 FactVersionRef::FileSourceEnv {
                     canonical_id: "/w/env.ts".to_string(),
                     parse_env_hash: ParseEnvHash::from_env_hash([66u8; 16]),
-                    parse_key: crate::build_toolchain_fingerprint::parse_key_for_test("/dep.ts", 2),
+                    parse_key: verter_session_query::source::toolchain::parse_key_for_test(
+                        "/dep.ts", 2,
+                    ),
                     file_language_id: FileArtifactKey::synthetic_file_language_for_test(
                         "/w/env.ts",
                     ),
@@ -5320,6 +4833,7 @@ mod fact_signature_fingerprint_pins {
 #[cfg(test)]
 mod central_signature_rail_tests {
     use super::*;
+    use verter_session_query::facts::store_view::ResolverHash16;
 
     /// Accepts every fact individually and every self-root individually,
     /// but REJECTS any signature naming more than one distinct canonical.
@@ -5534,6 +5048,7 @@ mod central_signature_rail_tests {
 #[cfg(test)]
 mod receipt_validation_tests {
     use super::*;
+    use verter_session_query::facts::store_view::ResolverHash16;
 
     /// Counts every fact it is asked to validate, rejecting one canonical
     /// and every self-root it is told to reject.
@@ -5574,7 +5089,9 @@ mod receipt_validation_tests {
     }
 
     fn receipt(facts: Vec<FactVersionRef>) -> FactVersionRef {
-        FactVersionRef::Receipt(verter_workspace::ResultReceipt::new(facts))
+        FactVersionRef::Receipt(verter_session_query::facts::fact_cache::ResultReceipt::new(
+            facts,
+        ))
     }
 
     /// A signature is valid exactly when every fact its receipts reach is,

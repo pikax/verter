@@ -18,8 +18,8 @@
 use std::sync::Arc;
 
 use verter_audit::RequestKind;
-use verter_session::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 
 const A_TS: &str = r#"
 import type { B } from "./b";
@@ -63,7 +63,7 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
             canonical_id: Arc::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -126,7 +126,7 @@ fn type_resolution_audit_does_not_visit_unreferenced_imports() {
             canonical_id: Arc::from("/c.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },

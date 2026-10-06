@@ -23,6 +23,8 @@
 //! clean-type-check gate spuriously. The declarations are ambient (`declare`)
 //! so they introduce no runtime value and never collide with a user import.
 
+use verter_language::svelte_rune_ambient::module_rune_ambient_source;
+
 use super::SvelteIdeDialect;
 
 /// The per-file pragma line. Opens the prelude; overrides the project-level
@@ -196,7 +198,7 @@ pub fn render_rune_prelude(mode: RunePreludeMode) -> String {
                 pragma.len()
                     + COMPONENT_RUNE_IMPORTS_AND_HEADER.len()
                     + COMPONENT_ONLY_RUNES_PROPS_BINDABLE.len()
-                    + SHARED_MODULE_RUNES.len()
+                    + module_rune_ambient_source().len()
                     + COMPONENT_ONLY_RUNE_HOST.len()
                     + COMPONENT_PROJECTION_CHECKERS.len()
                     + legacy.len(),
@@ -204,7 +206,7 @@ pub fn render_rune_prelude(mode: RunePreludeMode) -> String {
             out.push_str(pragma);
             out.push_str(COMPONENT_RUNE_IMPORTS_AND_HEADER);
             out.push_str(COMPONENT_ONLY_RUNES_PROPS_BINDABLE);
-            out.push_str(SHARED_MODULE_RUNES);
+            out.push_str(module_rune_ambient_source());
             out.push_str(COMPONENT_ONLY_RUNE_HOST);
             out.push_str(COMPONENT_PROJECTION_CHECKERS);
             out.push_str(legacy);
@@ -219,11 +221,11 @@ pub fn render_rune_prelude(mode: RunePreludeMode) -> String {
                 let mut out = String::with_capacity(
                     MODULE_LOCAL_MARKER.len()
                         + MODULE_RUNE_HEADER.len()
-                        + SHARED_MODULE_RUNES.len(),
+                        + module_rune_ambient_source().len(),
                 );
                 out.push_str(MODULE_LOCAL_MARKER);
                 out.push_str(MODULE_RUNE_HEADER);
-                out.push_str(SHARED_MODULE_RUNES);
+                out.push_str(module_rune_ambient_source());
                 out
             }
             RuneModuleSourceType::Js => {
@@ -238,26 +240,6 @@ pub fn render_rune_prelude(mode: RunePreludeMode) -> String {
         },
     }
 }
-
-/// The module-valid rune ambient declarations (TS `declare` form) WITHOUT the
-/// module-local `export {};` marker or any header — the SHARED rune surface a
-/// standalone rune module exposes.
-///
-/// This is the SAME [`SHARED_MODULE_RUNES`] the component and module preludes
-/// carry. The session's per-file eval-environment merge (Channel A — so a rune
-/// module's exported rune-derived types infer correctly through Verter's own
-/// type-resolution engine) parses THIS text into an isolated env and merges its
-/// symbols; the EvalEnv merge is already file-scoped, so it needs no
-/// `export {};`. There is no second rune-declaration source.
-#[must_use]
-pub fn module_rune_ambient_source() -> &'static str {
-    SHARED_MODULE_RUNES
-}
-
-/// The version of the rune ambient surface. Bumped whenever the module rune
-/// declarations change so a prelude fix invalidates stale inferred exports of a
-/// rune module (it enters the rune module's type/eval-env cache key).
-pub const RUNE_AMBIENT_PRELUDE_VERSION: u32 = 1;
 
 /// The component prelude's leading imports + rune-section header. Component
 /// mode only — the `Snippet`/`Attachment` imports back the projection
@@ -284,36 +266,6 @@ declare function $bindable<T = never>(fallback?: T): T;
 const COMPONENT_ONLY_RUNE_HOST: &str =
     "declare function $host<El extends HTMLElement = HTMLElement>(): El;\n";
 
-/// The module-VALID rune surface — shared VERBATIM between the component and
-/// module preludes. These are the runes Svelte 5 allows OUTSIDE a component
-/// (`$state`/`$derived`/`$effect`/`$inspect` + every namespace member,
-/// per the audit, 5.56.x). This is the ONE rune-declaration source;
-/// neither mode re-declares them.
-const SHARED_MODULE_RUNES: &str = r#"declare function $state<T>(initial: T): T;
-declare function $state<T>(): T | undefined;
-declare namespace $state {
-  function raw<T>(initial: T): T;
-  function raw<T>(): T | undefined;
-  function snapshot<T>(state: T): T;
-  function eager<T>(initial: T): T;
-}
-declare function $derived<T>(expression: T): T;
-declare namespace $derived {
-  function by<T>(fn: () => T): T;
-}
-declare function $effect(fn: () => void | (() => void)): void;
-declare namespace $effect {
-  function pre(fn: () => void | (() => void)): void;
-  function tracking(): boolean;
-  function root(fn: () => void | (() => void)): () => void;
-  function pending(): boolean;
-}
-declare function $inspect<T extends unknown[]>(...values: T): { with: (fn: (type: "init" | "update", ...values: T) => void) => void };
-declare namespace $inspect {
-  function trace(name?: string): void;
-}
-"#;
-
 /// The module-local scope marker. A standalone rune module's prepended
 /// declarations MUST stay module-local: a bare top-level `declare function` in
 /// a script-context file becomes a GLOBAL ambient, which would leak the runes
@@ -332,7 +284,7 @@ const MODULE_RUNE_HEADER_JS: &str =
 /// The JS-VALID module rune surface for a `.svelte.js` module (checked under
 /// `checkJs`). TS `declare function` syntax is not valid JavaScript, so the
 /// runes are declared as JSDoc-typed local functions (module-local via the
-/// leading `export {};`). The shapes mirror [`SHARED_MODULE_RUNES`] exactly so
+/// leading `export {};`). The shapes mirror [`module_rune_ambient_source`] exactly so
 /// `export const s = $state(0)` infers `number` identically to the `.ts` form.
 const JS_MODULE_RUNES: &str = r#"/**
  * @template T

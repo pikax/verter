@@ -602,7 +602,7 @@ test("STS0-svelte-pin: latest-tool claims without pinned provenance are rejected
 test("STS0-svelte-abi: clean rune probe matches the pinned $derived expression signature", () => {
   const probe = fs.readFileSync(path.join(HERE, "probes", "state-module.svelte.ts"), "utf8");
   const prelude = fs.readFileSync(
-    path.resolve(HERE, "../../../crates/verter_compiler/src/svelte/ide/prelude.rs"),
+    path.resolve(HERE, "../../../crates/verter_language/src/svelte_rune_ambient.rs"),
     "utf8",
   );
   const svelteTypes = fs.readFileSync(

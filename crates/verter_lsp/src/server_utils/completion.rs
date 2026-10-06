@@ -145,7 +145,7 @@ pub(in crate::server) fn filter_type_provider_completion_result(
 /// generated lexical locals, but are not script bindings and therefore cannot
 /// be recovered from the outer component scope.
 pub(in crate::server) fn template_lexical_scope_names(
-    template: &verter_semantic::analysis::template::TemplateAnalysisSnapshot,
+    template: &verter_session_query::analysis::template::TemplateAnalysisSnapshot,
     cursor_offset: u32,
 ) -> std::collections::HashSet<String> {
     let mut names = std::collections::HashSet::new();

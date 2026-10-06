@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use verter_semantic::analysis::project_index::ProjectIndex;
-use verter_semantic::analysis::template::{TemplateComponentUsage, TemplatePropUsage};
+use verter_session_query::analysis::template::{TemplateComponentUsage, TemplatePropUsage};
 
 /// Pre-computed cross-file analysis data for lint rules.
 #[derive(Debug, Default)]
@@ -467,7 +467,7 @@ mod tests {
 
     // ── Component cross-file analysis tests ─────────────────────────
 
-    use verter_semantic::analysis::template::{
+    use verter_session_query::analysis::template::{
         PropValueConstness, TemplateComponentUsage, TemplateComponentVModel, TemplatePropUsage,
     };
 

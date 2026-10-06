@@ -391,7 +391,7 @@ fn generate_svelte_ide_tsx(
         .unwrap_or("Component");
     let component_name = sanitize_component_name(raw_name);
     let hash = simple_hash(svelte_path.to_string_lossy().as_bytes());
-    let tsx_name = verter_semantic::resolver_core::carrier_ide_provider_path(
+    let tsx_name = verter_session_query::resolution::carrier_ide_provider_path(
         &format!("{component_name}_{hash:016x}"),
         ide.is_jsx,
     );
@@ -547,7 +547,7 @@ fn generate_all_tsx(
             // `checkJs` still comes from the user's own tsconfig through the
             // synthetic config's `extends`, so a `checkJs: true` project keeps
             // reporting real JavaScript errors.
-            let tsx_name = verter_semantic::resolver_core::carrier_ide_provider_path(
+            let tsx_name = verter_session_query::resolution::carrier_ide_provider_path(
                 &format!("{component_name}_{hash:016x}"),
                 tsx_is_jsx,
             );
@@ -2171,7 +2171,7 @@ fn canonicalize_nonrelative_carrier_specifiers(
     host: &VerterHost,
 ) -> Result<String, StackUnavailable> {
     rewrite_import_specifiers(code, |specifier| {
-        if verter_semantic::resolver_core::is_relative_specifier(specifier) {
+        if verter_session_query::resolution::is_relative_specifier(specifier) {
             return None;
         }
         // Only CARRIER specifiers: everything else (`vue`, a package type
@@ -2179,9 +2179,9 @@ fn canonicalize_nonrelative_carrier_specifiers(
         let carrier = CARRIER_VIRTUAL_IMPORT_SUFFIXES
             .iter()
             .find_map(|suffix| specifier.strip_suffix(suffix))
-            .filter(|carrier| verter_semantic::resolver_core::path_is_carrier(carrier))
+            .filter(|carrier| verter_session_query::resolution::path_is_carrier(carrier))
             .or_else(|| {
-                verter_semantic::resolver_core::path_is_carrier(specifier).then_some(specifier)
+                verter_session_query::resolution::path_is_carrier(specifier).then_some(specifier)
             })?;
         let resolved = host.resolve_import(owner_canonical_id, carrier)?;
         let suffix = &specifier[carrier.len()..];
@@ -2248,7 +2248,7 @@ fn absolutize_relative_specifier(import_path: &str, vue_dir: &Path) -> Option<St
     // check leaves the bare and backslash spellings un-absolutized in the
     // generated temp TSX, and TypeScript then resolves them against the
     // TEMP directory: spurious missing-module diagnostics on this lane.
-    if !verter_semantic::resolver_core::is_relative_specifier(import_path) {
+    if !verter_session_query::resolution::is_relative_specifier(import_path) {
         return None;
     }
     // Check if the path after "./" is already an absolute path (e.g., "./D:/...")
@@ -2297,8 +2297,8 @@ fn absolutize_relative_specifier(import_path: &str, vue_dir: &Path) -> Option<St
 ///   the strip to genuine carrier companions (a plain `./Widget.tsx` is left
 ///   untouched because `Widget` is not a carrier).
 const CARRIER_VIRTUAL_IMPORT_SUFFIXES: &[&str] = &[
-    verter_semantic::resolver_core::CARRIER_API_MODULE_SPECIFIER_SUFFIX, // ".verter.js"
-    verter_semantic::resolver_core::CARRIER_API_VIRTUAL_SUFFIX,          // ".verter.ts"
+    verter_session_query::resolution::CARRIER_API_MODULE_SPECIFIER_SUFFIX, // ".verter.js"
+    verter_session_query::resolution::CARRIER_API_VIRTUAL_SUFFIX,          // ".verter.ts"
     ".tsx",
     ".jsx",
 ];
@@ -2341,7 +2341,7 @@ fn lower_tsc_validation_carrier_specifiers(
     // carrier classification happens per-specifier in the scan. This is a cheap,
     // deliberately conservative pre-filter against the registry's carrier
     // extensions (`.vue`/`.svelte`), not a hardcoded `.vue` literal.
-    let carrier_source_exts = verter_semantic::resolver_core::carrier_source_extensions();
+    let carrier_source_exts = verter_session_query::resolution::carrier_source_extensions();
     let mentions_carrier = CARRIER_VIRTUAL_IMPORT_SUFFIXES
         .iter()
         .any(|s| code.contains(s))
@@ -2875,10 +2875,11 @@ fn carrier_virtual_import_target(
     let (carrier_path, suffix_stripped) = CARRIER_VIRTUAL_IMPORT_SUFFIXES
         .iter()
         .find_map(|suffix| specifier.strip_suffix(suffix))
-        .filter(|carrier| verter_semantic::resolver_core::path_is_carrier(carrier))
+        .filter(|carrier| verter_session_query::resolution::path_is_carrier(carrier))
         .map(|carrier| (carrier, true))
         .or_else(|| {
-            verter_semantic::resolver_core::path_is_carrier(specifier).then_some((specifier, false))
+            verter_session_query::resolution::path_is_carrier(specifier)
+                .then_some((specifier, false))
         })?;
 
     // Known carrier → temp-dir stub, by EXACT canonical lookup only.
@@ -6526,7 +6527,8 @@ const props = defineProps<{ msg: string }>()
         // same stem and `is_jsx`.
         for (path, is_jsx) in [(&js, true), (&ts, false)] {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap();
-            let expected = verter_semantic::resolver_core::carrier_ide_provider_path(stem, is_jsx);
+            let expected =
+                verter_session_query::resolution::carrier_ide_provider_path(stem, is_jsx);
             assert_eq!(
                 path.file_name().and_then(|s| s.to_str()),
                 Some(expected.as_str()),

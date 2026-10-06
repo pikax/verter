@@ -4,13 +4,15 @@
 //! parser-side `AnalyzedEmitField.payload_type` provides the raw_type
 //! when available.
 
-use verter_semantic::analysis::component_meta::{MacroExpansionDiagnostics, MacroExpansionKind};
-use verter_semantic::analysis::type_expand::ExpandedField;
-use verter_semantic::analysis::{AnalyzedMacro, AnalyzedMacroKind};
+use verter_session_query::analysis::component_meta::{
+    MacroExpansionDiagnostics, MacroExpansionKind,
+};
+use verter_session_query::analysis::type_expand::ExpandedField;
+use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
-use crate::resolver_core::ResolverContext;
-use crate::semantic_query::DeclIdentity;
-use crate::types::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::DeclIdentity;
 
 use super::macro_payload_substrate::PayloadSurfaceScope;
 use super::output_sink::{surface_member_to_expanded_field, MemberValuePosition};
@@ -37,7 +39,7 @@ pub(crate) fn project_emits(
         return Vec::new();
     }
 
-    let ctx: &dyn ResolverContext = query_engine.ctx;
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = query_engine.ctx;
     // See `project_props` for the PublishedField origin-edge rationale —
     // recorded uniformly inside `admit_published_member`.
     let admitted: Vec<AdmittedPublishedMember<'_>> = {

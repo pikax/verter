@@ -3,12 +3,12 @@ use crate::canonical_path::CanonicalPath;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use verter_semantic::resolver_core::ResolvePhase;
-use verter_semantic::resolver_core::{
-    ancestor_dirs, ancestor_dirs_from_dir, carrier_api_provider_path, carrier_ide_provider_path,
-    collapse_path, is_relative_specifier, join_paths, normalize_canonical_id, path_is_carrier,
-    strip_carrier_extension, AttemptFailure, ProviderTarget, ResolutionKind, ResolveRequestKind,
-    WorkspaceAlias,
+use verter_resolution::{ancestor_dirs, ancestor_dirs_from_dir};
+use verter_session_query::resolution::ResolvePhase;
+use verter_session_query::resolution::{
+    carrier_api_provider_path, carrier_ide_provider_path, collapse_path, is_relative_specifier,
+    join_paths, normalize_canonical_id, path_is_carrier, strip_carrier_extension, AttemptFailure,
+    ProviderTarget, ResolutionKind, ResolveRequestKind, WorkspaceAlias,
 };
 
 #[test]
@@ -89,8 +89,8 @@ impl TestReader {
 impl crate::traits::WorkspaceRead for TestReader {
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
         crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
     }
@@ -248,8 +248,8 @@ impl CountingReader {
 impl crate::traits::WorkspaceRead for CountingReader {
     fn preflight_resolution_inputs_bounded(
         &self,
-        keys: &[verter_semantic::resolver_core::InputKey],
-        basis: verter_semantic::resolver_core::ResolutionBasis,
+        keys: &[verter_session_query::resolution::InputKey],
+        basis: verter_session_query::resolution::ResolutionBasis,
     ) -> Result<crate::resolver::ResolutionInputReservationBatch, AttemptFailure> {
         crate::resolver::preflight_workspace_inputs_for_test(self, keys, basis)
     }
@@ -685,13 +685,13 @@ fn resolve_for_project_uses_owner_tsconfig_paths_without_importer_file() {
         "/workspace/types/vue/index.d.ts",
         "/workspace/types/vue/jsx.d.ts",
     ]);
-    let owner = verter_semantic::resolver_core::ProjectOwnership {
+    let owner = verter_session_query::resolution::ProjectOwnership {
         project_root: "/workspace".to_string(),
         tsconfig_path: Some("/workspace/tsconfig.json".to_string()),
     };
     let ctx = ResolutionContext {
         phase: ResolvePhase::ProviderGraph,
-        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
     };
 
     let vue = resolver
@@ -2473,7 +2473,7 @@ fn counting_reader_tracks_calls() {
 #[test]
 fn bare_package_json_reread_per_importer() {
     use crate::engine::Engine;
-    use verter_semantic::resolver_core::{ResolutionContext, ResolveRequestKind};
+    use verter_session_query::resolution::{ResolutionContext, ResolveRequestKind};
 
     let mut reader = CountingReader::with_files(&[
         "/repo/src/0.vue",
@@ -2494,7 +2494,7 @@ fn bare_package_json_reread_per_importer() {
     let engine = Engine::new();
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-        use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+        use verter_session_query::resolution::IdeProjectCompilerOptions;
         let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
             root: "/repo".to_string(),
             rank: ProjectRank::Inferred,
@@ -2538,7 +2538,7 @@ fn bare_package_json_reread_per_importer() {
 #[test]
 fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier() {
     use crate::engine::Engine;
-    use verter_semantic::resolver_core::{ResolutionContext, ResolveRequestKind};
+    use verter_session_query::resolution::{ResolutionContext, ResolveRequestKind};
 
     let mut reader =
         CountingReader::with_files(&["/repo/src/App.vue", "/repo/node_modules/pkg/dist/index.js"]);
@@ -2550,7 +2550,7 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
     let engine = Engine::new();
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-        use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+        use verter_session_query::resolution::IdeProjectCompilerOptions;
         let graph = ProjectGraph::from_configs(
             ["/repo", "/repo/node_modules/pkg"]
                 .into_iter()
@@ -2624,7 +2624,7 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
 #[test]
 fn package_imports_reread_per_importer() {
     use crate::engine::Engine;
-    use verter_semantic::resolver_core::{ResolutionContext, ResolveRequestKind};
+    use verter_session_query::resolution::{ResolutionContext, ResolveRequestKind};
 
     let mut reader = CountingReader::with_files(&[
         "/repo/src/a.vue",
@@ -2641,7 +2641,7 @@ fn package_imports_reread_per_importer() {
     let engine = Engine::new();
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-        use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+        use verter_session_query::resolution::IdeProjectCompilerOptions;
         let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
             root: "/repo".to_string(),
             rank: ProjectRank::Inferred,
@@ -2688,7 +2688,7 @@ fn package_imports_reread_per_importer() {
 #[test]
 fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
     use crate::engine::Engine;
-    use verter_semantic::resolver_core::{ResolutionContext, ResolveRequestKind};
+    use verter_session_query::resolution::{ResolutionContext, ResolveRequestKind};
 
     let mut reader = CountingReader::with_files(&[
         "/repo/src/components/App.vue",
@@ -2702,7 +2702,7 @@ fn node_modules_missing_ancestor_manifests_do_not_trigger_reads() {
     let engine = Engine::new();
     {
         use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
-        use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+        use verter_session_query::resolution::IdeProjectCompilerOptions;
         let graph = ProjectGraph::from_configs(vec![VfsProjectConfig {
             root: "/repo".to_string(),
             rank: ProjectRank::Inferred,

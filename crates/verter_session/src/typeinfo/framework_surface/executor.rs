@@ -53,9 +53,6 @@ use crate::framework::ctx::FrameworkAdapterCtx;
 use crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS;
 use crate::framework::registry::SurfaceRegistration;
 use crate::host_audit_runtime::AuditRequestRegistration;
-use crate::instant::Instant;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::ProjectionMode;
 use crate::typeinfo::framework_surface::graph_export::{
     encode_framework_surfaces, encode_framework_surfaces_with_unsupported_message,
 };
@@ -68,6 +65,9 @@ use crate::typeinfo::framework_surface::results::{
 };
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 /// The audit operation tag the framework-surface executor registers under.
 ///
@@ -93,7 +93,7 @@ impl VerterHost {
         envelope: TypeInfoGraphRequest,
     ) -> AuditedResult<TypeInfoGraphResponse, TypeInfoRequestError> {
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
@@ -111,7 +111,7 @@ impl VerterHost {
             self.config.projection_op_budget,
         );
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         let request_start = Instant::now();
         let (response, payload) = match registration.as_ref() {
@@ -368,7 +368,7 @@ impl VerterHost {
                             overlay,
                         );
                         let dispatch =
-                            crate::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
                                 &host_ctx,
                             );
                         let resolve_ctx = ExecutorResolveCtx {
@@ -450,8 +450,11 @@ impl VerterHost {
 struct ExecutorResolveCtx<'a> {
     /// The ONE proven-current request view every demand resolves against, so a
     /// single response never mixes owner versions under churn.
-    ctx: &'a dyn crate::resolver_core::ResolverContext,
-    dispatch: &'a crate::project_semantic_dispatch::ProjectSemanticDispatch<'a>,
+    ctx: &'a dyn crate::resolver_core::HostRequestContext,
+    dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        'a,
+        crate::resolver_core::HostCapabilities,
+    >,
 }
 
 impl ExecutorResolveCtx<'_> {
@@ -491,7 +494,7 @@ impl ExecutorResolveCtx<'_> {
         // Scoped PER DEMAND so one kind's degradation never downgrades a
         // sibling kind, and BUBBLED (not discarded) so the enclosing request
         // still records it.
-        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         let resolved = match demand {
             PlannedDemand::MacroPayload { owner, selector } => ResolvedDemand::MacroPayload(
                 self.resolve_macro_payload(&owner, requested_kind, &selector),
@@ -511,13 +514,14 @@ impl ExecutorResolveCtx<'_> {
                 ),
             ),
         };
-        let observed = crate::request_context::current_cold_compute_completeness();
+        let observed = verter_type_engine::request_context::current_cold_compute_completeness();
         drop(scope);
         match observed {
-            crate::semantic_query::ResultCompleteness::Complete => resolved,
-            crate::semantic_query::ResultCompleteness::Partial(reasons) => resolved.degraded_by(
-                &format!("framework surface resolution was degraded: {reasons:?}"),
-            ),
+            verter_type_engine::semantic_query::ResultCompleteness::Complete => resolved,
+            verter_type_engine::semantic_query::ResultCompleteness::Partial(reasons) => resolved
+                .degraded_by(&format!(
+                    "framework surface resolution was degraded: {reasons:?}"
+                )),
         }
     }
 
@@ -544,7 +548,7 @@ impl ExecutorResolveCtx<'_> {
         requested_kind: FrameworkSurfaceKind,
         _selector: &crate::typeinfo::framework_surface::plan::MacroPayloadSelector,
     ) -> ResolvedMacroPayload {
-        use verter_semantic::analysis::types::AnalyzedMacroKind;
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
 
         // The owner snapshot AND every macro DTO read flow through the ONE
         // request-bound `ctx`, so the whole response resolves against a single
@@ -601,6 +605,9 @@ impl ExecutorResolveCtx<'_> {
                 self.ctx,
                 self.dispatch,
                 &request,
+            )
+            .unwrap_or_else(
+                crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read,
             );
             any_partial |= dtos_read.is_partial();
             fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);
@@ -641,10 +648,10 @@ impl ExecutorResolveCtx<'_> {
     fn resolve_path_projection(
         &self,
         base: &crate::typeinfo::framework_surface::plan::TypeNodeHandle,
-        path: &[crate::semantic_query::PathSegment],
+        path: &[verter_type_engine::semantic_query::PathSegment],
         mode: ProjectionMode,
     ) -> ResolvedOutcome<crate::typeinfo::surface::TypeInfoSurface> {
-        use crate::semantic_query::{
+        use verter_type_engine::semantic_query::{
             ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi,
             SemanticQueryKey, SemanticQueryOutput,
         };
@@ -672,7 +679,7 @@ impl ExecutorResolveCtx<'_> {
                 canonical_id: Arc::from(base.owner_canonical.as_ref()),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
@@ -690,17 +697,19 @@ impl ExecutorResolveCtx<'_> {
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         ) {
-            crate::typeinfo::surface_resolution::SurfaceResolution::Resolved(surface)
-            | crate::typeinfo::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(surface)
+            | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(surface) => {
                 ResolvedOutcome::Resolved(surface.into_inner())
             }
-            crate::typeinfo::surface_resolution::SurfaceResolution::NoSurface(_) => {
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
                 ResolvedOutcome::Missing
             }
             // A failed projection is PARTIAL on the wire — its typed reason is
             // recorded and the usable subset (if any) rides the partial arm;
             // it never encodes as an absent surface.
-            crate::typeinfo::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
+            verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
+                incomplete,
+            ) => {
                 let diagnostics = vec![format!(
                     "shallow-surface-unresolved::{:?}",
                     incomplete.reasons()

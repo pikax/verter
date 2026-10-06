@@ -46,16 +46,42 @@
     },
     {
       "id": "ARH1-CUT-4",
-      "candidatePath": "crates/verter_session/src/semantic_query.rs",
-      "decision": "narrow every semantic_query pub item beyond the ten retained cross-crate envelope types and their seven used assoc items to pub(crate)",
-      "disposition": "bulk visibility narrowing; the cross-crate population (85 files: ffi/napi/wasm sources plus verter_session benches and integration tests, which compile as separate crates) is the exact importer inventory enforced by the verifier; the 68 files importing at least one narrowed name migrate to the existing for_tests test-support surface pattern in the same change, and PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers; lands under the semantic-dispatch narrowing heir after ARH2 characterization",
+      "candidatePath": "crates/verter_type_engine/src/semantic_query.rs",
+      "decision": "narrow every semantic_query pub item beyond the ten retained cross-crate envelope types and their eleven used assoc items to pub(crate)",
+      "disposition": "bulk visibility narrowing; the cross-crate population (357 files: the verter_session sources, benches, examples and integration tests, which reach verter_type_engine across the crate boundary, plus bench/ffi/napi/wasm/source-policy-gate files) is the exact importer inventory enforced by the verifier; the 299 files importing at least one narrowed name migrate in the same change (test files to the existing for_tests test-support surface pattern, verter_session production sources to a retained session-facing surface), and PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,UNDECIDED_CONDITIONAL} and ResultCompleteness::is_partial for the verter_session files importing only retained types; lands under the semantic-dispatch narrowing heir after ARH2 characterization",
       "owner": {
         "id": "ARH3",
         "kind": "node"
       },
       "class": "visibility-narrowing",
-      "evidence": "cross-crate references measured per consumer file from use-statement and inline-path syntax (aliases included, comments stripped): HashValue, SemanticNodeId, ScopeId, ResolveDeclKey, SemanticQueryKey, ResultCompleteness, PartialReason, PartialReasonSet, ProjectionMode, OriginEdgeKind are the only retained types imported, with the seven assoc items used on them; everything else referenced cross-crate is carried by a recorded bulk consumer",
-      "route": "crates/verter_session/src/semantic_query.rs#bulk"
+      "evidence": "cross-crate references measured per consumer file from use-statement and inline-path syntax (aliases included, comments stripped): HashValue, SemanticNodeId, ScopeId, ResolveDeclKey, SemanticQueryKey, ResultCompleteness, PartialReason, PartialReasonSet, ProjectionMode, OriginEdgeKind are the only retained types imported, with the assoc items used on them; everything else referenced cross-crate is carried by a recorded bulk consumer",
+      "route": "crates/verter_type_engine/src/semantic_query.rs#bulk"
+    },
+    {
+      "id": "ARH1-CUT-5",
+      "candidatePath": "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs",
+      "decision": "narrow every flow_return pub item back to the crate-visible module boundary (pub(crate))",
+      "disposition": "bulk visibility narrowing; the exact recorded consumers are the verter_session files that name the module through verter_type_engine::project_semantic_dispatch::flow_return or the session dispatch suites' module alias, and they migrate in the same change; lands under the semantic-dispatch narrowing heir after ARH2 characterization",
+      "owner": {
+        "id": "ARH3",
+        "kind": "node"
+      },
+      "class": "visibility-narrowing",
+      "evidence": "the module declaration in crates/verter_type_engine/src/project_semantic_dispatch/mod.rs is pub mod flow_return; consumers measured from use-statement and inline-path syntax with comments stripped",
+      "route": "crates/verter_type_engine/src/project_semantic_dispatch/flow_return.rs#bulk"
+    },
+    {
+      "id": "ARH1-CUT-6",
+      "candidatePath": "crates/verter_type_engine/src/project_semantic_dispatch/build.rs",
+      "decision": "narrow every build pub item back to the crate-visible module boundary (pub(crate))",
+      "disposition": "bulk visibility narrowing; the exact recorded consumers are the verter_session files that name the module through verter_type_engine::project_semantic_dispatch::build or the session dispatch suites' module alias, and they migrate in the same change; lands under the semantic-dispatch narrowing heir after ARH2 characterization",
+      "owner": {
+        "id": "ARH3",
+        "kind": "node"
+      },
+      "class": "visibility-narrowing",
+      "evidence": "the module declaration in crates/verter_type_engine/src/project_semantic_dispatch/mod.rs is pub mod build; consumers measured from use-statement and inline-path syntax with comments stripped",
+      "route": "crates/verter_type_engine/src/project_semantic_dispatch/build.rs#bulk"
     }
   ]
 }

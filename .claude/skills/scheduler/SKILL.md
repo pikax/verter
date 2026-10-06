@@ -857,7 +857,7 @@ pub struct CacheNodeDagNode {
     /// on task completion.
     pub cpu_concurrency_semaphore: Option<Arc<CpuConcurrencySemaphore>>,
     /// Scheduler-local opaque wrapper
-    /// (`crates/verter_scheduler/src/request_context.rs:103`,
+    /// (`crates/verter_execution/src/request_context.rs:103`,
     /// `pub struct OpaqueRequestContext(pub Arc<dyn RequestContextLike>)`).
     /// Calling crate wraps its concrete context inside
     /// `OpaqueRequestContext(arc as Arc<dyn RequestContextLike>)`

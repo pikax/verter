@@ -1,0 +1,5 @@
+error[E0616]: field `flow_body_exact_hash` of struct `FunctionProgramEntry` is private
+ --> tests/compile-fail/function_program_entry_fields_are_read_only.rs:7:11
+  |
+7 |     entry.flow_body_exact_hash = None;
+  |           ^^^^^^^^^^^^^^^^^^^^ private field

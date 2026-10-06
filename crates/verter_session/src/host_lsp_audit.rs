@@ -10,7 +10,7 @@
 //! The session encapsulates:
 //!
 //! 1. A fresh request id (stamped via the host's monotonic counter).
-//! 2. A [`crate::request_context::RequestContext`] keyed by
+//! 2. A [`verter_type_engine::request_context::RequestContext`] keyed by
 //!    [`verter_audit::RequestKind::Lsp`] with a producer-supplied
 //!    [`verter_audit::payloads::tags::LspMethodTag`].
 //! 3. An [`crate::host_audit_runtime::AuditRequestRegistration`]
@@ -42,8 +42,8 @@ use verter_audit::{
 };
 
 use crate::host_audit_runtime::AuditRequestRegistration;
-use crate::request_context::{RequestContext, RequestContextGuard};
 use crate::VerterHost;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 /// Session object held by an audited LSP handler for the duration
 /// of one request. Constructed by [`VerterHost::lsp_audit_begin`];
@@ -241,7 +241,7 @@ impl VerterHost {
 
         let canonical_id = target_identity.legacy_canonical_id();
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture;
         let timing_capture = self.config.audit_timing_capture;
@@ -266,7 +266,7 @@ impl VerterHost {
         match registration.as_ref() {
             AuditRequestRegistration::Noop => LspAuditSession::Noop,
             AuditRequestRegistration::Active(_) => {
-                let _ = ctx.install_audit_registration(Arc::clone(&registration));
+                let _ = ctx.install_audit_registration(registration.clone());
                 let parent_request_id = ctx.parent_request_id;
                 let tls_guard = RequestContextGuard::install(ctx);
                 LspAuditSession::Active(ActiveLspSession {

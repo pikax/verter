@@ -97,7 +97,7 @@ fn validates_route_surface_module_augmentation_index_shape_real_body() {
 fn host_store_view_overrides_all_per_domain_validators() {
     let src = read_session_source("resolver_store.rs");
     let host_impl_start = src
-        .find("impl crate::resolver_core::StoreView for HostStoreView {")
+        .find("impl verter_session_query::facts::store_view::StoreView for HostStoreView {")
         .expect("expected `impl StoreView for HostStoreView` block");
     let host_impl_window = &src[host_impl_start..];
     let host_impl_end = host_impl_window

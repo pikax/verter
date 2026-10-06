@@ -4,7 +4,7 @@ error[E0624]: method `context` is private
   |         let _ctx: InstantiateContext = k.context();
   |                                          ^^^^^^^ private method
   |
- ::: $WORKSPACE/crates/verter_session/src/semantic_query.rs
+ ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
   |
   |     pub(crate) fn context(&self) -> InstantiateContext {
   |     -------------------------------------------------- private method defined here
@@ -15,7 +15,7 @@ error[E0624]: method `body_source` is private
   |         let _source = k.body_source();
   |                         ^^^^^^^^^^^ private method
   |
- ::: $WORKSPACE/crates/verter_session/src/semantic_query.rs
+ ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
   |
   |     pub(crate) fn body_source(&self) -> InstantiateBodySource {
   |     --------------------------------------------------------- private method defined here
@@ -26,7 +26,7 @@ error[E0624]: method `args` is private
   |         let _args = k.args();
   |                       ^^^^ private method
   |
- ::: $WORKSPACE/crates/verter_session/src/semantic_query.rs
+ ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
   |
   |     pub(crate) fn args(&self) -> &Arc<[SemanticNodeId]> {
   |     --------------------------------------------------- private method defined here

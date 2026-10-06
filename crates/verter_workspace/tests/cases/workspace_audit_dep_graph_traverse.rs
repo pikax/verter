@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use verter_audit::{RequestKind, WorkspaceOp};
-use verter_semantic::resolver_core::{IdeProjectCompilerOptions, ResolveRequestKind};
+use verter_session_query::resolution::{IdeProjectCompilerOptions, ResolveRequestKind};
 use verter_workspace::{
     configured_membership_match_all_under_root, CanonicalPath, MemoryOptions, MemoryWorkspace,
     ParsedEdge, ProjectGraph, ProjectRank, VfsProjectConfig, WorkspaceAccess, WorkspaceRead,

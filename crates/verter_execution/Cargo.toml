@@ -1,0 +1,26 @@
+[package]
+name = "verter_execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Scheduler-independent execution primitives for Verter: task identity and wait graph, cancellation tokens, and opaque request-context propagation"
+publish = false
+
+[features]
+# Exposes the task registry's test-only inspectors to cross-crate test code.
+# Production binaries MUST NOT enable this feature; downstream crates that
+# need it for their own tests add `features = ["test-support"]` only in
+# `[dev-dependencies]` or forward it from their own `test-support` feature.
+test-support = []
+
+# Dependency closure is a layering contract: this crate sits below the
+# concrete scheduler, the workspace, the semantic engine and the session, and
+# depends on none of them.
+[dependencies]
+verter_debug_assert = { workspace = true }
+parking_lot = "0.12.5"
+rustc-hash = { workspace = true }
+smallvec = "1.15"

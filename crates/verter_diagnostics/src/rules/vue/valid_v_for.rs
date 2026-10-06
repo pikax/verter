@@ -5,7 +5,7 @@
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::template::{TemplateElement, VForDirective};
+use verter_session_query::analysis::template::{TemplateElement, VForDirective};
 
 /// Enforce valid v-for directives (variable and iterable must be present).
 pub struct ValidVFor;
@@ -52,8 +52,8 @@ impl LintRule for ValidVFor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use verter_semantic::analysis::template::*;
+    use verter_session_query::analysis::template::ElementNamespace;
+    use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
 
     fn run_rule(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
         crate::test_support::run_template_rule(ValidVFor, template)

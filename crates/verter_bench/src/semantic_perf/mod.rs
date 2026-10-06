@@ -40,8 +40,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use verter_session::semantic_query::SemanticNodeId;
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::SemanticNodeId;
 use verter_type_expr::TypeExpr;
 use verter_workspace::{AmbientLibSpec, MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 

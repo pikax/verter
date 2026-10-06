@@ -30,7 +30,7 @@ fn ensure(backend: &TsgoEngineBackend, workspace_root: &str, tsconfig_uri: &str)
         ENGINE_VERSION,
         env_dims(),
         Vec::new(),
-        verter_workspace::ProjectId(0),
+        verter_session_query::resolution::ProjectId(0),
         verter_workspace::SnapshotGeneration(1),
     );
     assert!(matches!(

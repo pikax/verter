@@ -1,7 +1,7 @@
 ## Template class fact demand
 
 Dynamic `:class` type decisions belong to
-`project_semantic_dispatch/template_class_facts.rs`, never to display text or
+`host_manage/template_class_facts.rs`, never to display text or
 eager script-analysis DTOs. Select subjects from `RawTemplateData`, join them
 to exact prepared binding keys or macro-payload locators, and classify every
 union arm through the shared graph. Preserve wrapper carriers until the

@@ -31,8 +31,8 @@ pub(crate) fn type_expr_contains_boolean(expression: &verter_type_expr::TypeExpr
 }
 
 fn merge_semantic_prop_definitions(
-    native: &mut Vec<verter_semantic::analysis::AnalyzedPropDefinition>,
-    semantic: Vec<verter_semantic::analysis::AnalyzedPropDefinition>,
+    native: &mut Vec<verter_session_query::analysis::template::AnalyzedPropDefinition>,
+    semantic: Vec<verter_session_query::analysis::template::AnalyzedPropDefinition>,
 ) {
     let mut semantic = semantic
         .into_iter()
@@ -64,7 +64,7 @@ fn merge_semantic_prop_definitions(
 pub(super) struct SemanticSnapshot {
     pub(super) document_revision: DocumentRevisionId,
     pub(super) semantic_generation: u64,
-    pub(super) analysis: Arc<verter_session::FileAnalysisSnapshot>,
+    pub(super) analysis: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
 }
 
 #[derive(Clone, Debug)]
@@ -292,7 +292,7 @@ impl DocumentRegistry {
                                         .is_some_and(type_expr_contains_boolean);
                                     let type_annotation =
                                         publication.terminal_display().text().map(str::to_string);
-                                    verter_semantic::analysis::AnalyzedPropDefinition {
+                                    verter_session_query::analysis::template::AnalyzedPropDefinition {
                                         name: prop.name,
                                         callable_role: prop.callable_role,
                                         type_annotation,
@@ -326,7 +326,7 @@ impl DocumentRegistry {
                                     .iter()
                                     .map(|prop| {
                                         let materialized = prop.ty.publication.materialized_type();
-                                        verter_semantic::analysis::AnalyzedPropDefinition {
+                                        verter_session_query::analysis::template::AnalyzedPropDefinition {
                                             name: prop.name.to_string(),
                                             callable_role:
                                                 verter_type_expr::PropCallableRole::default(),
@@ -519,7 +519,10 @@ impl DocumentRegistry {
 
     /// Return optional full enrichment when current, otherwise the bounded BUILD
     /// snapshot that the IDE projection already paid to construct.
-    pub fn get_analysis(&self, uri: &Uri) -> Option<verter_session::FileAnalysisSnapshot> {
+    pub fn get_analysis(
+        &self,
+        uri: &Uri,
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let canonical_id = self.get_canonical_id(uri)?;
         let semantic_generation = self.current_semantic_generation();
         if let Some(document) = self.documents.get(uri.as_str()) {
@@ -657,7 +660,7 @@ impl DocumentRegistry {
     fn current_analysis_for_source_feature_capture(
         &self,
         capture: &SourceFeatureDocumentCapture,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         if self.semantic_generation_is_current(capture.semantic_generation) {
             if let Some(analysis) = capture
                 .document
@@ -695,7 +698,7 @@ impl DocumentRegistry {
         current_svelte_evidence: &verter_session::framework::script_facts::ScriptFactEvidence<
             verter_semantic::analysis::framework_facts::svelte::SvelteScriptFacts,
         >,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let current = self.current_analysis_for_source_feature_capture(capture);
         let current_source = Arc::clone(&capture.document.source);
         let Some(progressive) = capture.document.progressive_analysis.as_ref() else {
@@ -795,7 +798,7 @@ impl DocumentRegistry {
     pub(crate) fn source_feature_analysis(
         &self,
         uri: &Uri,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         for _ in 0..2 {
             let Some(capture) = self.capture_source_feature_document(uri) else {
                 continue;
@@ -822,7 +825,7 @@ impl DocumentRegistry {
     pub(crate) fn cached_semantic_analysis(
         &self,
         canonical_id: &str,
-    ) -> Option<verter_session::FileAnalysisSnapshot> {
+    ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
         let generation = self.current_semantic_generation();
         let result = self
             .semantic_generation_is_current(generation)
@@ -889,7 +892,7 @@ fn convert_analysis_spans_with_index(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::AnalyzedPropDefinition;
+    use verter_session_query::analysis::template::AnalyzedPropDefinition;
 
     fn prop(name: &str, span: verter_span::Span) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
@@ -957,11 +960,11 @@ mod tests {
         let source = "éééé{{ count === }}";
         let diag_start = source.find("count").unwrap() as u32;
         let diag_end = diag_start + "count ===".len() as u32;
-        let snapshot = verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+        let snapshot = verter_session_query::analysis::template::TemplateAnalysisSnapshot {
             expression_diagnostics: vec![
-                verter_semantic::analysis::template::TemplateExpressionDiagnostic {
+                verter_session_query::analysis::template::TemplateExpressionDiagnostic {
                     severity:
-                        verter_semantic::analysis::template::TemplateDiagnosticSeverity::Error,
+                        verter_session_query::analysis::template::TemplateDiagnosticSeverity::Error,
                     code: "XInvalidExpression".to_string(),
                     message: "invalid expression".to_string(),
                     span: verter_span::Span::new(diag_start, diag_end),

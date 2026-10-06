@@ -29,11 +29,11 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,
     SemanticQueryKey, SemanticQueryOutput,
 };
-use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 const SOURCE_TS: &str = r#"

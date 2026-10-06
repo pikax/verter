@@ -50,7 +50,7 @@ fn readonly_mapped_publishes_source_member_types_unchanged() {
 
     // Read from the unified analysis surface (same pattern as
     // `lib_parity::pick_and_my_pick_produce_identical_props`).
-    let analysis_props: Vec<&verter_semantic::analysis::component_meta::PropAnalysis> =
+    let analysis_props: Vec<&verter_session_query::analysis::component_meta::PropAnalysis> =
         analysis.props.iter().collect();
 
     let msg = analysis_props
@@ -87,7 +87,7 @@ fn readonly_mapped_publishes_source_member_types_unchanged() {
     //   (b) the new source-surface helper unexpectedly consuming the
     //       Identity case via the per-key substrate when the source
     //       member's value should have been used directly.
-    let demand = |prop: &verter_semantic::analysis::component_meta::PropAnalysis| -> TypeExpr {
+    let demand = |prop: &verter_session_query::analysis::component_meta::PropAnalysis| -> TypeExpr {
         let source = prop
             .publication
             .result()

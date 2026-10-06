@@ -71,7 +71,7 @@ impl HostTestAuditState {
 #[derive(Debug, Clone, Copy)]
 pub struct HostTestAudit<'a> {
     state: &'a HostTestAuditState,
-    graph: &'a crate::semantic_query_memo::SemanticGraphStore,
+    graph: &'a verter_type_engine::semantic_query_memo::SemanticGraphStore,
 }
 
 /// supplement §5.D.0 r17 — dispatch-counter view over the
@@ -91,15 +91,15 @@ impl DispatchCounter {
     /// Cold-path dispatch count for `key` on this thread (cumulative).
     /// Returns 0 if the key has never dispatched on this thread.
     #[must_use]
-    pub fn family_cold(&self, key: &crate::semantic_query::SemanticQueryKey) -> usize {
-        crate::project_semantic_dispatch::raise::dispatch_cold_for(key)
+    pub fn family_cold(&self, key: &verter_type_engine::semantic_query::SemanticQueryKey) -> usize {
+        verter_type_engine::project_semantic_dispatch::raise::dispatch_cold_for(key)
     }
 
     /// Warm-path dispatch count for `key` on this thread (cumulative).
     /// Returns 0 if the key has never dispatched on this thread.
     #[must_use]
-    pub fn family_warm(&self, key: &crate::semantic_query::SemanticQueryKey) -> usize {
-        crate::project_semantic_dispatch::raise::dispatch_warm_for(key)
+    pub fn family_warm(&self, key: &verter_type_engine::semantic_query::SemanticQueryKey) -> usize {
+        verter_type_engine::project_semantic_dispatch::raise::dispatch_warm_for(key)
     }
 }
 
@@ -126,11 +126,11 @@ impl DispatchTrace {
     /// Construct a trace from a [`SemanticQueryKey`] by peeking the
     /// warm-cache prefix entries (test-only).
     pub(crate) fn from_key(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-        key: &crate::semantic_query::SemanticQueryKey,
+        graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+        key: &verter_type_engine::semantic_query::SemanticQueryKey,
     ) -> Self {
         let sub_keys = match key {
-            crate::semantic_query::SemanticQueryKey::ProjectPath {
+            verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
                 base,
                 path,
                 context,
@@ -138,18 +138,18 @@ impl DispatchTrace {
                 let mut out = Vec::with_capacity(path.len());
                 let caller_mode = context.mode;
                 for k in 1..=path.len() {
-                    let prefix: std::sync::Arc<[crate::semantic_query::PathSegment]> =
+                    let prefix: std::sync::Arc<[verter_type_engine::semantic_query::PathSegment]> =
                         std::sync::Arc::from(path[..k].to_vec().into_boxed_slice());
                     let is_terminal = k == path.len();
                     let prefix_mode = if is_terminal {
                         caller_mode
                     } else {
-                        crate::semantic_query::ProjectionMode::Navigate
+                        verter_type_engine::semantic_query::ProjectionMode::Navigate
                     };
-                    let prefix_key = crate::semantic_query::SemanticQueryKey::ProjectPath {
+                    let prefix_key = verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
                         base: *base,
                         path: prefix,
-                        context: crate::semantic_query::ProjectionReductionContext::published(
+                        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             prefix_mode,
                         ),
                     };
@@ -164,10 +164,10 @@ impl DispatchTrace {
                         // arm-split walks may not publish the trunk
                         // prefix in Navigate mode if the walker hit
                         // a Union/Intersection/Conditional mid-path.
-                        let alt_key = crate::semantic_query::SemanticQueryKey::ProjectPath {
+                        let alt_key = verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
                             base: *base,
                             path: std::sync::Arc::from(path[..k].to_vec().into_boxed_slice()),
-                            context: crate::semantic_query::ProjectionReductionContext::published(
+                            context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                                 caller_mode,
                             ),
                         };
@@ -180,7 +180,7 @@ impl DispatchTrace {
                             // path-precise contract intent (the
                             // entry never expanded with caller's
                             // mode at this hop).
-                            crate::semantic_query::ProjectionMode::Navigate
+                            verter_type_engine::semantic_query::ProjectionMode::Navigate
                         }
                     } else {
                         prefix_mode
@@ -195,14 +195,22 @@ impl DispatchTrace {
             other => {
                 // Non-ProjectPath: single-element decomposition.
                 let mode = match other {
-                    crate::semantic_query::SemanticQueryKey::ProjectMember { mode, .. }
-                    | crate::semantic_query::SemanticQueryKey::IndexedAccess { mode, .. } => *mode,
-                    crate::semantic_query::SemanticQueryKey::ResolveMacroPayload {
+                    verter_type_engine::semantic_query::SemanticQueryKey::ProjectMember {
+                        mode,
+                        ..
+                    }
+                    | verter_type_engine::semantic_query::SemanticQueryKey::IndexedAccess {
+                        mode,
+                        ..
+                    } => *mode,
+                    verter_type_engine::semantic_query::SemanticQueryKey::ResolveMacroPayload {
                         context,
                         ..
                     } => context.mode,
-                    crate::semantic_query::SemanticQueryKey::Instantiate(k) => k.mode(),
-                    _ => crate::semantic_query::ProjectionMode::Expanded,
+                    verter_type_engine::semantic_query::SemanticQueryKey::Instantiate(k) => {
+                        k.mode()
+                    }
+                    _ => verter_type_engine::semantic_query::ProjectionMode::Expanded,
                 };
                 vec![SubKey {
                     mode,
@@ -223,7 +231,7 @@ impl DispatchTrace {
 /// One hop in a [`DispatchTrace`]. supplement §5.D.0 r17.
 #[derive(Debug, Clone, Copy)]
 pub struct SubKey {
-    mode: crate::semantic_query::ProjectionMode,
+    mode: verter_type_engine::semantic_query::ProjectionMode,
     #[allow(dead_code)]
     is_terminal: bool,
 }
@@ -233,7 +241,7 @@ impl SubKey {
     /// Intermediate hops should be [`ProjectionMode::Navigate`]; the
     /// terminal hop carries the caller's mode.
     #[must_use]
-    pub fn mode(&self) -> crate::semantic_query::ProjectionMode {
+    pub fn mode(&self) -> verter_type_engine::semantic_query::ProjectionMode {
         self.mode
     }
 }
@@ -241,7 +249,7 @@ impl SubKey {
 impl<'a> HostTestAudit<'a> {
     pub(crate) fn new(
         state: &'a HostTestAuditState,
-        graph: &'a crate::semantic_query_memo::SemanticGraphStore,
+        graph: &'a verter_type_engine::semantic_query_memo::SemanticGraphStore,
     ) -> Self {
         Self { state, graph }
     }

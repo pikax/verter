@@ -1,4 +1,4 @@
-﻿//! Semantic database — revision-gated query engine.
+//! Semantic database — revision-gated query engine.
 //!
 //! The semantic DB holds cached semantic facts keyed by (canonical_file_id,
 //! query_key, revision). Queries are pure over immutable snapshots — they
@@ -11,13 +11,13 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::facts::binding::BindingDeclaration;
-use crate::facts::component::ComponentSurface;
-use crate::facts::reactivity::ReactivityFact;
-use crate::facts::symbol::FileImportGraph;
 use crate::query::QueryResult;
 use crate::refs::FileRef;
 use crate::revision::RevisionMarker;
+use verter_session_query::facts::binding::BindingDeclaration;
+use verter_session_query::facts::component::ComponentSurface;
+use verter_session_query::facts::reactivity::ReactivityFact;
+use verter_session_query::facts::symbol::FileImportGraph;
 
 /// Per-file semantic cache entry.
 #[derive(Debug)]
@@ -265,8 +265,8 @@ impl SemanticDb {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
-    use crate::facts::component::PropFact;
     use crate::query::Completeness;
+    use verter_session_query::facts::component::PropFact;
     use verter_span::Span;
 
     fn make_revision(ws: u64) -> RevisionMarker {
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn resolve_imported_component_surface_follows_import() {
-        use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+        use verter_session_query::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn resolve_imported_component_unknown_binding() {
-        use crate::facts::symbol::FileImportGraph;
+        use verter_session_query::facts::symbol::FileImportGraph;
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn resolve_imported_component_unresolved_import() {
-        use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+        use verter_session_query::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -469,8 +469,8 @@ mod tests {
 
     #[test]
     fn set_and_query_bindings() {
-        use crate::facts::binding::{BindingDeclaration, BindingKind};
-        use crate::facts::reactivity::ReactivityFact;
+        use verter_session_query::facts::binding::{BindingDeclaration, BindingKind};
+        use verter_session_query::facts::reactivity::ReactivityFact;
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -497,8 +497,8 @@ mod tests {
 
     #[test]
     fn bindings_stale_revision_returns_partial() {
-        use crate::facts::binding::{BindingDeclaration, BindingKind};
-        use crate::facts::reactivity::ReactivityFact;
+        use verter_session_query::facts::binding::{BindingDeclaration, BindingKind};
+        use verter_session_query::facts::reactivity::ReactivityFact;
 
         let mut db = SemanticDb::new();
         let rev1 = make_revision(1);
@@ -527,7 +527,7 @@ mod tests {
 
     #[test]
     fn set_and_query_import_graph() {
-        use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+        use verter_session_query::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn updating_one_fact_for_new_revision_invalidates_other_fact_cache() {
-        use crate::facts::binding::{BindingDeclaration, BindingKind};
+        use verter_session_query::facts::binding::{BindingDeclaration, BindingKind};
 
         let mut db = SemanticDb::new();
         let rev1 = make_revision(1);
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn invalidate_clears_all_facts() {
-        use crate::facts::symbol::FileImportGraph;
+        use verter_session_query::facts::symbol::FileImportGraph;
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -655,7 +655,8 @@ mod tests {
     #[test]
     fn extract_cache_query_component_surface_cycle() {
         use crate::extract::extract_component_surface;
-        use crate::input::{AnalyzedMacro, AnalyzedMacroKind, ScriptAnalysisSnapshot};
+        use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+        use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -671,14 +672,15 @@ mod tests {
             binding_name: None,
             model_name: None,
             has_inherit_attrs_false: false,
-            prop_fields: vec![crate::input::AnalyzedPropField {
+            prop_fields: vec![verter_session_query::analysis::types::AnalyzedPropField {
                 name: "title".into(),
                 is_optional: false,
                 span: Span::new(20, 25),
                 type_annotation: Some("string".into()),
                 description: None,
                 tags: Vec::new(),
-                resolution_source: crate::input::TypeResolutionSource::Rust,
+                resolution_source:
+                    verter_session_query::analysis::types::TypeResolutionSource::Rust,
                 resolution_error: None,
                 payload: None,
                 type_expr_scope: None,
@@ -719,9 +721,10 @@ mod tests {
     #[test]
     fn extract_cache_query_cross_file_cycle() {
         use crate::extract::{extract_component_surface, extract_import_graph};
-        use crate::input::{
+        use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+        use verter_session_query::analysis::types::{
             AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
-            ImportBindingKind, ScriptAnalysisSnapshot,
+            ImportBindingKind,
         };
 
         let mut db = SemanticDb::new();
@@ -738,14 +741,15 @@ mod tests {
             binding_name: None,
             model_name: None,
             has_inherit_attrs_false: false,
-            prop_fields: vec![crate::input::AnalyzedPropField {
+            prop_fields: vec![verter_session_query::analysis::types::AnalyzedPropField {
                 name: "label".into(),
                 is_optional: true,
                 span: Span::new(10, 15),
                 type_annotation: Some("string".into()),
                 description: None,
                 tags: Vec::new(),
-                resolution_source: crate::input::TypeResolutionSource::Rust,
+                resolution_source:
+                    verter_session_query::analysis::types::TypeResolutionSource::Rust,
                 resolution_error: None,
                 payload: None,
                 type_expr_scope: None,
@@ -854,7 +858,7 @@ mod tests {
 
     #[test]
     fn cross_file_chain_a_imports_b_imports_c() {
-        use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+        use verter_session_query::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -954,7 +958,7 @@ mod tests {
     #[test]
     fn import_graph_cached_and_reused_across_queries() {
         // Plan: "proving shallow symbol/export/import state is stored once and reused"
-        use crate::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
+        use verter_session_query::facts::symbol::{FileImportGraph, ImportKind, ImportedSymbol};
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -1026,9 +1030,9 @@ mod tests {
     #[test]
     fn set_multiple_facts_for_same_file_all_cached() {
         // Plan: "cache named declarations from that parsed file by name"
-        use crate::facts::binding::{BindingDeclaration, BindingKind};
-        use crate::facts::reactivity::ReactivityFact;
-        use crate::facts::symbol::FileImportGraph;
+        use verter_session_query::facts::binding::{BindingDeclaration, BindingKind};
+        use verter_session_query::facts::reactivity::ReactivityFact;
+        use verter_session_query::facts::symbol::FileImportGraph;
 
         let mut db = SemanticDb::new();
         let rev = make_revision(1);
@@ -1071,10 +1075,11 @@ mod tests {
         use crate::extract::{
             extract_boundary_edges, extract_component_surface, extract_import_graph,
         };
-        use crate::input::TemplateAnalysisSnapshot;
-        use crate::input::{
+        use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+        use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+        use verter_session_query::analysis::types::{
             AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
-            AnalyzedPropField, ImportBindingKind, ScriptAnalysisSnapshot, TypeResolutionSource,
+            AnalyzedPropField, ImportBindingKind, TypeResolutionSource,
         };
 
         let mut db = SemanticDb::new();
@@ -1142,32 +1147,37 @@ mod tests {
 
         // Simulate template with <Child unknown-prop />
         let mut template = TemplateAnalysisSnapshot::default();
-        template.components = vec![crate::input::TemplateComponentUsage {
-            name: "Child".into(),
-            import_source: Some("./child.vue".into()),
-            is_dynamic: false,
-            props: vec![crate::input::TemplatePropUsage {
-                name: "unknownProp".into(),
-                is_bound: false,
-                expression: None,
-                expression_locator: None,
-                constness: crate::input::PropValueConstness::Const,
-                referenced_bindings: vec![],
-                from_spread: false,
-                span: Span::new(100, 111),
-                name_span: Span::new(100, 111),
-                is_shorthand: false,
-            }],
-            has_spread: false,
-            slots_used: vec![],
-            static_classes: vec![],
-            has_dynamic_class: false,
-            dynamic_classes: vec![],
-            v_models: vec![],
-            bindings: vec![],
-            events: vec![],
-            span: Span::new(90, 130),
-        }];
+        template.components = vec![
+            verter_session_query::analysis::template::TemplateComponentUsage {
+                name: "Child".into(),
+                import_source: Some("./child.vue".into()),
+                is_dynamic: false,
+                props: vec![
+                    verter_session_query::analysis::template::TemplatePropUsage {
+                        name: "unknownProp".into(),
+                        is_bound: false,
+                        expression: None,
+                        expression_locator: None,
+                        constness:
+                            verter_session_query::analysis::template::PropValueConstness::Const,
+                        referenced_bindings: vec![],
+                        from_spread: false,
+                        span: Span::new(100, 111),
+                        name_span: Span::new(100, 111),
+                        is_shorthand: false,
+                    },
+                ],
+                has_spread: false,
+                slots_used: vec![],
+                static_classes: vec![],
+                has_dynamic_class: false,
+                dynamic_classes: vec![],
+                v_models: vec![],
+                bindings: vec![],
+                events: vec![],
+                span: Span::new(90, 130),
+            },
+        ];
 
         // Extract boundary edges
         let edges = extract_boundary_edges("/parent.vue", &template, &parent_graph);
@@ -1291,8 +1301,9 @@ mod tests {
         // Full pipeline: extract bindings → analyze reactive flow
         use crate::analyzers::reactive_flow::analyze_reactive_flow;
         use crate::extract::extract_bindings;
-        use crate::input::{
-            AnalyzedBinding, AnalyzedBindingKind, ReactivityKind, ScriptAnalysisSnapshot,
+        use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+        use verter_session_query::analysis::types::{
+            AnalyzedBinding, AnalyzedBindingKind, ReactivityKind,
         };
 
         let mut snapshot = ScriptAnalysisSnapshot::default();

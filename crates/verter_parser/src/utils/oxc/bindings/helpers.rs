@@ -475,7 +475,7 @@ pub fn collect_assignment_target_maybe_default_locals(
 pub fn collect_pattern_local_spans(pattern: &BindingPattern<'_>, locals: &mut Vec<Span>) {
     match pattern {
         BindingPattern::BindingIdentifier(ident) => {
-            locals.push(ident.span.into());
+            locals.push(verter_span::Span::new(ident.span.start, ident.span.end));
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
@@ -570,7 +570,7 @@ fn collect_expression_reference_spans_inner(
         Expression::Identifier(ident) => {
             let name_bytes = ident.name.as_bytes();
             if !ignored.contains(name_bytes) && !is_keyword(name_bytes) && !is_global(name_bytes) {
-                references.insert(ident.span.into());
+                references.insert(verter_span::Span::new(ident.span.start, ident.span.end));
             }
         }
         Expression::BinaryExpression(binary) => {
@@ -618,7 +618,10 @@ fn collect_expression_reference_spans_inner(
                                 && !is_keyword(name_bytes)
                                 && !is_global(name_bytes)
                             {
-                                references.insert(ident.span.into());
+                                references.insert(verter_span::Span::new(
+                                    ident.span.start,
+                                    ident.span.end,
+                                ));
                             }
                         }
                     } else {
@@ -727,7 +730,7 @@ pub fn collect_type_reference_spans(ts_type: &TSType<'_>, references: &mut FxHas
                 let name_bytes = ident.name.as_bytes();
                 // Note: don't filter globals here — Array, Map, Set etc. are valid TS types
                 if !is_keyword(name_bytes) {
-                    references.insert(ident.span.into());
+                    references.insert(verter_span::Span::new(ident.span.start, ident.span.end));
                 }
             }
             // Also check generic type arguments
@@ -810,7 +813,7 @@ pub fn collect_type_reference_spans(ts_type: &TSType<'_>, references: &mut FxHas
                 let name_bytes = ident.name.as_bytes();
                 // Note: don't filter globals here — typeof Array etc. are valid TS type queries
                 if !is_keyword(name_bytes) {
-                    references.insert(ident.span.into());
+                    references.insert(verter_span::Span::new(ident.span.start, ident.span.end));
                 }
             }
         }

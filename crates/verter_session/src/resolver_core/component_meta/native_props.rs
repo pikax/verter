@@ -3,11 +3,11 @@ use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use verter_type_expr::MemberVisibility;
 
-use crate::semantic_query::{
+use crate::typeinfo::surface::TypeInfoSurfaceMember;
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, ResolveDeclKey, ScopeId,
     SemanticQueryKey, SurfaceProvenanceContext,
 };
-use crate::typeinfo::surface::TypeInfoSurfaceMember;
 
 /// One keep-all class-member visibility row published to component-meta.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,8 +88,13 @@ impl NativePropProjectionCache {
 /// This projection owns no runtime DTO and performs one graph-only shallow
 /// demand. Member display rendering is publication-only.
 pub(crate) fn named_native_props_outcome(
-    ctx: &dyn crate::resolver_core::ResolverContext,
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+        crate::resolver_core::HostCapabilities,
+    >,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
     root_canonical: &str,
     root_owner: verter_type_expr::TopLevelOwnerId,
     root_name: &str,
@@ -99,11 +104,16 @@ pub(crate) fn named_native_props_outcome(
             canonical_id: Arc::from(root_canonical),
             owner: root_owner,
             local_scope: None,
-            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(root_owner),
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                root_owner,
+            ),
         },
         name: Arc::from(root_name),
     }));
-    crate::meta_resolve::emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
+    verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts(
+        dispatch,
+        &read.dep_signature,
+    );
     let (base, recursive) = match read.value {
         QueryResult::Value(node) => (node, false),
         QueryResult::Recursive(node) => (node, true),

@@ -137,7 +137,7 @@ fn run_claims(root: &Path) -> Vec<(Claim, bool, Vec<String>)> {
             title: "SymbolSpace::Namespace (expected: PRESENT)",
             expected_present: true,
             grep_pattern: "Namespace",
-            grep_paths: &["crates/verter_semantic/src/facts/registry.rs"],
+            grep_paths: &["crates/verter_session_query/src/facts/registry.rs"],
         },
         Claim {
             number: 12,

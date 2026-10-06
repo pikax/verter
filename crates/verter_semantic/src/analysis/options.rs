@@ -13,7 +13,7 @@ use crate::analysis::macros::{
     resolve_runtime_constructor_identifier,
 };
 use crate::analysis::root_binding_index::RootBindingIndex;
-use crate::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedEmitField, AnalyzedOptionsApi, AnalyzedOptionsComponent, AnalyzedOptionsField,
     AnalyzedOptionsProp,
 };
@@ -88,7 +88,7 @@ fn extract_options_api(
 ) -> AnalyzedOptionsApi {
     let mut result = AnalyzedOptionsApi {
         is_define_component,
-        object_span: Span::from(obj.span),
+        object_span: Span::new(obj.span.start, obj.span.end),
         ..Default::default()
     };
 
@@ -142,7 +142,7 @@ fn extract_options_props(
                 if let ArrayExpressionElement::StringLiteral(s) = elem {
                     Some(AnalyzedOptionsProp {
                         name: s.value.to_string(),
-                        span: Span::from(s.span),
+                        span: Span::new(s.span.start, s.span.end),
                         type_constructor: None,
                         is_required: false,
                         has_default: false,
@@ -351,7 +351,7 @@ fn extract_options_emits(value: &Expression<'_>, source: &str) -> Vec<AnalyzedEm
                 if let ArrayExpressionElement::StringLiteral(s) = elem {
                     Some(AnalyzedEmitField {
                         name: s.value.to_string(),
-                        span: Span::from(s.span),
+                        span: Span::new(s.span.start, s.span.end),
                         call_signature_span: None,
                         payload_type: None,
                         description: None,
@@ -506,7 +506,7 @@ fn extract_string_array_as_fields(value: &Expression<'_>) -> Vec<AnalyzedOptions
                 if let ArrayExpressionElement::StringLiteral(s) = elem {
                     Some(AnalyzedOptionsField {
                         name: s.value.to_string(),
-                        span: Span::from(s.span),
+                        span: Span::new(s.span.start, s.span.end),
                     })
                 } else {
                     None
@@ -562,7 +562,7 @@ fn extract_inject_keys(value: &Expression<'_>) -> Vec<AnalyzedOptionsField> {
                 if let ArrayExpressionElement::StringLiteral(s) = elem {
                     Some(AnalyzedOptionsField {
                         name: s.value.to_string(),
-                        span: Span::from(s.span),
+                        span: Span::new(s.span.start, s.span.end),
                     })
                 } else {
                     None
@@ -626,8 +626,8 @@ fn static_key_name(key: &PropertyKey<'_>) -> Option<String> {
 
 fn key_span(key: &PropertyKey<'_>) -> Span {
     match key {
-        PropertyKey::StaticIdentifier(id) => Span::from(id.span),
-        PropertyKey::StringLiteral(s) => Span::from(s.span),
+        PropertyKey::StaticIdentifier(id) => Span::new(id.span.start, id.span.end),
+        PropertyKey::StringLiteral(s) => Span::new(s.span.start, s.span.end),
         _ => Span::default(),
     }
 }

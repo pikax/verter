@@ -18,12 +18,12 @@
 
 use std::sync::Arc;
 
-use verter_session::for_tests::ReadSetSignature;
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::fact_cache::ReadSetSignature;
+use verter_type_engine::semantic_query::{
     ApparentDemandScope, ApparentTypeContext, LiteralValue, PrimitiveKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, TemplateLiteralReduceContext,
 };
-use verter_session::{HostConfig, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -208,7 +208,7 @@ const AMBIENT_LIB_ID: &str = "lib.function.d.ts";
 /// Build a host over one configured project at `/ws`, optionally registering
 /// the callable ambient corpus, with `/ws/owner.ts` loaded.
 fn callable_host(register_ambient: bool) -> Arc<VerterHost> {
-    use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+    use verter_session_query::resolution::IdeProjectCompilerOptions;
     use verter_workspace::{
         CanonicalPath, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
         WorkspaceAccess,
@@ -251,7 +251,7 @@ fn callable_base(host: &VerterHost) -> SemanticNodeId {
             "/ws/owner.ts",
             "Callable",
             &[],
-            Some(verter_session::semantic_query::ProjectionMode::Expanded),
+            Some(verter_type_engine::semantic_query::ProjectionMode::Expanded),
         )
         .into_parts();
     let node = outcome
@@ -295,7 +295,7 @@ fn call_member_origins(host: &VerterHost, node: SemanticNodeId) -> Vec<Option<Ar
         .filter(|member| {
             matches!(
                 &member.key,
-                verter_session::semantic_query::AuthoredPropertyKey::String(name)
+                verter_type_engine::semantic_query::AuthoredPropertyKey::String(name)
                     if name.as_ref() == "call"
             )
         })
@@ -331,7 +331,7 @@ fn apparent_type_widens_a_callable_to_the_registered_ambient_function_surface() 
         .expect("the widened `call` member MUST carry its declaring canonical");
     let expected = host
         .workspace_read()
-        .project_stable_key(verter_workspace::ProjectId(0))
+        .project_stable_key(verter_session_query::resolution::ProjectId(0))
         .map(|key| verter_workspace::ambient_virtual_canonical_id(key, AMBIENT_LIB_ID))
         .expect("the configured project MUST have a stable key");
     assert_eq!(

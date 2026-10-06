@@ -1,0 +1,712 @@
+//! [`ReturnPathPeeker`] — the graph demand PLANNER over one
+//! [`FunctionFlowGraph`].
+//!
+//! The planner computes a demand slice as **graph reachability** from a
+//! demand origin (a return site or an expression site) across the typed
+//! edge classes, under the two-frontier rule expressed AS edge classes:
+//!
+//! - **Value-provider edges** ([`FlowEdgeClass::ValueDef`] +
+//!   [`FlowEdgeClass::PathWrite`]) compute which sources provide the
+//!   demanded value. Path-write scans run right-to-left (descending
+//!   source ordinal) and MAY stop at a definite-present write for the
+//!   demanded path head; optional / unknown writes stay reachable and
+//!   earlier candidates remain reachable past them.
+//! - **Effect edges** ([`FlowEdgeClass::EvalEffect`] +
+//!   [`FlowEdgeClass::ControlRegion`]) stay live past a definite-present
+//!   write: a value-dead sibling keeps its evaluation-effect reachability
+//!   because evaluation effects survive a definite write even though
+//!   value materialization does not.
+//!
+//! The planner holds ONLY the graph — its input type makes a procedural
+//! statement / AST / skeleton walk impossible by construction: no
+//! statement list, no OXC node, and no skeleton is reachable from
+//! [`ReturnPathPeeker`]. It selects a reachable subgraph; it never
+//! re-discovers structure the graph build already captured. The one
+//! skeleton-adjacent operation — resolving demanded property-key TEXT to
+//! interned [`FlowNameId`]s — happens in the [`SliceDemand`] constructor
+//! BEFORE planning, as a name-table lookup, never a body walk.
+
+use std::sync::Arc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
+use verter_no_typeexpr::NoTypeExpr;
+
+use super::flow_graph::{
+    FlowEdgeClass, FlowEdgeKind, FlowNodeId, FunctionFlowGraph, PathWriteSource,
+};
+use crate::flow::skeleton::{
+    FlowNameId, FunctionBodySkeleton, SkeletonBindingId, SkeletonExprSiteId, SkeletonPathSegment,
+    SkeletonReturnSiteId, SkeletonWriteCertainty,
+};
+
+/// The demand planner's result: exactly the subgraph reachable from the
+/// demand origins under the two edge-class families' stop conditions.
+/// Node sets are sorted ascending by dense node index and disjoint —
+/// `effect_only_nodes` holds nodes reached ONLY through effect edges
+/// (their value is never materialized; their evaluation effects are).
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+pub struct ReturnSlicePlan {
+    /// The demand origins the reachability started from.
+    origins: Arc<[SliceOrigin]>,
+    /// The demanded projection path (empty = whole value).
+    demand_path: Arc<[DemandSegment]>,
+    /// Value-selected nodes (their value contributes to the demand),
+    /// sorted ascending.
+    value_nodes: Arc<[FlowNodeId]>,
+    /// Effect-only nodes (evaluation effects survive; value is never
+    /// materialized), sorted ascending, disjoint from `value_nodes`.
+    effect_only_nodes: Arc<[FlowNodeId]>,
+    /// Combined value visits and interned projection tails charged by planning.
+    /// Retained-plan admission compares this count with the caller's budget.
+    value_states: u32,
+}
+
+impl ReturnSlicePlan {
+    pub fn origins(&self) -> &[SliceOrigin] {
+        &self.origins
+    }
+    pub fn demand_path(&self) -> &[DemandSegment] {
+        &self.demand_path
+    }
+    pub fn value_nodes(&self) -> &[FlowNodeId] {
+        &self.value_nodes
+    }
+    pub fn effect_only_nodes(&self) -> &[FlowNodeId] {
+        &self.effect_only_nodes
+    }
+    pub fn value_states(&self) -> u32 {
+        self.value_states
+    }
+
+    /// Whether `node` is selected at all (value or effect).
+    #[must_use]
+    pub fn is_selected(&self, node: FlowNodeId) -> bool {
+        self.is_value(node) || self.is_effect_only(node)
+    }
+
+    /// Whether `node` is value-selected.
+    #[must_use]
+    pub fn is_value(&self, node: FlowNodeId) -> bool {
+        self.value_nodes
+            .binary_search_by_key(&node.index(), |n| n.index())
+            .is_ok()
+    }
+
+    /// Whether `node` is effect-only.
+    #[must_use]
+    pub fn is_effect_only(&self, node: FlowNodeId) -> bool {
+        self.effect_only_nodes
+            .binary_search_by_key(&node.index(), |n| n.index())
+            .is_ok()
+    }
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    /// Per-thread count of [`ReturnPathPeeker::plan`] executions — the
+    /// behavioral half of the plan-once guarantee: one cold demand runs
+    /// the planner exactly once, and the lowering / demand-plan assembly
+    /// reuse the retained plan instead of re-planning. Thread-local
+    /// (cache-runtime computes run on the demanding thread), observability
+    /// only: never key material, never a fact. Compiled only under the
+    /// `test-support` feature (a consumer DEV-dependency edge), so
+    /// production builds carry neither the TLS nor the increment.
+    static PLAN_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of [`ReturnPathPeeker::plan`] executions performed on the
+/// CALLING thread. Guard observability only — see the thread-local's doc.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn return_path_peeker_plan_thread_invocations() -> u64 {
+    PLAN_INVOCATIONS.with(std::cell::Cell::get)
+}
+
+// ---------------------------------------------------------------------------
+// Demand
+// ---------------------------------------------------------------------------
+
+/// One demand origin: a return site or an arbitrary expression site of
+/// the sliced function. The same planner serves return-type demands and
+/// expression-site demands — no second flow engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub enum SliceOrigin {
+    /// A `return` site of the sliced function.
+    Return(SkeletonReturnSiteId),
+    /// An arbitrary tracked expression site.
+    Expr(SkeletonExprSiteId),
+    /// A parameter whose flow facts the demand observes at the return:
+    /// the type predicate the checker infers from a function's single
+    /// return reads EVERY parameter's narrowed type there, whether or not
+    /// the returned value reads it. Planned on the effect frontier — the
+    /// binding's facts stay live, its value is never materialized.
+    Parameter(SkeletonBindingId),
+}
+
+/// One segment of the demanded projection path, resolved against the
+/// skeleton's interned name table.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr)]
+pub enum DemandSegment {
+    /// A demanded property key that is interned in the sliced body — it
+    /// can match static path-write segments.
+    Named(FlowNameId),
+    /// A demanded property key never mentioned in the sliced body: no
+    /// static path-write can match it (only computed / unknown writes
+    /// stay candidate providers). The authored key text is retained for
+    /// slice identity.
+    Foreign(Arc<str>),
+}
+
+/// One demand triple `(origins, projection path)` over a function flow
+/// graph. Origins are a SET so a whole-return demand (every return site)
+/// plans as one multi-source reachability — the union is the traversal,
+/// not a second composition pass.
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+pub struct SliceDemand {
+    /// The demand origins.
+    pub origins: Arc<[SliceOrigin]>,
+    /// The demanded projection path under the origin's value (empty =
+    /// the whole value).
+    pub path: Arc<[DemandSegment]>,
+}
+
+impl SliceDemand {
+    /// The whole-return-surface demand for `path` under every return
+    /// site of `skeleton`: origins = every return site, then every
+    /// statement-position yield argument (a generator's yield type is part
+    /// of its return type), and each demanded key resolved against the
+    /// skeleton's interned name table (a table lookup — not a body walk; a
+    /// key the body never mentions stays [`DemandSegment::Foreign`]).
+    ///
+    /// The WHOLE return of a plain function whose one `return` carries a
+    /// value that is not an object literal may be a type predicate over
+    /// any identifier parameter nothing reassigns
+    /// (`getTypePredicateFromBody`), so each such parameter is an origin
+    /// too ([`SliceOrigin::Parameter`]). "Nothing" is the checker's
+    /// `isSymbolAssigned`: this frame's own whole writes and every
+    /// assignment a nested callable makes
+    /// ([`FunctionBodySkeleton::closure_assignments`]). A closure that
+    /// only reads the parameter, or writes one of its members, leaves it
+    /// an origin.
+    #[must_use]
+    pub fn for_return_projection(skeleton: &FunctionBodySkeleton, path: &[Arc<str>]) -> Self {
+        let mut origins: Vec<SliceOrigin> = (0..skeleton.return_sites.len())
+            .filter_map(|index| u32::try_from(index).ok())
+            .map(|index| SliceOrigin::Return(SkeletonReturnSiteId::from_index(index)))
+            .chain(skeleton.yield_sites.iter().copied().map(SliceOrigin::Expr))
+            .collect();
+        let may_infer_predicate = path.is_empty()
+            && skeleton.kind == crate::flow::skeleton::FunctionBodyKind::Plain
+            && matches!(
+                skeleton.return_sites.as_ref(),
+                [only] if only.argument.is_some_and(|argument| !matches!(
+                    skeleton.expr_sites[argument.index()].shape,
+                    crate::flow::skeleton::SkeletonExprShape::ObjectLiteral { .. }
+                ))
+            );
+        if may_infer_predicate {
+            let reassigned =
+                |binding: SkeletonBindingId| {
+                    let local = crate::flow::binding::FlowBindingRef::Local(binding);
+                    skeleton.writes.iter().any(|write| {
+                        write.path.is_empty() && write.binding.as_ref() == Some(&local)
+                    }) || skeleton.closure_assignments.contains(&binding)
+                };
+            origins.extend(
+                skeleton
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, binding)| {
+                        binding.kind == crate::flow::skeleton::SkeletonBindingKind::Param
+                            && !binding.destructured
+                    })
+                    .filter_map(|(index, _)| u32::try_from(index).ok())
+                    .map(SkeletonBindingId::from_index)
+                    .filter(|binding| !reassigned(*binding))
+                    .map(SliceOrigin::Parameter),
+            );
+        }
+        let segments: Vec<DemandSegment> = path
+            .iter()
+            .map(|name| match skeleton.name_id(name) {
+                Some(id) => DemandSegment::Named(id),
+                None => DemandSegment::Foreign(Arc::clone(name)),
+            })
+            .collect();
+        Self {
+            origins: Arc::from(origins.into_boxed_slice()),
+            path: Arc::from(segments.into_boxed_slice()),
+        }
+    }
+
+    /// A single-origin expression-site demand for `path`.
+    #[must_use]
+    pub fn for_expression_site(
+        skeleton: &FunctionBodySkeleton,
+        site: SkeletonExprSiteId,
+        path: &[Arc<str>],
+    ) -> Self {
+        let segments: Vec<DemandSegment> = path
+            .iter()
+            .map(|name| match skeleton.name_id(name) {
+                Some(id) => DemandSegment::Named(id),
+                None => DemandSegment::Foreign(Arc::clone(name)),
+            })
+            .collect();
+        Self {
+            origins: Arc::from(vec![SliceOrigin::Expr(site)].into_boxed_slice()),
+            path: Arc::from(segments.into_boxed_slice()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Budget
+// ---------------------------------------------------------------------------
+
+/// The demand-slice budget. Armed by default: [`Default`] carries the
+/// production caps, and every trip returns a typed
+/// [`FlowSliceBudgetExceeded`] — never a panic, never a silent partial
+/// plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub struct FlowSliceBudget {
+    /// Maximum selected nodes (value + effect + region) in one slice.
+    pub max_selected_nodes: u32,
+    /// Maximum combined value visits and interned projection tails. This
+    /// bounds graph cycles that grow a demanded member path indefinitely.
+    pub max_value_states: u32,
+}
+
+impl Default for FlowSliceBudget {
+    fn default() -> Self {
+        Self {
+            max_selected_nodes: 4096,
+            max_value_states: 65_536,
+        }
+    }
+}
+
+/// Which budget axis tripped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub enum FlowSliceBudgetAxis {
+    /// Too many selected nodes.
+    SelectedNodes,
+    /// Too many value visits or interned projection tails.
+    ValueStates,
+}
+
+/// A typed budget trip: the axis, its limit, and the observed count at
+/// the trip. A genuine partial — the caller must route it through
+/// non-admission (`ReturnOnly` semantics); it never becomes a plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+pub struct FlowSliceBudgetExceeded {
+    /// The tripped axis.
+    pub axis: FlowSliceBudgetAxis,
+    /// The configured limit of the tripped axis.
+    pub limit: u32,
+    /// The observed count when the limit tripped.
+    pub observed: u32,
+}
+
+// ---------------------------------------------------------------------------
+// The planner
+// ---------------------------------------------------------------------------
+
+/// The graph demand planner. Holds ONLY the graph — see the module doc
+/// for why that is the structural proof the slice is reachability, not a
+/// procedural walk.
+pub struct ReturnPathPeeker<'g> {
+    graph: &'g FunctionFlowGraph,
+}
+
+/// One worklist item of the two-frontier reachability.
+enum WorkItem {
+    /// Value-provider frontier: the node's value contributes to the
+    /// demanded projection stored in the shared path arena.
+    Value {
+        /// The reached node.
+        node: FlowNodeId,
+        /// Interned remaining demanded path; zero is the whole value.
+        path: u32,
+    },
+    /// Effect frontier: the node's evaluation affects the slice even
+    /// when its value is non-contributing.
+    Effect {
+        /// The reached node.
+        node: FlowNodeId,
+    },
+}
+
+impl<'g> ReturnPathPeeker<'g> {
+    /// A planner over `graph`.
+    #[must_use]
+    pub fn new(graph: &'g FunctionFlowGraph) -> Self {
+        Self { graph }
+    }
+
+    /// Compute the demand slice for `demand` as graph reachability from
+    /// its origins, bounded by `budget`. The result is exactly the
+    /// reachable subgraph under the two edge-class families' stop
+    /// conditions; an over-budget traversal returns the typed
+    /// [`FlowSliceBudgetExceeded`].
+    pub fn plan(
+        &self,
+        demand: &SliceDemand,
+        budget: &FlowSliceBudget,
+    ) -> Result<ReturnSlicePlan, FlowSliceBudgetExceeded> {
+        #[cfg(feature = "test-support")]
+        PLAN_INVOCATIONS.with(|count| count.set(count.get().saturating_add(1)));
+        let mut state = PlanState {
+            paths: PathArena::default(),
+            value_nodes: FxHashSet::default(),
+            effect_nodes: FxHashSet::default(),
+            selected: FxHashSet::default(),
+            value_visited: FxHashSet::default(),
+            effect_visited: FxHashSet::default(),
+            worklist: Vec::new(),
+        };
+        let mut path = 0;
+        for segment in demand.path.iter().rev() {
+            path = state.prepend(segment.clone(), path, budget)?;
+        }
+
+        for origin in demand.origins.iter() {
+            match origin {
+                SliceOrigin::Return(id) => state.worklist.push(WorkItem::Value {
+                    node: self.graph.return_site_node(*id),
+                    path,
+                }),
+                SliceOrigin::Expr(id) => state.worklist.push(WorkItem::Value {
+                    node: self.graph.expr_site_node(*id),
+                    path,
+                }),
+                SliceOrigin::Parameter(id) => state.worklist.push(WorkItem::Effect {
+                    node: self.graph.binding_node(*id),
+                }),
+            }
+        }
+
+        while let Some(item) = state.worklist.pop() {
+            match item {
+                WorkItem::Value { node, path } => {
+                    self.process_value(&mut state, node, path, budget)?;
+                }
+                WorkItem::Effect { node } => {
+                    self.process_effect(&mut state, node, budget)?;
+                }
+            }
+        }
+
+        let value_states = (state.value_visited.len() + state.paths.tails.len()) as u32;
+        let mut value: Vec<FlowNodeId> = state.value_nodes.into_iter().collect();
+        value.sort_by_key(|node| node.index());
+        let mut effect_only: Vec<FlowNodeId> = state
+            .effect_nodes
+            .into_iter()
+            .filter(|node| {
+                value
+                    .binary_search_by_key(&node.index(), |selected| selected.index())
+                    .is_err()
+            })
+            .collect();
+        effect_only.sort_by_key(|node| node.index());
+
+        Ok(ReturnSlicePlan {
+            origins: Arc::clone(&demand.origins),
+            demand_path: Arc::clone(&demand.path),
+            value_nodes: Arc::from(value.into_boxed_slice()),
+            effect_only_nodes: Arc::from(effect_only.into_boxed_slice()),
+            value_states,
+        })
+    }
+
+    /// Value-frontier step: select `node` for value, then follow its
+    /// value-provider out-edges under the demanded-path rules. Every
+    /// value selection also enters the effect frontier (evaluating a
+    /// provider runs its effects).
+    fn process_value(
+        &self,
+        state: &mut PlanState,
+        node: FlowNodeId,
+        path: u32,
+        budget: &FlowSliceBudget,
+    ) -> Result<(), FlowSliceBudgetExceeded> {
+        if !state.value_visited.insert((node, path)) {
+            return Ok(());
+        }
+        state.check_value_budget(budget)?;
+        state.value_nodes.insert(node);
+        select(state, node, budget)?;
+        state.worklist.push(WorkItem::Effect { node });
+
+        let edges = self.graph.out_edges(node);
+
+        // Value-def edges thread the remaining demand unchanged: return
+        // argument, reaching definition, binding read.
+        for edge in edges {
+            let (projection, suffix) = match &edge.kind {
+                FlowEdgeKind::ValueDef => (&[][..], path),
+                FlowEdgeKind::SourceTypeQuery => (&[][..], 0),
+                FlowEdgeKind::ReadProjection {
+                    path: projection,
+                    kind,
+                } => (
+                    projection.as_ref(),
+                    match kind {
+                        crate::flow::skeleton::FlowReadKind::Result => path,
+                        crate::flow::skeleton::FlowReadKind::Input => 0,
+                    },
+                ),
+                _ => continue,
+            };
+            let projected = state.project(projection, suffix, budget)?;
+            state.worklist.push(WorkItem::Value {
+                node: edge.to,
+                path: projected,
+            });
+        }
+
+        // Path-write scan, right-to-left (descending source ordinal): a
+        // definite-present static write for the demanded head stops the
+        // scan for VALUE; optional / unknown writes stay reachable and
+        // earlier candidates remain reachable past them. Effect
+        // reachability is untouched — it flows through the effect
+        // frontier regardless of this stop.
+        let mut stopped_object_entries = false;
+        for edge in edges.iter().rev() {
+            let (write_path, certainty, object_entry) = match &edge.kind {
+                FlowEdgeKind::PathWrite {
+                    path,
+                    certainty,
+                    source,
+                } => (
+                    path,
+                    certainty,
+                    *source == PathWriteSource::ObjectLiteralEntry,
+                ),
+                _ => continue,
+            };
+            if object_entry && stopped_object_entries {
+                continue;
+            }
+            match match_write_path(write_path, &state.paths, path) {
+                WritePathMatch::None => {}
+                WritePathMatch::Static {
+                    consumed,
+                    remainder,
+                } => {
+                    state.worklist.push(WorkItem::Value {
+                        node: edge.to,
+                        path: remainder,
+                    });
+                    if object_entry
+                        && *certainty == SkeletonWriteCertainty::Definite
+                        && write_path.len() == 1
+                        && consumed == 1
+                    {
+                        // Definite-present write for the demanded head:
+                        // the value is fully determined here — earlier
+                        // candidates are value-suppressed.
+                        stopped_object_entries = true;
+                    }
+                }
+                WritePathMatch::Unknown { remainder } => {
+                    // An unknown-key write may either provision the
+                    // demanded key (consume it) or merge a whole source
+                    // object (spread — the demand projects INTO the
+                    // source unshifted). Both interpretations stay
+                    // reachable; neither stops the scan.
+                    state.worklist.push(WorkItem::Value {
+                        node: edge.to,
+                        path: remainder,
+                    });
+                    state.worklist.push(WorkItem::Value {
+                        node: edge.to,
+                        path,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Effect-frontier step: select `node` for effect and follow the
+    /// effect-family edges. A typed ControlInput edge alone crosses to
+    /// a whole-value demand for the expression governing execution.
+    fn process_effect(
+        &self,
+        state: &mut PlanState,
+        node: FlowNodeId,
+        budget: &FlowSliceBudget,
+    ) -> Result<(), FlowSliceBudgetExceeded> {
+        if !state.effect_visited.insert(node) {
+            return Ok(());
+        }
+        state.effect_nodes.insert(node);
+        select(state, node, budget)?;
+        for edge in self.graph.out_edges(node) {
+            if matches!(edge.kind, FlowEdgeKind::ControlInput) {
+                state.worklist.push(WorkItem::Value {
+                    node: edge.to,
+                    path: 0,
+                });
+                continue;
+            }
+            match edge.kind.class() {
+                FlowEdgeClass::EvalEffect | FlowEdgeClass::ControlRegion => {
+                    state.worklist.push(WorkItem::Effect { node: edge.to });
+                }
+                FlowEdgeClass::ValueDef | FlowEdgeClass::PathWrite => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Traversal state of one plan.
+struct PlanState {
+    paths: PathArena,
+    value_nodes: FxHashSet<FlowNodeId>,
+    effect_nodes: FxHashSet<FlowNodeId>,
+    selected: FxHashSet<FlowNodeId>,
+    value_visited: FxHashSet<(FlowNodeId, u32)>,
+    effect_visited: FxHashSet<FlowNodeId>,
+    worklist: Vec<WorkItem>,
+}
+
+/// Hash-consed projection lists share suffixes when read edges prepend
+/// member paths. A cyclic projection allocates only its new prefix, and
+/// the same budget bounds both allocated tails and visited value states.
+#[derive(Default)]
+struct PathArena {
+    tails: Vec<(DemandSegment, u32)>,
+    ids: FxHashMap<(DemandSegment, u32), u32>,
+}
+
+impl PlanState {
+    fn check_value_budget(&self, budget: &FlowSliceBudget) -> Result<(), FlowSliceBudgetExceeded> {
+        let observed = self
+            .value_visited
+            .len()
+            .saturating_add(self.paths.tails.len());
+        if observed > budget.max_value_states as usize {
+            return Err(FlowSliceBudgetExceeded {
+                axis: FlowSliceBudgetAxis::ValueStates,
+                limit: budget.max_value_states,
+                observed: u32::try_from(observed).unwrap_or(u32::MAX),
+            });
+        }
+        Ok(())
+    }
+
+    fn prepend(
+        &mut self,
+        head: DemandSegment,
+        tail: u32,
+        budget: &FlowSliceBudget,
+    ) -> Result<u32, FlowSliceBudgetExceeded> {
+        let key = (head, tail);
+        if let Some(id) = self.paths.ids.get(&key) {
+            return Ok(*id);
+        }
+        self.paths.tails.push(key.clone());
+        self.check_value_budget(budget)?;
+        let id = self.paths.tails.len() as u32;
+        self.paths.ids.insert(key, id);
+        Ok(id)
+    }
+
+    fn project(
+        &mut self,
+        prefix: &[FlowNameId],
+        mut path: u32,
+        budget: &FlowSliceBudget,
+    ) -> Result<u32, FlowSliceBudgetExceeded> {
+        for name in prefix.iter().rev() {
+            path = self.prepend(DemandSegment::Named(*name), path, budget)?;
+        }
+        Ok(path)
+    }
+}
+
+/// Count a node toward the selection budget.
+fn select(
+    state: &mut PlanState,
+    node: FlowNodeId,
+    budget: &FlowSliceBudget,
+) -> Result<(), FlowSliceBudgetExceeded> {
+    state.selected.insert(node);
+    let observed = state.selected.len();
+    if observed > budget.max_selected_nodes as usize {
+        return Err(FlowSliceBudgetExceeded {
+            axis: FlowSliceBudgetAxis::SelectedNodes,
+            limit: budget.max_selected_nodes,
+            observed: u32::try_from(observed).unwrap_or(u32::MAX),
+        });
+    }
+    Ok(())
+}
+
+/// How a write's projection path relates to the remaining demand.
+enum WritePathMatch {
+    /// A known-unrelated write: no value-provider reachability.
+    None,
+    /// A static match: the write provisions the demanded head; `consumed`
+    /// demand segments are satisfied by the write's path.
+    Static {
+        /// Demand segments consumed by the write path.
+        consumed: u32,
+        /// Interned demand remaining after the matching write prefix.
+        remainder: u32,
+    },
+    /// An unknown-key (computed / spread) write: `consumed` segments are
+    /// satisfied under the provisioning interpretation; the merge
+    /// interpretation consumes none.
+    Unknown {
+        /// Interned demand remaining under the provisioning reading.
+        remainder: u32,
+    },
+}
+
+/// Match a write path against an interned remaining demand.
+/// Static segments must equal the demanded key; computed segments match
+/// any demanded key; a write deeper than the demand still provides (its
+/// value occupies a sub-path of the demanded value).
+fn match_write_path(
+    write_path: &[SkeletonPathSegment],
+    demand: &PathArena,
+    mut remainder: u32,
+) -> WritePathMatch {
+    let mut unknown = false;
+    let mut consumed = 0;
+    for write_segment in write_path {
+        if remainder == 0 {
+            break;
+        }
+        let (demand_segment, tail) = &demand.tails[remainder as usize - 1];
+        match (write_segment, demand_segment) {
+            (SkeletonPathSegment::Static(write_name), DemandSegment::Named(demand_name)) => {
+                if write_name != demand_name {
+                    return WritePathMatch::None;
+                }
+            }
+            (SkeletonPathSegment::Static(_), DemandSegment::Foreign(_)) => {
+                return WritePathMatch::None;
+            }
+            (SkeletonPathSegment::Computed, _) => {
+                unknown = true;
+            }
+        }
+        remainder = *tail;
+        consumed += 1;
+    }
+    if unknown {
+        WritePathMatch::Unknown { remainder }
+    } else {
+        WritePathMatch::Static {
+            consumed,
+            remainder,
+        }
+    }
+}

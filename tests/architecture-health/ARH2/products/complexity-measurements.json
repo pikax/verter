@@ -26,9 +26,9 @@
         "cargo nextest run -p verter_session flow_return_coverage_tests",
         "cargo nextest run -p verter_session flow_return_frame_seal_tests",
         "cargo nextest run -p verter_session cycle_gate_tests",
-        "cargo nextest run -p verter_session dispatch_txn_tests",
-        "cargo nextest run -p verter_session semantic_query_memo::tests",
-        "cargo nextest run -p verter_session stable_key_tests",
+        "cargo nextest run -p verter_type_engine dispatch_txn_tests",
+        "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
+        "cargo nextest run -p verter_type_engine stable_key_tests",
         "cargo nextest run -p verter_session flow_slice_content_tests"
       ],
       "measures": "whether the characterized boundaries still behave as pinned (pass/fail per lane); this list is exactly the characterization product's pinned commands, joined by the verifier in both directions",
@@ -39,17 +39,17 @@
       "mechanismKind": "cargo-build",
       "mechanisms": [
         {
-          "command": "cargo build -p verter_scheduler -p verter_session --timings",
+          "command": "cargo build -p verter_scheduler -p verter_type_engine -p verter_session --timings",
           "cacheState": "clean",
-          "prepare": "cargo clean -p verter_scheduler -p verter_session"
+          "prepare": "cargo clean -p verter_scheduler -p verter_type_engine -p verter_session"
         },
         {
-          "command": "cargo build -p verter_scheduler -p verter_session --timings",
+          "command": "cargo build -p verter_scheduler -p verter_type_engine -p verter_session --timings",
           "cacheState": "warm",
-          "prepare": "cargo build -p verter_scheduler -p verter_session"
+          "prepare": "cargo build -p verter_scheduler -p verter_type_engine -p verter_session"
         }
       ],
-      "measures": "repository compilation of the characterized crates (verter_scheduler, verter_session) under cargo --timings telemetry already used by the gate runner: a clean target (prepare cargo clean of those packages, then the timed build) versus a warm target (prepare a first cargo build of those packages, then the timed second build); receipts are not committed",
+      "measures": "repository compilation of the characterized crates (verter_scheduler, verter_type_engine, verter_session) under cargo --timings telemetry already used by the gate runner: a clean target (prepare cargo clean of those packages, then the timed build) versus a warm target (prepare a first cargo build of those packages, then the timed second build); receipts are not committed",
       "separates": "clean and warm repository-build time are measured on distinct established cache states of the same cargo build recipe; a label alone is not a cache state; test execution and host/session application latency never enter this dimension"
     },
     {
@@ -64,9 +64,9 @@
         "cargo nextest run -p verter_session flow_return_coverage_tests",
         "cargo nextest run -p verter_session flow_return_frame_seal_tests",
         "cargo nextest run -p verter_session cycle_gate_tests",
-        "cargo nextest run -p verter_session dispatch_txn_tests",
-        "cargo nextest run -p verter_session semantic_query_memo::tests",
-        "cargo nextest run -p verter_session stable_key_tests",
+        "cargo nextest run -p verter_type_engine dispatch_txn_tests",
+        "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
+        "cargo nextest run -p verter_type_engine stable_key_tests",
         "cargo nextest run -p verter_session flow_slice_content_tests"
       ],
       "measures": "per-lane runtime cost of the twelve pinned characterization nextest lanes (the same commands as production-behavior; this dimension accounts wall/RSS, never pass/fail)",

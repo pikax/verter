@@ -10,10 +10,12 @@ use std::sync::Arc;
 
 use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
-    prepared_decl::PreparedDeclBundle, route_db::RouteDb, FactVersionRef, FallthroughNodeKey,
-    ResolutionNodeKey, ResolverCounters, SingleflightGroup, StableExecutionValue, StoreView,
-    ValidatedFactAdmission, ValidatedFactCache,
+    prepared_decl::PreparedDeclBundle, route_db::RouteDb, FallthroughNodeKey, ResolutionNodeKey,
+    ResolverCounters, SingleflightGroup, StableExecutionValue, ValidatedFactAdmission,
+    ValidatedFactCache,
 };
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// View fingerprints per (document, mode) whose component-meta states the
 /// runtime keeps: the current one and the one before it.
@@ -92,9 +94,15 @@ where
         key: &K,
         view: &TView,
         self_root_canonicals: &[&str],
-    ) -> Result<Arc<V>, (Option<crate::resolver_core::FactVersionRef>, usize)>
+    ) -> Result<
+        Arc<V>,
+        (
+            Option<verter_session_query::facts::fact_cache::FactVersionRef>,
+            usize,
+        ),
+    >
     where
-        TView: crate::resolver_core::StoreView + ?Sized,
+        TView: verter_session_query::facts::store_view::StoreView + ?Sized,
     {
         self.cache
             .get_if_valid_self_rooted_attributed(key, view, self_root_canonicals)
@@ -549,7 +557,7 @@ mod tests {
     fn view_key(canonical: &str, view_fingerprint: u64) -> ResolutionNodeKey {
         crate::host_manage::component_meta_request_impl::resolved_meta_cache_key_with_view_fingerprint(
             canonical,
-            crate::types::ProjectionMode::Expanded,
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
             view_fingerprint,
         )
     }

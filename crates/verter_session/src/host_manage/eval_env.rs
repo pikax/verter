@@ -6,19 +6,19 @@
 //! per-owner evaluated-type compute path. Public surface
 //! remains rooted at `crate::host_manage::*`; this file contributes a
 //! continuation `impl VerterHost { … }` block.
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+use verter_session_query::analysis::types::Hash16;
 
 use std::sync::Arc;
 
-use crate::instant::Instant;
-use crate::resolver_core::ValueDeclIdentity;
-use crate::types::*;
 use crate::VerterHost;
+use verter_session_query::declarations::metadata::ValueDeclIdentity;
+use verter_type_engine::instant::Instant;
 
 use super::resolve_eval_dependency_canonical_with;
-use super::{
-    component_meta_debug, component_meta_debug_enabled, component_meta_trace_custom,
-    is_raw_import_specifier_id, log_snapshot_debug, ComputedEvaluatedTypes,
-};
+use super::{is_raw_import_specifier_id, log_snapshot_debug, ComputedEvaluatedTypes};
+use verter_type_engine::component_meta_trace_custom;
+use verter_type_engine::request_observers::{component_meta_debug, component_meta_debug_enabled};
 
 /// [`VerterHost::component_meta_binding_type_entries`]'s admission result:
 /// the demanded `defineExpose` binding names split into ones the shared
@@ -48,7 +48,7 @@ impl VerterHost {
     pub(crate) fn base_eval_env_arc(
         &self,
         canonical_id: &str,
-    ) -> Option<Arc<verter_semantic::analysis::type_eval::EvalEnv>> {
+    ) -> Option<Arc<verter_session_query::declarations::EvalEnv>> {
         component_meta_trace_custom!(
             "base_eval_env",
             format!("owner={} store_view={}", canonical_id, false),
@@ -77,7 +77,7 @@ impl VerterHost {
         &self,
         canonical_source: &str,
         resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_session_query::declarations::DeclarationId> {
         // Resolve the owner from the cached declaration-header inventory
         // before consulting the whole env. A Vue canonical can contain both
         // module and setup owners; the legacy ordinary-owner lookup lost a
@@ -177,7 +177,7 @@ impl VerterHost {
         &self,
         canonical_source: &str,
         resolved_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::DeclarationId> {
+    ) -> Option<verter_session_query::declarations::DeclarationId> {
         let state = self.routed_shallow_state(canonical_source)?;
         let owner = Self::unique_local_type_declaration_owner_in(&state, resolved_name)?;
         // Presence WITHOUT body lowering — a header miss is `None`,
@@ -377,14 +377,14 @@ impl VerterHost {
     pub(crate) fn dependency_value_symbol_graph_native(
         &self,
         source: &ValueDeclIdentity,
-    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+    ) -> Option<verter_session_query::declarations::ValueDeclInfo> {
         let state = self.routed_shallow_state(&source.canonical_id)?;
         // The CENTRALIZED effective lookup applies user-wins → rune-ambient →
         // miss, so a Svelte rune module's ambient `$state`/`$derived`/`$effect`/
         // `$inspect` resolve here WITHOUT this reader knowing anything about the
         // rune prelude — the single authority lives on `ShallowFileState`.
         let lowered = state.effective_value_decl_in(source.owner, &source.name)?;
-        Some(verter_semantic::analysis::type_eval::ValueDeclInfo {
+        Some(verter_session_query::declarations::ValueDeclInfo {
             owner: source.owner,
             name: source.name.clone(),
             declaration_id: 0,
@@ -403,7 +403,7 @@ impl VerterHost {
         &self,
         source_canonical_id: &str,
         source_name: &str,
-    ) -> Option<verter_semantic::analysis::type_eval::ValueDeclInfo> {
+    ) -> Option<verter_session_query::declarations::ValueDeclInfo> {
         self.dependency_value_symbol_graph_native(&ValueDeclIdentity {
             canonical_id: source_canonical_id.to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -475,7 +475,9 @@ impl VerterHost {
     /// resolves against a file the requester cannot see.
     pub(crate) fn resolve_value_export_route_identity_with_context(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         dep_canonical_id: &str,
         imported_name: &str,
     ) -> Option<ValueDeclIdentity> {
@@ -484,7 +486,7 @@ impl VerterHost {
             dep_canonical_id,
             imported_name,
         )?;
-        crate::fact_signature_helpers::observe_fact_signature(&chain_facts);
+        verter_type_engine::fact_signature_helpers::observe_fact_signature(&chain_facts);
         let (canonical_id, owner, name) = route_result.resolved()?;
         let canonical_id = self
             .normalized_analysis_canonical(canonical_id)
@@ -513,7 +515,7 @@ impl VerterHost {
         // DIRECT hop), so this observation is the SOLE record of the
         // chain for value-space demands. A no-op without an installed
         // tracer.
-        crate::fact_signature_helpers::observe_fact_signature(&chain_facts);
+        verter_type_engine::fact_signature_helpers::observe_fact_signature(&chain_facts);
         let (canonical_id, owner, name) = route_result.resolved()?;
         let canonical_id = self
             .normalized_analysis_canonical(canonical_id)
@@ -538,7 +540,9 @@ impl VerterHost {
         // `whole_hash` is already `hash_16` of the exact bytes this parse (and
         // therefore this analysis) observed.
         let anchor_revision =
-            crate::types::AnalysisSourceRevision::from_whole_hash(parse.whole_hash);
+            verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(
+                parse.whole_hash,
+            );
         FileAnalysisSnapshot {
             imports: script_analysis.imports,
             bindings: script_analysis.bindings,
@@ -667,7 +671,7 @@ impl VerterHost {
         template_inputs: Option<crate::types::VueTemplateInputs>,
         analysis_started: Option<Instant>,
     ) -> FileAnalysisSnapshot {
-        verter_workspace::probe_scope!(FINALIZE_SNAPSHOT);
+        verter_session_query::probe_scope!(FINALIZE_SNAPSHOT);
         self.resolve_snapshot_imports(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         if needs_template_analysis {
@@ -684,7 +688,7 @@ impl VerterHost {
     }
 
     fn is_expanded_types_empty(
-        result: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+        result: &verter_session_query::analysis::type_expand::ExpandedComponentTypes,
     ) -> bool {
         result.is_empty()
     }
@@ -780,7 +784,7 @@ impl VerterHost {
         let memo_ctx = if dep_canonical.is_empty() || is_raw_import_specifier_id(dep_canonical) {
             None
         } else {
-            crate::request_context::current_request_context()
+            verter_type_engine::request_context::current_request_context()
         };
         if let Some(ctx) = memo_ctx.as_ref() {
             if let Some(hit) = ctx.dep_canonical_memo.lock().get(dep_canonical).cloned() {
@@ -840,9 +844,9 @@ impl VerterHost {
                 match self.resolve_for_persistent_state(
                     canonical_id,
                     candidate,
-                    verter_semantic::resolver_core::ResolutionContext {
-                        phase: verter_semantic::resolver_core::ResolvePhase::CodegenBlocker,
-                        kind: verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+                    verter_session_query::resolution::ResolutionContext {
+                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                        kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
                     },
                 ) {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
@@ -859,8 +863,8 @@ impl VerterHost {
                 // no resolution-derived mapping may be retained. Taint
                 // every enclosing cacheability scope so a caller folding
                 // this fallback serves ReturnOnly.
-                crate::resolver_core::resolver_context::note_non_cacheable_read_fan_out(
-                    crate::resolver_core::resolver_context::NonCacheableReadReason::UnrootableRoute,
+                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return (None, true);
             }
@@ -899,8 +903,9 @@ impl VerterHost {
             }
 
             for export in facts.shallow_state.exports.values() {
-                if let crate::resolver_core::ExportTarget::Reexport {
-                    source_specifier, ..
+                if let verter_session_query::inputs::shallow::ExportTarget::Reexport {
+                    source_specifier,
+                    ..
                 } = export
                 {
                     if let Some(resolved) =
@@ -944,7 +949,9 @@ impl VerterHost {
     /// reused as-is; uncaptured compute clones `IndexedReady.eval_source`.
     /// Catalog lookup stays on the IndexedReady producer.
     pub(crate) fn clone_owner_eval_source_arc(
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         captured: Option<&Arc<str>>,
     ) -> Option<Arc<str>> {
@@ -962,8 +969,13 @@ impl VerterHost {
     /// candidates for cross-file macro-argument-type expansion.
     pub(crate) fn compute_evaluated_types_with_tracking_from_owner_context_with_ctx(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         owner_eval_source: Option<&str>,
@@ -994,12 +1006,14 @@ impl VerterHost {
     /// through the prepared surface, by name); plus the requested binding
     /// NAMES whose preparation genuinely FAILED — a distinct outcome from a
     /// proven-absent binding, preserved here rather than collapsed by the
-    /// `Option`-shaped [`crate::resolver_core::resolver_context::ResolverContext::prepared_value_decl_return_only`]
+    /// `Option`-shaped [`verter_type_engine::resolver_core::resolver_context::ResolverContext::prepared_value_decl_return_only`]
     /// so the caller can publish a typed `Failed` result instead of silently
     /// dropping the binding.
     fn component_meta_binding_type_entries(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         requested_bindings: &std::collections::BTreeSet<verter_type_expr::DeclBindingKey>,
     ) -> BindingAdmissionResult {
@@ -1015,7 +1029,7 @@ impl VerterHost {
         };
         let mut admitted = std::collections::BTreeSet::new();
         for demand in requested_bindings {
-            let Some(crate::resolver_core::shallow_file_state::LexicalValueBinding::Local(owner)) =
+            let Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(owner)) =
                 indexed
                     .shallow_state
                     .visible_value_binding(demand.owner, demand.name.as_ref())
@@ -1082,7 +1096,7 @@ impl VerterHost {
     /// carries no demandable type at all — that is the proven `Absent` case,
     /// not a gate omission.
     fn prepared_value_decl_has_demandable_type(
-        decl: &verter_semantic::analysis::type_solver::prepared::PreparedValueDecl,
+        decl: &verter_session_query::type_solver::prepared::PreparedValueDecl,
     ) -> bool {
         !matches!(
             decl.type_annotation.classification,
@@ -1092,7 +1106,7 @@ impl VerterHost {
             || decl.enum_members.is_some()
             || matches!(
                 decl.kind,
-                verter_semantic::analysis::type_eval::ValueDeclKind::Class
+                verter_session_query::declarations::ValueDeclKind::Class
             )
     }
 
@@ -1102,8 +1116,13 @@ impl VerterHost {
     /// session view carries them.
     pub(crate) fn compute_evaluated_types_from_owner_context_with_ctx(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
-        dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         snapshot: &FileAnalysisSnapshot,
         eval_source: &str,
@@ -1175,15 +1194,17 @@ impl VerterHost {
         // 9.2's scoped origin export reverse-walks only the reachable
         // subgraph rooted at these ids.
         let audit_enabled = self.config.audit_enabled;
-        let prop_node_ids: std::cell::RefCell<Vec<Option<crate::semantic_query::SemanticNodeId>>> =
-            std::cell::RefCell::new(Vec::new());
-        let emit_node_ids: std::cell::RefCell<Vec<Option<crate::semantic_query::SemanticNodeId>>> =
-            std::cell::RefCell::new(Vec::new());
+        let prop_node_ids: std::cell::RefCell<
+            Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
+        > = std::cell::RefCell::new(Vec::new());
+        let emit_node_ids: std::cell::RefCell<
+            Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
+        > = std::cell::RefCell::new(Vec::new());
         let slot_binding_node_ids: std::cell::RefCell<
-            Vec<Option<crate::semantic_query::SemanticNodeId>>,
+            Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
         > = std::cell::RefCell::new(Vec::new());
         let binding_node_ids: std::cell::RefCell<
-            Vec<Option<crate::semantic_query::SemanticNodeId>>,
+            Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
         > = std::cell::RefCell::new(Vec::new());
         let mut result = {
             component_meta_trace_custom!(
@@ -1218,7 +1239,7 @@ impl VerterHost {
                     use crate::resolver_core::component_meta_query_engine::{
                         FastShallowFieldExpr, FastShallowFieldExprExactness,
                     };
-                    use verter_semantic::analysis::type_expand::{
+                    use verter_session_query::analysis::type_expand::{
                         ExpandedNormalizedExpr, ExpansionResult,
                     };
                     use verter_type_expr::facts::SemanticTypeSource;
@@ -1255,7 +1276,9 @@ impl VerterHost {
                     // re-lowering at the closure's tail (no
                     // duplicate dispatch round-trip — audit is now a
                     // pure reader of production work).
-                    let mut produced_node_id: Option<crate::semantic_query::SemanticNodeId> = None;
+                    let mut produced_node_id: Option<
+                        verter_type_engine::semantic_query::SemanticNodeId,
+                    > = None;
 
                     // The field's content-free AUTHORED source: the macro
                     // payload position when the analyzer stamped one, or —
@@ -1273,7 +1296,7 @@ impl VerterHost {
                             ctx.kind,
                             verter_semantic::analysis::type_eval_build::FieldKind::Binding
                         ) {
-                            use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
+                            use verter_session_query::analysis::field_path::PathSegment as MacroPathSegment;
                             if let [MacroPathSegment::Member(name)] = ctx.output_path.as_ref() {
                                 // An IMPORT alias binds no value declaration
                                 // in THIS file. A locator anchored here would
@@ -1359,10 +1382,10 @@ impl VerterHost {
                         // lowering miss, projection unknown, raise
                         // failed) emit a structured trace event and
                         // fall back to symbolic preservation.
-                        use crate::semantic_query::{
+                        use verter_session_query::analysis::field_path::PathSegment as MacroPathSegment;
+                        use verter_type_engine::semantic_query::{
                             PathSegment as SemanticPathSegment, ProjectionMode,
                         };
-                        use verter_semantic::analysis::type_eval_build::PathSegment as MacroPathSegment;
 
                         let preserve_authored_symbolically = || {
                             ExpansionResult::exact_symbolic(ExpandedNormalizedExpr {
@@ -1404,7 +1427,7 @@ impl VerterHost {
                         let fast_path_applied = !ctx.output_path.is_empty()
                             && !matches!(
                                 macro_kind,
-                                Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+                                Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel)
                             )
                             && macro_type_arg.is_some()
                             && !engine.field_needs_parent_projection(
@@ -1438,7 +1461,7 @@ impl VerterHost {
                             // from 5k per §5.13 r15 table).
                             if matches!(
                                 macro_kind,
-                                Some(verter_semantic::analysis::AnalyzedMacroKind::DefineModel)
+                                Some(verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel)
                             ) {
                                 if macro_type_arg.is_some() {
                                     // Sink-owned demand: the model value type IS
@@ -1555,7 +1578,7 @@ impl VerterHost {
                                             let root_is_reference_carrier =
                                                 engine.dispatch.macro_type_arg_hot_ref(canonical, ctx.macro_index)
                                                 .and_then(|product| {
-                                                    crate::project_semantic_dispatch::node_data_for(
+                                                    verter_type_engine::project_semantic_dispatch::node_data_for(
                                                         engine.dispatch.graph(),
                                                         product.hot.node(),
                                                     )
@@ -1564,8 +1587,8 @@ impl VerterHost {
                                                     data.bare_ref_head().is_some()
                                                         || matches!(
                                                             data.as_ref(),
-                                                            crate::semantic_query::SemanticNodeData::DeclRef { .. }
-                                                                | crate::semantic_query::SemanticNodeData::InstantiationRef { .. }
+                                                            verter_type_engine::semantic_query::SemanticNodeData::DeclRef { .. }
+                                                                | verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef { .. }
                                                         )
                                                 });
                                             if root_is_reference_carrier {
@@ -1830,7 +1853,7 @@ impl VerterHost {
             binding_node_ids.borrow_mut().push(None);
             result
                 .bindings
-                .push(verter_semantic::analysis::type_expand::ExpandedField {
+                .push(verter_session_query::analysis::type_expand::ExpandedField {
                     name: key.name.to_string(),
                     owner: key.owner,
                     authority: verter_type_expr::ResolvedTypeAuthority::failed(
@@ -1842,9 +1865,9 @@ impl VerterHost {
                     ),
                     authored_evidence: None,
                     optional: false,
-                    exactness: verter_semantic::analysis::type_solver::SolverExactness::Incomplete,
+                    exactness: verter_session_query::type_solver::SolverExactness::Incomplete,
                     execution_status:
-                        verter_semantic::analysis::type_solver::ExecutionStatus::Completed,
+                        verter_session_query::type_solver::ExecutionStatus::Completed,
                     diagnostics: Vec::new(),
                     declared_in_macro_type_arg: false,
                 });
@@ -1977,7 +2000,9 @@ impl crate::VerterHost {
     /// its own already-view-correct path.
     fn resolve_binding_import_origin(
         &self,
-        ctx: &dyn crate::resolver_core::resolver_context::ResolverContext,
+        ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        >,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         local_name: &str,

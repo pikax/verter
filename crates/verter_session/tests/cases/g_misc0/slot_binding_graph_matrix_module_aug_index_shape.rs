@@ -17,11 +17,14 @@
 
 #![cfg(test)]
 
-use verter_semantic::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
-use verter_semantic::facts::{FactKey, FactLane};
 use verter_session::for_tests::install_fact_tracer_for_tests;
-use verter_session::resolver_core::{FactReadSetFinalise, FactVersionRef, RouteSurfaceFactRef};
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_session_query::facts::{
+    fact_cache::{FactVersionRef, RouteSurfaceFactRef},
+    fact_read_set::FactReadSetFinalise,
+};
+use verter_session_query::facts::{FactKey, FactLane};
 
 #[test]
 fn slot_binding_graph_fact_tracer_carries_module_aug_index_shape() {

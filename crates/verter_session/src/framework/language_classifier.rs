@@ -7,7 +7,7 @@ use verter_language::{CapabilityId, FileLanguage, LanguageRegistry, StaticClassi
 
 use super::options::FrameworkOptions;
 use super::project_capabilities::ProjectCapabilitySnapshot;
-use crate::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 
 /// The single classification authority for SESSION-level consumers.
 ///

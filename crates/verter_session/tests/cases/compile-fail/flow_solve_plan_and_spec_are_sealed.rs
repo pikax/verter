@@ -14,7 +14,8 @@
 //! the two legs cannot share a fixture.
 #![allow(dead_code, unreachable_code)]
 
-use verter_session::for_tests::{FlowDemandPlan, FlowExecutionSelection, FlowObligationSpec, SealedFlowCompletion};
+use verter_type_engine::project_semantic_dispatch::flow_solve::{FlowDemandPlan, FlowExecutionSelection};
+use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::{FlowObligationSpec, SealedFlowCompletion};
 
 // No field write and no field read: even with a plan in hand, its fields
 // are unreachable (E0616).

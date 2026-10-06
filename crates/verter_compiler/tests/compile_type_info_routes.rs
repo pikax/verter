@@ -18,17 +18,17 @@ use verter_compiler::compile_request::{
 };
 use verter_compiler::compile_transaction::{CompileAttempt, TypeInfoRouteFailure};
 use verter_macro_dto::RuntimePropType;
-use verter_semantic::analysis::types::ImportBindingKind;
-use verter_semantic::analysis::{
-    AnalyzedEmitField, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
-    AnalyzedPropField, MacroTypeDep, MacroTypeDepUsage, ScriptAnalysisSnapshot,
-    TypeResolutionSource,
-};
 use verter_semantic::type_info::{
     ImportedComponentResolution, NonFlowObservationKey, ObservedMacroSurface,
     ObservedSurfaceMember, MISSING_PROOF_EMITS, MISSING_PROOF_EXPOSE,
     MISSING_PROOF_IMPORTED_COMPONENT, MISSING_PROOF_MODEL, MISSING_PROOF_PROPS,
     MISSING_PROOF_VUE_MACRO,
+};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::analysis::types::{
+    AnalyzedEmitField, AnalyzedImport, AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind,
+    AnalyzedPropField, MacroTypeDep, MacroTypeDepUsage, TypeResolutionSource,
 };
 use verter_span::Span;
 use verter_type_expr::TopLevelOwnerId;

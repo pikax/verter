@@ -35,11 +35,12 @@ use std::sync::Arc;
 use verter_audit::{AuditCaps, MaterializationSubject};
 
 use crate::component_meta_audit::{
-    accumulator::RequestFootprintAccumulator, AliasResolveRecord, ConditionalRecord,
-    IndexedReadyBuildRecord, InstantiationRecord, MaterializationRecord, ProjectionRecord,
-    StructuredAuditEvent, SubstitutionRecord, VfsLayer, VfsReadRecord,
+    AliasResolveRecord, ConditionalRecord, IndexedReadyBuildRecord, InstantiationRecord,
+    MaterializationRecord, ProjectionRecord, StructuredAuditEvent, SubstitutionRecord, VfsLayer,
+    VfsReadRecord,
 };
-use crate::semantic_query::SemanticNodeId;
+use verter_type_engine::request_footprint::RequestFootprintAccumulator;
+use verter_type_engine::semantic_query::SemanticNodeId;
 
 /// Construct an `AuditCaps` with every category set to a tight `cap`
 /// — useful for tests that need to exercise truncation behaviour at
@@ -272,7 +273,7 @@ fn accumulator_caps_shared_load_reuses_at_configured_limit() {
 
 #[test]
 fn accumulator_caps_derivation_edges_at_configured_limit() {
-    use crate::semantic_query::{OriginEdge, OriginEdgeKind, OriginMeta};
+    use verter_type_engine::semantic_query::{OriginEdge, OriginEdgeKind, OriginMeta};
 
     const CAP: usize = 3;
     const EXCESS: u64 = 5;
@@ -283,13 +284,12 @@ fn accumulator_caps_derivation_edges_at_configured_limit() {
         let edge = OriginEdge {
             sources,
             meta: OriginMeta::None,
-            edge_dep_signature: Arc::new(
-                Arc::<[(Arc<str>, crate::semantic_query::DepVersion)]>::from(Vec::<(
-                    Arc<str>,
-                    crate::semantic_query::DepVersion,
-                )>::new(
-                )),
-            ),
+            edge_dep_signature: Arc::new(Arc::<
+                [(Arc<str>, verter_type_engine::semantic_query::DepVersion)],
+            >::from(Vec::<(
+                Arc<str>,
+                verter_type_engine::semantic_query::DepVersion,
+            )>::new())),
         };
         acc.push_derivation_edge(SemanticNodeId(i), OriginEdgeKind::AliasResolve, edge);
     }

@@ -18,10 +18,10 @@
 use std::sync::Arc;
 
 use verter_audit::ProjectionModeTag;
-use verter_session::semantic_query::{
+use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryKey,
 };
-use verter_session::{HostConfig, UpsertRequest, VerterHost};
 
 const TYPES_TS: &str = r#"
 export type A = {
@@ -58,7 +58,7 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
             canonical_id: Arc::from("/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
-            binder_scope_id: verter_session::semantic_query::BinderScopeId::file_scope(
+            binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
@@ -76,19 +76,19 @@ fn type_resolution_audit_intermediate_hops_navigate_terminal_uses_caller_mode() 
         base: a_node,
         path: Arc::from(
             vec![
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("c"),
                 )),
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("full"),
                 )),
-                PathSegment::Member(verter_session::semantic_query::PropertyKey::identifier(
+                PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     Arc::from("bar"),
                 )),
             ]
             .into_boxed_slice(),
         ),
-        context: verter_session::semantic_query::ProjectionReductionContext::published(
+        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Expanded,
         ),
     };

@@ -29,11 +29,11 @@
 
 use std::sync::Arc;
 
-use verter_session::semantic_query::{
+use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_type_engine::semantic_query::{
     LiteralValue, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
-use verter_session::{for_tests, FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_type_expr::TypeExpr;
 
 const SOURCE_TS: &str = r#"
@@ -172,7 +172,7 @@ fn invalidate_canonical_clears_evaluate_deferred_memo() {
     // chain through the Alias arm, so the memo populates on first
     // call.
     let leaf = store.intern_node(SemanticNodeData::Primitive(
-        verter_session::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let mid = store.intern_node(SemanticNodeData::Alias(leaf));
     let head = store.intern_node(SemanticNodeData::Alias(mid));
@@ -239,13 +239,13 @@ fn invalidate_canonical_clears_substitute_memo() {
     let store = host.project_type_store().semantic_graph();
 
     let a = store.intern_node(SemanticNodeData::Primitive(
-        verter_session::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     let b = store.intern_node(SemanticNodeData::Primitive(
-        verter_session::semantic_query::PrimitiveKind::Number,
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
     ));
     let c = store.intern_node(SemanticNodeData::Primitive(
-        verter_session::semantic_query::PrimitiveKind::Boolean,
+        verter_type_engine::semantic_query::PrimitiveKind::Boolean,
     ));
 
     // Populate the substitute memo via the public publish API.

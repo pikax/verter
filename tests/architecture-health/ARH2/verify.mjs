@@ -12,7 +12,8 @@
  * ARH0 god-module candidate population; every ARH1 authority responsibility
  * is carried by exactly one characterization row. Every behavioral pin is a
  * real cargo nextest lane: the command is canonical (`cargo nextest run`),
- * the crate is a live workspace member, the filter selects the recorded
+ * the crate (the row's crate, or the pin's own crate when its witnesses
+ * compile in another package) is a live workspace member, the filter selects the recorded
  * witnesses under nextest substring semantics over the compiled module path
  * (`mod` / `#[path]` plus the enclosing inline `mod` of each function, never
  * a filesystem `src::` fragment or a cross-product of sibling inline modules),
@@ -602,7 +603,17 @@ function checkWitness(witness, errors, caseId) {
   return true;
 }
 
-function checkPin(pin, crate, errors, caseId) {
+function checkPin(pin, defaultCrate, crates, errors, caseId) {
+  // A pin whose witnesses compile in another package than the row's names
+  // that package itself; the lane runs there.
+  const crate = pin.crate === undefined ? defaultCrate : pin.crate;
+  if (pin.crate !== undefined && !crates.has(pin.crate)) {
+    errors.push({
+      caseId,
+      code: "hotspot-crate-unknown",
+      detail: `${pin.crate} is not a workspace member crate`,
+    });
+  }
   const expected = `cargo nextest run -p ${crate} ${pin.filter}`;
   if (pin.command !== expected) {
     errors.push({
@@ -865,7 +876,7 @@ function validateCharacterization(products, predecessors, errors) {
       errors.push({ caseId, code: "hotspot-without-pins", detail: hotspot.path });
       continue;
     }
-    for (const pin of hotspot.pins) checkPin(pin, hotspot.crate, errors, caseId);
+    for (const pin of hotspot.pins) checkPin(pin, hotspot.crate, crates, errors, caseId);
   }
 
   // Every narrowing cutover route (ARH3/ARH4 heirs) plus this node's own
@@ -917,7 +928,7 @@ function validateCharacterization(products, predecessors, errors) {
         const crate = route.path.includes("verter_scheduler")
           ? "verter_scheduler"
           : "verter_session";
-        checkPin(pin, crate, errors, caseId);
+        checkPin(pin, crate, crates, errors, caseId);
       }
     }
   }
@@ -995,7 +1006,7 @@ function validateCharacterization(products, predecessors, errors) {
   }
   const bulkRoute = (characterization.routes || []).find((r) => r.cutoverRow === "ARH1-CUT-4");
   if (bulkRoute) {
-    const queryRel = "crates/verter_session/src/semantic_query.rs";
+    const queryRel = "crates/verter_type_engine/src/semantic_query.rs";
     const contract = arh1["dependency-contracts"].hotspots.find((h) => h.path === queryRel);
     const declared = contract?.minimalPublicSurface || {};
     const bulkRow = (declared.narrow || []).find((r) => r.kind === "bulk");

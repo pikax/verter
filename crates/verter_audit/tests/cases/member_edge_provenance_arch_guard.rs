@@ -102,19 +102,19 @@ fn is_production_source(path: &Path) -> bool {
 /// emit sites. Allowlisted for guard #1.
 const SUBSTRATE_FILES: &[&str] = &[
     "crates/verter_audit/src/origin_graph.rs",
-    "crates/verter_session/src/semantic_query.rs",
+    "crates/verter_type_engine/src/semantic_query.rs",
     "crates/verter_session/src/component_meta_audit/footprint_miner.rs",
     "crates/verter_session/src/component_meta_audit/accumulator.rs",
     "crates/verter_session/src/component_meta_audit/mod.rs",
-    "crates/verter_session/src/semantic_query_memo/mod.rs",
-    "crates/verter_session/src/semantic_query_memo/family.rs",
-    "crates/verter_session/src/semantic_query_memo/derivation.rs",
-    "crates/verter_session/src/capture_token.rs",
-    "crates/verter_session/src/loop5_instrumentation.rs",
+    "crates/verter_type_engine/src/semantic_query_memo/mod.rs",
+    "crates/verter_type_engine/src/semantic_query_memo/family.rs",
+    "crates/verter_type_engine/src/semantic_query_memo/derivation.rs",
+    "crates/verter_type_engine/src/capture_token.rs",
+    "crates/verter_type_engine/src/loop5_instrumentation.rs",
     "crates/verter_session/src/host_test_audit.rs",
     "crates/verter_session/src/host_resolve_type_audit.rs",
-    "crates/verter_session/src/project_semantic_dispatch/mod.rs",
-    "crates/verter_session/src/project_semantic_dispatch/raise.rs",
+    "crates/verter_type_engine/src/project_semantic_dispatch/mod.rs",
+    "crates/verter_type_engine/src/project_semantic_dispatch/raise.rs",
 ];
 
 #[test]

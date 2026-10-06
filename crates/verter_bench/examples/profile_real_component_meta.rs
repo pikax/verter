@@ -171,7 +171,7 @@ fn resolve_target_file(project_root: &Path, token: &str) -> io::Result<PathBuf> 
 fn print_profile(
     run_index: usize,
     target_id: &str,
-    analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     resolved: &verter_session::meta_resolve::ResolvedComponentMetaState,
     elapsed: std::time::Duration,
 ) {
@@ -195,7 +195,7 @@ fn print_profile(
 /// Dump (and reset) the env-gated decl-lowering handoff rendezvous profile.
 /// Silent when `VERTER_DECL_HANDOFF_PROFILE` is off.
 fn print_decl_handoff(label: &str) {
-    let Some(s) = verter_session::dump_decl_handoff_stats() else {
+    let Some(s) = verter_semantic_source::decl_lowering::dump_decl_handoff_stats() else {
         return;
     };
     let ms = |ns: u64| ns as f64 / 1e6;
@@ -219,14 +219,14 @@ fn print_decl_handoff(label: &str) {
             + s.run_service_ns
             + s.run_response_ns),
     );
-    verter_session::reset_decl_handoff_stats();
+    verter_semantic_source::decl_lowering::reset_decl_handoff_stats();
 }
 
 fn profile_one(project_root: &Path, token: &str, repeats: usize) -> io::Result<()> {
     let target_file = resolve_target_file(project_root, token)?;
     let target_id = path_to_host_id(&target_file)?;
 
-    verter_session::reset_decl_handoff_stats();
+    verter_semantic_source::decl_lowering::reset_decl_handoff_stats();
     let component_started = Instant::now();
     let host = make_host(project_root)?;
     let bootstrap_started = Instant::now();

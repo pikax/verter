@@ -223,11 +223,10 @@ mod canary_warm_hit_zero_alloc {
 
     use std::hint::black_box;
 
-    use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
-    use verter_session::resolver_core::{
-        FactVersionRef, ParseFactRef, PermissiveStoreView, ValidatedFactCache,
-    };
-    use verter_session::semantic_query::HashValue;
+    use verter_session::resolver_core::{PermissiveStoreView, ValidatedFactCache};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ParseFactRef};
+    use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
+    use verter_type_engine::semantic_query::HashValue;
 
     use super::alloc_count;
 
@@ -433,11 +432,11 @@ mod canary_signature_fingerprint_zero_alloc {
 
     use std::hint::black_box;
 
-    use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
-    use verter_session::resolver_core::{
-        compute_signature_fingerprint_for_tests, DerivedFactKind, FactVersionRef, ParseFactRef,
-        ResolveImportsFactRef, RouteSurfaceFactRef,
+    use verter_session::resolver_core::compute_signature_fingerprint_for_tests;
+    use verter_session_query::facts::fact_cache::{
+        DerivedFactKind, FactVersionRef, ParseFactRef, ResolveImportsFactRef, RouteSurfaceFactRef,
     };
+    use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
     use super::alloc_count;
 
@@ -551,8 +550,8 @@ mod canary_flow_return_audit_emission_zero_alloc {
     use std::hint::black_box;
     use std::sync::Arc;
 
-    use verter_semantic::analysis::flow::peeker::{FlowSliceBudgetAxis, FlowSliceBudgetExceeded};
-    use verter_session::flow_return_audit::{
+    use verter_session_query::flow::peeker::{FlowSliceBudgetAxis, FlowSliceBudgetExceeded};
+    use verter_type_engine::flow_return_audit::{
         record_flow_cycle_reentry, record_flow_return_started, record_flow_slice_budget_exceeded,
     };
 
@@ -926,6 +925,9 @@ mod construction_bytes_allocation;
 #[path = "allocation_cases/flow_literal_provenance.rs"]
 mod flow_literal_provenance_allocation;
 
+#[path = "allocation_cases/expression_source_selection.rs"]
+mod expression_source_selection_allocation;
+
 mod signature_kernel_warm_positional {
     //! Warm positional Empty/One read: no per-candidate `Arc` clone and no
     //! intern-shard lock. The counting allocator is process-global in this
@@ -934,7 +936,7 @@ mod signature_kernel_warm_positional {
 
     use std::hint::black_box;
 
-    use verter_session::for_tests::{
+    use verter_type_engine::signature_kernel::test_support::{
         warm_positional_read, warm_positional_read_many, WarmPositionalLockProbe,
         WarmPositionalStore,
     };

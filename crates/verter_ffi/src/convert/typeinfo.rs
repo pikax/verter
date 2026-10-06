@@ -9,10 +9,10 @@ use verter_protocol::typeinfo::{
     FfiEvaluateTypeExpressionRequest, FfiImportSpec, FfiNamedImport, FfiSymbolEntry, MODE_EXPANDED,
     MODE_IDENTITY, MODE_NAVIGATE, MODE_SHALLOW, MODE_SKELETON,
 };
-use verter_session::semantic_query::ProjectionMode;
 use verter_session::typeinfo::types::{
     EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolEntry, SymbolKind,
 };
+use verter_type_engine::semantic_query::ProjectionMode;
 
 use super::error::FfiConversionError;
 

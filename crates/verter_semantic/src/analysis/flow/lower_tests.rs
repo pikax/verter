@@ -5,15 +5,18 @@
 
 use std::sync::Arc;
 
-use super::*;
-use crate::analysis::flow::flow_graph::build_function_flow_graph_for_test as build_function_flow_graph;
-use crate::analysis::flow::flow_ir::{
+use verter_session_query::flow::flow_graph::build_function_flow_graph_for_test as build_function_flow_graph;
+use verter_session_query::flow::flow_ir::{
     FlowCallee, FlowDef, FlowEffect, FlowEffectTarget, FlowExpr, FlowExprId, FlowExprRole,
     FlowExprShape, FlowObjectEntry, FlowObjectKey, FlowPathSegment, FlowRead, FlowReturnEntry,
     FlowSliceIR, FlowSlot, FlowSlotId, ReturnAccumulator,
 };
-use crate::analysis::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
-use crate::analysis::flow::{FrameSpan, FunctionBodySkeleton, SkeletonWriteCertainty};
+use verter_session_query::flow::lower::*;
+use verter_session_query::flow::peeker::{FlowSliceBudget, ReturnPathPeeker, SliceDemand};
+use verter_session_query::flow::{
+    frame_span::FrameSpan,
+    skeleton::{FunctionBodySkeleton, SkeletonWriteCertainty},
+};
 
 fn skeleton_of(source: &str) -> FunctionBodySkeleton {
     crate::analysis::flow::skeleton_tests::indexed_skeleton_of(source)

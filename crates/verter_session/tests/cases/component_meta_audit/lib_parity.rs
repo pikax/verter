@@ -147,7 +147,7 @@ fn pick_and_my_pick_produce_identical_props() {
 /// `Pick<Cfg, 'alpha'>` would surface only `alpha`.
 ///
 /// The resolver-context [`ScopeShadowing`] struct in
-/// `verter_session::resolver_core::scope_shadowing` is threaded
+/// `verter_type_engine::resolver_core::scope_shadowing` is threaded
 /// through both the dispatch-lowering entry
 /// (`shallow_lower_type_expr`) and the materialise-path registry
 /// route fast-path (`project_expr_class_a_via_dispatch_threaded`).
@@ -192,7 +192,7 @@ fn shadowed_pick_is_userland_not_intrinsic() {
 pub(crate) fn render_pair(
     host: &verter_session::VerterHost,
     owner: &str,
-    prop: &verter_semantic::analysis::component_meta::PropAnalysis,
+    prop: &verter_session_query::analysis::component_meta::PropAnalysis,
 ) -> (String, String) {
     let source = prop
         .publication

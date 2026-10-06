@@ -24,13 +24,13 @@ use super::resolved_state::SurfaceNodeIdentities;
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn build_origin_graph(
-    graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>,
+    graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
     surface_identities: Option<&SurfaceNodeIdentities>,
 ) -> verter_protocol::types::OriginGraphDto {
-    use crate::semantic_query::OriginEdgeKind;
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::collections::VecDeque;
     use verter_protocol::types::{OriginEdgeDto, OriginGraphDto, OriginNodeDto};
+    use verter_type_engine::semantic_query::OriginEdgeKind;
 
     // Step 9.2 / F6 scoped origin export: when surface_identities are
     // populated, reverse-walk via walk_origin_chain starting from each
@@ -38,9 +38,10 @@ pub(crate) fn build_origin_graph(
     // to export_all_origin_edges when surface_identities is None
     // (audit-off path or pre-populated state).
     let all_edges = if let Some(ids) = surface_identities {
-        let mut roots: Vec<crate::semantic_query::SemanticNodeId> = Vec::new();
+        let mut roots: Vec<verter_type_engine::semantic_query::SemanticNodeId> = Vec::new();
         let push_some =
-            |roots: &mut Vec<_>, opt: &Option<crate::semantic_query::SemanticNodeId>| {
+            |roots: &mut Vec<_>,
+             opt: &Option<verter_type_engine::semantic_query::SemanticNodeId>| {
                 if let Some(id) = opt {
                     roots.push(*id);
                 }
@@ -63,13 +64,14 @@ pub(crate) fn build_origin_graph(
         if roots.is_empty() {
             return OriginGraphDto::default();
         }
-        let mut reached: FxHashSet<crate::semantic_query::SemanticNodeId> = FxHashSet::default();
-        let mut worklist: VecDeque<crate::semantic_query::SemanticNodeId> =
+        let mut reached: FxHashSet<verter_type_engine::semantic_query::SemanticNodeId> =
+            FxHashSet::default();
+        let mut worklist: VecDeque<verter_type_engine::semantic_query::SemanticNodeId> =
             roots.into_iter().collect();
         let mut collected: Vec<(
-            crate::semantic_query::SemanticNodeId,
+            verter_type_engine::semantic_query::SemanticNodeId,
             OriginEdgeKind,
-            crate::semantic_query::OriginEdge,
+            verter_type_engine::semantic_query::OriginEdge,
         )> = Vec::new();
         while let Some(node) = worklist.pop_front() {
             if !reached.insert(node) {
@@ -93,58 +95,59 @@ pub(crate) fn build_origin_graph(
         return OriginGraphDto::default();
     }
 
-    let mut node_index: FxHashMap<crate::semantic_query::SemanticNodeId, u32> =
+    let mut node_index: FxHashMap<verter_type_engine::semantic_query::SemanticNodeId, u32> =
         FxHashMap::default();
     let mut nodes: Vec<OriginNodeDto> = Vec::new();
     let mut meta_strings: Vec<String> = Vec::new();
     let mut meta_index_map: FxHashMap<String, u32> = FxHashMap::default();
 
-    let mut intern_node = |id: crate::semantic_query::SemanticNodeId,
-                           graph: &Arc<crate::semantic_query_memo::SemanticGraphStore>|
-     -> u32 {
-        if let Some(&idx) = node_index.get(&id) {
-            return idx;
-        }
-        let idx = nodes.len() as u32;
-        let (kind, label) = graph
-            .node_data(id)
-            .map(|d| {
-                use crate::semantic_query::SemanticNodeData;
-                let k = format!("{:?}", *d).split_once('{').map_or_else(
-                    || {
-                        format!("{:?}", *d)
-                            .split_once('(')
-                            .map_or_else(|| format!("{:?}", *d), |(name, _)| name.to_string())
-                    },
-                    |(name, _)| name.to_string(),
-                );
-                let l = match &*d {
-                    SemanticNodeData::Primitive(p) => Some(format!("{p:?}").to_lowercase()),
-                    SemanticNodeData::Object(_) => Some("{...}".to_string()),
-                    SemanticNodeData::TypeParam { display_name, .. } => {
-                        Some(display_name.to_string())
-                    }
-                    SemanticNodeData::Literal(lit) => Some(format!("{lit:?}")),
-                    SemanticNodeData::Array { readonly, .. } => {
-                        Some(if *readonly { "readonly T[]" } else { "T[]" }.to_string())
-                    }
-                    SemanticNodeData::Tuple { .. } => Some("[...]".to_string()),
-                    SemanticNodeData::Union(_) => Some("A | B".to_string()),
-                    SemanticNodeData::Intersection(_) => Some("A & B".to_string()),
-                    SemanticNodeData::Signature { .. } => Some("(...) => R".to_string()),
-                    _ => None,
-                };
-                (k, l)
-            })
-            .unwrap_or_else(|| ("Unknown".to_string(), None));
-        nodes.push(OriginNodeDto {
-            id: idx,
-            kind,
-            label,
-        });
-        node_index.insert(id, idx);
-        idx
-    };
+    let mut intern_node =
+        |id: verter_type_engine::semantic_query::SemanticNodeId,
+         graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>|
+         -> u32 {
+            if let Some(&idx) = node_index.get(&id) {
+                return idx;
+            }
+            let idx = nodes.len() as u32;
+            let (kind, label) = graph
+                .node_data(id)
+                .map(|d| {
+                    use verter_type_engine::semantic_query::SemanticNodeData;
+                    let k = format!("{:?}", *d).split_once('{').map_or_else(
+                        || {
+                            format!("{:?}", *d)
+                                .split_once('(')
+                                .map_or_else(|| format!("{:?}", *d), |(name, _)| name.to_string())
+                        },
+                        |(name, _)| name.to_string(),
+                    );
+                    let l = match &*d {
+                        SemanticNodeData::Primitive(p) => Some(format!("{p:?}").to_lowercase()),
+                        SemanticNodeData::Object(_) => Some("{...}".to_string()),
+                        SemanticNodeData::TypeParam { display_name, .. } => {
+                            Some(display_name.to_string())
+                        }
+                        SemanticNodeData::Literal(lit) => Some(format!("{lit:?}")),
+                        SemanticNodeData::Array { readonly, .. } => {
+                            Some(if *readonly { "readonly T[]" } else { "T[]" }.to_string())
+                        }
+                        SemanticNodeData::Tuple { .. } => Some("[...]".to_string()),
+                        SemanticNodeData::Union(_) => Some("A | B".to_string()),
+                        SemanticNodeData::Intersection(_) => Some("A & B".to_string()),
+                        SemanticNodeData::Signature { .. } => Some("(...) => R".to_string()),
+                        _ => None,
+                    };
+                    (k, l)
+                })
+                .unwrap_or_else(|| ("Unknown".to_string(), None));
+            nodes.push(OriginNodeDto {
+                id: idx,
+                kind,
+                label,
+            });
+            node_index.insert(id, idx);
+            idx
+        };
 
     let mut edges_dto: Vec<OriginEdgeDto> = Vec::new();
     for (target_node, kind, edge) in &all_edges {

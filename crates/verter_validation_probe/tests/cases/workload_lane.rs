@@ -17,8 +17,8 @@ use verter_validation_probe::runner::{self, DriverCommand, PhaseDeadlines, Plann
 use verter_validation_probe::summary::{FrameworkSummary, Lane};
 use verter_validation_probe::Framework;
 
-/// Which lane this run drives. The workflow's smoke job leaves it unset; the
-/// main job sets it to `main`.
+/// Which lane this run drives. The workflow sets it to `main`; a local run
+/// that leaves it unset drives the bounded smoke slice.
 fn lane_from_env() -> Lane {
     match std::env::var("VALIDATION_PROBE_LANE").as_deref() {
         Ok("main") => Lane::Main,

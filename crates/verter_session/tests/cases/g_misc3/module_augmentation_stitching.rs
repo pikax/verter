@@ -11,14 +11,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use verter_semantic::facts::registry::InternedSpecifier;
 use verter_session::fact_emission::emit_parse_facts;
 use verter_session::file_artifact_store::{
-    AugmentationTargetKey, AugmentationTargetKind, FileArtifactKey, FileArtifactStore,
-    FileArtifacts, ProjectIdentity,
+    AugmentationTargetKey, AugmentationTargetKind, FileArtifactStore, FileArtifacts,
+    ProjectIdentity,
 };
 use verter_session::project_type_store::IndexedReady;
 use verter_session::resolver_core::shallow_file_state::ShallowFileState;
+use verter_session_query::facts::registry::InternedSpecifier;
+use verter_session_query::source::artifact_key::FileArtifactKey;
 
 // ────────────────────────────────────────────────────────────────
 // Test helpers
@@ -313,7 +314,7 @@ pub(crate) fn session_overlay_augmenter_isolated_from_base_index() {
 fn seed_base_and_overlay_augmenters(
     store: &FileArtifactStore,
     fingerprint: u64,
-) -> verter_session::Hash16 {
+) -> verter_session_query::analysis::types::Hash16 {
     let _ = insert_artifact_from_fixture(
         store,
         "/aug-base.ts",
@@ -1009,8 +1010,9 @@ fn insert_artifact_at_build_fingerprint(
         augmentations: Arc::new(emission.augmentations),
     });
     let key = FileArtifactKey {
-        build_toolchain_fingerprint:
-            verter_session::build_toolchain_fingerprint::fingerprint_for_test(fingerprint_marker),
+        build_toolchain_fingerprint: verter_session_query::source::toolchain::fingerprint_for_test(
+            fingerprint_marker,
+        ),
         ..FileArtifactKey::base_for_test(Arc::from(canonical), content_hash)
     };
     store.insert_artifacts(key.clone(), artifacts);
@@ -1030,7 +1032,7 @@ fn stale_build_fingerprint_augmenter_is_excluded() {
     );
     assert_eq!(
         current_key.build_toolchain_fingerprint,
-        verter_session::build_toolchain_fingerprint::current_build_toolchain_fingerprint()
+        verter_session_query::source::toolchain::current_build_toolchain_fingerprint()
     );
 
     // (b) stale-version augmenter — same base `parse_env_hash` sentinel,
@@ -1045,7 +1047,7 @@ fn stale_build_fingerprint_augmenter_is_excluded() {
     );
     assert_ne!(
         stale_key.build_toolchain_fingerprint,
-        verter_session::build_toolchain_fingerprint::current_build_toolchain_fingerprint(),
+        verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
         "the stale augmenter MUST carry a non-current build fingerprint"
     );
     // The two artifacts coexist in the store (the stale one is not drained

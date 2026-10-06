@@ -15,6 +15,7 @@
 //! the struct definition in `lib.rs`; the construction-time substrate
 //! types ([`HostResolverState`], [`WorkspaceSourceLoader`],
 //! [`next_host_instance_id`]) live here.
+use verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs;
 
 use std::sync::Arc;
 
@@ -37,28 +38,6 @@ pub(crate) fn is_ordinary_typescript_canonical(canonical: &str) -> bool {
         return false;
     }
     canonical.ends_with(".ts") || canonical.ends_with(".tsx")
-}
-
-/// Per-host relation-engine knobs, grouped off the `VerterHost` struct body.
-///
-/// - `force_overflow_observations`: test-injection for the cold relation
-///   judgement path — when `N > 0`, the cold compute observes `N` synthetic
-///   `FileWholeHash` facts onto the active tracer, forcing the relation
-///   memo's `FactReadSetFinalise::Overflow` non-admission (the judgement is
-///   returned to the caller but refused memo admission).
-/// - `force_budget_exhaustion`: trips the relation reducer's work budget on
-///   its first driver pass — the deterministic trigger for the typed
-///   `BudgetExceeded` public outcome and its three-layer non-admission (no
-///   warm memo entry, no fact signature, no reverse-index registration).
-///
-/// The strict-family configuration is NOT a knob: the relation reducer reads
-/// it from the effective tsconfig options of the project owning the
-/// request's canonical ([`VerterHost::semantic_compiler_options_for`]), the
-/// same option set that project's `type_env_hash` folds.
-#[derive(Debug, Default)]
-pub(crate) struct RelationHostKnobs {
-    pub(crate) force_overflow_observations: std::sync::atomic::AtomicUsize,
-    pub(crate) force_budget_exhaustion: std::sync::atomic::AtomicBool,
 }
 
 /// Construction-time source for the host's execution-only worker pools.
@@ -99,15 +78,15 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
             } else {
                 format!("{}**/*", root)
             };
-            membership.spec.include = vec![verter_semantic::resolver_core::CompiledGlob::new(
-                verter_semantic::resolver_core::NormalizedGlob::new(&include),
+            membership.spec.include = vec![verter_session_query::resolution::CompiledGlob::new(
+                verter_session_query::resolution::NormalizedGlob::new(&include),
             )];
             membership.spec.exclude =
                 ["node_modules/**", "bower_components/**", "jspm_packages/**"]
                     .into_iter()
                     .map(|pattern| {
-                        verter_semantic::resolver_core::CompiledGlob::new(
-                            verter_semantic::resolver_core::NormalizedGlob::new(&format!(
+                        verter_session_query::resolution::CompiledGlob::new(
+                            verter_session_query::resolution::NormalizedGlob::new(&format!(
                                 "{root}{pattern}"
                             )),
                         )
@@ -350,7 +329,7 @@ impl VerterHost {
         // across hosts; the scheduler crate uses a `OnceLock` and
         // silently observes that the hook is already registered on
         // subsequent host constructions.
-        crate::request_context::install_clear_tls_hook();
+        verter_type_engine::request_context::install_clear_tls_hook();
 
         // Thread the host's configured `resolve_extensions` into the
         // workspace at construction so reverse-dep stem stripping
@@ -362,7 +341,7 @@ impl VerterHost {
         // Constructed before the scheduler so the stage executor can share
         // the host's provenance counters (`carrier_parses` / `sfc_parses`
         // are bumped on rayon workers where no capture-token TLS exists).
-        let provenance = Arc::new(crate::types::MetaProvenance::default());
+        let provenance = Arc::new(crate::meta_provenance::MetaProvenance::default());
         let instance_id = next_host_instance_id();
         let registered_source_authority = Arc::new(
             verter_language::registered_source_authority::RegisteredSourceAuthority::new()
@@ -524,11 +503,10 @@ impl VerterHost {
             crate::project_type_store::ProjectTypeStore::with_provenance(Arc::clone(&provenance)),
         );
         // The workspace's resident request-overlay resolution state charges
-        // the same aggregate account every host store charges.
+        // the process-local account — the same aggregate account every host
+        // store charges.
         workspace_lock.read().install_resolution_retention(Arc::new(
-            crate::semantic_retention_account::ResolutionRetention(Arc::clone(
-                project_type_store.retention_account(),
-            )),
+            verter_session_query::retention::ResolutionRetention::process_local(),
         ));
         // Pull RouteDb / ImportedRootDb handles from the project-type-store
         // BEFORE constructing the resolver runtime so the runtime borrows
@@ -543,7 +521,7 @@ impl VerterHost {
         // fresh `insert`s bump `total_shallow_processes` + `loaded_files`
         // cumulatively across requests on this host. Test-only;
         // production builds compile without this block.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let test_force = Arc::new(crate::host_test_force::TestForceKnobs::default());
         #[cfg(test)]
         project_type_store
@@ -603,6 +581,14 @@ impl VerterHost {
             .clone()
             .map(crate::cooperative_scheduler::CooperativeSchedulerAdapter::with_yield_hook)
             .unwrap_or_default();
+        // The request attachment shares the registry-owned surface stores and
+        // the project store's output lease and surface-claim authority; it
+        // constructs none of them.
+        let session_attachment = crate::session_attachment::SessionAttachment::new(
+            framework_services.framework_registry(),
+            project_type_store.output_lease().clone(),
+            std::sync::Arc::clone(project_type_store.surface_claims()),
+        );
         let host = Self {
             #[cfg(any(test, feature = "test-support"))]
             source_input_leases: crate::resolver_core::request_inputs::InputArtifactLeases::default(),
@@ -666,11 +652,12 @@ impl VerterHost {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
             }),
+            session_attachment,
             framework_services,
             framework_script_caches,
             #[cfg(not(target_arch = "wasm32"))]
             host_cpu_pool,
-            decl_lowering: Arc::new(crate::decl_lowering::DeclLoweringService::new_with(
+            decl_lowering: Arc::new(verter_semantic_source::decl_lowering::DeclLoweringService::new_with(
                 matches!(
                     decl_lowering_policy.spawn,
                     crate::types::PoolSpawn::LazyOnFirstUse
@@ -683,11 +670,9 @@ impl VerterHost {
             augmentation_force_source_env_unobservable: std::sync::atomic::AtomicBool::new(false),
             #[cfg(any(test, feature = "test-support"))]
             flow_fault_injection:
-                Arc::new(crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default()),
-            #[cfg(test)]
+                Arc::new(verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_fault_injection::FlowAdmissionFaultKnobs::default()),
+            #[cfg(any(test, feature = "test-support"))]
             test_force,
-            #[cfg(test)]
-            macro_hot_lowering_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(any(test, feature = "test-support"))]
             compile_tier_prefetch_invocations: std::sync::atomic::AtomicUsize::new(0),
             signature_overflow_at_install: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -730,7 +715,7 @@ impl VerterHost {
         let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
             verter_workspace::MemoryOptions::default(),
         ));
-        let configs: Vec<verter_semantic::resolver_core::IdeProjectConfig> = projects
+        let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
             .iter()
             .map(|(root, tsconfig_json)| {
                 let root = root.trim_end_matches('/').to_string();
@@ -846,7 +831,7 @@ impl VerterHost {
     #[must_use]
     pub fn dispatch_trace_for(
         &self,
-        key: &crate::semantic_query::SemanticQueryKey,
+        key: &verter_type_engine::semantic_query::SemanticQueryKey,
     ) -> crate::host_test_audit::DispatchTrace {
         crate::host_test_audit::DispatchTrace::from_key(
             self.project_type_store.semantic_graph(),
@@ -874,14 +859,21 @@ impl VerterHost {
     #[must_use]
     pub fn semantic_dispatch(
         &self,
-    ) -> crate::project_semantic_dispatch::ProjectSemanticDispatch<'_> {
-        crate::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
+    ) -> verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities,
+    > {
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(self)
     }
 
     /// Run one base-lane operation through a sealed request-bound context.
     pub(crate) fn with_base_resolver_context<R>(
         &self,
-        operation: impl FnOnce(&dyn crate::resolver_core::ResolverContext) -> R,
+        operation: impl FnOnce(
+            &dyn verter_type_engine::resolver_core::ResolverContext<
+                crate::resolver_core::HostCapabilities,
+            >,
+        ) -> R,
     ) -> R {
         let base = self.resolver_store_view_read().into_cold_seed_view();
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
@@ -1058,7 +1050,7 @@ impl VerterHost {
     pub fn semantic_compiler_options_for(
         &self,
         canonical: &str,
-    ) -> verter_semantic::resolver_core::SemanticCompilerOptions {
+    ) -> verter_session_query::resolution::SemanticCompilerOptions {
         let workspace = self.workspace();
         self.resolve_project_for_canonical(canonical)
             .and_then(|p| workspace.semantic_compiler_options_for_project(p))
@@ -1066,7 +1058,7 @@ impl VerterHost {
     }
 
     /// TEST-ONLY: the live `parse_env_hash` dimension for `canonical`, as
-    /// the sealed [`ParseEnvHash`](crate::semantic_query::ParseEnvHash)
+    /// the sealed [`ParseEnvHash`](verter_session_query::facts::fact_cache::ParseEnvHash)
     /// newtype. Lets external test fixtures mirror the
     /// `instantiate_context_for` choke point's `file_backed(P)` keying
     /// WITHOUT opening the newtype's byte constructor — the wrapped value
@@ -1082,8 +1074,8 @@ impl VerterHost {
     pub fn live_parse_env_dim_for_tests(
         &self,
         canonical: &str,
-    ) -> crate::semantic_query::ParseEnvHash {
-        crate::semantic_query::ParseEnvHash::from_env_hash(
+    ) -> verter_session_query::facts::fact_cache::ParseEnvHash {
+        verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(
             self.host_view_env_hashes_for(canonical).parse_env_hash,
         )
     }
@@ -1122,7 +1114,7 @@ impl VerterHost {
     pub fn resolve_project_for_canonical(
         &self,
         canonical: &str,
-    ) -> Option<verter_workspace::workspace_snapshot::ProjectId> {
+    ) -> Option<verter_session_query::resolution::ProjectId> {
         let root = self.workspace().published_root()?;
         root.snapshot.owners_for_file(canonical).first().copied()
     }
@@ -1251,59 +1243,12 @@ impl VerterHost {
         &self.typeinfo_scratch_cache
     }
 
-    /// The Vue adapter's typed framework-surface DTO store — the host-owned
-    /// cache of `.vue` macro-surface normalized DTOs.
-    ///
-    /// The store lives erased on the Vue registration row
-    /// ([`crate::framework::registry::FrameworkRegistration::surface_store`]);
-    /// this accessor performs the ONE downcast at store acquisition to the typed
-    /// [`FrameworkSurfaceStore<VueSurfaceKey, MacroSurfaceDtos>`](crate::framework::surface_store::FrameworkSurfaceStore),
-    /// exactly the public-hidden downcast doctrine the carriers use. Used by the
-    /// [`crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx`]
-    /// to materialize each `.vue` macro surface once per `(canonical, content,
-    /// macro, level)`.
-    ///
-    /// Panics only on a build defect (the Vue registration absent, or its
-    /// surface store erased to the wrong concrete type) — neither is reachable
-    /// on a correctly-constructed host (`framework_registry_complete` +
-    /// `vue_registration_carries_every_leg` pin the registration).
-    pub(crate) fn vue_surface_store_handle(
-        &self,
-    ) -> Arc<
-        crate::framework::surface_store::FrameworkSurfaceStore<
-            crate::typeinfo::framework_surface::VueSurfaceKey,
-            crate::typeinfo::framework_surface::MacroSurfaceDtos,
-        >,
-    > {
-        Arc::clone(
-            &self
-                .framework_registry()
-                .get(&verter_language::FrameworkAdapterId::vue())
-                .expect("the Vue adapter is registered")
-                .surface_store,
-        )
-        .into_any_arc()
-        .downcast()
-        .expect("typed Vue surface store")
-    }
-    pub(crate) fn svelte_surface_store_handle(
-        &self,
-    ) -> Arc<
-        crate::framework::surface_store::FrameworkSurfaceStore<
-            crate::typeinfo::framework_surface::SvelteSurfaceKey,
-            crate::typeinfo::framework_surface::MacroSurfaceDtos,
-        >,
-    > {
-        Arc::clone(
-            &self
-                .framework_registry()
-                .get(&verter_language::FrameworkAdapterId::svelte())
-                .expect("the Svelte adapter is registered")
-                .surface_store,
-        )
-        .into_any_arc()
-        .downcast()
-        .expect("typed Svelte surface store")
+    /// The host-owned state a request reaches beside the engine (the typed
+    /// framework-surface DTO stores, selected once from the registry rows that
+    /// own them). Request contexts hand it out through the host-attachment
+    /// port.
+    pub(crate) fn session_attachment(&self) -> &crate::session_attachment::SessionAttachment {
+        &self.session_attachment
     }
     #[cfg(test)]
     pub(crate) fn vue_surface_store(
@@ -1363,7 +1308,7 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         state: &mut crate::resolver_core::ShallowFileState,
-        macros: &[verter_semantic::analysis::types::AnalyzedMacro],
+        macros: &[verter_session_query::analysis::types::AnalyzedMacro],
         eval_source: Option<&str>,
         framework_parse: Option<&Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
     ) {
@@ -1619,9 +1564,9 @@ mod resource_policy_lazy_tests {
     use std::sync::Arc;
 
     use crate::host_compile::{CompileBatchInput, CompileBatchOptions};
-    use crate::semantic_query::ProjectionMode;
     use crate::types::{HostConfig, UpsertRequest};
     use crate::{FileLanguage, VerterHost};
+    use verter_type_engine::semantic_query::ProjectionMode;
 
     /// `batch_typecheck()` must NOT spawn the host CPU pool's worker
     /// threads at construction; the first `compile_many` batch (which fans
@@ -1772,71 +1717,98 @@ mod resource_policy_lazy_tests {
     }
 }
 
+impl verter_type_engine::fact_signature_helpers::UnboundBasisOwner for crate::VerterHost {
+    fn signature_overflow_at_install(&self) -> &std::sync::atomic::AtomicU64 {
+        &self.signature_overflow_at_install
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    fn engine_test_knobs(&self) -> &verter_type_engine::engine_test_knobs::TestKnobs {
+        &self.test_force.engine
+    }
+}
+
 impl crate::VerterHost {
-    pub(crate) fn engine_observers(&self) -> crate::project_semantic_dispatch::EngineObservers {
-        crate::project_semantic_dispatch::EngineObservers::new(
+    pub(crate) fn engine_observers(
+        &self,
+    ) -> verter_type_engine::project_semantic_dispatch::EngineObservers {
+        verter_type_engine::project_semantic_dispatch::EngineObservers::new(
             #[cfg(any(test, feature = "test-support"))]
             Arc::clone(&self.signature_overflow_at_install),
-            Arc::clone(&self.provenance),
+            Arc::clone(&self.provenance.engine),
             Arc::clone(&self.relation_knobs),
             #[cfg(any(test, feature = "test-support"))]
             Arc::clone(&self.flow_fault_injection),
-            #[cfg(test)]
-            Arc::clone(&self.test_force),
+            #[cfg(any(test, feature = "test-support"))]
+            Arc::clone(&self.test_force.engine),
         )
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 mod fact_validation_authority {
-    use crate::resolver_core::fact_validation_port::FactValidation;
-    use crate::resolver_core::{
-        DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
-        ResolveImportsFactRef, ResolverHash16, RouteSurfaceFactRef, StoreView,
-        StoreViewCompatToken,
-    };
     use std::collections::BTreeSet;
+    use verter_session_query::facts::fact_cache::{
+        DerivedFactKind, FactVersionRef, ParseFactRef, ProgramAnalysisFactRef,
+        ResolveImportsFactRef, RouteSurfaceFactRef,
+    };
+    use verter_session_query::facts::store_view::{
+        ResolverHash16, StoreView, StoreViewCompatToken,
+    };
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidation;
+    impl verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation
+        for crate::VerterHost
+    {
+        type Clocks = crate::resolver_store::WorkspaceSlotClocks;
+        fn aggregate_clock_reader(
+            &self,
+        ) -> verter_session_query::facts::clocks::AggregateClockReader<Self::Clocks> {
+            crate::VerterHost::aggregate_clock_reader(self)
+        }
+    }
     impl FactValidation for crate::VerterHost {
         fn current_external_supersession_fingerprint(&self) -> u64 {
             crate::VerterHost::current_external_supersession_fingerprint(self)
         }
         fn source_environment(
             &self,
-            key: &crate::file_artifact_store::FileArtifactKey,
-        ) -> crate::resolver_store::SourceEnvIdentity {
-            crate::resolver_store::SourceEnvIdentity::live_for_artifact_key(self, key)
+            key: &verter_session_query::source::artifact_key::FileArtifactKey,
+        ) -> verter_session_query::source::env_identity::SourceEnvIdentity {
+            crate::resolver_store::live_source_env_identity(self, key)
         }
         fn current_project_generation(&self) -> u64 {
             self.project_type_store().current_project_generation()
         }
         fn complete_graph_signature(
             &self,
-            roots: &[(std::sync::Arc<str>, crate::types::Hash16)],
+            roots: &[(
+                std::sync::Arc<str>,
+                verter_session_query::analysis::types::Hash16,
+            )],
             facts: &[FactVersionRef],
         ) -> Result<
-            crate::fact_signature_helpers::StructuralCarrierReadSet,
-            crate::cache_runtime::NonAdmissionReason,
+            verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
+            verter_audit::NonAdmissionReason,
         > {
             let view = match self.resolver_store_view_read() {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
             };
-            crate::semantic_query_memo::semantic_graph_read_set_signature(&view, roots, facts)
-        }
-        fn aggregate_clock_reader(&self) -> crate::resolver_store::AggregateClockReader {
-            crate::VerterHost::aggregate_clock_reader(self)
+            verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
+                &view, roots, facts,
+            )
         }
         fn record_signature_overflow(&self) {
             self.signature_overflow_at_install
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        #[cfg(test)]
         fn tracer_forcing(&self) -> (bool, usize) {
             (
                 self.test_force
+                    .engine
                     .force_fact_tracer_non_cacheable_read
                     .load(std::sync::atomic::Ordering::Relaxed),
                 self.test_force
+                    .engine
                     .force_fact_tracer_overflow_observations
                     .load(std::sync::atomic::Ordering::Relaxed),
             )
@@ -1903,7 +1875,7 @@ mod fact_validation_authority {
         fn validates_file_source_env(
             &self,
             canonical_id: &str,
-            parse_env_hash: crate::locator_identity::ParseEnvHash,
+            parse_env_hash: verter_session_query::facts::fact_cache::ParseEnvHash,
             parse_key: &verter_language::ParseKey,
             file_language_id: &verter_language::FileLanguage,
         ) -> bool {
@@ -1931,7 +1903,9 @@ mod fact_validation_authority {
 
             view.validates_self_root_whole_hash(canonical_id, hash)
         }
-        fn strict_self_root_world_identity(&self) -> Option<verter_workspace::StrictSelfRootWorld> {
+        fn strict_self_root_world_identity(
+            &self,
+        ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
@@ -1950,7 +1924,7 @@ mod fact_validation_authority {
         fn mint_strict_self_root_world(
             &self,
             roots: &[(&str, ResolverHash16)],
-        ) -> Option<verter_workspace::StrictSelfRootWorld> {
+        ) -> Option<verter_session_query::facts::fact_cache::StrictSelfRootWorld> {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
@@ -1978,8 +1952,10 @@ mod fact_validation_authority {
 
             view.derived_hash_for(canonical_id, kind)
         }
-        fn aggregate_basis_seed(&self) -> verter_workspace::AggregateBasisSeed {
-            verter_workspace::AggregateBasisSeed::Unvouched
+        fn aggregate_basis_seed(
+            &self,
+        ) -> verter_session_query::facts::fact_cache::AggregateBasisSeed {
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched
         }
         fn validates_fact_signature(&self, sig: &[FactVersionRef]) -> bool {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
@@ -2016,8 +1992,8 @@ mod fact_validation_authority {
         fn promote_route_completion(
             &self,
             canonical: &str,
-            whole_hash: crate::types::Hash16,
-            route_hash: Option<crate::types::Hash16>,
+            whole_hash: verter_session_query::analysis::types::Hash16,
+            route_hash: Option<verter_session_query::analysis::types::Hash16>,
         ) {
             let view = match crate::VerterHost::resolver_store_view_read(self) {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),

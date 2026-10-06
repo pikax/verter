@@ -1,7 +1,7 @@
 //! Discriminating test (v8 AMENDMENT-S): a namespace import
 //! (`import * as ns from "X"`) admits a fact whose
 //! [`ResolvedImportClauseEntry::space`] is
-//! [`verter_semantic::facts::registry::SymbolSpace::Namespace`].
+//! [`verter_session_query::facts::registry::SymbolSpace::Namespace`].
 //!
 //! **Discrimination:** Pre-`1.f` state has no producer; pre-v8
 //! state classified namespace imports as `Type` or `Value` only.
@@ -16,11 +16,11 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::registry::SymbolSpace;
 use verter_session::session_view::{HostView, SessionView};
 use verter_session::{
     CompileErrorPolicy, DependencyResolution, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
+use verter_session_query::facts::registry::SymbolSpace;
 
 #[test]
 fn namespace_import_admits_namespace_space_fact() {

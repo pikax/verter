@@ -31,8 +31,10 @@ use crate::typeinfo::surface::TypeInfoSurfaceMember;
 /// JSDoc deliberately uses the declaration_origin instead (the two axes
 /// intentionally use different files).
 #[must_use]
-pub(crate) fn member_value_expr_scope(
-    dispatch: &crate::project_semantic_dispatch::ProjectSemanticDispatch<'_>,
+pub(crate) fn member_value_expr_scope<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
     owner_fallback: &str,
 ) -> TypeExprScope {

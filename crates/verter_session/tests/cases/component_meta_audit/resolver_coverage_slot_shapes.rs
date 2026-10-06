@@ -37,7 +37,7 @@ defineSlots<{
 fn demand_binding_type(
     host: &verter_session::VerterHost,
     owner: &str,
-    binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
+    binding: &verter_session_query::analysis::component_meta::SlotBindingAnalysis,
 ) -> TypeExpr {
     let source = binding
         .publication

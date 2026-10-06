@@ -17,13 +17,15 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
-use verter_semantic::facts::registry::SymbolSpace;
+use verter_session_query::facts::registry::SymbolSpace;
 
-use crate::file_artifact_store::{AugmentationTargetKind, ProjectIdentity};
+use crate::file_artifact_store::ProjectIdentity;
 #[cfg(any(test, feature = "test-support"))]
 use crate::resolver_core::PermissiveStoreView;
-use crate::resolver_core::{FactVersionRef, SingleflightGroup, StoreView, ValidatedFactCache};
-use crate::types::Hash16;
+use crate::resolver_core::{SingleflightGroup, ValidatedFactCache};
+use verter_session_query::analysis::types::Hash16;
+use verter_session_query::facts::fact_cache::FactVersionRef;
+use verter_session_query::facts::store_view::StoreView;
 
 /// Substrate version for the route/barrel resolution algorithm. A bump
 /// invalidates every `RouteNameKey` / `BarrelSurfaceKey` slot by changing
@@ -116,51 +118,6 @@ impl BarrelSurfaceKey {
             resolve_env_hash,
             lib_env_hash,
             resolver_version: ROUTE_DB_RESOLVER_VERSION,
-        }
-    }
-}
-
-/// Build the parse-domain `FactKey::ModuleAugmentationIndexShape`
-/// payload an augmentation-index consumer observes for the queried
-/// target — the sole `RouteSurface` fact shape. The parallel optional
-/// fields hold the concrete target value; the `target_kind_tag`
-/// discriminates.
-pub(crate) fn build_module_augmentation_index_shape_fact_key(
-    target: &AugmentationTargetKind,
-) -> verter_semantic::facts::FactKey {
-    use verter_semantic::facts::registry::AugmentationTargetKindTag;
-    match target {
-        AugmentationTargetKind::ExternalSpecifier(spec) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
-                external_specifier: Some(spec.clone()),
-                resolved_relative_canonical: None,
-                wildcard_pattern: None,
-            }
-        }
-        AugmentationTargetKind::ResolvedRelativeCanonical(canon) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::ResolvedRelativeCanonical,
-                external_specifier: None,
-                resolved_relative_canonical: Some(Arc::clone(canon)),
-                wildcard_pattern: None,
-            }
-        }
-        AugmentationTargetKind::WildcardAmbient(pat) => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::WildcardAmbient,
-                external_specifier: None,
-                resolved_relative_canonical: None,
-                wildcard_pattern: Some(pat.clone()),
-            }
-        }
-        AugmentationTargetKind::GlobalAugmentation => {
-            verter_semantic::facts::FactKey::ModuleAugmentationIndexShape {
-                target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
-                external_specifier: None,
-                resolved_relative_canonical: None,
-                wildcard_pattern: None,
-            }
         }
     }
 }
@@ -331,7 +288,7 @@ impl RouteDb {
         view: &V,
     ) -> Option<Arc<RouteResult>> {
         let result = self.routes.get_if_valid(key, view);
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -351,7 +308,7 @@ impl RouteDb {
     #[cfg(any(test, feature = "test-support"))]
     pub fn get_route_any(&self, key: &RouteNameKey) -> Option<Arc<RouteResult>> {
         let result = self.routes.get_if_valid(key, &PermissiveStoreView);
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -463,7 +420,7 @@ impl RouteDb {
     /// into any active tracer on the current thread.
     ///
     /// On a warm hit the cached fact-dep signature is fanned out via
-    /// [`crate::fact_signature_helpers::observe_fact_signature`] before
+    /// [`verter_type_engine::fact_signature_helpers::observe_fact_signature`] before
     /// returning. On a cold miss the inner `resolve` closure is invoked
     /// inside a singleflight group; after resolution the freshly-stored
     /// facts are read back and also fanned out. When a concurrent thread
@@ -608,19 +565,23 @@ impl RouteDb {
         V: StoreView,
         F: FnOnce() -> Option<BarrelRouteSurface>,
     {
-        crate::fact_signature_helpers::with_cacheability_scope(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(host),
+        verter_type_engine::fact_signature_helpers::with_cacheability_scope(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(host),
             |probe| self.get_or_build_barrel_surface_in_scope(key, view, probe, build),
         )
         .0
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    fn get_or_build_barrel_surface_in_scope<V, F>(
+    fn get_or_build_barrel_surface_in_scope<
+        V,
+        F,
+        W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+    >(
         &self,
         key: BarrelSurfaceKey,
         view: &V,
-        probe: &crate::fact_signature_helpers::CacheabilityProbe<'_>,
+        probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
         build: F,
     ) -> Option<Arc<BarrelRouteSurface>>
     where
@@ -766,7 +727,7 @@ pub(crate) fn emit_export_route_resolved_event(
         ..
     } = result
     {
-        crate::host_manage::push_structured_event(
+        verter_type_engine::request_observers::push_structured_event(
             crate::component_meta_audit::StructuredAuditEvent::ExportRouteResolved {
                 provider_canonical: Arc::<str>::from(provider_canonical),
                 exported_name: Arc::<str>::from(exported_name),
@@ -778,20 +739,20 @@ pub(crate) fn emit_export_route_resolved_event(
     }
 }
 
-impl crate::invalidation_domain::ParticipatesInInvalidation for RouteDb {
-    fn domains(&self) -> &'static [crate::invalidation_domain::InvalidationDomain] {
-        use crate::invalidation_domain::InvalidationDomain::*;
+impl verter_type_engine::invalidation_domain::ParticipatesInInvalidation for RouteDb {
+    fn domains(&self) -> &'static [verter_type_engine::invalidation_domain::InvalidationDomain] {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         &[FileContent, ResolverState, ProjectGeneration]
     }
-    fn invalidate(&self, domain: crate::invalidation_domain::InvalidationDomain) {
-        use crate::invalidation_domain::InvalidationDomain::*;
+    fn invalidate(&self, domain: verter_type_engine::invalidation_domain::InvalidationDomain) {
+        use verter_type_engine::invalidation_domain::InvalidationDomain::*;
         if matches!(domain, ProjectGeneration) {
             self.clear();
         }
     }
 }
 
-impl crate::invalidation_domain::InvalidationByCanonical for RouteDb {
+impl verter_type_engine::invalidation_domain::InvalidationByCanonical for RouteDb {
     fn invalidate_canonical_for(&self, canonical_id: &str) -> usize {
         // Routes are keyed on (resolver_owner_canonical, specifier);
         // a content edit on a provider canonical evicts every route
@@ -815,7 +776,8 @@ fn test_host() -> &'static crate::VerterHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resolver_core::{FactVersionRef, StoreView, StoreViewCompatToken};
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
 
     #[derive(Debug)]
     struct TestView {

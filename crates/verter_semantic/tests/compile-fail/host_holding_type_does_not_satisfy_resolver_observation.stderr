@@ -9,17 +9,16 @@ help: the trait `observation::sealed::Sealed` is not implemented for `FakeHostHa
    |
 21 | struct FakeHostHandle {
    | ^^^^^^^^^^^^^^^^^^^^^
-   = note: `FakeHostHandle` implements similarly named trait `unicode_width::private::Sealed`, but not `observation::sealed::Sealed`
 help: the trait `observation::sealed::Sealed` is implemented for `ResolverAttemptView`
-  --> src/resolver_core/resolver_attempt_view.rs
+  --> $WORKSPACE/crates/verter_resolution/src/resolver_attempt_view.rs
    |
    | impl Sealed for ResolverAttemptView {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 note: required by a bound in `ResolverObservation`
-  --> src/resolver_core/observation.rs
+  --> $WORKSPACE/crates/verter_resolution/src/observation.rs
    |
    | pub trait ResolverObservation: sealed::Sealed {
    |                                ^^^^^^^^^^^^^^ required by this bound in `ResolverObservation`
-   = note: `ResolverObservation` is a "sealed trait", because to implement it you also need to implement `verter_semantic::resolver_core::observation::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = note: `ResolverObservation` is a "sealed trait", because to implement it you also need to implement `verter_resolution::observation::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
    = help: the following type implements the trait:
-             verter_semantic::resolver_core::ResolverAttemptView
+             verter_resolution::ResolverAttemptView

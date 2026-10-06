@@ -395,7 +395,7 @@ fn type_publication_wire_keeps_outcome_and_terminal_display_separate() {
 
 #[test]
 fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     use verter_type_expr::facts::{SemanticSourceFailure, SourcePosition};
     use verter_type_expr::{PublicationResult, ResolutionProvenance, TypedResolutionFailure};
 
@@ -521,15 +521,15 @@ fn resolution_output_with(
     origin_graph: Option<verter_protocol::types::OriginGraphDto>,
 ) -> host::meta_resolve::ComponentMetaResolutionOutput {
     host::meta_resolve::ComponentMetaResolutionOutput {
-        mode: host::ProjectionMode::Expanded,
+        mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
         resolved_macros: Vec::new(),
         resolved_type_registry_meta,
         origin_graph,
     }
 }
 
-fn empty_analysis() -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
-    verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+fn empty_analysis() -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+    verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -544,18 +544,21 @@ fn empty_analysis() -> verter_semantic::analysis::component_meta::ComponentMetaA
         bindings: Vec::new(),
         vue_api_calls: Vec::new(),
         styles: Vec::new(),
-        flags: verter_semantic::analysis::component_meta::ComponentMetaFlags::default(),
+        flags: verter_session_query::analysis::component_meta::ComponentMetaFlags::default(),
         root_reachability:
-            verter_semantic::analysis::component_meta::RootReachability::NoFallthrough {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            verter_session_query::analysis::component_meta::RootReachability::NoFallthrough {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             },
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
         accepted_surface_completeness:
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
-        fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::None {
-            reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
-        },
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface:
+            verter_session_query::analysis::component_meta::FallthroughSurface::None {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
         macro_expansion_diagnostics: Vec::new(),
         options_api: false,
         file_path: String::new(),
@@ -662,7 +665,7 @@ fn host_cpu_threads_forwards_to_host_config() {
 
 #[test]
 fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_information() {
-    let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+    let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -671,7 +674,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         public_instance: None,
         ordered_sfc_structure: None,
         type_registry: vec![
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+            verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Props".to_string(),
                 type_source: verter_type_expr::facts::SourcePosition::Present(
                     verter_type_expr::facts::SemanticTypeSource::Closed(
@@ -689,18 +692,21 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
         bindings: Vec::new(),
         vue_api_calls: Vec::new(),
         styles: Vec::new(),
-        flags: verter_semantic::analysis::component_meta::ComponentMetaFlags::default(),
+        flags: verter_session_query::analysis::component_meta::ComponentMetaFlags::default(),
         root_reachability:
-            verter_semantic::analysis::component_meta::RootReachability::NoFallthrough {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            verter_session_query::analysis::component_meta::RootReachability::NoFallthrough {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             },
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
         accepted_surface_completeness:
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
-        fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::None {
-            reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
-        },
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface:
+            verter_session_query::analysis::component_meta::FallthroughSurface::None {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
         macro_expansion_diagnostics: Vec::new(),
         options_api: false,
         file_path: "/src/App.vue".to_string(),
@@ -708,14 +714,15 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
     let resolution = resolution_output_with(
         vec![host::meta_resolve::ResolvedTypeRegistryMeta {
             name: "Props".to_string(),
-            declaration: host::meta_resolve::ResolvedTypeDeclaration {
+            declaration: verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
                 requested_name: "Props".to_string(),
                 declaration_id: None,
                 resolved_name: "Props".to_string(),
                 canonical_source: "/src/types.ts".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 span: verter_span::Span::new(10, 48),
-                kind: host::meta_resolve::ResolvedDeclarationKind::Interface,
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
                 text: Some("export interface Props { label: string }".to_string()),
             },
         }],
@@ -759,7 +766,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
 
 #[test]
 fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
-    let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+    let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -772,7 +779,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
         // positional swap moves the sentinel types — both fail the
         // assertions below.
         type_registry: vec![
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+            verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Button".to_string(),
                 type_source: verter_type_expr::facts::SourcePosition::Present(
                     verter_type_expr::facts::SemanticTypeSource::Closed(
@@ -783,7 +790,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
                 ),
                 type_expansion: None,
             },
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+            verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Middle".to_string(),
                 type_source: verter_type_expr::facts::SourcePosition::Present(
                     verter_type_expr::facts::SemanticTypeSource::Closed(
@@ -794,7 +801,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
                 ),
                 type_expansion: None,
             },
-            verter_semantic::analysis::component_meta::ResolvedTypeAnalysis {
+            verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Button".to_string(),
                 type_source: verter_type_expr::facts::SourcePosition::Present(
                     verter_type_expr::facts::SemanticTypeSource::Closed(
@@ -812,18 +819,21 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
         bindings: Vec::new(),
         vue_api_calls: Vec::new(),
         styles: Vec::new(),
-        flags: verter_semantic::analysis::component_meta::ComponentMetaFlags::default(),
+        flags: verter_session_query::analysis::component_meta::ComponentMetaFlags::default(),
         root_reachability:
-            verter_semantic::analysis::component_meta::RootReachability::NoFallthrough {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            verter_session_query::analysis::component_meta::RootReachability::NoFallthrough {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             },
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
         accepted_surface_completeness:
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
-        fallthrough_surface: verter_semantic::analysis::component_meta::FallthroughSurface::None {
-            reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
-        },
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+        fallthrough_surface:
+            verter_session_query::analysis::component_meta::FallthroughSurface::None {
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
+            },
         macro_expansion_diagnostics: Vec::new(),
         options_api: false,
         file_path: "/src/App.vue".to_string(),
@@ -831,14 +841,15 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
     let resolution = resolution_output_with(
         vec![host::meta_resolve::ResolvedTypeRegistryMeta {
             name: "Button".to_string(),
-            declaration: host::meta_resolve::ResolvedTypeDeclaration {
+            declaration: verter_session_query::declarations::metadata::ResolvedTypeDeclaration {
                 requested_name: "Button".to_string(),
                 declaration_id: None,
                 resolved_name: "Button".to_string(),
                 canonical_source: "/src/App.vue".to_string(),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 span: verter_span::Span::new(10, 52),
-                kind: host::meta_resolve::ResolvedDeclarationKind::TypeAlias,
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias,
                 text: Some(
                     "type Button = ComponentConfig<typeof theme, MissingAppConfig>".to_string(),
                 ),
@@ -905,7 +916,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
 
 #[test]
 fn component_meta_ffi_exposes_root_info_summary() {
-    let analysis = verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+    let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -920,20 +931,20 @@ fn component_meta_ffi_exposes_root_info_summary() {
         bindings: Vec::new(),
         vue_api_calls: Vec::new(),
         styles: Vec::new(),
-        flags: verter_semantic::analysis::component_meta::ComponentMetaFlags::default(),
-        root_reachability: verter_semantic::analysis::component_meta::RootReachability::Branches {
+        flags: verter_session_query::analysis::component_meta::ComponentMetaFlags::default(),
+        root_reachability: verter_session_query::analysis::component_meta::RootReachability::Branches {
             branches: vec![
-                verter_semantic::analysis::component_meta::RootBranch {
+                verter_session_query::analysis::component_meta::RootBranch {
                     branch_index: 0,
                     condition_text: None,
                     target:
-                        verter_semantic::analysis::component_meta::RootTargetRef::ComponentUsage {
+                        verter_session_query::analysis::component_meta::RootTargetRef::ComponentUsage {
                             element_index: 1,
                             usage_index: 0,
                             name: "PrimaryButton".to_string(),
                             import_source: Some("./PrimaryButton.vue".to_string()),
                         },
-                    consumed: verter_semantic::analysis::component_meta::ConsumedRootBindings {
+                    consumed: verter_session_query::analysis::component_meta::ConsumedRootBindings {
                         attrs: vec!["class".to_string()],
                         listeners: vec!["click".to_string()],
                         has_dynamic_attr_name: false,
@@ -941,15 +952,15 @@ fn component_meta_ffi_exposes_root_info_summary() {
                     },
                     has_unknown_spread: false,
                 },
-                verter_semantic::analysis::component_meta::RootBranch {
+                verter_session_query::analysis::component_meta::RootBranch {
                     branch_index: 1,
                     condition_text: Some("isFallback".to_string()),
                     target:
-                        verter_semantic::analysis::component_meta::RootTargetRef::NativeElement {
+                        verter_session_query::analysis::component_meta::RootTargetRef::NativeElement {
                             element_index: 2,
                             tag: "button".to_string(),
                         },
-                    consumed: verter_semantic::analysis::component_meta::ConsumedRootBindings {
+                    consumed: verter_session_query::analysis::component_meta::ConsumedRootBindings {
                         attrs: Vec::new(),
                         listeners: Vec::new(),
                         has_dynamic_attr_name: false,
@@ -962,9 +973,9 @@ fn component_meta_ffi_exposes_root_info_summary() {
         accepted_props: Vec::new(),
         accepted_events: Vec::new(),
         accepted_surface_completeness:
-            verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
+            verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact,
         fallthrough_surface:
-            verter_semantic::analysis::component_meta::FallthroughSurface::Branches {
+            verter_session_query::analysis::component_meta::FallthroughSurface::Branches {
                 branches: Vec::new(),
             },
         macro_expansion_diagnostics: Vec::new(),
@@ -1166,25 +1177,25 @@ fn config_all_fields() {
 
 #[test]
 fn expansion_metadata_to_ffi_preserves_exactness_and_execution_status() {
-    let ffi = expansion_metadata_to_ffi(verter_semantic::analysis::type_expand::ExpansionMetadata {
-        exactness: verter_semantic::analysis::type_solver::result::SolverExactness::ExactSymbolic,
+    let ffi = expansion_metadata_to_ffi(verter_session_query::analysis::type_expand::ExpansionMetadata {
+        exactness: verter_session_query::type_solver::result::SolverExactness::ExactSymbolic,
         execution_status:
-            verter_semantic::analysis::type_solver::result::ExecutionStatus::HardStop,
+            verter_session_query::type_solver::result::ExecutionStatus::HardStop,
         diagnostics: vec![
-            verter_semantic::analysis::type_expand::ExpansionDiagnostic {
+            verter_session_query::analysis::type_expand::ExpansionDiagnostic {
                 reason:
-                    verter_semantic::analysis::type_expand::ExpansionStopReason::UnsupportedOperator,
+                    verter_session_query::analysis::type_expand::ExpansionStopReason::UnsupportedOperator,
                 context: "kept symbolic".to_string(),
                 property_name: None,
             },
-            verter_semantic::analysis::type_expand::ExpansionDiagnostic {
+            verter_session_query::analysis::type_expand::ExpansionDiagnostic {
                 reason:
-                    verter_semantic::analysis::type_expand::ExpansionStopReason::ProjectionWorkLimit,
+                    verter_session_query::analysis::type_expand::ExpansionStopReason::ProjectionWorkLimit,
                 context: "work limit".to_string(),
                 property_name: None,
             },
-            verter_semantic::analysis::type_expand::ExpansionDiagnostic {
-                reason: verter_semantic::analysis::type_expand::ExpansionStopReason::ConnectedQueryDepthLimit,
+            verter_session_query::analysis::type_expand::ExpansionDiagnostic {
+                reason: verter_session_query::analysis::type_expand::ExpansionStopReason::ConnectedQueryDepthLimit,
                 context: "query depth limit".to_string(),
                 property_name: None,
             },
@@ -2576,7 +2587,7 @@ fn ffi_seam_response_serialises_mode_fields() {
 /// exact assertions.
 #[test]
 fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     use verter_type_expr::{PrimitiveName, TypeExpr};
 
     let mut analysis = empty_analysis();
@@ -2746,7 +2757,7 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
 /// payload) cannot satisfy this test.
 #[test]
 fn component_meta_lane_misalignment_fails_closed_not_silent_truncation() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
 
     let mut analysis = empty_analysis();
     // One analysis prop against the EMPTY default lanes — misaligned.
@@ -2800,8 +2811,8 @@ fn conversion_panic_message(convert: impl FnOnce() + std::panic::UnwindSafe) -> 
 
 fn fallthrough_prop_entry(
     name: &str,
-) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
-    verter_semantic::analysis::component_meta::FallthroughPropEntry {
+) -> verter_session_query::analysis::component_meta::FallthroughPropEntry {
+    verter_session_query::analysis::component_meta::FallthroughPropEntry {
         name: name.to_string(),
         callable_role: verter_type_expr::PropCallableRole::default(),
         publication: publication_fixture(verter_type_expr::facts::SourcePosition::unannotated()),
@@ -2812,8 +2823,8 @@ fn fallthrough_prop_entry(
 
 fn fallthrough_event_entry(
     name: &str,
-) -> verter_semantic::analysis::component_meta::FallthroughEventEntry {
-    verter_semantic::analysis::component_meta::FallthroughEventEntry {
+) -> verter_session_query::analysis::component_meta::FallthroughEventEntry {
+    verter_session_query::analysis::component_meta::FallthroughEventEntry {
         name: name.to_string(),
         payload: verter_type_expr::facts::SourcePosition::unannotated(),
         payload_scope: None,
@@ -2823,16 +2834,16 @@ fn fallthrough_event_entry(
 }
 
 fn fallthrough_branch(
-    props: Vec<verter_semantic::analysis::component_meta::FallthroughPropEntry>,
-    events: Vec<verter_semantic::analysis::component_meta::FallthroughEventEntry>,
-) -> verter_semantic::analysis::component_meta::FallthroughBranch {
-    verter_semantic::analysis::component_meta::FallthroughBranch {
+    props: Vec<verter_session_query::analysis::component_meta::FallthroughPropEntry>,
+    events: Vec<verter_session_query::analysis::component_meta::FallthroughEventEntry>,
+) -> verter_session_query::analysis::component_meta::FallthroughBranch {
+    verter_session_query::analysis::component_meta::FallthroughBranch {
         branch_key: "0".to_string(),
         condition_text: None,
         props,
         events,
         root_chain: Vec::new(),
-        status: verter_semantic::analysis::component_meta::BranchStatus::Resolved,
+        status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
     }
 }
 
@@ -2843,7 +2854,7 @@ fn fallthrough_branch(
 /// builds, where the truncation would ship).
 #[test]
 fn fallthrough_outer_branch_lane_misalignment_fails_closed() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     let surface = cm::FallthroughSurface::Branches {
         branches: vec![fallthrough_branch(Vec::new(), Vec::new())],
     };
@@ -2867,7 +2878,7 @@ fn fallthrough_outer_branch_lane_misalignment_fails_closed() {
 /// the inner prop zip would silently truncate otherwise.
 #[test]
 fn fallthrough_inner_prop_lane_misalignment_fails_closed() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     use verter_type_expr::{PrimitiveName, TypeExpr};
     let surface = cm::FallthroughSurface::Branches {
         branches: vec![fallthrough_branch(
@@ -2899,7 +2910,7 @@ fn fallthrough_inner_prop_lane_misalignment_fails_closed() {
 /// event lane length differs from its analysis event rows must refuse loudly.
 #[test]
 fn fallthrough_inner_event_lane_misalignment_fails_closed() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     use verter_type_expr::{PrimitiveName, TypeExpr};
     let surface = cm::FallthroughSurface::Branches {
         branches: vec![fallthrough_branch(
@@ -2936,7 +2947,7 @@ fn fallthrough_inner_event_lane_misalignment_fails_closed() {
 /// silently dropping them would hide the tear.
 #[test]
 fn fallthrough_none_surface_with_nonempty_lanes_fails_closed() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     use verter_type_expr::{PrimitiveName, TypeExpr};
     let surface = cm::FallthroughSurface::None {
         reason: cm::NoFallthroughReason::NoTemplate,
@@ -2965,7 +2976,7 @@ fn fallthrough_none_surface_with_nonempty_lanes_fails_closed() {
 /// positional member.
 #[test]
 fn component_meta_aligned_lanes_convert_unchanged_through_the_hard_guard() {
-    use verter_semantic::analysis::component_meta as cm;
+    use verter_session_query::analysis::component_meta as cm;
     use verter_type_expr::{PrimitiveName, TypeExpr};
 
     let mut analysis = empty_analysis();
@@ -3064,7 +3075,7 @@ fn component_public_contract_crosses_the_production_ffi_seam_structurally() {
         None,
         Default::default(),
         contract,
-        host::semantic_query::ResultCompleteness::Complete,
+        verter_type_engine::semantic_query::ResultCompleteness::Complete,
     );
     let FfiComponentContractAvailability::Supported { contract } = ffi.component_public_contract
     else {
@@ -3140,8 +3151,8 @@ fn resolution_less_conversion_reports_typed_unavailable_status_never_silent_succ
 /// skipping and the undemanded binding grows two null keys.
 #[test]
 fn binding_return_wrapper_role_crosses_the_ffi_boundary_with_exactness_intact() {
-    use verter_semantic::analysis::component_meta::{BindingAnalysis, BindingKindAnalysis};
-    use verter_semantic::analysis::types::ReactivityKind;
+    use verter_session_query::analysis::component_meta::{BindingAnalysis, BindingKindAnalysis};
+    use verter_session_query::analysis::types::ReactivityKind;
 
     let binding =
         |name: &str,
@@ -3546,8 +3557,8 @@ fn ffi_style_token_fails_closed_for_foreign_artifact_ref() {
         "fixture premise: identical artifact-local block id"
     );
 
-    let style_row = |block_ref| verter_semantic::analysis::component_meta::StyleAnalysis {
-        lang: verter_semantic::analysis::style::StyleAnalysisLang::Css,
+    let style_row = |block_ref| verter_session_query::analysis::component_meta::StyleAnalysis {
+        lang: verter_session_query::analysis::style::StyleAnalysisLang::Css,
         scoped: false,
         is_module: false,
         module_name: None,
@@ -3841,8 +3852,8 @@ fn reasonless_partial_publishes_the_inherited_partiality_reason() {
                 diagnostics: Arc::from([]),
             },
         ),
-        host::semantic_query::ResultCompleteness::partial(
-            host::semantic_query::PartialReasonSet::empty(),
+        verter_type_engine::semantic_query::ResultCompleteness::partial(
+            verter_type_engine::semantic_query::PartialReasonSet::empty(),
         ),
     );
 

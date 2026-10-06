@@ -6,28 +6,28 @@ use verter_session as host;
 use crate::types::*;
 
 pub(super) fn macro_expansion_kind_to_string(
-    kind: verter_semantic::analysis::component_meta::MacroExpansionKind,
+    kind: verter_session_query::analysis::component_meta::MacroExpansionKind,
 ) -> String {
     match kind {
-        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineProps => {
+        verter_session_query::analysis::component_meta::MacroExpansionKind::DefineProps => {
             "defineProps".to_string()
         }
-        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineEmits => {
+        verter_session_query::analysis::component_meta::MacroExpansionKind::DefineEmits => {
             "defineEmits".to_string()
         }
-        verter_semantic::analysis::component_meta::MacroExpansionKind::DefineSlots => {
+        verter_session_query::analysis::component_meta::MacroExpansionKind::DefineSlots => {
             "defineSlots".to_string()
         }
     }
 }
-pub(super) fn jsdoc_to_ffi(tag: verter_semantic::analysis::types::JsdocTag) -> FfiJsdocTag {
+pub(super) fn jsdoc_to_ffi(tag: verter_session_query::analysis::types::JsdocTag) -> FfiJsdocTag {
     FfiJsdocTag {
         name: tag.name,
         text: tag.text,
     }
 }
 pub(super) fn expansion_metadata_to_ffi(
-    metadata: verter_semantic::analysis::type_expand::ExpansionMetadata,
+    metadata: verter_session_query::analysis::type_expand::ExpansionMetadata,
 ) -> FfiExpansionMetadata {
     FfiExpansionMetadata {
         exactness: expansion_exactness_to_string(metadata.exactness),
@@ -44,87 +44,87 @@ pub(super) fn expansion_metadata_to_ffi(
     }
 }
 pub(super) fn expansion_exactness_to_string(
-    exactness: verter_semantic::analysis::type_expand::ExpansionExactness,
+    exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
 ) -> String {
     match exactness {
-        verter_semantic::analysis::type_expand::ExpansionExactness::ExactConcrete => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete => {
             "exactConcrete".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::ExactSymbolic => {
             "exactSymbolic".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete => {
+        verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete => {
             "incomplete".to_string()
         }
     }
 }
 
 pub(super) fn expansion_execution_status_to_string(
-    status: verter_semantic::analysis::type_expand::ExpansionExecutionStatus,
+    status: verter_session_query::analysis::type_expand::ExpansionExecutionStatus,
 ) -> String {
     match status {
-        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed => {
+        verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed => {
             "completed".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Cancelled => {
+        verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Cancelled => {
             "cancelled".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Interrupted => {
+        verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Interrupted => {
             "interrupted".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionExecutionStatus::HardStop => {
+        verter_session_query::analysis::type_expand::ExpansionExecutionStatus::HardStop => {
             "hardStop".to_string()
         }
     }
 }
 
 pub(super) fn expansion_stop_reason_to_string(
-    reason: verter_semantic::analysis::type_expand::ExpansionStopReason,
+    reason: verter_session_query::analysis::type_expand::ExpansionStopReason,
 ) -> String {
     match reason {
-        verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::BudgetExceeded => {
             "budgetExceeded".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::ProjectionWorkLimit => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::ProjectionWorkLimit => {
             "projectionWorkLimit".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::ConnectedQueryDepthLimit => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::ConnectedQueryDepthLimit => {
             "connectedQueryDepthLimit".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::ConnectedMemoryLimit => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::ConnectedMemoryLimit => {
             "connectedMemoryLimit".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::MappedDepthExceeded => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::MappedDepthExceeded => {
             "mappedDepthExceeded".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::UnresolvedReference => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::UnresolvedReference => {
             "unresolvedReference".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::IndeterminateConditional => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::IndeterminateConditional => {
             "indeterminateConditional".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::InfiniteKeySpace => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::InfiniteKeySpace => {
             "infiniteKeySpace".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::UnsupportedOperator => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::UnsupportedOperator => {
             "unsupportedOperator".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::ConditionalContextTruncated => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::ConditionalContextTruncated => {
             "conditionalContextTruncated".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::IdempotentArm => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::IdempotentArm => {
             "idempotentArm".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::CyclicReference => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::CyclicReference => {
             "cyclicReference".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::CyclicInstantiation => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::CyclicInstantiation => {
             "cyclicInstantiation".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::InstantiationError => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::InstantiationError => {
             "instantiationError".to_string()
         }
-        verter_semantic::analysis::type_expand::ExpansionStopReason::EmptyUnionArm => {
+        verter_session_query::analysis::type_expand::ExpansionStopReason::EmptyUnionArm => {
             "emptyUnionArm".to_string()
         }
     }
@@ -327,7 +327,7 @@ fn symbolic_equivalence_kind_to_ffi(
 }
 
 pub(super) fn accepted_prop_to_ffi(
-    prop: verter_semantic::analysis::component_meta::AcceptedPropAnalysis,
+    prop: verter_session_query::analysis::component_meta::AcceptedPropAnalysis,
     lane: verter_session::meta_resolve::MaterializedTypePublication,
 ) -> FfiAcceptedPropMeta {
     let (r#type, publication, terminal_display) = materialized_publication_to_ffi(lane);
@@ -344,7 +344,7 @@ pub(super) fn accepted_prop_to_ffi(
 }
 
 pub(super) fn accepted_event_to_ffi(
-    event: verter_semantic::analysis::component_meta::AcceptedEventAnalysis,
+    event: verter_session_query::analysis::component_meta::AcceptedEventAnalysis,
     payload: verter_type_expr::TypeExpr,
 ) -> FfiAcceptedEventMeta {
     FfiAcceptedEventMeta {
@@ -358,13 +358,13 @@ pub(super) fn accepted_event_to_ffi(
 }
 
 pub(super) fn member_provenance_to_ffi(
-    provenance: verter_semantic::analysis::component_meta::MemberProvenance,
+    provenance: verter_session_query::analysis::component_meta::MemberProvenance,
 ) -> FfiMemberProvenance {
     match provenance {
-        verter_semantic::analysis::component_meta::MemberProvenance::Declared => {
+        verter_session_query::analysis::component_meta::MemberProvenance::Declared => {
             FfiMemberProvenance::Declared
         }
-        verter_semantic::analysis::component_meta::MemberProvenance::Inherited { sources } => {
+        verter_session_query::analysis::component_meta::MemberProvenance::Inherited { sources } => {
             FfiMemberProvenance::Inherited {
                 sources: sources.into_iter().map(inherited_source_to_ffi).collect(),
             }
@@ -373,65 +373,65 @@ pub(super) fn member_provenance_to_ffi(
 }
 
 pub(super) fn inherited_source_to_ffi(
-    source: verter_semantic::analysis::component_meta::InheritedSource,
+    source: verter_session_query::analysis::component_meta::InheritedSource,
 ) -> FfiInheritedSource {
     match source {
-        verter_semantic::analysis::component_meta::InheritedSource::NativeTag { tag } => {
+        verter_session_query::analysis::component_meta::InheritedSource::NativeTag { tag } => {
             FfiInheritedSource::NativeTag { tag }
         }
-        verter_semantic::analysis::component_meta::InheritedSource::Component { canonical_id } => {
-            FfiInheritedSource::Component { canonical_id }
-        }
+        verter_session_query::analysis::component_meta::InheritedSource::Component {
+            canonical_id,
+        } => FfiInheritedSource::Component { canonical_id },
     }
 }
 
 pub(super) fn member_availability_to_ffi(
-    availability: verter_semantic::analysis::component_meta::MemberAvailability,
+    availability: verter_session_query::analysis::component_meta::MemberAvailability,
 ) -> FfiMemberAvailability {
     match availability {
-        verter_semantic::analysis::component_meta::MemberAvailability::Always => {
+        verter_session_query::analysis::component_meta::MemberAvailability::Always => {
             FfiMemberAvailability::Always
         }
-        verter_semantic::analysis::component_meta::MemberAvailability::Conditional {
+        verter_session_query::analysis::component_meta::MemberAvailability::Conditional {
             branch_keys,
         } => FfiMemberAvailability::Conditional { branch_keys },
     }
 }
 
 pub(super) fn accepted_prop_kind_to_ffi(
-    kind: verter_semantic::analysis::component_meta::AcceptedPropKind,
+    kind: verter_session_query::analysis::component_meta::AcceptedPropKind,
 ) -> FfiAcceptedPropKind {
     match kind {
-        verter_semantic::analysis::component_meta::AcceptedPropKind::DeclaredProp => {
+        verter_session_query::analysis::component_meta::AcceptedPropKind::DeclaredProp => {
             FfiAcceptedPropKind::DeclaredProp
         }
-        verter_semantic::analysis::component_meta::AcceptedPropKind::Attr => {
+        verter_session_query::analysis::component_meta::AcceptedPropKind::Attr => {
             FfiAcceptedPropKind::Attr
         }
     }
 }
 
 pub(super) fn accepted_event_kind_to_ffi(
-    kind: verter_semantic::analysis::component_meta::AcceptedEventKind,
+    kind: verter_session_query::analysis::component_meta::AcceptedEventKind,
 ) -> FfiAcceptedEventKind {
     match kind {
-        verter_semantic::analysis::component_meta::AcceptedEventKind::DeclaredEmit => {
+        verter_session_query::analysis::component_meta::AcceptedEventKind::DeclaredEmit => {
             FfiAcceptedEventKind::DeclaredEmit
         }
-        verter_semantic::analysis::component_meta::AcceptedEventKind::Listener => {
+        verter_session_query::analysis::component_meta::AcceptedEventKind::Listener => {
             FfiAcceptedEventKind::Listener
         }
     }
 }
 
 pub(super) fn accepted_surface_completeness_to_ffi(
-    completeness: verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness,
+    completeness: verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness,
 ) -> FfiAcceptedSurfaceCompleteness {
     match completeness {
-        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::Exact => {
+        verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact => {
             FfiAcceptedSurfaceCompleteness::Exact
         }
-        verter_semantic::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound => {
+        verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound => {
             FfiAcceptedSurfaceCompleteness::LowerBound
         }
     }
@@ -449,46 +449,54 @@ pub(super) fn resolved_jsdoc_tag_to_ffi(
 }
 
 pub(super) fn component_prop_constness_to_string(
-    constness: verter_semantic::analysis::template::PropValueConstness,
+    constness: verter_session_query::analysis::template::PropValueConstness,
 ) -> String {
     match constness {
-        verter_semantic::analysis::template::PropValueConstness::Const => "const".to_string(),
-        verter_semantic::analysis::template::PropValueConstness::Dynamic => "dynamic".to_string(),
-        verter_semantic::analysis::template::PropValueConstness::Unknown => "unknown".to_string(),
+        verter_session_query::analysis::template::PropValueConstness::Const => "const".to_string(),
+        verter_session_query::analysis::template::PropValueConstness::Dynamic => {
+            "dynamic".to_string()
+        }
+        verter_session_query::analysis::template::PropValueConstness::Unknown => {
+            "unknown".to_string()
+        }
     }
 }
 
 pub(super) fn binding_kind_to_string(
-    kind: verter_semantic::analysis::component_meta::BindingKindAnalysis,
+    kind: verter_session_query::analysis::component_meta::BindingKindAnalysis,
 ) -> String {
     match kind {
-        verter_semantic::analysis::component_meta::BindingKindAnalysis::Const => {
+        verter_session_query::analysis::component_meta::BindingKindAnalysis::Const => {
             "const".to_string()
         }
-        verter_semantic::analysis::component_meta::BindingKindAnalysis::Let => "let".to_string(),
-        verter_semantic::analysis::component_meta::BindingKindAnalysis::Var => "var".to_string(),
-        verter_semantic::analysis::component_meta::BindingKindAnalysis::Function => {
+        verter_session_query::analysis::component_meta::BindingKindAnalysis::Let => {
+            "let".to_string()
+        }
+        verter_session_query::analysis::component_meta::BindingKindAnalysis::Var => {
+            "var".to_string()
+        }
+        verter_session_query::analysis::component_meta::BindingKindAnalysis::Function => {
             "function".to_string()
         }
-        verter_semantic::analysis::component_meta::BindingKindAnalysis::AsyncFunction => {
+        verter_session_query::analysis::component_meta::BindingKindAnalysis::AsyncFunction => {
             "asyncFunction".to_string()
         }
-        verter_semantic::analysis::component_meta::BindingKindAnalysis::Class => {
+        verter_session_query::analysis::component_meta::BindingKindAnalysis::Class => {
             "class".to_string()
         }
     }
 }
 
 pub(super) fn reactivity_kind_to_string(
-    kind: verter_semantic::analysis::types::ReactivityKind,
+    kind: verter_session_query::analysis::types::ReactivityKind,
 ) -> String {
     match kind {
-        verter_semantic::analysis::types::ReactivityKind::None => "none".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::Ref => "ref".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::Computed => "computed".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::Reactive => "reactive".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::MaybeRef => "maybeRef".to_string(),
-        verter_semantic::analysis::types::ReactivityKind::Mutable => "mutable".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::None => "none".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::Ref => "ref".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::Computed => "computed".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::Reactive => "reactive".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::MaybeRef => "maybeRef".to_string(),
+        verter_session_query::analysis::types::ReactivityKind::Mutable => "mutable".to_string(),
     }
 }
 
@@ -547,74 +555,100 @@ pub(super) fn reactive_wrapper_unresolved_reason_to_string(
 }
 
 pub(super) fn vue_api_to_string(
-    api: verter_semantic::analysis::types::VueApiClassification,
+    api: verter_session_query::analysis::types::VueApiClassification,
 ) -> String {
     format!("{api:?}")
 }
 
 pub(super) fn style_lang_to_string(
-    lang: verter_semantic::analysis::style::StyleAnalysisLang,
+    lang: verter_session_query::analysis::style::StyleAnalysisLang,
 ) -> String {
     format!("{lang:?}")
 }
 
-pub(super) fn projection_mode_to_string(mode: host::ProjectionMode) -> String {
+pub(super) fn projection_mode_to_string(
+    mode: verter_type_engine::semantic_query::ProjectionMode,
+) -> String {
     match mode {
-        host::ProjectionMode::Identity => "identity".to_string(),
-        host::ProjectionMode::Navigate => "navigate".to_string(),
-        host::ProjectionMode::Shallow => "shallow".to_string(),
-        host::ProjectionMode::Expanded => "expanded".to_string(),
-        host::ProjectionMode::Skeleton => "skeleton".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Identity => "identity".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Navigate => "navigate".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Shallow => "shallow".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Expanded => "expanded".to_string(),
+        verter_type_engine::semantic_query::ProjectionMode::Skeleton => "skeleton".to_string(),
     }
 }
 
-pub(super) fn macro_kind_to_string(kind: verter_semantic::analysis::AnalyzedMacroKind) -> String {
+pub(super) fn macro_kind_to_string(
+    kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+) -> String {
     match kind {
-        verter_semantic::analysis::AnalyzedMacroKind::DefineProps => "defineProps".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::WithDefaults => "withDefaults".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineEmits => "defineEmits".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineSlots => "defineSlots".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineModel => "defineModel".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineExpose => "defineExpose".to_string(),
-        verter_semantic::analysis::AnalyzedMacroKind::DefineOptions => "defineOptions".to_string(),
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps => {
+            "defineProps".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::WithDefaults => {
+            "withDefaults".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits => {
+            "defineEmits".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots => {
+            "defineSlots".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel => {
+            "defineModel".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose => {
+            "defineExpose".to_string()
+        }
+        verter_session_query::analysis::types::AnalyzedMacroKind::DefineOptions => {
+            "defineOptions".to_string()
+        }
     }
 }
 
 pub(super) fn resolved_declaration_kind_to_string(
-    kind: host::meta_resolve::ResolvedDeclarationKind,
+    kind: verter_session_query::declarations::metadata::ResolvedDeclarationKind,
 ) -> String {
     match kind {
-        host::meta_resolve::ResolvedDeclarationKind::Interface => "interface".to_string(),
-        host::meta_resolve::ResolvedDeclarationKind::TypeAlias => "typeAlias".to_string(),
-        host::meta_resolve::ResolvedDeclarationKind::Class => "class".to_string(),
-        host::meta_resolve::ResolvedDeclarationKind::Unknown => "unknown".to_string(),
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface => {
+            "interface".to_string()
+        }
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::TypeAlias => {
+            "typeAlias".to_string()
+        }
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Class => {
+            "class".to_string()
+        }
+        verter_session_query::declarations::metadata::ResolvedDeclarationKind::Unknown => {
+            "unknown".to_string()
+        }
     }
 }
 
 pub(super) fn public_instance_completeness_to_string(
-    completeness: verter_semantic::analysis::component_meta::PublicInstanceCompleteness,
+    completeness: verter_session_query::analysis::component_meta::PublicInstanceCompleteness,
 ) -> String {
     match completeness {
-        verter_semantic::analysis::component_meta::PublicInstanceCompleteness::Exact => {
+        verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact => {
             "exact".to_string()
         }
-        verter_semantic::analysis::component_meta::PublicInstanceCompleteness::Partial => {
+        verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Partial => {
             "partial".to_string()
         }
     }
 }
 
 pub(super) fn public_instance_member_kind_to_string(
-    kind: verter_semantic::analysis::component_meta::PublicInstanceMemberKind,
+    kind: verter_session_query::analysis::component_meta::PublicInstanceMemberKind,
 ) -> String {
     match kind {
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Prop => {
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Prop => {
             "prop".to_string()
         }
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::SlotContainer => {
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::SlotContainer => {
             "slotContainer".to_string()
         }
-        verter_semantic::analysis::component_meta::PublicInstanceMemberKind::Exposed => {
+        verter_session_query::analysis::component_meta::PublicInstanceMemberKind::Exposed => {
             "exposed".to_string()
         }
     }

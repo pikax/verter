@@ -72,7 +72,8 @@ defineSlots<LiteralKeyedSlots<PricingPlan>>();
 <template><div></div></template>
 "#;
 
-fn resolve_pricing_plans() -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+fn resolve_pricing_plans() -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis
+{
     let host = harness::build_hermetic_host(&[
         ("/pricing_slots.ts", PRICING_SLOTS_TS),
         ("/PricingPlans.vue", PRICING_PLANS_VUE),
@@ -85,7 +86,7 @@ fn resolve_pricing_plans() -> verter_semantic::analysis::component_meta::Compone
 }
 
 fn slot_binding_names(
-    analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for slot in analysis.slots.iter() {

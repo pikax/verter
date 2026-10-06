@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use verter_session::host_audit_runtime::AuditRequestRegistration;
-use verter_session::request_context::RequestContext;
+use verter_type_engine::request_context::RequestContext;
 
 #[test]
 fn dropping_active_registration_without_finalize_clears_active_map_and_emits_no_record() {

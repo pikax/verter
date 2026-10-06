@@ -236,10 +236,10 @@ fn token_advances_on_augmentation_index_populate() {
     // (the base view snapshots `route_surface_index_fingerprints` by
     // value). A populate MUST advance the token.
     use crate::file_artifact_store::{
-        AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, AugmenterSet,
-        ProjectIdentity,
+        AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind, ProjectIdentity,
     };
     use smallvec::SmallVec;
+    use verter_session_query::resolution::AugmenterSet;
 
     let (host, _canonical) = host_with_one_file();
     let before = host.current_validation_token();
@@ -439,7 +439,7 @@ fn token_does_not_advance_on_noop_reachability_gc() {
 
     // Live set covers the single artifact's (canonical, whole_hash)
     // projection → nothing is unreachable → no removal.
-    let mut live: rustc_hash::FxHashSet<(Arc<str>, crate::types::Hash16)> =
+    let mut live: rustc_hash::FxHashSet<(Arc<str>, verter_session_query::analysis::types::Hash16)> =
         rustc_hash::FxHashSet::default();
     live.insert((Arc::from("/proj/keep.ts"), indexed.whole_hash));
     host.project_type_store()
@@ -627,7 +627,8 @@ fn distinct_overlays_yield_distinct_token_identities() {
         canonical.clone(),
         Arc::from("export interface A { v: 1 }\n"),
     );
-    let mut hashes_a: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let mut hashes_a: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     hashes_a.insert(canonical.clone(), [0xAAu8; 16]);
     let view_a = OverlaidView::with_overlay_hashes(
         Arc::clone(&host),
@@ -641,7 +642,8 @@ fn distinct_overlays_yield_distinct_token_identities() {
         canonical.clone(),
         Arc::from("export interface A { v: 2 }\n"),
     );
-    let mut hashes_b: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let mut hashes_b: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     hashes_b.insert(canonical.clone(), [0xBBu8; 16]);
     let view_b = OverlaidView::with_overlay_hashes(
         Arc::clone(&host),
@@ -708,7 +710,8 @@ fn base_view_overlay_does_not_mutate_shared_snapshot() {
         canonical.clone(),
         Arc::from("export interface A { w: 9 }\n"),
     );
-    let mut hashes: FxHashMap<String, crate::types::Hash16> = FxHashMap::default();
+    let mut hashes: FxHashMap<String, verter_session_query::analysis::types::Hash16> =
+        FxHashMap::default();
     hashes.insert(canonical.clone(), [0xCCu8; 16]);
     let view = OverlaidView::with_overlay_hashes(
         Arc::clone(&host),
@@ -987,7 +990,7 @@ fn compat_token_lane_oracle_ignores_additive_generations() {
     // multiple-cold-winner regression this proves closed. The companion test
     // `compat_token_changes_on_external_supersession_without_epoch` proves the
     // oracle still discriminates a REAL external mutation.
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let (host, _canonical) = host_with_one_file();
     // Upsert a second file (tracked, not yet materialised). Capture the
@@ -1058,7 +1061,7 @@ fn compat_token_changes_on_external_supersession_without_epoch() {
     // an env-hash-only change IDENTICAL (its epoch did not move) and the two
     // views would wrongly coalesce. The folded `validity_fingerprint`
     // (external-supersession dims) differs, keeping the lanes distinct.
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let (host, _canonical) = host_with_one_file();
 
@@ -1111,7 +1114,7 @@ fn compat_token_validity_fingerprint_matches_external_supersession_fingerprint()
     // `HostStoreView` wires the SAME external oracle into the coalescing-lane
     // identity that the promotion fence (`is_stable`) compares, not a partial
     // or constant fingerprint and not the over-strict complete-token fold.
-    use crate::resolver_core::StoreView;
+    use verter_session_query::facts::store_view::StoreView;
 
     let (host, _canonical) = host_with_one_file();
     let view = host.resolver_store_view_read().into_owned_view();
@@ -2338,7 +2341,7 @@ fn content_generation_dimension_does_not_self_fence_reads() {
 /// on that reset path is harmless.
 #[test]
 fn schema_mismatch_sweep_advances_artifact_generation_token() {
-    use crate::cache_schema::CacheSchemaVersioned;
+    use verter_type_engine::cache_schema::CacheSchemaVersioned;
 
     let host = VerterHost::new_standalone(HostConfig::default());
     let canonical = "/schema_sweep/file.ts";
@@ -2539,7 +2542,7 @@ fn reentrant_base_view_on_the_claim_holding_thread_refuses_to_park() {
 /// captured view must not, or Vue-macro `InputBasisId` aliases across snapshots.
 #[test]
 fn captured_view_project_identity_survives_live_republish() {
-    use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+    use verter_session_query::resolution::IdeProjectCompilerOptions;
     use verter_workspace::{
         MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
         WorkspaceAccess,

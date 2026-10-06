@@ -17,7 +17,7 @@
 //! serves nothing for module classes rather than something mis-mapped.
 
 use tower_lsp_server::ls_types::*;
-use verter_session::FileAnalysisSnapshot;
+use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
 
 use crate::documents::carrier_structure::CarrierBlockView;
 use crate::documents::line_index::LineIndex;
@@ -58,11 +58,11 @@ pub(crate) fn css_class_name_at(
 
 /// Whether `class_span` sits inside a `:global(...)` pseudo of `style`.
 fn class_in_global_pseudo(
-    style: &verter_semantic::analysis::StyleBlockAnalysis,
+    style: &verter_session_query::analysis::style::StyleBlockAnalysis,
     class_span: verter_span::Span,
 ) -> bool {
     style.special_pseudos.iter().any(|p| {
-        p.kind == verter_semantic::analysis::SpecialPseudoKind::Global
+        p.kind == verter_session_query::analysis::style::SpecialPseudoKind::Global
             && class_span.start >= p.start
             && class_span.end <= p.end
     })
@@ -71,7 +71,7 @@ fn class_in_global_pseudo(
 /// Whether a class declaration at `class_span` in `style` is a GLOBAL
 /// declaration: a non-scoped, non-module block, or a `:global(...)` escape.
 fn class_decl_is_global(
-    style: &verter_semantic::analysis::StyleBlockAnalysis,
+    style: &verter_session_query::analysis::style::StyleBlockAnalysis,
     class_span: verter_span::Span,
 ) -> bool {
     (!style.scoped && !style.is_module) || class_in_global_pseudo(style, class_span)
@@ -83,7 +83,7 @@ fn class_decl_is_global(
 /// so the css-native class legs fail closed on them, unless the declaration
 /// sits inside `:global(...)`.
 pub(crate) fn class_plain_addressable(
-    style: &verter_semantic::analysis::StyleBlockAnalysis,
+    style: &verter_session_query::analysis::style::StyleBlockAnalysis,
     class_span: verter_span::Span,
 ) -> bool {
     !style.is_module || class_in_global_pseudo(style, class_span)
@@ -217,13 +217,17 @@ pub(crate) fn collect_cross_file_global_class_locations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::{build_css_style_analysis, StyleAnalysisLang, VueStyleInput};
+    use verter_semantic::analysis::{build_css_style_analysis, VueStyleInput};
+    use verter_session_query::analysis::style::StyleAnalysisLang;
 
-    fn style(source: &str, scoped: bool) -> verter_semantic::analysis::StyleBlockAnalysis {
+    fn style(
+        source: &str,
+        scoped: bool,
+    ) -> verter_session_query::analysis::style::StyleBlockAnalysis {
         build_css_style_analysis(source, VueStyleInput::default(), scoped, false, None, 0)
     }
 
-    fn module_style(source: &str) -> verter_semantic::analysis::StyleBlockAnalysis {
+    fn module_style(source: &str) -> verter_session_query::analysis::style::StyleBlockAnalysis {
         build_css_style_analysis(source, VueStyleInput::default(), false, true, None, 0)
     }
 
@@ -328,7 +332,7 @@ mod tests {
         let (scs, sce) = style_block.content_range();
         let analysis = FileAnalysisSnapshot {
             markup_class_tokens: std::sync::Arc::new(vec![
-                verter_semantic::analysis::MarkupClassToken {
+                verter_session_query::analysis::template::MarkupClassToken {
                     name: "btn".to_string(),
                     span: verter_span::Span::new(23, 26),
                     from_directive: false,

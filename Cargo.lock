@@ -3274,6 +3274,7 @@ dependencies = [
  "serde_json",
  "verter_diagnostics",
  "verter_semantic",
+ "verter_session_query",
  "verter_span",
  "verter_type_expr",
 ]
@@ -3286,6 +3287,10 @@ dependencies = [
  "serde_json",
  "verter_identity",
 ]
+
+[[package]]
+name = "verter_analyzer_mint"
+version = "0.0.1-beta.6"
 
 [[package]]
 name = "verter_audit"
@@ -3330,8 +3335,11 @@ dependencies = [
  "verter_diagnostics",
  "verter_parser",
  "verter_semantic",
+ "verter_semantic_source",
  "verter_session",
+ "verter_session_query",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
  "verter_workspace",
  "walkdir",
@@ -3362,6 +3370,7 @@ dependencies = [
  "trybuild",
  "verter_compiler",
  "verter_session",
+ "verter_type_engine",
  "verter_type_expr",
 ]
 
@@ -3406,6 +3415,7 @@ dependencies = [
  "verter_macro_dto",
  "verter_parser",
  "verter_semantic",
+ "verter_session_query",
  "verter_span",
  "verter_type_expr",
  "verter_type_expr_oxc",
@@ -3438,6 +3448,7 @@ dependencies = [
  "serde_json",
  "verter_language",
  "verter_semantic",
+ "verter_session_query",
  "verter_span",
  "verter_type_expr",
  "verter_workspace",
@@ -3470,6 +3481,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_execution"
+version = "0.0.1-beta.6"
+dependencies = [
+ "parking_lot",
+ "rustc-hash",
+ "smallvec",
+ "verter_debug_assert",
+]
+
+[[package]]
 name = "verter_ffi"
 version = "0.0.1-beta.6"
 dependencies = [
@@ -3484,7 +3505,9 @@ dependencies = [
  "verter_protocol",
  "verter_semantic",
  "verter_session",
+ "verter_session_query",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
 ]
 
@@ -3539,15 +3562,18 @@ dependencies = [
  "verter_css_syntax",
  "verter_debug_assert",
  "verter_diagnostics",
+ "verter_execution",
  "verter_ffi",
  "verter_language",
  "verter_lsp",
  "verter_macro_dto",
  "verter_parser",
  "verter_protocol",
+ "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
+ "verter_session_query",
  "verter_span",
  "verter_test_support",
  "verter_tsgo_api",
@@ -3590,6 +3616,7 @@ dependencies = [
  "verter_protocol",
  "verter_semantic",
  "verter_session",
+ "verter_session_query",
  "verter_span",
  "verter_test_support",
  "verter_tsgo_api",
@@ -3632,10 +3659,13 @@ dependencies = [
  "verter_ffi",
  "verter_napi_request_fixture",
  "verter_protocol",
+ "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
  "verter_session",
+ "verter_session_query",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
  "verter_workspace",
 ]
@@ -3711,6 +3741,7 @@ dependencies = [
  "stacker",
  "verter_debug_assert",
  "verter_language",
+ "verter_session_query",
  "verter_span",
  "verter_type_expr",
  "verter_type_expr_oxc",
@@ -3735,6 +3766,7 @@ dependencies = [
  "verter_language",
  "verter_no_typeexpr",
  "verter_semantic",
+ "verter_session_query",
  "verter_span",
  "verter_type_expr",
 ]
@@ -3750,11 +3782,26 @@ dependencies = [
  "verter_lsp",
  "verter_semantic",
  "verter_session",
+ "verter_session_query",
  "verter_span",
  "verter_test_support",
  "verter_tsgo_api",
  "verter_workspace",
  "windows-sys",
+]
+
+[[package]]
+name = "verter_resolution"
+version = "0.0.1-beta.6"
+dependencies = [
+ "rustc-hash",
+ "serde_json",
+ "static_assertions",
+ "verter_audit",
+ "verter_language",
+ "verter_session_query",
+ "verter_span",
+ "verter_type_expr",
 ]
 
 [[package]]
@@ -3771,6 +3818,7 @@ dependencies = [
  "smallvec",
  "verter_audit",
  "verter_debug_assert",
+ "verter_execution",
  "verter_language",
  "verter_span",
  "web-time",
@@ -3799,6 +3847,7 @@ dependencies = [
  "sha2",
  "static_assertions",
  "trybuild",
+ "verter_analyzer_mint",
  "verter_audit",
  "verter_css_syntax",
  "verter_debug_assert",
@@ -3806,11 +3855,43 @@ dependencies = [
  "verter_macro_dto",
  "verter_no_typeexpr",
  "verter_parser",
+ "verter_resolution",
+ "verter_session_query",
  "verter_span",
  "verter_test_support",
  "verter_type_expr",
  "verter_type_expr_oxc",
  "web-time",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "verter_semantic_source"
+version = "0.0.1-beta.6"
+dependencies = [
+ "crossbeam-channel",
+ "dashmap",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_parser",
+ "oxc_span",
+ "oxc_syntax",
+ "parking_lot",
+ "rustc-hash",
+ "self_cell",
+ "tracing",
+ "verter_audit",
+ "verter_debug_assert",
+ "verter_ecma",
+ "verter_execution",
+ "verter_language",
+ "verter_parser",
+ "verter_semantic",
+ "verter_session_query",
+ "verter_span",
+ "verter_type_expr",
+ "verter_type_expr_oxc",
  "xxhash-rust",
 ]
 
@@ -3864,6 +3945,8 @@ dependencies = [
  "verter_compiler",
  "verter_css_syntax",
  "verter_debug_assert",
+ "verter_ecma",
+ "verter_execution",
  "verter_identity",
  "verter_language",
  "verter_macro_dto",
@@ -3871,13 +3954,16 @@ dependencies = [
  "verter_no_typeexpr",
  "verter_parser",
  "verter_protocol",
+ "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
+ "verter_semantic_source",
  "verter_session",
  "verter_session_oracle_macro",
  "verter_session_query",
  "verter_span",
  "verter_test_support",
+ "verter_type_engine",
  "verter_type_expr",
  "verter_type_expr_oxc",
  "verter_type_runtime",
@@ -3901,8 +3987,26 @@ dependencies = [
 name = "verter_session_query"
 version = "0.0.1-beta.6"
 dependencies = [
+ "bitflags",
+ "glob",
+ "imbl",
+ "parking_lot",
+ "rustc-hash",
+ "serde",
  "serde_json",
+ "sha2",
+ "smallvec",
+ "static_assertions",
+ "verter_analysis_inputs",
+ "verter_analyzer_mint",
+ "verter_audit",
+ "verter_debug_assert",
+ "verter_language",
+ "verter_macro_dto",
+ "verter_no_typeexpr",
+ "verter_span",
  "verter_type_expr",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -3923,6 +4027,7 @@ dependencies = [
  "verter_no_typeexpr",
  "verter_session",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
  "verter_workspace",
 ]
@@ -3982,6 +4087,7 @@ dependencies = [
  "verter_parser",
  "verter_semantic",
  "verter_session",
+ "verter_session_query",
  "verter_span",
  "verter_test_support",
  "verter_tsc",
@@ -4006,6 +4112,40 @@ dependencies = [
  "verter_test_support",
  "verter_tsgo_api",
  "windows-sys",
+]
+
+[[package]]
+name = "verter_type_engine"
+version = "0.0.1-beta.6"
+dependencies = [
+ "arc-swap",
+ "boxcar",
+ "dashmap",
+ "hotpath",
+ "imbl",
+ "indexmap",
+ "parking_lot",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "static_assertions",
+ "tracing",
+ "uuid",
+ "verter_analysis_inputs",
+ "verter_audit",
+ "verter_debug_assert",
+ "verter_ecma",
+ "verter_execution",
+ "verter_identity",
+ "verter_language",
+ "verter_no_typeexpr",
+ "verter_session_query",
+ "verter_span",
+ "verter_type_engine",
+ "verter_type_expr",
+ "web-time",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -4051,6 +4191,7 @@ dependencies = [
  "verter_debug_assert",
  "verter_identity",
  "verter_language",
+ "verter_session_query",
  "verter_span",
  "verter_test_support",
  "verter_tsgo_api",
@@ -4110,9 +4251,12 @@ dependencies = [
  "verter_ffi",
  "verter_identity",
  "verter_protocol",
+ "verter_resolution",
  "verter_semantic",
  "verter_session",
+ "verter_session_query",
  "verter_span",
+ "verter_type_engine",
  "verter_type_expr",
  "wasm-bindgen",
  "wasm-bindgen-test",
@@ -4141,10 +4285,13 @@ dependencies = [
  "tracing",
  "verter_audit",
  "verter_debug_assert",
+ "verter_execution",
  "verter_language",
  "verter_parser",
+ "verter_resolution",
  "verter_scheduler",
  "verter_semantic",
+ "verter_session_query",
  "verter_span",
  "verter_tsgo_api",
  "verter_type_expr",

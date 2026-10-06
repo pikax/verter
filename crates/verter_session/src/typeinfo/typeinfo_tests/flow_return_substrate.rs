@@ -22,9 +22,9 @@ use verter_type_expr::LiteralValue;
 const SUBSTRATE: &str = "/fixtures/flow_return_substrate.ts";
 
 /// Dispatch-mask bit of the `FlowReturn` family — its
-/// [`crate::semantic_query::SemanticQueryKeyTag::bit_index`].
+/// [`verter_type_engine::semantic_query::SemanticQueryKeyTag::bit_index`].
 fn flow_return_dispatch_bit() -> u32 {
-    crate::semantic_query::SemanticQueryKeyTag::FlowReturn.bit_index()
+    verter_type_engine::semantic_query::SemanticQueryKeyTag::FlowReturn.bit_index()
 }
 
 fn upsert_substrate_fixture(host: &VerterHost) {
@@ -63,7 +63,7 @@ fn assert_semantic_miss(expr: &TypeExpr) {
     match expr {
         TypeExpr::Unknown(unknown) => assert_eq!(
             unknown.raw(),
-            crate::semantic_query::compat_spelling::SEMANTIC_MISS
+            verter_type_engine::semantic_query::compat_spelling::SEMANTIC_MISS
         ),
         other => panic!("expected the degraded semantic-miss surface, got {other:?}"),
     }
@@ -72,8 +72,9 @@ fn assert_semantic_miss(expr: &TypeExpr) {
 fn expr_contains_semantic_miss(expr: &TypeExpr) -> bool {
     match expr {
         TypeExpr::Unknown(unknown) => {
-            unknown.raw() == crate::semantic_query::compat_spelling::SEMANTIC_MISS
-                || unknown.raw() == crate::semantic_query::compat_spelling::UNMODELED_POSITION
+            unknown.raw() == verter_type_engine::semantic_query::compat_spelling::SEMANTIC_MISS
+                || unknown.raw()
+                    == verter_type_engine::semantic_query::compat_spelling::UNMODELED_POSITION
         }
         TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
             members.iter().any(expr_contains_semantic_miss)

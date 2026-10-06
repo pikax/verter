@@ -246,7 +246,7 @@ pub struct DerivationEdgeRaw {
 }
 
 /// Audit-side origin edge kind. Mirrors the semantic graph's
-/// `verter_session::semantic_query::OriginEdgeKind` (nine kinds) and
+/// `verter_type_engine::semantic_query::OriginEdgeKind` (nine kinds) and
 /// adds `SharedLoadReuse` — an audit-only edge emitted when a joiner
 /// attaches to a winner's in-flight artifact.
 #[derive(
@@ -518,7 +518,7 @@ pub enum MaterializationScopeAudit {
     Nested,
 }
 
-/// PUB mirror of `verter_session::semantic_query::ProjectionMode`.
+/// PUB mirror of `verter_type_engine::semantic_query::ProjectionMode`.
 /// Same rationale as [`MaterializationScopeAudit`] — keeps audit
 /// consumers independent of the dispatch types.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ts_rs::TS, PartialEq, Eq, Hash)]

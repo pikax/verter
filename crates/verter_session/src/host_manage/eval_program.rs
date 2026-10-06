@@ -6,15 +6,14 @@
 //! surface remains rooted at `crate::host_manage::*`; this file
 //! contributes a private `impl VerterHost { … }` block that
 //! continues the parent shell's impl chain.
+use verter_session_query::analysis::types::Hash16;
 
 use std::sync::Arc;
 
-use crate::types::*;
 use crate::VerterHost;
 
-use super::{
-    component_meta_trace_custom, is_raw_import_specifier_id, read_analysis_source_result_detail,
-};
+use super::{is_raw_import_specifier_id, read_analysis_source_result_detail};
+use verter_type_engine::component_meta_trace_custom;
 
 impl VerterHost {
     pub(crate) fn store_view_allows_current_whole_hash(
@@ -45,8 +44,9 @@ impl VerterHost {
         canonical_id: &str,
         _state: &crate::resolver_core::ShallowFileState,
         _dep_edges: &rustc_hash::FxHashMap<String, String>,
-    ) -> rustc_hash::FxHashMap<String, crate::resolver_core::prepared_decl::TypeParamBinding> {
-        use crate::resolver_core::prepared_decl::TypeParamBinding;
+    ) -> rustc_hash::FxHashMap<String, verter_session_query::inputs::prepared::TypeParamBinding>
+    {
+        use verter_session_query::inputs::prepared::TypeParamBinding;
 
         let mut bindings = rustc_hash::FxHashMap::default();
 
@@ -142,7 +142,9 @@ impl VerterHost {
     /// script-program walk would).
     pub(crate) fn vue_flight_script_program<'a>(
         eval_is_extracted_script: bool,
-        parsed_eval_program: Option<&'a crate::ParsedEvalProgram>,
+        parsed_eval_program: Option<
+            &'a verter_semantic_source::parsed_eval_program::ParsedEvalProgram,
+        >,
     ) -> crate::parse::VueScriptProgram<'a> {
         if !eval_is_extracted_script {
             return crate::parse::VueScriptProgram::ParseHere;
@@ -161,7 +163,9 @@ impl VerterHost {
     /// the retained parse instead of re-parsing the same bytes.
     pub(crate) fn framework_flight_script_program<'a>(
         eval_is_extracted_script: bool,
-        parsed_eval_program: Option<&'a crate::ParsedEvalProgram>,
+        parsed_eval_program: Option<
+            &'a verter_semantic_source::parsed_eval_program::ParsedEvalProgram,
+        >,
     ) -> crate::parse::FrameworkScriptProgram<'a> {
         if !eval_is_extracted_script {
             return crate::parse::FrameworkScriptProgram::ParseHere;

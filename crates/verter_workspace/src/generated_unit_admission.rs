@@ -12,7 +12,7 @@
 //!
 //! The query CONSUMES the existing membership authority — it never builds a
 //! second membership model. A unit is a member when the owning project's
-//! compiled [`StaticMembershipSpec`](verter_semantic::resolver_core::StaticMembershipSpec)
+//! compiled [`StaticMembershipSpec`](verter_session_query::resolution::StaticMembershipSpec)
 //! matches the unit DIRECTLY (`files` exact and exclude-immune; `include`
 //! minus `exclude`; extension-specific globs match only their extension; the
 //! JS family is present only under `allowJs`/`checkJs`), or — when the unit
@@ -38,7 +38,8 @@ use std::hash::{Hash, Hasher};
 use rustc_hash::FxHasher;
 
 use crate::canonical_path::CanonicalPath;
-use crate::workspace_snapshot::{ProjectId, ProjectPayload, WorkspaceSnapshot};
+use crate::workspace_snapshot::{ProjectPayload, WorkspaceSnapshot};
+use verter_session_query::resolution::ProjectId;
 
 /// Why ONE generated unit is not admitted to the intended configured project.
 /// A closed set: every non-admission is exactly one of these.
@@ -323,7 +324,7 @@ pub fn decide_generated_unit_admission_with_basis(
 /// does. Mirrors `StaticMembershipSpec::matches` step for step so the two can
 /// never disagree; it only names WHICH step refused.
 fn spec_refusal(
-    spec: &verter_semantic::resolver_core::StaticMembershipSpec,
+    spec: &verter_session_query::resolution::StaticMembershipSpec,
     unit: &CanonicalPath,
 ) -> Option<GeneratedUnitNonAdmissionReason> {
     if spec.matches(unit) {
@@ -340,7 +341,7 @@ fn spec_refusal(
 
 /// Fold the membership inputs that decide admission into the fingerprint, in
 /// their stored (deterministic) order.
-fn hash_spec(spec: &verter_semantic::resolver_core::StaticMembershipSpec, hasher: &mut FxHasher) {
+fn hash_spec(spec: &verter_session_query::resolution::StaticMembershipSpec, hasher: &mut FxHasher) {
     spec.files.len().hash(hasher);
     for file in &spec.files {
         file.as_str().hash(hasher);

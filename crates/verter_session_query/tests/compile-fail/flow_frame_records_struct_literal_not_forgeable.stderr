@@ -1,0 +1,37 @@
+error[E0451]: fields `skeleton`, `bindings`, `type_parameters`, `enclosing_type_parameters`, `parameters`, `parameter_names`, `modelled_patterns`, `body_hash`, `snapshot`, `outer`, `anchor` and `end` of struct `DefiningFrameGate` are private
+  --> tests/compile-fail/flow_frame_records_struct_literal_not_forgeable.rs:12:9
+   |
+11 |     DefiningFrameGate {
+   |     ----------------- in this type
+12 |         skeleton: Arc::clone(gate.skeleton()),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+13 |         ..gate.clone()
+   |           ^^^^^^^^^^^^ fields `bindings`, `type_parameters`, `enclosing_type_parameters`, `parameters`, `parameter_names`, `modelled_patterns`, `body_hash`, `snapshot`, `outer`, `anchor` and `end` are private
+
+error[E0451]: field `enclosing` of struct `CaptureScope` is private
+  --> tests/compile-fail/flow_frame_records_struct_literal_not_forgeable.rs:19:9
+   |
+18 |     CaptureScope {
+   |     ------------ in this type
+19 |         enclosing: Some(Arc::new(CapturedFrame {
+   |         ^^^^^^^^^ private field
+
+error[E0451]: fields `gate` and `region` of struct `CapturedFrame` are private
+  --> tests/compile-fail/flow_frame_records_struct_literal_not_forgeable.rs:20:13
+   |
+19 |         enclosing: Some(Arc::new(CapturedFrame {
+   |                                  ------------- in this type
+20 |             gate,
+   |             ^^^^ private field
+21 |             region: scope.enclosing().unwrap().region(),
+   |             ^^^^^^ private field
+
+error[E0451]: fields `captures` and `this` of struct `NestedFlowContext` are private
+  --> tests/compile-fail/flow_frame_records_struct_literal_not_forgeable.rs:28:9
+   |
+27 |     NestedFlowContext {
+   |     ----------------- in this type
+28 |         captures,
+   |         ^^^^^^^^ private field
+29 |         this: None,
+   |         ^^^^ private field

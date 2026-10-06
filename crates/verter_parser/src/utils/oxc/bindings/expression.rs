@@ -884,8 +884,11 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
         // Record the function
         self.result.functions.push(FunctionBinding {
-            span: arrow.span.into(),
-            body_span: arrow.body.span().into(),
+            span: verter_span::RelativeSpan::new(arrow.span.start, arrow.span.end),
+            body_span: verter_span::RelativeSpan::new(
+                arrow.body.span().start,
+                arrow.body.span().end,
+            ),
             pos: arrow.span.start + self.ctx.base_offset,
             body_pos: arrow.body.span().start + self.ctx.base_offset,
         });
@@ -927,8 +930,8 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         // Record the function
         if let Some(body) = &func.body {
             self.result.functions.push(FunctionBinding {
-                span: span.into(),
-                body_span: body.span.into(),
+                span: verter_span::RelativeSpan::new(span.start, span.end),
+                body_span: verter_span::RelativeSpan::new(body.span.start, body.span.end),
                 pos: span.start + self.ctx.base_offset,
                 body_pos: body.span.start + self.ctx.base_offset,
             });
@@ -1042,7 +1045,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         // that is the recorder's job rather than every walker arm's.
         self.result.push_binding(Binding {
             name,
-            span: span.into(),
+            span: verter_span::RelativeSpan::new(span.start, span.end),
             pos: span.start + self.ctx.base_offset,
             ignore,
             is_shorthand,
@@ -1087,7 +1090,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             }
         };
         self.result.literals.push(LiteralBinding {
-            span: span.into(),
+            span: verter_span::RelativeSpan::new(span.start, span.end),
             pos: span.start + self.ctx.base_offset,
             content,
         });

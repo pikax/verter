@@ -1,11 +1,12 @@
-﻿//! Rule: no-expose-after-await
+//! Rule: no-expose-after-await
 //!
 //! Disallows calling `defineExpose()` after `await` in `<script setup>`.
 
 use crate::context::LintContext;
 use crate::diagnostic::{DiagnosticSpanKind, Severity};
 use crate::rules::{LintRule, RuleCategory};
-use verter_semantic::analysis::types::{AnalyzedMacroKind, ScriptAnalysisSnapshot};
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::types::AnalyzedMacroKind;
 
 pub struct NoExposeAfterAwait;
 
@@ -47,8 +48,8 @@ impl LintRule for NoExposeAfterAwait {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use verter_session_query::analysis::types::AnalyzedMacro;
 
-    use verter_semantic::analysis::types::*;
     use verter_span::Span;
 
     fn run_rule(script: &ScriptAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {

@@ -22,27 +22,12 @@ name: Validation Probe
 # that goes red still leaves behind the evidence for why.
 
 on:
-  push:
-    branches: main
-  # A pull request runs the bounded smoke slice only when something the probe
-  # exercises changed: the compiler and its native binding (any crate, its
-  # manifests, the toolchain), the JS driver's install graph, the probe's own
-  # manifests and this workflow. A docs, editor-packaging or CI-helper change
-  # spends nothing here; main still runs the complete inventories.
-  pull_request:
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - ".cargo/**"
-      - "packages/native/**"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - ".npmrc"
-      - ".nvmrc"
-      - ".github/workflows/validation-probe.yml"
+  # Nightly, not per pull request: the lane checks out and generates two
+  # external corpora and builds the native addon, which is too slow and too
+  # exposed to third-party availability to sit on every pull request. A manual
+  # dispatch runs the same complete inventories on demand.
+  schedule:
+    - cron: "0 5 * * *" # 5 AM UTC daily
   workflow_dispatch:
 
 concurrency:
@@ -119,11 +104,11 @@ jobs:
         working-directory: .integration-tests/repos/svelte-benchmarks
         run: pnpm --ignore-workspace install && pnpm generate
 
-      # The pull-request lane drives each manifest's bounded smoke slice; main
-      # and manual runs drive the complete ratified inventories.
+      # Every run drives the complete ratified inventories. The bounded smoke
+      # slice remains the default for a local run that leaves the lane unset.
       - name: Run the workload probe
         env:
-          VALIDATION_PROBE_LANE: ${{ github.event_name == 'pull_request' && 'smoke' || 'main' }}
+          VALIDATION_PROBE_LANE: main
         run: cargo nextest run -p verter_validation_probe --features external-corpus -E 'not test(observation_lane_emits_one_artifact)'
 
       - name: Upload the summary artifact
@@ -205,7 +190,7 @@ jobs:
 
       - name: Capture observations
         env:
-          VALIDATION_PROBE_LANE: ${{ github.event_name == 'pull_request' && 'smoke' || 'main' }}
+          VALIDATION_PROBE_LANE: main
         run: cargo nextest run -p verter_validation_probe --features external-corpus -E 'test(observation_lane_emits_one_artifact)'
 
       - name: Upload the observation artifact

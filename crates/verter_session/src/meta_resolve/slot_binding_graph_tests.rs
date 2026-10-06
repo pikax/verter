@@ -38,8 +38,8 @@ use std::sync::Arc;
 #[cfg(feature = "external-corpus")]
 use std::time::Instant;
 
-use verter_semantic::analysis::component_meta::ComponentMetaAnalysis;
-use verter_semantic::analysis::type_expand::ExpansionExactness;
+use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
+use verter_session_query::analysis::type_expand::ExpansionExactness;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
 use crate::audited_request::AuditedRequest;
@@ -90,7 +90,7 @@ fn slot_binding<'a>(
     meta: &'a ComponentMetaAnalysis,
     slot: &str,
     binding: &str,
-) -> Option<&'a verter_semantic::analysis::component_meta::SlotBindingAnalysis> {
+) -> Option<&'a verter_session_query::analysis::component_meta::SlotBindingAnalysis> {
     meta.slots
         .iter()
         .find(|s| s.name == slot)?
@@ -104,7 +104,7 @@ fn slot_binding<'a>(
 fn shallow_binding_type(
     host: &VerterHost,
     owner: &str,
-    binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
+    binding: &verter_session_query::analysis::component_meta::SlotBindingAnalysis,
 ) -> TypeExpr {
     crate::test_only::semantic_source_probe::shallow_type_expr(
         host,
@@ -130,7 +130,7 @@ fn shallow_binding_type(
 fn demand_binding_type(
     host: &VerterHost,
     owner: &str,
-    binding: &verter_semantic::analysis::component_meta::SlotBindingAnalysis,
+    binding: &verter_session_query::analysis::component_meta::SlotBindingAnalysis,
 ) -> TypeExpr {
     crate::test_only::semantic_source_probe::demand_type_expr(
         host,
@@ -584,7 +584,10 @@ defineSlots<Slots>()
     // flag via `resolve_component_meta(Expanded)`. A naive synthesis
     // that emits optional=true for the first arm fails this assertion.
     let resolved = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("resolved expanded");
     let key = "default.value".to_string();
     let expanded_field = resolved
@@ -1766,7 +1769,7 @@ defineSlots<Slots>()
     );
     let _ = host.get_component_meta("/src/Comp.vue");
     let dep_canonical_ids: Vec<Arc<str>> =
-        crate::component_meta_result_db::ComponentMetaResultDb::dep_signature_for_owner_in_test(
+        crate::component_meta_cached_result::dep_signature_for_owner_in_test(
             &host,
             "/src/Comp.vue",
         );
@@ -1881,7 +1884,10 @@ defineProps<{ msg: MyStr }>()
     );
 
     let resolved = host
-        .resolve_component_meta("/src/Comp.vue", crate::types::ProjectionMode::Expanded)
+        .resolve_component_meta(
+            "/src/Comp.vue",
+            verter_type_engine::semantic_query::ProjectionMode::Expanded,
+        )
         .expect("resolved expanded");
     let evaluated = resolved
         .evaluated_types
@@ -2093,7 +2099,7 @@ defineSlots<Slots>()
         envelope.diagnostics.iter().any(|d| {
             matches!(
                 d.reason,
-                verter_semantic::analysis::type_expand::ExpansionStopReason::BudgetExceeded
+                verter_session_query::analysis::type_expand::ExpansionStopReason::BudgetExceeded
             )
         })
     });
@@ -2105,10 +2111,8 @@ defineSlots<Slots>()
     );
 
     // The cache must NOT be warmed when suppression is active.
-    let cached = crate::component_meta_result_db::ComponentMetaResultDb::has_owner_entry_in_test(
-        &host,
-        "/src/Comp.vue",
-    );
+    let cached =
+        crate::component_meta_cached_result::has_owner_entry_in_test(&host, "/src/Comp.vue");
     assert!(
         !cached,
         "budget-exceeded synthesis must NOT warm the result cache",
@@ -2123,7 +2127,7 @@ defineSlots<Slots>()
 // layer. Mirrors the dispatch-level
 // `memo_refuses_insertion_on_cache_suppress_true_via_pathological_input`.
 //
-// Scope note: the `SemanticGraphStore::memo_size_in_test` accessor
+// Scope note: the `SemanticGraphStore::memo_entry_count` accessor
 // observes host-global memo state that grows from peer dispatches
 // outside the synthesis path. The discriminating contract under
 // test is "the cache_suppress no-poison gate FIRES during the
@@ -2353,7 +2357,7 @@ defineSlots<Slots>()
 // `verter::dispatch::walk` target.
 #[test]
 fn walker_warn_event_on_cap_fire() {
-    use verter_semantic::analysis::type_expand::ExpansionStopReason;
+    use verter_session_query::analysis::type_expand::ExpansionStopReason;
 
     let mut config = HostConfig::default();
     // Override the production 10_000-node cap with a small value so a

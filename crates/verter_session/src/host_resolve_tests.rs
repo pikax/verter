@@ -29,7 +29,7 @@ fn profile() -> CompileProfile {
 }
 
 fn parsed_vue_fixture(source: &str) -> Arc<verter_parser::parser::types::ParsedSfc> {
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let artifact = crate::carrier_fixture_tests::publish_carrier_fixture(
         "file:///host-resolve-fixture.vue",
         source,
@@ -1445,7 +1445,7 @@ fn define_props_extends_at_alias_primitive_props_resolves() {
             "/project".to_string(),
             Some("/project/tsconfig.json".to_string()),
         );
-        cfg.workspace_aliases = vec![verter_semantic::resolver_core::WorkspaceAlias {
+        cfg.workspace_aliases = vec![verter_session_query::resolution::WorkspaceAlias {
             find: "@/".to_string(),
             replacement: "/project/src/".to_string(),
         }];
@@ -2717,16 +2717,16 @@ fn candidate_list_resolves_to_first_loaded() {
     let host = strict_host();
     // Configure workspace with @/ alias via host wrapper
     // (`host.workspace()` is `pub(crate)`).
-    host.configure_projects(vec![verter_semantic::resolver_core::IdeProjectConfig {
+    host.configure_projects(vec![verter_session_query::resolution::IdeProjectConfig {
         root: "/src".to_string(),
         workspace_root: "/src".to_string(),
         tsconfig_path: None,
         provider_root: "/src".to_string(),
-        workspace_aliases: vec![verter_semantic::resolver_core::WorkspaceAlias {
+        workspace_aliases: vec![verter_session_query::resolution::WorkspaceAlias {
             find: "@/".to_string(),
             replacement: "/src/".to_string(),
         }],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("/src"),
@@ -4009,9 +4009,9 @@ fn template_expression_diagnostics_match_across_analysis_and_bundle_routes() {
         rows
     }
     fn expression_rows(
-        diags: &[verter_semantic::analysis::template::TemplateExpressionDiagnostic],
+        diags: &[verter_session_query::analysis::template::TemplateExpressionDiagnostic],
     ) -> Vec<Row> {
-        use verter_semantic::analysis::template::TemplateDiagnosticSeverity as S;
+        use verter_session_query::analysis::template::TemplateDiagnosticSeverity as S;
         diags
             .iter()
             .filter(|d| d.code == "XInvalidExpression")
@@ -4655,7 +4655,7 @@ fn upsert_syncs_relative_import_edges_to_workspace() {
         extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
         workspace_root: "/src".to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("/src"),
@@ -4713,7 +4713,7 @@ fn scheduler_resolves_only_macro_type_blockers_during_source_admission() {
         extensions: vec![".vue".to_string(), ".ts".to_string(), ".html".to_string()],
         workspace_root: "/src".to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new("/src"),
@@ -4813,7 +4813,7 @@ fn workspace_resolution_used_for_aliased_imports() {
         extensions: vec![".vue".to_string(), ".ts".to_string(), ".tsx".to_string()],
         workspace_root: "/project".to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions {
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions {
             paths: vec![("@/*".to_string(), vec!["/project/src/*".to_string()])],
             ..Default::default()
         },
@@ -4858,7 +4858,7 @@ fn workspace_resolution_used_for_aliased_imports() {
     let result = host.resolve_loaded_dependency_canonical(
         "/project/src/Comp.vue",
         "@/utils",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
 
     // This SHOULD resolve to /project/src/utils.ts via the workspace's project resolver.
@@ -4905,7 +4905,7 @@ fn workspace_resolution_does_not_override_exact_resolution() {
     let result = host.resolve_loaded_dependency_canonical(
         "/src/Comp.vue",
         "./dep",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
 
     // The `import_routes` exact-match fast path should take priority
@@ -4991,7 +4991,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
     let esm_resolve = host.resolve_loaded_dependency_canonical(
         "/workspace/src/Popup.vue",
         "motion",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert!(
         esm_resolve.is_none(),
@@ -5001,7 +5001,7 @@ fn macro_type_dep_resolves_types_only_package_exports() {
     let type_resolve = host.resolve_loaded_dependency_canonical(
         "/workspace/src/Popup.vue",
         "motion",
-        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        verter_session_query::resolution::ResolveRequestKind::TypeImport,
     );
     assert!(
         type_resolve.is_some(),
@@ -5235,7 +5235,7 @@ fn type_import_package_with_node_condition_still_prefers_types_entry() {
     let resolved = host.resolve_loaded_dependency_canonical(
         "/workspace/src/Consumer.vue",
         "vue-router",
-        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        verter_session_query::resolution::ResolveRequestKind::TypeImport,
     );
 
     assert_eq!(
@@ -7299,7 +7299,7 @@ fn barrel_imported_root_component_is_named_by_its_real_namespace_member() {
 #[test]
 fn an_unnameable_root_component_zeroes_its_whole_arm() {
     use verter_compiler::tsc::{FallthroughArm, FallthroughPropsProjection};
-    use verter_semantic::analysis::component_meta::{
+    use verter_session_query::analysis::component_meta::{
         AcceptedSurfaceCompleteness, BranchStatus, FallthroughBranch, FallthroughPropEntry,
         FallthroughSurface, InheritedSource, ResolvedRootStep,
     };
@@ -7766,7 +7766,7 @@ fn multi_hop_chain_through_an_options_api_middle_reaches_the_leaf_prop() {
 /// regression that broke barrel imports generally could not hide here.
 #[test]
 fn a_namespace_member_root_fails_closed_with_a_typed_unresolved_reason() {
-    use verter_semantic::analysis::component_meta::{
+    use verter_session_query::analysis::component_meta::{
         BranchStatus, FallthroughSurface, ResolvedRootStep, UnresolvedBranchReason,
         UnresolvedRootTargetReason,
     };

@@ -18,14 +18,14 @@
 
 use std::sync::Arc;
 
-use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
-use verter_session::resolver_core::{
-    FactVersionRef, ResolveImportsFactRef, ResolverStore, StoreView,
-};
+use verter_session::resolver_core::ResolverStore;
 use verter_session::session_view::{HostView, SessionView};
 use verter_session::{
     CompileErrorPolicy, DependencyResolution, FileLanguage, HostConfig, UpsertRequest, VerterHost,
 };
+use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
+use verter_session_query::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
+use verter_session_query::facts::store_view::StoreView;
 
 #[test]
 fn validator_warms_then_invalidates_after_source_edit() {

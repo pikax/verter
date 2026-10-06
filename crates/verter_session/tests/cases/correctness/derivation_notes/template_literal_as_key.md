@@ -61,10 +61,10 @@ Phase linkage:
   rule-correct expected (`props = [prefixA: number, prefixB: number]`).
 - Phase 5i §5.11 (re-homed from 5k per §5.13 r15 table) closes
   the gap via two changes in
-  `crates/verter_session/src/project_semantic_dispatch/build.rs`
+  `crates/verter_type_engine/src/project_semantic_dispatch/build.rs`
   (apply `mapper.name_remap` per iteration in `build_mapped_type`)
   and
-  `crates/verter_session/src/project_semantic_dispatch/evaluate.rs`
+  `crates/verter_type_engine/src/project_semantic_dispatch/evaluate.rs`
   (fold `SemanticNodeData::TemplateLiteral` to a `Literal::String`
   when every expression resolves to a literal). The fixture is
   authored as a regression guard for both pieces.

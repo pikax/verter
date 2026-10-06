@@ -19,8 +19,8 @@
 //!   env.
 
 pub(crate) fn template_converter_inputs(
-    imports: &[verter_semantic::analysis::AnalyzedImport],
-    bindings: &[verter_semantic::analysis::AnalyzedBinding],
+    imports: &[verter_session_query::analysis::types::AnalyzedImport],
+    bindings: &[verter_session_query::analysis::types::AnalyzedBinding],
 ) -> Vec<(String, String)> {
     // Carrier-linkage map for template components. A `import type { X }` (or a
     // per-specifier `import { type X }`) is a TYPE-ONLY binding — it has no
@@ -45,7 +45,7 @@ pub(crate) fn template_converter_inputs(
     // it in the linkage map so a `<X>` tag links to its `.vue` carrier exactly
     // like a static default import.
     for binding in bindings {
-        if let Some(verter_semantic::analysis::BindingInitializer::FunctionCall {
+        if let Some(verter_session_query::analysis::types::BindingInitializer::FunctionCall {
             async_component_source: Some(source),
             ..
         }) = &binding.initializer
@@ -204,7 +204,7 @@ pub(crate) fn build_position_preserving_script_source(
 pub(crate) fn populate_ordered_sfc_structure(
     host: &crate::VerterHost,
     canonical_id: &str,
-    meta: &mut verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    meta: &mut verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) {
     let Some((structure, _)) = host.registered_file_structure_snapshot(canonical_id) else {
         return;
@@ -216,7 +216,7 @@ pub(crate) fn populate_ordered_sfc_structure(
 /// This is deliberately content-free and never reparses source bytes.
 pub(crate) fn ordered_sfc_structure_analysis(
     structure: &crate::carrier_publication_store::RegisteredFileStructure,
-) -> verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+) -> verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis {
     let inventory = structure.inventory();
 
     let source_space_tokens = inventory
@@ -291,7 +291,7 @@ pub(crate) fn ordered_sfc_structure_analysis(
         })
         .collect::<Vec<_>>();
 
-    verter_semantic::analysis::component_meta::OrderedSfcStructureAnalysis {
+    verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis {
         schema_version: 1,
         artifact_token: structure.public_artifact_token().as_str().to_owned(),
         inventory: std::sync::Arc::clone(inventory),

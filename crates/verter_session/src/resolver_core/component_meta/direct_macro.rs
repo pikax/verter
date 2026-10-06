@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 
-use verter_semantic::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedImport, AnalyzedMacro, AnalyzedMacroKind, MacroTypeDep,
 };
 
-use crate::resolver_core::ResolvedTypeDeclaration;
+use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 use super::ComponentMetaResolutionPurpose;
 
@@ -94,7 +94,7 @@ pub(super) fn is_direct_local_macro_type_reference(
 }
 
 fn macro_has_authoritative_evaluated_surface(
-    evaluated: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_kind: AnalyzedMacroKind,
     macro_index: usize,
 ) -> bool {
@@ -130,7 +130,7 @@ fn macro_has_authoritative_evaluated_surface(
 
 pub(super) fn macro_has_authoritative_owner_surface(
     mac: &AnalyzedMacro,
-    evaluated: Option<&verter_semantic::analysis::type_expand::ExpandedComponentTypes>,
+    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macro_index: usize,
 ) -> bool {
     if macro_has_authoritative_evaluated_surface(evaluated, mac.kind, macro_index) {
@@ -177,7 +177,7 @@ pub(super) fn macro_dep_exported_type_name<'a>(
 
             if matches!(
                 binding.kind,
-                verter_semantic::analysis::types::ImportBindingKind::Namespace
+                verter_session_query::analysis::types::ImportBindingKind::Namespace
             ) {
                 let prefix = format!("{}.", binding.name);
                 if let Some(member_name) = dep.type_name.strip_prefix(&prefix) {

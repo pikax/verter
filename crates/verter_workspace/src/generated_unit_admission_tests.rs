@@ -12,7 +12,8 @@ use std::sync::Arc;
 use crate::canonical_path::CanonicalPath;
 use crate::memory::{MemoryOptions, MemoryWorkspace};
 use crate::snapshot_builder::{build_workspace_snapshot_simple, configured_project};
-use crate::workspace_snapshot::{ProjectId, SnapshotGeneration, WorkspaceSnapshot};
+use crate::workspace_snapshot::{SnapshotGeneration, WorkspaceSnapshot};
+use verter_session_query::resolution::ProjectId;
 
 use super::{
     decide_generated_unit_admission, decide_generated_unit_admission_with_basis,

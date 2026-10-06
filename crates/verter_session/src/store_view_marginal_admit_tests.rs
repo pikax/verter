@@ -66,10 +66,11 @@
 
 use std::sync::Arc;
 
-use crate::resolver_core::{DerivedFactKind, FactVersionRef, StoreView};
 use crate::store_view_roots::{reset_store_view_owner_visits, store_view_owner_visits};
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::facts::fact_cache::{DerivedFactKind, FactVersionRef};
+use verter_session_query::facts::store_view::StoreView;
 
 /// Counter deltas measured around one window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

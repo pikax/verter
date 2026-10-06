@@ -49,7 +49,7 @@ export type SymbolKind =
   | "classValue"
   | "enum";
 
-/** Projection-mode tag — mirrors `verter_session::semantic_query::ProjectionMode`. */
+/** Projection-mode tag — mirrors `verter_type_engine::semantic_query::ProjectionMode`. */
 export type ProjectionMode = "identity" | "navigate" | "shallow" | "expanded" | "skeleton";
 
 /**

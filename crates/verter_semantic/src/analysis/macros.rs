@@ -2,12 +2,13 @@ use oxc_ast::ast::*;
 use oxc_ast::Comment;
 
 use oxc_span::GetSpan;
+use verter_analyzer_mint::MemberListAnchorMint;
 use verter_type_expr::{TopLevelOwnerId, TypeExpr};
 
-use crate::analysis::top_level_owners::TopLevelOwnerTable;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
 
-use crate::analysis::types::{
+use verter_session_query::analysis::types::{
     AnalyzedDefaultValue, AnalyzedEmitField, AnalyzedExposeField, AnalyzedMacro, AnalyzedMacroKind,
     AnalyzedPropField, AnalyzedSlotField, AnalyzedSlotFieldBinding, JsdocTag, MacroAnchor,
     MacroAnchorUnsupported, MacroEditAnchors, MacroTypeDepUsage, MemberListAnchor,
@@ -26,29 +27,6 @@ fn classify_macro(name: &str) -> Option<AnalyzedMacroKind> {
         "withDefaults" => Some(AnalyzedMacroKind::WithDefaults),
         _ => None,
     }
-}
-
-/// Select the props-root binding name (`const props = …`) for a component's
-/// `defineProps` / `withDefaults` pair.
-///
-/// Vue permits at most one `defineProps` per component, so there is no
-/// ambiguity: for `const props = withDefaults(defineProps<T>(), { … })` the
-/// declarator's binding is recorded on the OUTER `WithDefaults` macro while
-/// the INNER `DefineProps` (which carries the prop fields) has no declarator
-/// of its own and records `binding_name: None` — a first-match-wins selection
-/// over the pair would observe that inner `None` and disarm every props-usage
-/// analysis. The expression-statement form (`withDefaults(defineProps<T>(),
-/// { … });` with no declarator) correctly yields `None`.
-pub fn props_root_binding(macros: &[AnalyzedMacro]) -> Option<&str> {
-    macros
-        .iter()
-        .filter(|m| {
-            matches!(
-                m.kind,
-                AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults
-            )
-        })
-        .find_map(|m| m.binding_name.as_deref())
 }
 
 /// Collect all type reference names from a TypeScript type annotation.
@@ -715,7 +693,7 @@ pub fn lower_macro_type_argument_at_span(
         source: &str,
         macro_span: verter_span::Span,
     ) -> Option<verter_type_expr::TypeExpr> {
-        let call_span: verter_span::Span = call.span.into();
+        let call_span: verter_span::Span = verter_span::Span::new(call.span.start, call.span.end);
         if call_span == macro_span {
             let type_args = call.type_arguments.as_ref()?;
             let first = type_args.params.first()?;
@@ -969,7 +947,7 @@ fn find_macro_call_at_span<'a>(
         call: &'a CallExpression<'a>,
         macro_span: verter_span::Span,
     ) -> Option<&'a CallExpression<'a>> {
-        let call_span: verter_span::Span = call.span.into();
+        let call_span: verter_span::Span = verter_span::Span::new(call.span.start, call.span.end);
         if call_span == macro_span {
             return Some(call);
         }
@@ -1026,7 +1004,8 @@ fn lower_prop_field_payload_at_span(
     for members in field_payload_member_lists(program, owners, mac) {
         for member in members {
             if let TSSignature::TSPropertySignature(prop) = member {
-                let key_span: verter_span::Span = prop.key.span().into();
+                let key_span: verter_span::Span =
+                    verter_span::Span::new(prop.key.span().start, prop.key.span().end);
                 if key_span == span {
                     return match prop.type_annotation.as_ref() {
                         Some(ta) => MacroFieldPayloadLowering::Payload(
@@ -1047,7 +1026,8 @@ fn lower_prop_field_payload_at_span(
                     let ObjectPropertyKind::ObjectProperty(p) = prop else {
                         continue;
                     };
-                    let key_span: verter_span::Span = p.key.span().into();
+                    let key_span: verter_span::Span =
+                        verter_span::Span::new(p.key.span().start, p.key.span().end);
                     if key_span != span {
                         continue;
                     }
@@ -1118,7 +1098,8 @@ fn lower_emit_field_payload_at_span(
         for member in members {
             match member {
                 TSSignature::TSPropertySignature(prop) => {
-                    let key_span: verter_span::Span = prop.key.span().into();
+                    let key_span: verter_span::Span =
+                        verter_span::Span::new(prop.key.span().start, prop.key.span().end);
                     if key_span == span {
                         return match prop.type_annotation.as_ref() {
                             Some(ta) => MacroFieldPayloadLowering::Payload(
@@ -1141,7 +1122,8 @@ fn lower_emit_field_payload_at_span(
                     let TSLiteral::StringLiteral(s) = &lit.literal else {
                         continue;
                     };
-                    let name_span: verter_span::Span = s.span.into();
+                    let name_span: verter_span::Span =
+                        verter_span::Span::new(s.span.start, s.span.end);
                     if name_span != span {
                         continue;
                     }
@@ -1194,7 +1176,8 @@ fn lower_slot_return_payload_at_span(
         for member in members {
             match member {
                 TSSignature::TSPropertySignature(prop) => {
-                    let key_span: verter_span::Span = prop.key.span().into();
+                    let key_span: verter_span::Span =
+                        verter_span::Span::new(prop.key.span().start, prop.key.span().end);
                     if key_span == span {
                         let Some(ta) = prop.type_annotation.as_ref() else {
                             return MacroFieldPayloadLowering::Unauthored;
@@ -1211,7 +1194,8 @@ fn lower_slot_return_payload_at_span(
                     }
                 }
                 TSSignature::TSMethodSignature(method) => {
-                    let key_span: verter_span::Span = method.key.span().into();
+                    let key_span: verter_span::Span =
+                        verter_span::Span::new(method.key.span().start, method.key.span().end);
                     if key_span == span {
                         return match method.return_type.as_ref() {
                             Some(rt) => MacroFieldPayloadLowering::Payload(
@@ -1718,7 +1702,7 @@ fn extract_fields_from_interface_body_like(
                 key_name.map(|name| AnalyzedPropField {
                     name,
                     is_optional: prop.optional,
-                    span: prop.key.span().into(),
+                    span: verter_span::Span::new(prop.key.span().start, prop.key.span().end),
                     type_annotation,
                     description,
                     tags,
@@ -1867,8 +1851,12 @@ fn resolve_local_define_props(
                     ) {
                         let expanded = build_expanded_type_text(&ref_fields);
                         let span = match decl {
-                            LocalTypeDecl::Interface { body, .. } => body.span.into(),
-                            LocalTypeDecl::Alias(t) => t.span().into(),
+                            LocalTypeDecl::Interface { body, .. } => {
+                                verter_span::Span::new(body.span.start, body.span.end)
+                            }
+                            LocalTypeDecl::Alias(t) => {
+                                verter_span::Span::new(t.span().start, t.span().end)
+                            }
                             LocalTypeDecl::Class => verter_span::Span::default(),
                         };
                         resolved_types.push(ResolvedLocalType {
@@ -1912,8 +1900,12 @@ fn resolve_local_define_props(
                 ) {
                     let expanded = build_expanded_type_text(&fields);
                     let span = match decl {
-                        LocalTypeDecl::Interface { body, .. } => body.span.into(),
-                        LocalTypeDecl::Alias(t) => t.span().into(),
+                        LocalTypeDecl::Interface { body, .. } => {
+                            verter_span::Span::new(body.span.start, body.span.end)
+                        }
+                        LocalTypeDecl::Alias(t) => {
+                            verter_span::Span::new(t.span().start, t.span().end)
+                        }
                         LocalTypeDecl::Class => verter_span::Span::default(),
                     };
                     resolved_types.push(ResolvedLocalType {
@@ -2658,7 +2650,7 @@ fn append_destructure_defaults(pattern: &ObjectPattern<'_>, source: &str, m: &mu
         let entry = AnalyzedDefaultValue {
             key: key.clone(),
             value: default_value_source_text(&assign.right, source).unwrap_or_default(),
-            span: assign.right.span().into(),
+            span: verter_span::Span::new(assign.right.span().start, assign.right.span().end),
         };
         if let Some(existing) = m.default_values.iter_mut().find(|d| d.key == key) {
             *existing = entry;
@@ -2849,7 +2841,7 @@ fn try_extract_macro(
                 parsed_type_argument,
                 parsed_type_argument_scope,
                 edit_anchors,
-                span: call.span.into(),
+                span: verter_span::Span::new(call.span.start, call.span.end),
             })
         }
         _ => None,
@@ -2884,7 +2876,7 @@ fn extract_define_model_type(
     vec![AnalyzedPropField {
         name,
         is_optional,
-        span: first.span().into(),
+        span: verter_span::Span::new(first.span().start, first.span().end),
         type_annotation: Some(type_text.to_string()),
         description: None,
         tags: Vec::new(),
@@ -2985,7 +2977,7 @@ fn extract_define_model_default_values(
             Some(AnalyzedDefaultValue {
                 key: name.to_string(),
                 value,
-                span: p.value.span().into(),
+                span: verter_span::Span::new(p.value.span().start, p.value.span().end),
             })
         })
         .collect()
@@ -3324,7 +3316,10 @@ fn extract_prop_fields_from_runtime(
                                 default_values.push(AnalyzedDefaultValue {
                                     key: key_name.clone(),
                                     value: val_text,
-                                    span: sp.value.span().into(),
+                                    span: verter_span::Span::new(
+                                        sp.value.span().start,
+                                        sp.value.span().end,
+                                    ),
                                 });
                             }
                             _ => {}
@@ -3339,7 +3334,7 @@ fn extract_prop_fields_from_runtime(
                 fields.push(AnalyzedPropField {
                     name: key_name,
                     is_optional,
-                    span: p.key.span().into(),
+                    span: verter_span::Span::new(p.key.span().start, p.key.span().end),
                     type_annotation,
                     description,
                     tags,
@@ -3370,7 +3365,7 @@ fn extract_prop_fields_from_runtime(
                             name: lit.value.to_string(),
                             // Array form has no type or required info — optional by Vue default.
                             is_optional: true,
-                            span: lit.span.into(),
+                            span: verter_span::Span::new(lit.span.start, lit.span.end),
                             type_annotation: None,
                             description: None,
                             tags: Vec::new(),
@@ -3500,7 +3495,7 @@ fn extract_emit_fields_from_members_at(
                 let (description, tags) = extract_jsdoc_for(comments, prop.span().start, source);
                 key_name.map(|name| AnalyzedEmitField {
                     name,
-                    span: prop.key.span().into(),
+                    span: verter_span::Span::new(prop.key.span().start, prop.key.span().end),
                     call_signature_span: None,
                     payload_type,
                     description,
@@ -3543,8 +3538,11 @@ fn extract_emit_fields_from_members_at(
                             extract_jsdoc_for(comments, call_sig.span().start, source);
                         return Some(AnalyzedEmitField {
                             name: s.value.to_string(),
-                            span: s.span.into(),
-                            call_signature_span: Some(call_sig.span().into()),
+                            span: verter_span::Span::new(s.span.start, s.span.end),
+                            call_signature_span: Some(verter_span::Span::new(
+                                call_sig.span().start,
+                                call_sig.span().end,
+                            )),
                             payload_type,
                             description,
                             tags,
@@ -3575,7 +3573,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                     };
                     key_name.map(|name| AnalyzedEmitField {
                         name,
-                        span: p.key.span().into(),
+                        span: verter_span::Span::new(p.key.span().start, p.key.span().end),
                         call_signature_span: None,
                         payload_type: None,
                         description: None,
@@ -3595,7 +3593,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                 if let ArrayExpressionElement::StringLiteral(lit) = elem {
                     Some(AnalyzedEmitField {
                         name: lit.value.to_string(),
-                        span: lit.span.into(),
+                        span: verter_span::Span::new(lit.span.start, lit.span.end),
                         call_signature_span: None,
                         payload_type: None,
                         description: None,
@@ -3662,7 +3660,7 @@ fn extract_with_defaults_values(
                 Some(AnalyzedDefaultValue {
                     key,
                     value,
-                    span: p.value.span().into(),
+                    span: verter_span::Span::new(p.value.span().start, p.value.span().end),
                 })
             } else {
                 None
@@ -3735,7 +3733,7 @@ fn extract_expose_fields(
                                 BindingResolution, StartScope,
                             };
                             match index.resolve_value_identifier(
-                                ident.span.into(),
+                                verter_span::Span::new(ident.span.start, ident.span.end),
                                 StartScope::OwnerNaturalScope,
                             ) {
                                 BindingResolution::Local(key) => Some(key),
@@ -3749,7 +3747,7 @@ fn extract_expose_fields(
                 };
                 key_name.map(|name| AnalyzedExposeField {
                     name,
-                    span: Some(p.key.span().into()),
+                    span: Some(verter_span::Span::new(p.key.span().start, p.key.span().end)),
                     payload: None,
                     type_expr_scope: None,
                     referenced_binding,
@@ -3840,7 +3838,7 @@ fn extract_slot_fields_from_members(
                 key_name.map(|name| AnalyzedSlotField {
                     name,
                     is_required: !prop.optional,
-                    span: prop.key.span().into(),
+                    span: verter_span::Span::new(prop.key.span().start, prop.key.span().end),
                     bindings,
                     props_anchor,
                     return_type,
@@ -3878,7 +3876,7 @@ fn extract_slot_fields_from_members(
                 key_name.map(|name| AnalyzedSlotField {
                     name,
                     is_required: !method.optional,
-                    span: method.key.span().into(),
+                    span: verter_span::Span::new(method.key.span().start, method.key.span().end),
                     bindings,
                     props_anchor,
                     return_type,
@@ -3969,7 +3967,11 @@ fn closing_delimiter_anchor(span: oxc_span::Span, is_empty: bool) -> MacroAnchor
     if span.end <= span.start {
         return MacroAnchor::Unsupported(MacroAnchorUnsupported::NoMemberList);
     }
-    MacroAnchor::Available(MemberListAnchor::new(span.end - 1, is_empty))
+    MacroAnchor::Available(MemberListAnchor::new(
+        MemberListAnchorMint::grant(),
+        span.end - 1,
+        is_empty,
+    ))
 }
 
 /// The appendable member-list anchor of an object TYPE at this position.
@@ -4070,7 +4072,7 @@ fn extract_slot_bindings_from_type_literal(
                 key_name.map(|name| AnalyzedSlotFieldBinding {
                     name,
                     type_annotation,
-                    span: prop.key.span().into(),
+                    span: verter_span::Span::new(prop.key.span().start, prop.key.span().end),
                     payload: None,
                     binding_expr_scope: None,
                 })

@@ -23,7 +23,7 @@ impl Scheduler {
         self: &Arc<Self>,
         identity: &WorkNodeIdentity,
         flight: &Arc<ScopedCacheFlight>,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
         request_token: Option<CancellationToken>,
         build: F,
     ) -> Result<Arc<T>, ScopedCacheNodeError>
@@ -72,7 +72,7 @@ impl Scheduler {
                 let run = move || {
                     let _request_guard =
                         context_for_worker.map(|context| Arc::clone(&context.0).install_tls());
-                    let _job_guard = crate::cancellation::JobCancellationGuard::install(
+                    let _job_guard = verter_execution::cancellation::JobCancellationGuard::install(
                         aggregate_for_worker.clone(),
                     );
                     let outcome = caller_kind::with_active_path(identity_for_path, || {
@@ -173,7 +173,7 @@ impl Scheduler {
         identity: WorkNodeIdentity,
         priority: Priority,
         flight: Arc<ScopedCacheFlight>,
-        request_context: Option<crate::request_context::OpaqueRequestContext>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) {
         let _gate = self.scoped_cache_gate.lock();
         let is_current = self

@@ -20,12 +20,12 @@ use crate::context::LintContext;
 use crate::cross_file::CrossFileSnapshot;
 use crate::diagnostic::Severity;
 use verter_language::FrameworkAdapterId;
-use verter_semantic::analysis::template::{
+use verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot;
+use verter_session_query::analysis::style::StyleBlockAnalysis;
+use verter_session_query::analysis::template::{
     TemplateAnalysisSnapshot, TemplateBindingOccurrence, TemplateDirective, TemplateElement,
     VForDirective,
 };
-use verter_semantic::analysis::types::ScriptAnalysisSnapshot;
-use verter_semantic::analysis::StyleBlockAnalysis;
 
 /// File-level context passed to `check_file`.
 ///

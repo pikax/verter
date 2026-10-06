@@ -26,7 +26,7 @@ use super::{assemble_vue_main_module, CompileProfile, HmrStrategy};
 /// assertion it backs.
 fn assemble_inline_vapor_module(source: &str) -> String {
     let canonical_id = "fixtures/vue/nested-v-for-runtime-proof.vue".to_string();
-    let provenance = crate::types::MetaProvenance::default();
+    let provenance = crate::meta_provenance::MetaProvenance::default();
     let (snapshot, artifact) = crate::parse::parse_vue_snapshot(
         &canonical_id,
         source,

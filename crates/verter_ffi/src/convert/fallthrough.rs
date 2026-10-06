@@ -8,15 +8,15 @@ use super::component_meta::require_lane_aligned;
 use super::string_helpers::{inherited_source_to_ffi, materialized_publication_to_ffi};
 
 pub(super) fn root_reachability_to_ffi(
-    reachability: verter_semantic::analysis::component_meta::RootReachability,
+    reachability: verter_session_query::analysis::component_meta::RootReachability,
 ) -> FfiRootReachability {
     match reachability {
-        verter_semantic::analysis::component_meta::RootReachability::NoFallthrough { reason } => {
-            FfiRootReachability::NoFallthrough {
-                reason: no_fallthrough_reason_to_ffi(reason),
-            }
-        }
-        verter_semantic::analysis::component_meta::RootReachability::Branches { branches } => {
+        verter_session_query::analysis::component_meta::RootReachability::NoFallthrough {
+            reason,
+        } => FfiRootReachability::NoFallthrough {
+            reason: no_fallthrough_reason_to_ffi(reason),
+        },
+        verter_session_query::analysis::component_meta::RootReachability::Branches { branches } => {
             FfiRootReachability::Branches {
                 branches: branches.into_iter().map(root_branch_to_ffi).collect(),
             }
@@ -25,22 +25,24 @@ pub(super) fn root_reachability_to_ffi(
 }
 
 pub(super) fn root_info_to_ffi(
-    reachability: &verter_semantic::analysis::component_meta::RootReachability,
+    reachability: &verter_session_query::analysis::component_meta::RootReachability,
 ) -> FfiRootInfo {
     match reachability {
-        verter_semantic::analysis::component_meta::RootReachability::NoFallthrough { reason } => {
+        verter_session_query::analysis::component_meta::RootReachability::NoFallthrough {
+            reason,
+        } => {
             let kind = match reason {
-                verter_semantic::analysis::component_meta::NoFallthroughReason::MultiRoot
-                | verter_semantic::analysis::component_meta::NoFallthroughReason::RootVFor => {
+                verter_session_query::analysis::component_meta::NoFallthroughReason::MultiRoot
+                | verter_session_query::analysis::component_meta::NoFallthroughReason::RootVFor => {
                     FfiRootInfoKind::Multiple
                 }
-                verter_semantic::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot => {
+                verter_session_query::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot => {
                     FfiRootInfoKind::Conditional
                 }
-                verter_semantic::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse
-                | verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate
-                | verter_semantic::analysis::component_meta::NoFallthroughReason::EmptyTemplate
-                | verter_semantic::analysis::component_meta::NoFallthroughReason::TextOrInterpolationRoot => {
+                verter_session_query::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse
+                | verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate
+                | verter_session_query::analysis::component_meta::NoFallthroughReason::EmptyTemplate
+                | verter_session_query::analysis::component_meta::NoFallthroughReason::TextOrInterpolationRoot => {
                     FfiRootInfoKind::None
                 }
             };
@@ -50,7 +52,7 @@ pub(super) fn root_info_to_ffi(
                 targets: Vec::new(),
             }
         }
-        verter_semantic::analysis::component_meta::RootReachability::Branches { branches } => {
+        verter_session_query::analysis::component_meta::RootReachability::Branches { branches } => {
             FfiRootInfo {
                 kind: if branches.len() <= 1 {
                     FfiRootInfoKind::Single
@@ -68,35 +70,35 @@ pub(super) fn root_info_to_ffi(
 }
 
 pub(super) fn no_fallthrough_reason_to_ffi(
-    reason: verter_semantic::analysis::component_meta::NoFallthroughReason,
+    reason: verter_session_query::analysis::component_meta::NoFallthroughReason,
 ) -> FfiNoFallthroughReason {
     match reason {
-        verter_semantic::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse => {
+        verter_session_query::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse => {
             FfiNoFallthroughReason::InheritAttrsFalse
         }
-        verter_semantic::analysis::component_meta::NoFallthroughReason::MultiRoot => {
+        verter_session_query::analysis::component_meta::NoFallthroughReason::MultiRoot => {
             FfiNoFallthroughReason::MultiRoot
         }
-        verter_semantic::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot => {
+        verter_session_query::analysis::component_meta::NoFallthroughReason::BranchNotSingleRoot => {
             FfiNoFallthroughReason::BranchNotSingleRoot
         }
-        verter_semantic::analysis::component_meta::NoFallthroughReason::RootVFor => {
+        verter_session_query::analysis::component_meta::NoFallthroughReason::RootVFor => {
             FfiNoFallthroughReason::RootVFor
         }
-        verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate => {
+        verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate => {
             FfiNoFallthroughReason::NoTemplate
         }
-        verter_semantic::analysis::component_meta::NoFallthroughReason::EmptyTemplate => {
+        verter_session_query::analysis::component_meta::NoFallthroughReason::EmptyTemplate => {
             FfiNoFallthroughReason::EmptyTemplate
         }
-        verter_semantic::analysis::component_meta::NoFallthroughReason::TextOrInterpolationRoot => {
+        verter_session_query::analysis::component_meta::NoFallthroughReason::TextOrInterpolationRoot => {
             FfiNoFallthroughReason::TextOrInterpolationRoot
         }
     }
 }
 
 pub(super) fn root_branch_to_ffi(
-    branch: verter_semantic::analysis::component_meta::RootBranch,
+    branch: verter_session_query::analysis::component_meta::RootBranch,
 ) -> FfiRootBranch {
     FfiRootBranch {
         branch_index: branch.branch_index,
@@ -113,21 +115,21 @@ pub(super) fn root_branch_to_ffi(
 }
 
 pub(super) fn root_target_ref_to_ffi(
-    target: verter_semantic::analysis::component_meta::RootTargetRef,
+    target: verter_session_query::analysis::component_meta::RootTargetRef,
 ) -> FfiRootTargetRef {
     match target {
-        verter_semantic::analysis::component_meta::RootTargetRef::NativeElement {
+        verter_session_query::analysis::component_meta::RootTargetRef::NativeElement {
             element_index,
             tag,
         } => FfiRootTargetRef::NativeElement { element_index, tag },
-        verter_semantic::analysis::component_meta::RootTargetRef::DynamicComponentUsage {
+        verter_session_query::analysis::component_meta::RootTargetRef::DynamicComponentUsage {
             element_index,
             usage_index,
         } => FfiRootTargetRef::DynamicComponentUsage {
             element_index,
             usage_index,
         },
-        verter_semantic::analysis::component_meta::RootTargetRef::ComponentUsage {
+        verter_session_query::analysis::component_meta::RootTargetRef::ComponentUsage {
             element_index,
             usage_index,
             name,
@@ -138,7 +140,7 @@ pub(super) fn root_target_ref_to_ffi(
             name,
             import_source,
         },
-        verter_semantic::analysis::component_meta::RootTargetRef::UnresolvedTarget {
+        verter_session_query::analysis::component_meta::RootTargetRef::UnresolvedTarget {
             element_index,
             tag,
             reason,
@@ -151,25 +153,25 @@ pub(super) fn root_target_ref_to_ffi(
 }
 
 pub(super) fn unresolved_root_target_reason_to_ffi(
-    reason: verter_semantic::analysis::component_meta::UnresolvedRootTargetReason,
+    reason: verter_session_query::analysis::component_meta::UnresolvedRootTargetReason,
 ) -> FfiUnresolvedRootTargetReason {
     match reason {
-        verter_semantic::analysis::component_meta::UnresolvedRootTargetReason::DynamicComponentIs => {
+        verter_session_query::analysis::component_meta::UnresolvedRootTargetReason::DynamicComponentIs => {
             FfiUnresolvedRootTargetReason::DynamicComponentIs
         }
-        verter_semantic::analysis::component_meta::UnresolvedRootTargetReason::SlotOutlet => {
+        verter_session_query::analysis::component_meta::UnresolvedRootTargetReason::SlotOutlet => {
             FfiUnresolvedRootTargetReason::SlotOutlet
         }
-        verter_semantic::analysis::component_meta::UnresolvedRootTargetReason::UnsupportedBuiltin { tag } => {
+        verter_session_query::analysis::component_meta::UnresolvedRootTargetReason::UnsupportedBuiltin { tag } => {
             FfiUnresolvedRootTargetReason::UnsupportedBuiltin { tag }
         }
-        verter_semantic::analysis::component_meta::UnresolvedRootTargetReason::MissingUsageLink => {
+        verter_session_query::analysis::component_meta::UnresolvedRootTargetReason::MissingUsageLink => {
             FfiUnresolvedRootTargetReason::MissingUsageLink
         }
-        verter_semantic::analysis::component_meta::UnresolvedRootTargetReason::UnresolvedImport => {
+        verter_session_query::analysis::component_meta::UnresolvedRootTargetReason::UnresolvedImport => {
             FfiUnresolvedRootTargetReason::UnresolvedImport
         }
-        verter_semantic::analysis::component_meta::UnresolvedRootTargetReason::UnknownRootTarget => {
+        verter_session_query::analysis::component_meta::UnresolvedRootTargetReason::UnknownRootTarget => {
             FfiUnresolvedRootTargetReason::UnknownRootTarget
         }
     }
@@ -188,12 +190,12 @@ pub(super) fn unresolved_root_target_reason_to_ffi(
 /// TRUNCATE the wire payload. A debug-only assert would let a release build
 /// ship the truncated payload.
 pub(super) fn fallthrough_surface_to_ffi(
-    surface: verter_semantic::analysis::component_meta::FallthroughSurface,
+    surface: verter_session_query::analysis::component_meta::FallthroughSurface,
     prop_lanes: Vec<Vec<verter_session::meta_resolve::MaterializedTypePublication>>,
     event_lanes: Vec<Vec<verter_type_expr::TypeExpr>>,
 ) -> FfiFallthroughSurface {
     match surface {
-        verter_semantic::analysis::component_meta::FallthroughSurface::None { reason } => {
+        verter_session_query::analysis::component_meta::FallthroughSurface::None { reason } => {
             assert!(
                 prop_lanes.is_empty() && event_lanes.is_empty(),
                 "component-meta FFI conversion refused: a `None` fallthrough surface must \
@@ -207,7 +209,9 @@ pub(super) fn fallthrough_surface_to_ffi(
                 reason: no_fallthrough_reason_to_ffi(reason),
             }
         }
-        verter_semantic::analysis::component_meta::FallthroughSurface::Branches { branches } => {
+        verter_session_query::analysis::component_meta::FallthroughSurface::Branches {
+            branches,
+        } => {
             require_lane_aligned("fallthrough-props", branches.len(), prop_lanes.len());
             require_lane_aligned(
                 "fallthrough-event-payloads",
@@ -256,7 +260,7 @@ pub(super) fn fallthrough_surface_to_ffi(
 }
 
 pub(super) fn fallthrough_branch_to_ffi(
-    branch: verter_semantic::analysis::component_meta::FallthroughBranch,
+    branch: verter_session_query::analysis::component_meta::FallthroughBranch,
     prop_types: Vec<verter_session::meta_resolve::MaterializedTypePublication>,
     event_payloads: Vec<verter_type_expr::TypeExpr>,
 ) -> FfiFallthroughBranch {
@@ -299,36 +303,37 @@ pub(super) fn fallthrough_branch_to_ffi(
 }
 
 pub(super) fn resolved_root_step_to_ffi(
-    step: verter_semantic::analysis::component_meta::ResolvedRootStep,
+    step: verter_session_query::analysis::component_meta::ResolvedRootStep,
 ) -> FfiResolvedRootStep {
     match step {
-        verter_semantic::analysis::component_meta::ResolvedRootStep::NativeTag { tag } => {
+        verter_session_query::analysis::component_meta::ResolvedRootStep::NativeTag { tag } => {
             FfiResolvedRootStep::NativeTag { tag }
         }
-        verter_semantic::analysis::component_meta::ResolvedRootStep::Component {
+        verter_session_query::analysis::component_meta::ResolvedRootStep::Component {
             canonical_id,
             component_name,
         } => FfiResolvedRootStep::Component {
             canonical_id,
             component_name,
         },
-        verter_semantic::analysis::component_meta::ResolvedRootStep::Unresolved { tag, reason } => {
-            FfiResolvedRootStep::Unresolved {
-                tag,
-                reason: unresolved_branch_reason_to_ffi(reason),
-            }
-        }
+        verter_session_query::analysis::component_meta::ResolvedRootStep::Unresolved {
+            tag,
+            reason,
+        } => FfiResolvedRootStep::Unresolved {
+            tag,
+            reason: unresolved_branch_reason_to_ffi(reason),
+        },
     }
 }
 
 pub(super) fn branch_status_to_ffi(
-    status: verter_semantic::analysis::component_meta::BranchStatus,
+    status: verter_session_query::analysis::component_meta::BranchStatus,
 ) -> FfiBranchStatus {
     match status {
-        verter_semantic::analysis::component_meta::BranchStatus::Resolved => {
+        verter_session_query::analysis::component_meta::BranchStatus::Resolved => {
             FfiBranchStatus::Resolved
         }
-        verter_semantic::analysis::component_meta::BranchStatus::PartiallyUnresolved {
+        verter_session_query::analysis::component_meta::BranchStatus::PartiallyUnresolved {
             reasons,
         } => FfiBranchStatus::PartiallyUnresolved {
             reasons: reasons
@@ -336,7 +341,7 @@ pub(super) fn branch_status_to_ffi(
                 .map(partial_branch_reason_to_ffi)
                 .collect(),
         },
-        verter_semantic::analysis::component_meta::BranchStatus::Unresolved { reason } => {
+        verter_session_query::analysis::component_meta::BranchStatus::Unresolved { reason } => {
             FfiBranchStatus::Unresolved {
                 reason: unresolved_branch_reason_to_ffi(reason),
             }
@@ -345,44 +350,44 @@ pub(super) fn branch_status_to_ffi(
 }
 
 pub(super) fn generic_resolution_failure_to_ffi(
-    failure: verter_semantic::analysis::component_meta::GenericResolutionFailure,
+    failure: verter_session_query::analysis::component_meta::GenericResolutionFailure,
 ) -> FfiGenericResolutionFailure {
     match failure {
-        verter_semantic::analysis::component_meta::GenericResolutionFailure::SpreadInput => {
+        verter_session_query::analysis::component_meta::GenericResolutionFailure::SpreadInput => {
             FfiGenericResolutionFailure::SpreadInput
         }
-        verter_semantic::analysis::component_meta::GenericResolutionFailure::DynamicKey => {
+        verter_session_query::analysis::component_meta::GenericResolutionFailure::DynamicKey => {
             FfiGenericResolutionFailure::DynamicKey
         }
-        verter_semantic::analysis::component_meta::GenericResolutionFailure::MissingType => {
+        verter_session_query::analysis::component_meta::GenericResolutionFailure::MissingType => {
             FfiGenericResolutionFailure::MissingType
         }
-        verter_semantic::analysis::component_meta::GenericResolutionFailure::UnsupportedExpression => {
+        verter_session_query::analysis::component_meta::GenericResolutionFailure::UnsupportedExpression => {
             FfiGenericResolutionFailure::UnsupportedExpression
         }
-        verter_semantic::analysis::component_meta::GenericResolutionFailure::MissingUsageLink => {
+        verter_session_query::analysis::component_meta::GenericResolutionFailure::MissingUsageLink => {
             FfiGenericResolutionFailure::MissingUsageLink
         }
-        verter_semantic::analysis::component_meta::GenericResolutionFailure::UnresolvedChildGenericSurface => {
+        verter_session_query::analysis::component_meta::GenericResolutionFailure::UnresolvedChildGenericSurface => {
             FfiGenericResolutionFailure::UnresolvedChildGenericSurface
         }
     }
 }
 
 pub(super) fn partial_branch_reason_to_ffi(
-    reason: verter_semantic::analysis::component_meta::PartialBranchReason,
+    reason: verter_session_query::analysis::component_meta::PartialBranchReason,
 ) -> FfiPartialBranchReason {
     match reason {
-        verter_semantic::analysis::component_meta::PartialBranchReason::DynamicAttrName => {
+        verter_session_query::analysis::component_meta::PartialBranchReason::DynamicAttrName => {
             FfiPartialBranchReason::DynamicAttrName
         }
-        verter_semantic::analysis::component_meta::PartialBranchReason::DynamicListenerName => {
+        verter_session_query::analysis::component_meta::PartialBranchReason::DynamicListenerName => {
             FfiPartialBranchReason::DynamicListenerName
         }
-        verter_semantic::analysis::component_meta::PartialBranchReason::UnknownSpread => {
+        verter_session_query::analysis::component_meta::PartialBranchReason::UnknownSpread => {
             FfiPartialBranchReason::UnknownSpread
         }
-        verter_semantic::analysis::component_meta::PartialBranchReason::GenericResolution {
+        verter_session_query::analysis::component_meta::PartialBranchReason::GenericResolution {
             failure,
         } => FfiPartialBranchReason::GenericResolution {
             failure: generic_resolution_failure_to_ffi(failure),
@@ -391,27 +396,27 @@ pub(super) fn partial_branch_reason_to_ffi(
 }
 
 pub(super) fn unresolved_branch_reason_to_ffi(
-    reason: verter_semantic::analysis::component_meta::UnresolvedBranchReason,
+    reason: verter_session_query::analysis::component_meta::UnresolvedBranchReason,
 ) -> FfiUnresolvedBranchReason {
     match reason {
-        verter_semantic::analysis::component_meta::UnresolvedBranchReason::Cycle { canonical_id } => {
+        verter_session_query::analysis::component_meta::UnresolvedBranchReason::Cycle { canonical_id } => {
             FfiUnresolvedBranchReason::Cycle { canonical_id }
         }
-        verter_semantic::analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs => {
+        verter_session_query::analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs => {
             FfiUnresolvedBranchReason::DynamicComponentIs
         }
-        verter_semantic::analysis::component_meta::UnresolvedBranchReason::ChildResolutionFailed => {
+        verter_session_query::analysis::component_meta::UnresolvedBranchReason::ChildResolutionFailed => {
             FfiUnresolvedBranchReason::ChildResolutionFailed
         }
-        verter_semantic::analysis::component_meta::UnresolvedBranchReason::UnresolvedChildImport {
+        verter_session_query::analysis::component_meta::UnresolvedBranchReason::UnresolvedChildImport {
             import_source,
         } => FfiUnresolvedBranchReason::UnresolvedChildImport { import_source },
-        verter_semantic::analysis::component_meta::UnresolvedBranchReason::RootTarget { reason } => {
+        verter_session_query::analysis::component_meta::UnresolvedBranchReason::RootTarget { reason } => {
             FfiUnresolvedBranchReason::RootTarget {
                 reason: unresolved_root_target_reason_to_ffi(reason),
             }
         }
-        verter_semantic::analysis::component_meta::UnresolvedBranchReason::GenericResolution { failure } => {
+        verter_session_query::analysis::component_meta::UnresolvedBranchReason::GenericResolution { failure } => {
             FfiUnresolvedBranchReason::GenericResolution {
                 failure: generic_resolution_failure_to_ffi(failure),
             }

@@ -32,11 +32,11 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
 use verter_session::audited_request::AuditedRequest;
 pub use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
 use verter_session::component_meta_audit::{RequestAuditRecord, RequestFootprintAudit};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 use verter_workspace::{
     AmbientLibSpec, MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
     WorkspaceAccess,
@@ -106,7 +106,7 @@ pub fn resolve_under_audit(
     host: Arc<VerterHost>,
     canonical: &str,
 ) -> (
-    verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     verter_session::meta_resolve::ResolvedComponentMetaState,
     RequestAuditRecord,
 ) {
@@ -218,7 +218,7 @@ mod self_tests {
     //!   shadow ambient libs).
     use std::sync::Arc;
 
-    use verter_workspace::ProjectId;
+    use verter_session_query::resolution::ProjectId;
 
     use super::{build_hermetic_host_with_lib, STUB_LIB_ES5};
 

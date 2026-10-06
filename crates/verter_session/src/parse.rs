@@ -22,13 +22,14 @@ use verter_compiler::framework_common::registered_carrier_projection::{
 use verter_compiler::parser::types::ParsedSfc;
 use verter_compiler::types::NodeProp;
 
-use crate::hash::{hash_16, semantic_hash};
+use crate::hash::semantic_hash;
 use crate::id::resolve_external;
 use crate::types::{
     DescriptorMin, DiagnosticsSnapshot, ExternalBlockKind, ExternalSourceRequest, FileMeta,
     HostDiagnostic, HostSeverity, ParseSnapshot, PendingPreprocessorRequest, SliceHashes,
     SrcBlockInfo,
 };
+use verter_semantic_source::source_hash::hash_16;
 
 /// Closed failure while assigning carrier statements to typed script regions.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -53,9 +54,11 @@ pub(crate) enum ScriptOwnerIndexError {
         end: u32,
     },
     #[error(transparent)]
-    InvalidTable(#[from] verter_semantic::analysis::TopLevelOwnerTableError),
+    InvalidTable(#[from] verter_session_query::analysis::top_level_owners::TopLevelOwnerTableError),
     #[error(transparent)]
-    InvalidRegions(#[from] verter_semantic::analysis::TopLevelOwnerRegionError),
+    InvalidRegions(
+        #[from] verter_session_query::analysis::top_level_owners::TopLevelOwnerRegionError,
+    ),
     #[error("parser owner mapping length mismatch: program has {statement_count} statements, mapping has {owner_count}")]
     ParserTable {
         statement_count: usize,
@@ -98,10 +101,15 @@ fn script_owner_index_diagnostic(error: &ScriptOwnerIndexError, source: &str) ->
 pub(crate) fn top_level_owner_table(
     program: &Program<'_>,
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
-) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+) -> Result<
+    verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
+    ScriptOwnerIndexError,
+> {
     let Some(artifact) = framework_parse else {
         return Ok(
-            verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(program.body.len()),
+            verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+                program.body.len(),
+            ),
         );
     };
     top_level_owner_table_from_regions(program, &artifact.script_regions())
@@ -110,7 +118,10 @@ pub(crate) fn top_level_owner_table(
 fn top_level_owner_table_from_regions(
     program: &Program<'_>,
     regions: &[verter_language::ScriptRegion],
-) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+) -> Result<
+    verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
+    ScriptOwnerIndexError,
+> {
     let regions = regions
         .iter()
         .map(|region| (region.span, region.kind))
@@ -121,7 +132,10 @@ fn top_level_owner_table_from_regions(
 fn vue_top_level_owner_table(
     program: &Program<'_>,
     parsed: &ParsedSfc,
-) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+) -> Result<
+    verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
+    ScriptOwnerIndexError,
+> {
     let mut regions = Vec::new();
     if let Some(span) = parsed.script().and_then(|script| script.content) {
         regions.push((
@@ -141,7 +155,10 @@ fn vue_top_level_owner_table(
 fn top_level_owner_table_from_region_spans(
     program: &Program<'_>,
     regions: &[(verter_span::Span, verter_language::ScriptRegionKind)],
-) -> Result<verter_semantic::analysis::TopLevelOwnerTable, ScriptOwnerIndexError> {
+) -> Result<
+    verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
+    ScriptOwnerIndexError,
+> {
     let mut regions = regions.to_vec();
     // A script block with no inline content — an external `<script src=...>`
     // block, or a genuinely empty `<script></script>` — contributes NO
@@ -215,15 +232,15 @@ fn top_level_owner_table_from_region_spans(
         }
         owners.push(*owner);
     }
-    let table = verter_semantic::analysis::TopLevelOwnerTable::try_from_statement_owners(
+    let table = verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::try_from_statement_owners(
         program.body.len(),
         owners,
     )?;
-    Ok(table.try_with_regions(
-        regions
-            .into_iter()
-            .map(|(span, owner)| verter_semantic::analysis::TopLevelOwnerRegion { owner, span }),
-    )?)
+    Ok(
+        table.try_with_regions(regions.into_iter().map(|(span, owner)| {
+            verter_session_query::analysis::top_level_owners::TopLevelOwnerRegion { owner, span }
+        }))?,
+    )
 }
 
 /// Zero-copy attribute extraction: returns slices borrowed from `source`.
@@ -322,7 +339,7 @@ pub(crate) fn carrier_parse_snapshot(
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Option<(
     ParseSnapshot,
     Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
@@ -358,7 +375,7 @@ pub(crate) fn carrier_snapshot_from_artifact(
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
 ) -> Option<(ParseSnapshot, Arc<str>)> {
     let eval_source = catalog_eval_source(artifact, source)?;
@@ -381,7 +398,7 @@ pub(crate) fn carrier_snapshot_from_eval_source(
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     artifact: &Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
     eval_source: &str,
 ) -> Option<ParseSnapshot> {
@@ -565,7 +582,7 @@ pub(crate) fn capture_synth_script_candidates(
         verter_semantic::analysis::framework_facts::FrameworkScriptModeHint,
     >,
     source_type: SourceType,
-    owner_table: &verter_semantic::analysis::TopLevelOwnerTable,
+    owner_table: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
 ) -> verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet {
     use verter_semantic::analysis::framework_facts::FrameworkScriptCandidateSet;
     if active_providers.is_empty() {
@@ -630,7 +647,7 @@ pub(crate) fn capture_synth_script_candidates(
 /// which also makes the pass idempotent. An empty `canonical_id` (no
 /// producing identity to absolutize to) leaves the sentinel in place.
 pub(crate) fn absolutize_macro_payload_anchors(
-    macros: &mut [verter_semantic::analysis::types::AnalyzedMacro],
+    macros: &mut [verter_session_query::analysis::types::AnalyzedMacro],
     canonical_id: &str,
 ) {
     use verter_type_expr::locators::MacroPayloadLocator;
@@ -707,6 +724,25 @@ pub(crate) fn module_script_region(
         .map(|region| (region.span.start, region.span.end))
 }
 
+/// The owned parse facts of a framework carrier artifact: its adapter and
+/// carrier language, the parse identity it recorded and its module-script
+/// region. Engine inputs and source lowering consume these facts instead of
+/// retaining the artifact.
+#[allow(clippy::let_and_return)]
+pub(crate) fn framework_parse_facts(
+    artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
+) -> verter_session_query::source::framework_parse::FrameworkParseFacts {
+    let facts = verter_session_query::source::framework_parse::FrameworkParseFacts::new(
+        artifact.adapter_id().clone(),
+        artifact.language_id().clone(),
+        artifact.parse_key().clone(),
+        module_script_region(artifact),
+    );
+    #[cfg(any(test, feature = "test-support"))]
+    let facts = facts.with_script_regions(artifact.script_regions());
+    facts
+}
+
 /// The parser-owned non-script mode inputs carried by a neutral parse artifact.
 ///
 /// Svelte captures `<svelte:options runes={...}>` during its single carrier
@@ -768,9 +804,9 @@ fn build_svelte_snapshot_from_eval_source(
     source: &str,
     eval_source: &str,
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     script_program: FrameworkScriptProgram<'_>,
-    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
+    script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
 
@@ -929,7 +965,9 @@ fn build_svelte_snapshot_from_eval_source(
         parse_diagnostics: owner_error.map_or_else(DiagnosticsSnapshot::default, |error| {
             DiagnosticsSnapshot::from_vec(vec![script_owner_index_diagnostic(error, source)])
         }),
-        script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
+        script_analysis: Arc::new(
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default(),
+        ),
         export_signatures: Vec::new(),
         style_analyses: Vec::new(),
         prepared_styles: Vec::new(),
@@ -1078,7 +1116,7 @@ fn build_svelte_snapshot_from_eval_source(
 pub(crate) fn collect_svelte_markup_class_tokens(
     source: &str,
     nodes: &[verter_compiler::svelte::parser::SvelteNode],
-) -> Vec<verter_semantic::analysis::MarkupClassToken> {
+) -> Vec<verter_session_query::analysis::template::MarkupClassToken> {
     use verter_compiler::svelte::parser::{
         SvelteAttributeKind, SvelteAttributeValue, SvelteDirectiveKind, SvelteNode,
     };
@@ -1086,7 +1124,7 @@ pub(crate) fn collect_svelte_markup_class_tokens(
     fn walk(
         source: &str,
         nodes: &[SvelteNode],
-        out: &mut Vec<verter_semantic::analysis::MarkupClassToken>,
+        out: &mut Vec<verter_session_query::analysis::template::MarkupClassToken>,
     ) {
         for node in nodes {
             match node {
@@ -1115,7 +1153,7 @@ pub(crate) fn collect_svelte_markup_class_tokens(
                                     while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
                                         i += 1;
                                     }
-                                    out.push(verter_semantic::analysis::MarkupClassToken {
+                                    out.push(verter_session_query::analysis::template::MarkupClassToken {
                                         name: text[start..i].to_string(),
                                         span: verter_span::Span::new(
                                             value_span.start + start as u32,
@@ -1138,7 +1176,7 @@ pub(crate) fn collect_svelte_markup_class_tokens(
                                 if source.get(start as usize..end as usize)
                                     == Some(dir.local.as_str())
                                 {
-                                    out.push(verter_semantic::analysis::MarkupClassToken {
+                                    out.push(verter_session_query::analysis::template::MarkupClassToken {
                                         name: dir.local.clone(),
                                         span: verter_span::Span::new(start, end),
                                         from_directive: true,
@@ -1181,7 +1219,7 @@ pub(crate) enum FrameworkScriptProgram<'a> {
     /// The flight's eval program IS the snapshot's script program (the eval
     /// source was the position-preserving extracted script): walk it, parse
     /// nothing.
-    Shared(&'a crate::ParsedEvalProgram),
+    Shared(&'a verter_semantic_source::parsed_eval_program::ParsedEvalProgram),
     /// The flight's single eval-program parse was fatal (recovered panic). A
     /// re-parse over the same bytes under the same source type fails
     /// identically, so the snapshot defaults directly with zero additional
@@ -1202,7 +1240,7 @@ pub(crate) fn parse_vue_snapshot(
     canonical_id: &str,
     source: &str,
     analysis_scope: verter_semantic::analysis::AnalysisScope,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> (
     ParseSnapshot,
     Arc<verter_compiler::framework_common::FrameworkParseArtifact>,
@@ -1229,7 +1267,7 @@ pub(crate) fn parse_vue_snapshot(
 #[cfg(test)]
 pub(crate) fn build_vue_parse_artifact_from_source(
     source: &str,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Arc<verter_compiler::framework_common::FrameworkParseArtifact> {
     crate::carrier_fixture_tests::publish_carrier_fixture(
         "file:///fixture.vue",
@@ -1468,10 +1506,10 @@ pub(crate) fn build_vue_snapshot_from_parsed(
     analysis_scope: verter_semantic::analysis::AnalysisScope,
     parsed: &ParsedSfc,
     framework_parse: &verter_compiler::framework_common::FrameworkParseArtifact,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     eval_source: &str,
     script_program: VueScriptProgram<'_>,
-    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
+    script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
 
@@ -1710,9 +1748,9 @@ pub(crate) fn build_vue_snapshot_from_parsed(
         }
         VueScriptProgram::SharedFatal => VueScriptOutputs {
             export_signatures: Vec::new(),
-            script_analysis: analysis_scope
-                .needs_script_analysis()
-                .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            script_analysis: analysis_scope.needs_script_analysis().then(
+                verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default,
+            ),
             panic_diags: Vec::new(),
             refused: None,
         },
@@ -1843,7 +1881,7 @@ fn build_preprocessor_requests(
 /// served snapshots keep sharing the stored `Arc` unchanged.
 pub(crate) fn attach_style_block_tokens(
     structure: &crate::carrier_publication_store::RegisteredFileStructure,
-    styles: &mut [verter_semantic::analysis::StyleBlockAnalysis],
+    styles: &mut [verter_session_query::analysis::style::StyleBlockAnalysis],
 ) {
     let inventory = structure.inventory();
     for style in styles.iter_mut() {
@@ -1871,7 +1909,7 @@ fn build_style_analyses_from_inventory(
     canonical_id: &str,
     vue_style_semantics: bool,
 ) -> (
-    Vec<verter_semantic::analysis::StyleBlockAnalysis>,
+    Vec<verter_session_query::analysis::style::StyleBlockAnalysis>,
     Vec<Option<verter_compiler::style_planner::PreparedStyleIr>>,
 ) {
     use verter_language::parse_artifact::carrier_inventory::{
@@ -1910,8 +1948,9 @@ fn build_style_analyses_from_inventory(
     fn analysis_lang(
         dialect: &StyleDialect,
         authored: Option<&str>,
-    ) -> verter_semantic::analysis::StyleAnalysisLang {
-        use verter_semantic::analysis::StyleAnalysisLang;
+    ) -> verter_session_query::analysis::style::StyleAnalysisLang {
+        use verter_semantic::analysis::StyleLangDialect;
+        use verter_session_query::analysis::style::StyleAnalysisLang;
         match authored {
             None => match dialect {
                 StyleDialect::Css => StyleAnalysisLang::Css,
@@ -2123,9 +2162,10 @@ fn vue_oxc_source_type(parsed: &ParsedSfc, source: &str) -> SourceType {
 /// Shared by `parse_vue_snapshot()` (eager) and `build_script_analysis_from_parsed()`.
 /// Combined `.vue` script-program outputs from a SINGLE OXC parse.
 struct VueScriptOutputs {
-    export_signatures: Vec<verter_semantic::analysis::ExportSignature>,
+    export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
     /// `None` when the caller did not request script analysis.
-    script_analysis: Option<verter_semantic::analysis::ScriptAnalysisSnapshot>,
+    script_analysis:
+        Option<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
     /// Panic diagnostics in production order: parse, export walk,
     /// analysis walk.
     panic_diags: Vec<HostDiagnostic>,
@@ -2149,7 +2189,7 @@ pub(crate) enum VueScriptProgram<'a> {
     /// The flight's eval program IS the script program (the eval
     /// source was the position-preserving extracted script): walk it,
     /// parse nothing.
-    Shared(&'a crate::ParsedEvalProgram),
+    Shared(&'a verter_semantic_source::parsed_eval_program::ParsedEvalProgram),
     /// The flight's single parse attempt over the extracted script was
     /// fatal (recovered panic). A re-parse over the same bytes under
     /// the same source type fails identically, so every script output
@@ -2171,7 +2211,7 @@ fn vue_script_walks_from_program(
     script_source: &str,
     source_type: SourceType,
     program: &Program<'_>,
-    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     needs_exports: bool,
     needs_script_analysis: bool,
     parse_errors: bool,
@@ -2190,7 +2230,7 @@ fn vue_script_walks_from_program(
     .unwrap_or_else(|refused| VueScriptOutputs {
         export_signatures: Vec::new(),
         script_analysis: needs_script_analysis
-            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            .then(verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default),
         panic_diags: Vec::new(),
         refused: Some(refused),
     })
@@ -2200,7 +2240,7 @@ fn vue_script_walks_under_lease(
     script_source: &str,
     source_type: SourceType,
     program: &Program<'_>,
-    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     needs_exports: bool,
     needs_script_analysis: bool,
     parse_errors: bool,
@@ -2208,7 +2248,7 @@ fn vue_script_walks_under_lease(
     let mut outputs = VueScriptOutputs {
         export_signatures: Vec::new(),
         script_analysis: needs_script_analysis
-            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            .then(verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default),
         panic_diags: Vec::new(),
         refused: None,
     };
@@ -2275,8 +2315,9 @@ fn vue_script_walks_for_sfc(
         ),
         Err(error) => VueScriptOutputs {
             export_signatures: Vec::new(),
-            script_analysis: needs_script_analysis
-                .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            script_analysis: needs_script_analysis.then(
+                verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default,
+            ),
             panic_diags: vec![script_owner_index_diagnostic(&error, script_source)],
             refused: None,
         },
@@ -2308,12 +2349,12 @@ fn build_vue_script_outputs(
     eval_source: &str,
     needs_exports: bool,
     needs_script_analysis: bool,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> VueScriptOutputs {
     let mut outputs = VueScriptOutputs {
         export_signatures: Vec::new(),
         script_analysis: needs_script_analysis
-            .then(verter_semantic::analysis::ScriptAnalysisSnapshot::default),
+            .then(verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default),
         panic_diags: Vec::new(),
         refused: None,
     };
@@ -2375,8 +2416,8 @@ fn build_vue_script_outputs(
 #[cfg(test)]
 pub(crate) fn build_script_analysis_from_source(
     source: &str,
-    provenance: &crate::types::MetaProvenance,
-) -> verter_semantic::analysis::ScriptAnalysisSnapshot {
+    provenance: &crate::meta_provenance::MetaProvenance,
+) -> verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot {
     // On-demand Vue re-parse routes through the Vue carrier producer (the
     // counted chokepoint) so the artifact stays the one post-parse
     // representation.
@@ -2389,8 +2430,8 @@ pub(crate) fn build_script_analysis_from_parsed(
     parsed: &ParsedSfc,
     source: &str,
     eval_source: &str,
-    provenance: &crate::types::MetaProvenance,
-) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
+    provenance: &crate::meta_provenance::MetaProvenance,
+) -> Option<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot> {
     let outputs = build_vue_script_outputs(
         parsed,
         source,
@@ -2417,8 +2458,8 @@ pub(crate) fn build_script_analysis_from_parsed(
 pub(crate) fn build_style_analyses_from_source(
     source: &str,
     canonical_id: &str,
-    provenance: &crate::types::MetaProvenance,
-) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+    provenance: &crate::meta_provenance::MetaProvenance,
+) -> Vec<verter_session_query::analysis::style::StyleBlockAnalysis> {
     // On-demand Vue re-parse routes through the Vue carrier producer (the
     // counted chokepoint) so the artifact stays the one post-parse
     // representation.
@@ -2433,8 +2474,8 @@ pub(crate) fn build_style_analyses_from_source(
 pub(crate) fn build_script_analysis_for_artifact(
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     source: &str,
-    provenance: &crate::types::MetaProvenance,
-) -> Option<verter_semantic::analysis::ScriptAnalysisSnapshot> {
+    provenance: &crate::meta_provenance::MetaProvenance,
+) -> Option<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot> {
     let artifact = framework_parse?;
     let eval_source = catalog_eval_source(artifact, source)?;
     let parsed = crate::typeinfo::adapters::vue::vue_parse(artifact)?;
@@ -2447,8 +2488,8 @@ pub(crate) fn build_style_analyses_for_artifact(
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     source: &str,
     canonical_id: &str,
-    _provenance: &crate::types::MetaProvenance,
-) -> Vec<verter_semantic::analysis::StyleBlockAnalysis> {
+    _provenance: &crate::meta_provenance::MetaProvenance,
+) -> Vec<verter_session_query::analysis::style::StyleBlockAnalysis> {
     framework_parse.map_or_else(Vec::new, |artifact| {
         build_style_analyses_from_inventory(
             artifact.inventory(),
@@ -2471,10 +2512,10 @@ pub(crate) fn build_carrier_snapshot_from_artifact_with_program(
     source: &str,
     _analysis_scope: verter_semantic::analysis::AnalysisScope,
     framework_parse: &verter_compiler::framework_common::FrameworkParseArtifact,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
     eval_source: &str,
     script_program: FrameworkScriptProgram<'_>,
-    script_owners: Option<&verter_semantic::analysis::TopLevelOwnerTable>,
+    script_owners: Option<&verter_session_query::analysis::top_level_owners::TopLevelOwnerTable>,
 ) -> ParseSnapshot {
     build_svelte_snapshot_from_eval_source(
         canonical_id,
@@ -2528,7 +2569,7 @@ pub(crate) fn compile_template_data(
     compile_source: &str,
     framework_parse: Option<&verter_compiler::framework_common::FrameworkParseArtifact>,
     reuse_carrier_parse: bool,
-    _provenance: &crate::types::MetaProvenance,
+    _provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Option<verter_compiler::framework_common::registered_carrier_projection::TemplateFactsProduct>
 {
     let adapter_id = file_language.adapter_id()?;
@@ -2566,7 +2607,7 @@ pub(crate) fn compile_template_data(
         )
     });
     if refused.is_some() {
-        crate::request_context::mark_request_result_partial();
+        verter_type_engine::request_context::mark_request_result_partial();
     }
     facts
 }
@@ -2578,7 +2619,10 @@ pub(crate) fn build_non_sfc_snapshot_from_program(
     program: &Program<'_>,
     parse_errors: bool,
 ) -> ParseSnapshot {
-    let owners = verter_semantic::analysis::TopLevelOwnerTable::ordinary_file(program.body.len());
+    let owners =
+        verter_session_query::analysis::top_level_owners::TopLevelOwnerTable::ordinary_file(
+            program.body.len(),
+        );
     build_snapshot_from_program_with_owners(
         canonical_id,
         source,
@@ -2606,7 +2650,9 @@ fn fatal_script_snapshot(
         external_requests: Vec::new(),
         src_blocks: Vec::new(),
         parse_diagnostics: DiagnosticsSnapshot::default(),
-        script_analysis: Arc::new(verter_semantic::analysis::ScriptAnalysisSnapshot::default()),
+        script_analysis: Arc::new(
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default(),
+        ),
         export_signatures: Vec::new(),
         style_analyses: Vec::new(),
         prepared_styles: Vec::new(),
@@ -2624,7 +2670,7 @@ fn build_snapshot_from_program_with_owners(
     source: &str,
     source_type: SourceType,
     program: &Program<'_>,
-    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     parse_errors: bool,
 ) -> ParseSnapshot {
     verter_parser::oxc_parse::with_program_walk_stack_lease(program, || {
@@ -2645,7 +2691,7 @@ fn build_snapshot_under_lease(
     source: &str,
     source_type: SourceType,
     program: &Program<'_>,
-    owners: &verter_semantic::analysis::TopLevelOwnerTable,
+    owners: &verter_session_query::analysis::top_level_owners::TopLevelOwnerTable,
     parse_errors: bool,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
@@ -2701,7 +2747,7 @@ pub(crate) fn parse_non_sfc_snapshot(
     canonical_id: &str,
     source: &str,
     file_language: &verter_language::FileLanguage,
-    provenance: &crate::types::MetaProvenance,
+    provenance: &crate::meta_provenance::MetaProvenance,
 ) -> ParseSnapshot {
     // A full OXC program parse outside the `parse_eval_program` funnel —
     // counted on its own provenance rail (it is not a carrier parse and
@@ -3009,7 +3055,7 @@ mod tests {
             canonical_id,
             source,
             analysis_scope,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         );
         let parsed = crate::typeinfo::adapters::vue::vue_parse(&artifact)
             .expect("a Vue carrier artifact carries a ParsedSfc")
@@ -3025,7 +3071,7 @@ mod tests {
             canonical_id,
             source,
             file_language,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         )
     }
 
@@ -3325,7 +3371,7 @@ const view = <div className="card">hello</div>
             "Comp.vue",
             source,
             AnalysisScope::LSP,
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         );
         let inventory_ids = artifact
             .inventory()
@@ -3700,7 +3746,9 @@ watch(count, (value, oldValue) => {
             .script_analysis
             .vue_api_calls
             .iter()
-            .find(|call| call.api == verter_semantic::analysis::VueApiClassification::Watch)
+            .find(|call| {
+                call.api == verter_session_query::analysis::types::VueApiClassification::Watch
+            })
             .expect("should find watch() call");
 
         assert_eq!(watch_call.callback_params.len(), 2);
@@ -3824,7 +3872,7 @@ watch(count, (value, oldValue) => {
         let style = &snap.style_analyses[0];
         assert_eq!(
             style.lang,
-            verter_semantic::analysis::StyleAnalysisLang::Scss
+            verter_session_query::analysis::style::StyleAnalysisLang::Scss
         );
         let css = style
             .css
@@ -3953,7 +4001,7 @@ watch(count, (value, oldValue) => {
             source,
             AnalysisScope::LSP,
             &verter_language::FileLanguage::svelte(),
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         )
         .expect("registered Svelte carrier");
         let styles = snapshot.style_analyses;
@@ -3989,7 +4037,7 @@ watch(count, (value, oldValue) => {
         let global = style
             .special_pseudos
             .iter()
-            .find(|p| p.kind == verter_semantic::analysis::SpecialPseudoKind::Global)
+            .find(|p| p.kind == verter_session_query::analysis::style::SpecialPseudoKind::Global)
             .expect(":global recorded");
         assert_eq!(
             &source[global.start as usize..global.end as usize],
@@ -4040,7 +4088,7 @@ watch(count, (value, oldValue) => {
             source,
             AnalysisScope::LSP,
             &verter_language::FileLanguage::svelte(),
-            &crate::types::MetaProvenance::default(),
+            &crate::meta_provenance::MetaProvenance::default(),
         )
         .expect("svelte carrier dispatch yields a snapshot");
         assert_eq!(snapshot.style_analyses.len(), 1);
@@ -4147,14 +4195,16 @@ onMounted(() => { console.log('mounted') })
             analysis
                 .vue_api_calls
                 .iter()
-                .any(|c| c.api == verter_semantic::analysis::VueApiClassification::Provide),
+                .any(|c| c.api
+                    == verter_session_query::analysis::types::VueApiClassification::Provide),
             "should detect provide() call"
         );
         assert!(
             analysis
                 .vue_api_calls
                 .iter()
-                .any(|c| c.api == verter_semantic::analysis::VueApiClassification::OnMounted),
+                .any(|c| c.api
+                    == verter_session_query::analysis::types::VueApiClassification::OnMounted),
             "should detect onMounted() call"
         );
         // Positive: IMPORTS should be populated
@@ -4166,10 +4216,8 @@ onMounted(() => { console.log('mounted') })
         );
         // Negative: should not have lifecycle hooks that aren't in the source
         assert!(
-            analysis
-                .vue_api_calls
-                .iter()
-                .all(|c| c.api != verter_semantic::analysis::VueApiClassification::OnUnmounted),
+            analysis.vue_api_calls.iter().all(|c| c.api
+                != verter_session_query::analysis::types::VueApiClassification::OnUnmounted),
             "should not detect onUnmounted which isn't in the source"
         );
     }
@@ -4191,7 +4239,7 @@ onMounted(() => { console.log('mounted') })
     fn catalog_miss_script_analysis_refuses_empty_snapshot() {
         let source =
             "<script setup lang=\"ts\">const n = 1;</script>\n<template><div /></template>";
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let artifact = build_vue_parse_artifact_from_source(source, &provenance);
         assert!(
             catalog_eval_source(artifact.as_ref(), source).is_some(),
@@ -4211,7 +4259,7 @@ onMounted(() => { console.log('mounted') })
             .expect("catalog hit must analyse the script");
         assert_ne!(
             hit,
-            verter_semantic::analysis::ScriptAnalysisSnapshot::default(),
+            verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot::default(),
             "catalog hit must not be an empty snapshot (so miss-None is distinct from empty success)"
         );
         assert!(
@@ -4226,7 +4274,7 @@ onMounted(() => { console.log('mounted') })
             "<script setup lang=\"ts\">import Child from './Child.vue'</script>\n",
             "<template><Child :foo=\"n\" /></template>",
         );
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let artifact = build_vue_parse_artifact_from_source(source, &provenance);
         let file_language = verter_language::FileLanguage::vue();
         let hit = compile_template_data(
@@ -4282,7 +4330,7 @@ onMounted(() => { console.log('mounted') })
             "<script setup lang=\"ts\">import Other from './Other.vue'</script>\n",
             "<template><Other :bar=\"m\" /></template>",
         );
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let artifact = build_vue_parse_artifact_from_source(source_a, &provenance);
         let file_language = verter_language::FileLanguage::vue();
         let mixed = compile_template_data(
@@ -4316,7 +4364,7 @@ onMounted(() => { console.log('mounted') })
     #[test]
     fn compile_template_data_script_only_is_empty_success_not_refusal() {
         let source = "<script setup lang=\"ts\">const n = 1;</script>";
-        let provenance = crate::types::MetaProvenance::default();
+        let provenance = crate::meta_provenance::MetaProvenance::default();
         let artifact = build_vue_parse_artifact_from_source(source, &provenance);
         let file_language = verter_language::FileLanguage::vue();
         let hit = compile_template_data(

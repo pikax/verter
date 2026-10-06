@@ -6,7 +6,7 @@
 use crate::provider::{ActionContext, ActionProvider};
 use crate::types::{ActionKind, AutofixSafety, CodeAction, FileEdit};
 use verter_diagnostics::LintDiagnostic;
-use verter_semantic::analysis::AnalyzedSelector;
+use verter_session_query::analysis::style::AnalyzedSelector;
 
 /// Provider that removes unused CSS selector rules.
 pub struct RemoveUnusedCss;
@@ -148,7 +148,8 @@ mod tests {
     use super::*;
     use crate::provider::ActionContext;
     use verter_diagnostics::{DiagnosticSet, DiagnosticSpanKind, LintDiagnostic, Severity};
-    use verter_semantic::analysis::{build_css_style_analysis, StyleBlockAnalysis, VueStyleInput};
+    use verter_semantic::analysis::{build_css_style_analysis, VueStyleInput};
+    use verter_session_query::analysis::style::StyleBlockAnalysis;
 
     /// Build a real `StyleBlockAnalysis` (selectors, specificity,
     /// `rule_body_span`, ...) from raw CSS text through the shared syntax

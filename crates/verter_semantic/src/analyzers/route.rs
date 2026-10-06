@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::facts::route::RouteReachabilityStatus;
-use crate::facts::symbol::FileImportGraph;
+use verter_session_query::facts::route::RouteReachabilityStatus;
+use verter_session_query::facts::symbol::FileImportGraph;
 
 /// Route reachability report for a component.
 #[derive(Debug, Clone, Serialize, Deserialize)]

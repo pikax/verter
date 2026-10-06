@@ -4,7 +4,7 @@
 //! can mask a regression of the other.
 
 fn main() {
-    let _literal = verter_semantic::analysis::types::MemberListAnchor {
+    let _literal = verter_session_query::analysis::types::MemberListAnchor {
         insert_offset: 4,
         is_empty: false,
     };

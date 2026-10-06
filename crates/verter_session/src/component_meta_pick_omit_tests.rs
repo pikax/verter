@@ -11,11 +11,11 @@ use std::sync::Arc;
 
 use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
-use crate::capture_token::CaptureToken;
 use crate::meta::MetaProject;
 use crate::meta_resolve::PICK_MEMBER_ROUTE_CALLABLE_DESCENT_COUNTER;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::capture_token::CaptureToken;
 
 /// Build a hermetic project (host wrapped in `MetaProject`) backed
 /// by a [`MemoryWorkspace`] pre-populated with the supplied files.
@@ -121,7 +121,7 @@ fn make_workspace_project_config(root: &str) -> verter_workspace::VfsProjectConf
         extensions: vec![],
         workspace_root: root.to_string(),
         workspace_aliases: vec![],
-        compiler_options: verter_semantic::resolver_core::IdeProjectCompilerOptions::default(),
+        compiler_options: verter_session_query::resolution::IdeProjectCompilerOptions::default(),
         references: vec![],
         membership: verter_workspace::configured_membership_match_all_under_root(
             &verter_workspace::CanonicalPath::new(root),
@@ -661,14 +661,14 @@ fn chatmessages_resolvable_barrel_publishes_open_pick_as_shallow_carrier() {
     for diag in &resolution.synthesis_diagnostics {
         assert_eq!(
             diag.execution_status,
-            verter_semantic::analysis::type_expand::ExpansionExecutionStatus::Completed,
+            verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
             "no macro expansion may report a non-Completed (budget/cancel/hard-stop) status; \
              got {:?}",
             diag.execution_status
         );
         assert_ne!(
             diag.exactness,
-            verter_semantic::analysis::type_expand::ExpansionExactness::Incomplete,
+            verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete,
             "no macro expansion may report Incomplete exactness (a partial surface)"
         );
     }
@@ -1599,14 +1599,15 @@ const m12 = defineModel<Cell<T, 'm12'>>('m12')
 /// complete, never classified.
 #[test]
 fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
-    use crate::project_semantic_dispatch::output_materialization::{
-        wrap_degraded_output, wrap_output_type_expr, TestOutputCap,
-    };
-    use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::resolver_core::shallow_file_state::{BudgetDomain, BudgetExceededFailure};
-    use crate::semantic_query::{DepSignature, QueryError};
+    use crate::output_sinks::{OutputProjector, TestOutputCap};
     use crate::VerterHost;
+    use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
+    use verter_type_engine::project_semantic_dispatch::output_materialization::{
+        wrap_degraded_output, wrap_output_type_expr,
+    };
+    use verter_type_engine::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{DepSignature, QueryError};
     use verter_type_expr::{TypeExpr, UnknownValue};
 
     let host = VerterHost::new_standalone(Default::default());
@@ -1617,7 +1618,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
     // PARTIAL at the `from_parts` choke point ⇒ refused warm admission; the
     // terminal tree keeps the production spelling.
     let typed_sealed = wrap_degraded_output(
-        &cap,
+        cap.authority(),
         QueryError::BudgetExceeded(BudgetExceededFailure {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
@@ -1625,7 +1626,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
             context: "typed-channel-fixture".to_string(),
         }),
     );
-    let tree = typed_sealed.into_type_expr(&cap);
+    let tree = typed_sealed.into_type_expr(cap.authority());
     let TypeExpr::Unknown(value) = &tree else {
         panic!("a budget trip projects an Unknown leaf")
     };
@@ -1635,7 +1636,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
         "the terminal projection keeps the production spelling"
     );
     let typed_sealed = wrap_degraded_output(
-        &cap,
+        cap.authority(),
         QueryError::BudgetExceeded(BudgetExceededFailure {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
@@ -1650,14 +1651,16 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
         "a typed BudgetExceeded must mark the payload partial"
     );
     assert!(
-        crate::cache_runtime::refuse_result_cache_admission_if_partial(carrier.result_is_partial()),
+        verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
+            carrier.result_is_partial()
+        ),
         "… and the admission gate refuses it"
     );
 
     // INERT: an identically-spelled GENUINE `UnknownValue` carries no
     // classification — exact, complete, admitted.
     let inert_sealed = wrap_output_type_expr(
-        &cap,
+        cap.authority(),
         TypeExpr::Unknown(UnknownValue::unsupported_syntax(
             "budgetExceeded(ProjectionOperation)",
         )),
@@ -1669,7 +1672,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
         "an identically-spelled genuine UnknownValue is complete, not classified"
     );
     assert!(
-        !crate::cache_runtime::refuse_result_cache_admission_if_partial(
+        !verter_type_engine::cache_runtime::refuse_result_cache_admission_if_partial(
             carrier.result_is_partial()
         ),
         "… and the admission gate admits it"

@@ -62,6 +62,16 @@ fn read_session_source(relative: &str) -> String {
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
 }
 
+/// Read a `verter_type_engine` source file relative to its `src/`.
+fn read_engine_source(relative: &str) -> String {
+    let cargo_manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let mut path = PathBuf::from(cargo_manifest_dir);
+    path.push("../verter_type_engine/src");
+    path.push(relative);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
+}
+
 /// The Family A fact-validated caches carry the path-precise rail
 /// through the `ReadSetSignature` carrier. The four single-entry caches
 /// store `Arc<CacheEntry<V>>` (the carrier lives on `CacheEntry`); the
@@ -71,7 +81,7 @@ fn read_session_source(relative: &str) -> String {
 /// Source-grep arch guard.
 #[test]
 fn family_a_entries_carry_fact_dep_signature() {
-    let src = read_session_source("component_meta_caches.rs");
+    let src = read_engine_source("component_meta_caches.rs");
 
     // 1. The four single-entry caches store their value + carrier in the
     //    generic `Arc<CacheEntry<V>>` rather than a bespoke `*Entry`
@@ -112,8 +122,8 @@ fn family_a_entries_carry_fact_dep_signature() {
     //    carrier from `CacheEntry` while keeping `Candidate`'s would still
     //    pass file-wide. Windowing to the `CacheEntry<V>` body makes that
     //    drop flip the guard RED.
-    let admission = read_session_source("cache_runtime/admission.rs");
-    let cache_entry = struct_window(&admission, "pub(crate) struct CacheEntry<V> {");
+    let admission = read_engine_source("cache_runtime/admission.rs");
+    let cache_entry = struct_window(&admission, "pub struct CacheEntry<V> {");
     assert!(
         cache_entry.contains("pub signature: ReadSetSignature"),
         "`cache_runtime::CacheEntry<V>` must carry `signature: ReadSetSignature` — the \
@@ -333,9 +343,9 @@ fn extract_fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
 ///   the overlay's. A signature builder must NEVER observe a hash; it
 ///   takes the observed hash as a parameter.
 ///
-/// The three central helpers live in `fact_signature_helpers.rs`; the
-/// four `engine_fact_signature_for_*` wrappers live in the engine's
-/// `mod.rs`. The producers (the observation point) are responsible for
+/// The three central helpers and the materialize-memo builder live in
+/// `fact_signature_helpers.rs`; the exported-type engine wrapper lives in
+/// the engine's `mod.rs`. The producers (the observation point) are responsible for
 /// read-ordering — not token-checkable; the producer-level
 /// overlay-discrimination tests in `query_db_self_root_tests.rs` cover
 /// that. Re-introducing any forbidden token inside any builder below
@@ -356,11 +366,11 @@ fn central_fact_signature_helpers_are_provenance_pure() {
     ];
 
     // The three central helpers in `fact_signature_helpers.rs`.
-    let helpers_src = read_session_source("fact_signature_helpers.rs");
+    let helpers_src = read_engine_source("fact_signature_helpers.rs");
     const HELPERS: &[&str] = &[
-        "pub(crate) fn fact_signature_for_exported_type(",
-        "pub(crate) fn fact_signature_for_canonical_member(",
-        "pub(crate) fn fact_signature_for_canonical_surface(",
+        "pub fn fact_signature_for_exported_type<",
+        "pub fn fact_signature_for_canonical_member<",
+        "pub fn fact_signature_for_canonical_surface<",
     ];
     for helper in HELPERS {
         let body = extract_fn_body(&helpers_src, helper);
@@ -376,23 +386,35 @@ fn central_fact_signature_helpers_are_provenance_pure() {
         }
     }
 
-    // The live engine wrappers in `component_meta_query_engine/mod.rs`.
-    // They delegate to the central helpers and must be provenance-pure
-    // for the same reason — a re-read inside a wrapper is the same
-    // publish-race hole as one inside the central helper. The
-    // walker-cluster's `engine_fact_signature_for_prepared_target`
-    // wrapper is DELETED (its `PreparedTargetDb` producer is gone), and
-    // `engine_fact_signature_for_canonical_member` had no surviving
-    // producer wrapper — the canonical-member signature builder lives in
+    // The live engine signature wrappers. They delegate to the central
+    // helpers and must be provenance-pure for the same reason — a re-read
+    // inside a wrapper is the same publish-race hole as one inside the
+    // central helper. The exported-type wrapper lives in the engine's
+    // `component_meta_query_engine/mod.rs`; the materialize-memo builder
+    // lives beside the central helpers in the type engine's
+    // `fact_signature_helpers.rs`. The canonical-member signature builder is
     // `fact_signature_helpers.rs::fact_signature_for_canonical_member`,
-    // already covered by the HELPERS list above.
-    let engine_src = read_session_source("resolver_core/component_meta_query_engine/mod.rs");
-    const ENGINE_WRAPPERS: &[&str] = &[
-        "pub(crate) fn engine_fact_signature_for_exported_type(",
-        "pub(crate) fn engine_fact_signature_for_materialize_memo(",
+    // already covered by the HELPERS list above. The flag selects the crate:
+    // `false` reads the session `src/`, `true` the type engine `src/`.
+    const ENGINE_WRAPPERS: &[(bool, &str, &str)] = &[
+        (
+            false,
+            "resolver_core/component_meta_query_engine/mod.rs",
+            "pub(crate) fn engine_fact_signature_for_exported_type(",
+        ),
+        (
+            true,
+            "fact_signature_helpers.rs",
+            "pub fn engine_fact_signature_for_materialize_memo(",
+        ),
     ];
-    for wrapper in ENGINE_WRAPPERS {
-        let body = extract_fn_body(&engine_src, wrapper);
+    for (in_engine, file, wrapper) in ENGINE_WRAPPERS {
+        let wrapper_src = if *in_engine {
+            read_engine_source(file)
+        } else {
+            read_session_source(file)
+        };
+        let body = extract_fn_body(&wrapper_src, wrapper);
         for forbidden in FORBIDDEN {
             assert!(
                 !body.contains(forbidden),

@@ -64,7 +64,7 @@ Phase linkage:
   rule-correct expected (`id: string`).
 - Phase 5k §5.13 amended `shallow_lower_type_expr`'s
   `TypeExpr::TypeOf` arm
-  (`crates/verter_session/src/project_semantic_dispatch/lower.rs`)
+  (`crates/verter_type_engine/src/project_semantic_dispatch/lower.rs`)
   to attempt single-segment root resolution first, falling back to
   the joined-2-segment lookup only when the single-segment root
   misses AND a longer path exists. The fallback preserves the

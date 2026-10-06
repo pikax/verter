@@ -13,15 +13,15 @@
 
 use std::sync::Arc;
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::{
-    DeclIdentity, NodeScopeId, ScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey,
-};
 use crate::types::HostConfig;
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::semantic_query::{
+    DeclIdentity, NodeScopeId, ScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey,
+};
 
 fn carrier_wrapping(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     arg: SemanticNodeId,
     kind: u8,
 ) -> SemanticNodeId {
@@ -38,7 +38,7 @@ fn carrier_wrapping(
                     canonical_id: Arc::from("/v.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
-                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                    binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     ),
                 },
@@ -67,7 +67,9 @@ fn carrier_wrapping(
 fn accumulate_carrier_deps_descends_carrier_args() {
     for kind in 0u8..3 {
         let host = VerterHost::new_standalone(HostConfig::default());
-        let ctx: &dyn crate::resolver_core::ResolverContext = &host;
+        let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
+            crate::resolver_core::HostCapabilities,
+        > = &host;
         let graph = Arc::clone(host.project_type_store().semantic_graph());
 
         // A cross-file DeclRef (declared in /dep.ts) wrapped in a carrier
@@ -84,11 +86,13 @@ fn accumulate_carrier_deps_descends_carrier_args() {
         let decl_ref = graph.intern_node(SemanticNodeData::DeclRef { identity: dep_id });
         let carrier = carrier_wrapping(&graph, decl_ref, kind);
 
-        let ((), finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        let ((), finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
+            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
             || {
                 let fixture_dispatch_0 =
-                    crate::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+                    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                        ctx,
+                    );
                 super::accumulate_lowered_node_carrier_deps(
                     &fixture_dispatch_0,
                     carrier,
@@ -97,14 +101,14 @@ fn accumulate_carrier_deps_descends_carrier_args() {
             },
         );
         let facts = match finalise {
-            crate::resolver_core::FactReadSetFinalise::Ok(facts) => facts,
+            verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(facts) => facts,
             other => panic!("carrier dependency tracing must be cacheable: {other:?}"),
         };
 
         let saw_dep = facts.iter().any(|f| {
             matches!(
                 f,
-                crate::resolver_core::FactVersionRef::FileWholeHash { canonical_id, .. }
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash { canonical_id, .. }
                     if canonical_id == "/dep.ts"
             )
         });
@@ -138,7 +142,9 @@ fn node_contains_free_type_param_descends_carrier_args() {
     for kind in 0u8..3 {
         let carrier = carrier_wrapping(&graph, free_param, kind);
         assert!(
-            super::node_contains_free_type_param(&dispatch, carrier),
+            verter_type_engine::project_semantic_dispatch::symbolic_root::node_contains_free_type_param(
+                &dispatch, carrier
+            ),
             "a free TypeParam inside a carrier's type_args (kind {kind}) must make the node \
              contain a free param; carrier {:?}",
             graph.node_data(carrier).as_deref()
@@ -149,12 +155,14 @@ fn node_contains_free_type_param_descends_carrier_args() {
     // NOT free (proving the descent reads the actual arg, not a blanket
     // true for any carrier).
     let concrete = graph.intern_node(SemanticNodeData::Primitive(
-        crate::semantic_query::PrimitiveKind::String,
+        verter_type_engine::semantic_query::PrimitiveKind::String,
     ));
     for kind in 0u8..3 {
         let carrier = carrier_wrapping(&graph, concrete, kind);
         assert!(
-            !super::node_contains_free_type_param(&dispatch, carrier),
+            !verter_type_engine::project_semantic_dispatch::symbolic_root::node_contains_free_type_param(
+                &dispatch, carrier
+            ),
             "a carrier whose only arg is a concrete primitive (kind {kind}) must NOT be free"
         );
     }
@@ -167,10 +175,15 @@ const DEPTH: usize = 10_000;
 
 /// `leaf` under `DEPTH` array types, read on a 1 MiB thread by `probe`.
 fn under_nested_arrays<R: Send + 'static>(
-    leaf: impl FnOnce(&crate::semantic_query_memo::SemanticGraphStore) -> SemanticNodeId
+    leaf: impl FnOnce(&verter_type_engine::semantic_query_memo::SemanticGraphStore) -> SemanticNodeId
         + Send
         + 'static,
-    probe: impl FnOnce(&ProjectSemanticDispatch<'_>, SemanticNodeId) -> R + Send + 'static,
+    probe: impl FnOnce(
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+            SemanticNodeId,
+        ) -> R
+        + Send
+        + 'static,
 ) -> R {
     std::thread::Builder::new()
         .stack_size(1 << 20)
@@ -192,7 +205,9 @@ fn under_nested_arrays<R: Send + 'static>(
         .expect("the probe answers")
 }
 
-fn free_param(graph: &crate::semantic_query_memo::SemanticGraphStore) -> SemanticNodeId {
+fn free_param(
+    graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic("X"),
         param_index: 0,
@@ -206,7 +221,9 @@ fn free_param(graph: &crate::semantic_query_memo::SemanticGraphStore) -> Semanti
 #[test]
 fn a_free_param_is_found_at_any_depth() {
     assert!(under_nested_arrays(free_param, |dispatch, node| {
-        super::node_contains_free_type_param(dispatch, node)
+        verter_type_engine::project_semantic_dispatch::symbolic_root::node_contains_free_type_param(
+            dispatch, node,
+        )
     }));
 }
 
@@ -214,12 +231,12 @@ fn a_free_param_is_found_at_any_depth() {
 /// reference.
 #[test]
 fn a_non_owner_reference_is_found_at_any_depth() {
-    let foreign = |graph: &crate::semantic_query_memo::SemanticGraphStore| {
+    let foreign = |graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore| {
         graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
                 canonical_id: Arc::from("/elsewhere.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                whole_hash: crate::semantic_query::HashValue::default(),
+                whole_hash: verter_type_engine::semantic_query::HashValue::default(),
                 decl_name: Arc::from("Elsewhere"),
             },
         })

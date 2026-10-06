@@ -11,11 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use verter_session::projection_bench_support::{ProjectionBenchCase, ProjectionBenchHarness};
-use verter_session::semantic_query::{
+use verter_session::projection_bench_support::{harness_for_host, ProjectionBenchHarness};
+use verter_session::{HostConfig, LanguageRegistry, UpsertRequest, VerterHost};
+use verter_type_engine::project_semantic_dispatch::locator_view::ProjectionBenchCase;
+use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, ResultCompleteness,
 };
-use verter_session::{HostConfig, LanguageRegistry, UpsertRequest, VerterHost};
 
 struct CountingAllocator;
 
@@ -180,7 +181,7 @@ fn prepare_cases<'a>(
 
 fn assert_complete(
     outcome: (
-        verter_session::semantic_query::SemanticNodeId,
+        verter_type_engine::semantic_query::SemanticNodeId,
         ResultCompleteness,
     ),
 ) {
@@ -200,7 +201,7 @@ fn projection_safety(c: &mut Criterion) {
         "export type Imported = { value: string };\n".to_string(),
     );
     upsert_ts(&host, FIXTURE_CANONICAL, fixture_source());
-    let mut harness = ProjectionBenchHarness::new(&host);
+    let mut harness = harness_for_host(&host);
     let cases = prepare_cases(&harness);
     let expanded = ProjectionReductionContext::published(ProjectionMode::Expanded);
 

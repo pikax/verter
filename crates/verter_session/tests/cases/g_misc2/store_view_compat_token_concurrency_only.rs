@@ -8,7 +8,7 @@
 //! not be conflated."
 //!
 //! The guard scans every production source file under
-//! `crates/verter_session/src/**/*.rs` and asserts that
+//! `crates/{verter_session,verter_type_engine}/src/**/*.rs` and asserts that
 //! `StoreViewCompatToken` appears only in concurrency contexts:
 //!
 //! 1. **Singleflight keys** — `(K, StoreViewCompatToken)` map keys,
@@ -50,6 +50,22 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root resolves above the crate dir")
 }
 
+/// Every `.rs` file of the session crate and of the type engine it builds
+/// on; the token is consumed by cache-runtime and resolver code in both.
+fn session_and_engine_rs_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for krate in ["verter_session", "verter_type_engine"] {
+        let crate_src = workspace_root().join("crates").join(krate).join("src");
+        assert!(
+            crate_src.is_dir(),
+            "source root {} is missing",
+            crate_src.display()
+        );
+        files.extend(scan_rs_files(&crate_src));
+    }
+    files
+}
+
 fn scan_rs_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -74,7 +90,7 @@ fn scan_rs_files(root: &Path) -> Vec<PathBuf> {
 }
 
 /// Discrimination 1: every `StoreViewCompatToken` occurrence in
-/// production source code (under `crates/verter_session/src/**`) is
+/// production source code (under `crates/{verter_session,verter_type_engine}/src/**`) is
 /// in a concurrency-oracle context. The guard scans every line,
 /// classifies each `StoreViewCompatToken` mention, and asserts the
 /// classification is in the allow-list set.
@@ -129,11 +145,7 @@ fn store_view_compat_token_is_concurrency_oracle_only() {
         "staleness",
     ];
 
-    let crate_src = workspace_root()
-        .join("crates")
-        .join("verter_session")
-        .join("src");
-    let files = scan_rs_files(&crate_src);
+    let files = session_and_engine_rs_files();
     let mut violations: Vec<String> = Vec::new();
     for file in files {
         // Skip test files — the guard scans production paths only.
@@ -211,11 +223,7 @@ fn store_view_compat_token_is_concurrency_oracle_only() {
 /// review so the redemption list stays exhaustive.
 #[test]
 fn store_view_compat_token_every_production_site_classified() {
-    let crate_src = workspace_root()
-        .join("crates")
-        .join("verter_session")
-        .join("src");
-    let files = scan_rs_files(&crate_src);
+    let files = session_and_engine_rs_files();
     let mut total = 0usize;
     for file in files {
         let path_str = file.display().to_string().replace('\\', "/");

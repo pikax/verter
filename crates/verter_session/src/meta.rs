@@ -49,11 +49,11 @@ pub enum MetaError {
     /// The computation was aborted (a cancelled request, a superseded view,
     /// a shut down host): it published nothing.
     #[error("request aborted: {0:?}")]
-    Aborted(crate::semantic_query::ExecutionAbort),
+    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
-impl From<crate::semantic_query::ExecutionAbort> for MetaError {
-    fn from(abort: crate::semantic_query::ExecutionAbort) -> Self {
+impl From<verter_type_engine::semantic_query::ExecutionAbort> for MetaError {
+    fn from(abort: verter_type_engine::semantic_query::ExecutionAbort) -> Self {
         Self::Aborted(abort)
     }
 }
@@ -87,9 +87,9 @@ static PAYLOAD_ITEM_COMPLETENESS_PROBE: std::sync::Mutex<
 mod output_api;
 
 pub(crate) fn component_meta_expansion_budget_exceeded(
-    types: &verter_semantic::analysis::type_expand::ExpandedComponentTypes,
+    types: &verter_session_query::analysis::type_expand::ExpandedComponentTypes,
 ) -> bool {
-    use verter_semantic::analysis::type_expand::ExpansionStopReason;
+    use verter_session_query::analysis::type_expand::ExpansionStopReason;
 
     let is_budget = |reason: ExpansionStopReason| {
         matches!(
@@ -101,27 +101,28 @@ pub(crate) fn component_meta_expansion_budget_exceeded(
         )
     };
 
-    let field_has_budget = |field: &verter_semantic::analysis::type_expand::ExpandedField| {
+    let field_has_budget = |field: &verter_session_query::analysis::type_expand::ExpandedField| {
         field
             .diagnostics
             .iter()
             .any(|diagnostic| is_budget(diagnostic.reason))
     };
     let macro_has_budget =
-        |shape: &verter_semantic::analysis::type_expand::ExpandedMacroObjectShape| {
+        |shape: &verter_session_query::analysis::type_expand::ExpandedMacroObjectShape| {
             shape
                 .result
                 .diagnostics
                 .iter()
                 .any(|diagnostic| is_budget(diagnostic.reason))
         };
-    let props_has_budget = |shape: &verter_semantic::analysis::type_expand::ExpandedMacroProps| {
-        shape
-            .result
-            .diagnostics
-            .iter()
-            .any(|diagnostic| is_budget(diagnostic.reason))
-    };
+    let props_has_budget =
+        |shape: &verter_session_query::analysis::type_expand::ExpandedMacroProps| {
+            shape
+                .result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| is_budget(diagnostic.reason))
+        };
 
     types.props.iter().any(field_has_budget)
         || types.emits.iter().any(field_has_budget)
@@ -133,7 +134,7 @@ pub(crate) fn component_meta_expansion_budget_exceeded(
 }
 
 fn component_meta_symbolic_budget_is_fatal(
-    analysis: Option<&verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+    analysis: Option<&verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
 ) -> bool {
     let Some(analysis) = analysis else {
         return true;
@@ -148,7 +149,7 @@ fn component_meta_symbolic_budget_is_fatal(
 
 fn component_meta_resolution_budget_error(
     canonical_or_alias: &str,
-    analysis: Option<&verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+    analysis: Option<&verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
 ) -> Option<MetaError> {
     // Walker overflow is no longer meaningful — the solver path replaced
@@ -328,7 +329,7 @@ impl MetaProject {
     /// Configure project-scoped path alias resolution.
     pub fn configure_projects(
         &self,
-        projects: Vec<verter_semantic::resolver_core::IdeProjectConfig>,
+        projects: Vec<verter_session_query::resolution::IdeProjectConfig>,
     ) -> Result<(), MetaError> {
         self.check_alive()?;
         // No overlay gate — base operations go directly to host.
@@ -638,7 +639,10 @@ impl MetaSession {
     pub fn get_analysis(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<crate::types::FileAnalysisSnapshot>, MetaError> {
+    ) -> Result<
+        Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
+        MetaError,
+    > {
         self.check_alive()?;
         let host = self.project.host();
         // Route through the view-aware host entry point so overlayed
@@ -654,8 +658,10 @@ impl MetaSession {
     pub fn evaluate_types(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<verter_semantic::analysis::type_expand::ExpandedComponentTypes>, MetaError>
-    {
+    ) -> Result<
+        Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+        MetaError,
+    > {
         self.check_alive()?;
         let host = self.project.host();
         // Route through the view-aware host entry point so overlayed
@@ -683,8 +689,10 @@ impl MetaSession {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>, MetaError>
-    {
+    ) -> Result<
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
+        MetaError,
+    > {
         self.check_alive()?;
         let host = self.project.host();
         // Share the fixed-view fast path with the batch analysis surface
@@ -735,7 +743,7 @@ impl MetaSession {
     ) -> Result<
         Vec<
             Result<
-                Option<verter_semantic::analysis::component_meta::ComponentMetaAnalysis>,
+                Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
                 MetaError,
             >,
         >,
@@ -914,7 +922,7 @@ impl MetaSession {
         canonical_or_alias: &str,
     ) -> Result<
         Option<(
-            verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+            verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
             crate::meta_resolve::ResolvedComponentMetaState,
         )>,
         MetaError,
@@ -1104,7 +1112,9 @@ impl MetaSession {
     }
 
     /// Return provenance counters for this session's host.
-    pub fn get_provenance(&self) -> Result<crate::types::MetaProvenanceSnapshot, MetaError> {
+    pub fn get_provenance(
+        &self,
+    ) -> Result<crate::meta_provenance::MetaProvenanceSnapshot, MetaError> {
         self.check_alive()?;
         Ok(self.project.host.provenance_snapshot())
     }
@@ -1236,8 +1246,10 @@ impl MetaSession {
     ) -> R {
         let mut overlays: rustc_hash::FxHashMap<String, Arc<str>> =
             rustc_hash::FxHashMap::default();
-        let mut overlay_hashes: rustc_hash::FxHashMap<String, crate::types::Hash16> =
-            rustc_hash::FxHashMap::default();
+        let mut overlay_hashes: rustc_hash::FxHashMap<
+            String,
+            verter_session_query::analysis::types::Hash16,
+        > = rustc_hash::FxHashMap::default();
         let mut overlay_tombstones: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         let mut resolution_authority = None;
@@ -1250,7 +1262,8 @@ impl MetaSession {
                     match overlay {
                         SessionOverlay::Upsert { source } => {
                             let body: Arc<str> = Arc::from(source.as_str());
-                            let hash = crate::hash::hash_16(body.as_bytes());
+                            let hash =
+                                verter_semantic_source::source_hash::hash_16(body.as_bytes());
                             overlays.insert(canonical.clone(), body);
                             overlay_hashes.insert(canonical.clone(), hash);
                         }

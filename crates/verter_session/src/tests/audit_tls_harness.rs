@@ -38,7 +38,7 @@ use std::thread::ThreadId;
 
 use verter_audit::current_observer;
 
-use crate::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 /// One worker thread's observer-propagation observation, captured
 /// via [`report_worker_observer_presence`]. Public so the

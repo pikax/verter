@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::analysis::types::Hash16;
+use verter_session_query::analysis::types::Hash16;
 use verter_session::external_ts::{
     BoundProject, EngineBackend, EngineCapabilities, EngineError, OpenState, PublishSnapshot,
     Query, QueryFeature, QueryOutcome, ScriptKind, SnapshotFile, SnapshotRole,

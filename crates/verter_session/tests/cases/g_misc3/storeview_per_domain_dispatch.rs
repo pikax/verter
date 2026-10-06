@@ -22,13 +22,14 @@
 //! R26: "Adding a new `FactKey` extends the per-domain `*FactRef`
 //! enum but does NOT widen the trait".
 
-use verter_semantic::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
-use verter_semantic::facts::{FactKey, FactLane, SymbolSpace};
 use verter_session::file_artifact_store::InternedName;
-use verter_session::resolver_core::{
+use verter_session_query::facts::fact_cache::{
     FactVersionRef, ParseFactRef, ProgramAnalysisFactRef, ResolveImportsFactRef,
-    RouteSurfaceFactRef, StoreView, StoreViewCompatToken,
+    RouteSurfaceFactRef,
 };
+use verter_session_query::facts::registry::{AugmentationTargetKindTag, InternedSpecifier};
+use verter_session_query::facts::store_view::{StoreView, StoreViewCompatToken};
+use verter_session_query::facts::{FactKey, FactLane, SymbolSpace};
 
 /// Test view that returns one of three distinct values depending on
 /// which per-domain method the dispatch picked.
@@ -151,7 +152,7 @@ fn route_surface_fact() -> FactVersionRef {
 
 fn program_analysis_fact() -> FactVersionRef {
     FactVersionRef::ProgramAnalysis(ProgramAnalysisFactRef::FlowBody {
-        function: verter_session::resolver_core::ProgramAnalysisFunctionRef {
+        function: verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
             canonical_id: std::sync::Arc::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             merged_symbol_name: std::sync::Arc::from("flow"),

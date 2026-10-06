@@ -776,7 +776,7 @@ pub fn assemble_volar_payload(
 /// model. `query_path` on every handle is `None` (surface root) — no
 /// production path emits declaration-scoped query paths here.
 pub fn assemble_surface_from_analysis(
-    analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> ComponentMetaSurface {
     let canonical = analysis.file_path.clone();
     let project_id = String::new();
@@ -829,18 +829,17 @@ pub fn assemble_surface_from_analysis(
         .map(|t| named(&t.name, false, None))
         .collect();
 
-    let fallthrough_surface =
-        match &analysis.fallthrough_surface {
-            verter_semantic::analysis::component_meta::FallthroughSurface::Branches {
-                branches,
-            } if !branches.is_empty() => Some(FallthroughSurfaceLazy {
-                branches: branches
-                    .iter()
-                    .map(|_branch| FallthroughBranchLazy::default())
-                    .collect(),
-            }),
-            _ => None,
-        };
+    let fallthrough_surface = match &analysis.fallthrough_surface {
+        verter_session_query::analysis::component_meta::FallthroughSurface::Branches {
+            branches,
+        } if !branches.is_empty() => Some(FallthroughSurfaceLazy {
+            branches: branches
+                .iter()
+                .map(|_branch| FallthroughBranchLazy::default())
+                .collect(),
+        }),
+        _ => None,
+    };
 
     ComponentMetaSurface {
         file_path: analysis.file_path.clone(),

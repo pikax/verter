@@ -55,8 +55,8 @@ error[E0277]: the trait bound `BoundNativeHostRequest: serde::Deserialize<'de>` 
    = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `BoundNativeHostRequest` type
    = note: for types from other crates check whether the crate offers a `serde` feature flag
    = help: the following other types implement trait `Deserialize<'de>`:
+             &'a Path
              &'a [u8]
-             &'a std::path::Path
              &'a str
              ()
              (T,)

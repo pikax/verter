@@ -30,7 +30,7 @@
 //!    direct assignment) on a `DerivedRawState.import_routes` binding
 //!    outside this allow-list is rejected.
 //!
-//! The guard scans `crates/verter_session/src/**/*.rs` excluding
+//! The guard scans `crates/{verter_session,verter_type_engine}/src/**/*.rs` excluding
 //! sibling `*_tests.rs` files. It does **not** flag reads of
 //! `entry.import_routes` (e.g. cloning into a snapshot, iterating to
 //! build dep targets) — only mutations. It tracks local variables
@@ -610,6 +610,22 @@ fn has_cfg_test(attrs: &[Attribute]) -> bool {
     })
 }
 
+/// Production files of the session crate and of the type engine it builds
+/// on; a route-table writer in either crate is in scope.
+fn session_and_engine_production_rs_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for krate in ["crates/verter_session/src", "crates/verter_type_engine/src"] {
+        let crate_root = workspace_root().join(krate);
+        assert!(
+            crate_root.is_dir(),
+            "production source root {} is missing",
+            crate_root.display()
+        );
+        files.extend(walk_production_rs_files(&crate_root));
+    }
+    files
+}
+
 fn walk_production_rs_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
@@ -704,9 +720,8 @@ fn format_violations(violations: &[Violation]) -> String {
 /// reintroduced.
 #[test]
 fn import_routes_writer_allow_list() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut violations = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
+    for file in session_and_engine_production_rs_files() {
         scan_file(&file, &mut violations);
     }
     // Filter down to `import_routes` violations only (Guard 2 owns the
@@ -752,8 +767,7 @@ fn import_routes_writer_allow_list() {
 /// stale negative answer current for the remainder of a generation.
 #[test]
 fn known_miss_generation_sidecar_is_deleted() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
-    let offenders: Vec<String> = walk_production_rs_files(&crate_root)
+    let offenders: Vec<String> = session_and_engine_production_rs_files()
         .into_iter()
         .filter(|file| {
             std::fs::read_to_string(file)
@@ -792,9 +806,8 @@ fn known_miss_generation_sidecar_is_deleted() {
 /// positive-route memo fails here.
 #[test]
 fn positive_route_memo_producer_is_deleted() {
-    let crate_root = workspace_root().join("crates/verter_session/src");
     let mut offenders: Vec<String> = Vec::new();
-    for file in walk_production_rs_files(&crate_root) {
+    for file in session_and_engine_production_rs_files() {
         let Ok(src) = std::fs::read_to_string(&file) else {
             continue;
         };
@@ -819,7 +832,7 @@ fn positive_route_memo_producer_is_deleted() {
 
     // Anti-vacuity: the scanner really did read production source.
     assert!(
-        !walk_production_rs_files(&crate_root).is_empty(),
+        !session_and_engine_production_rs_files().is_empty(),
         "the production source walk must find files"
     );
 }

@@ -41,9 +41,10 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/parking_lot"]
 # need it for their own tests add `features = ["test-support"]` only in
 # `[dev-dependencies]`, which Cargo unifies into their test/bench/example
 # targets and not into a production build.
-test-support = []
+test-support = ["verter_execution/test-support"]
 
 [dependencies]
+verter_execution = { path = "../verter_execution" }
 verter_debug_assert = { workspace = true }
 arc-swap = "1.9"
 hotpath = { version = "0.23", optional = true }
@@ -63,3 +64,4 @@ rayon = "1"
 web-time = "1.1"
 
 [dev-dependencies]
+verter_execution = { path = "../verter_execution", features = ["test-support"] }

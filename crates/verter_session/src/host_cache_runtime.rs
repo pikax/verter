@@ -41,7 +41,7 @@ impl VerterHost {
     pub(crate) fn workspace_aliases_for_canonical(
         &self,
         canonical: &str,
-    ) -> Vec<verter_semantic::resolver_core::WorkspaceAlias> {
+    ) -> Vec<verter_session_query::resolution::WorkspaceAlias> {
         use verter_workspace::workspace_snapshot::ProjectPayload;
         let Some(root) = self.workspace().published_root() else {
             return Vec::new();
@@ -105,11 +105,11 @@ impl VerterHost {
     /// opt-in.
     #[must_use]
     pub(crate) fn owner_has_module_augmentation_dependency(&self, canonical: &str) -> bool {
-        use crate::fact_emission::GLOBAL_AUGMENTATION_TAG;
         use crate::file_artifact_store::{
             AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
         };
-        use verter_semantic::facts::registry::{InternedGlobPattern, InternedSpecifier};
+        use verter_session_query::facts::registry::{InternedGlobPattern, InternedSpecifier};
+        use verter_session_query::source::augmentation::GLOBAL_AUGMENTATION_TAG;
 
         let store = self.project_type_store.indexed();
         let env = self.host_view_env_hashes_for(canonical);
@@ -245,7 +245,8 @@ impl VerterHost {
                 // probe reports "no augmenters", and a Content request
                 // admits a content-addressed entry with NO augmenter
                 // fingerprint — stale serves after the augmenter edits.
-                let is_relative = verter_semantic::resolver_core::is_relative_specifier(specifier);
+                let is_relative =
+                    verter_session_query::resolution::is_relative_specifier(specifier);
                 // Resolve a relative specifier's canonical through the live
                 // type-dependency resolver — the ONE resolution authority,
                 // and the SAME `pathIsRelative` authority the fact-side
@@ -413,7 +414,7 @@ impl VerterHost {
                             per_import_targets.push(AugmentationTargetKind::WildcardAmbient(
                                 InternedGlobPattern::from(fact_specifier),
                             ));
-                        } else if verter_semantic::resolver_core::is_relative_specifier(
+                        } else if verter_session_query::resolution::is_relative_specifier(
                             fact_specifier,
                         ) {
                             // Resolve the augmenter's relative
@@ -463,7 +464,7 @@ impl VerterHost {
                 // `resolve_type_dependency_canonical` — the same
                 // authority the binding-driven walk above uses.
                 {
-                    use crate::resolver_core::shallow_file_state::ExportTarget;
+                    use verter_session_query::inputs::shallow::ExportTarget;
                     // The barrel edges come from the artifact the ensure
                     // above returned (never a permissive `get_any` scan,
                     // which can surface a stale multi-candidate row); the
@@ -540,7 +541,7 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn compile_output_pure_content(
         &self,
-    ) -> &crate::cache_runtime::CompileOutputNodePureContent {
+    ) -> &crate::compile_output_node::CompileOutputNodePureContent {
         self.project_type_store.compile_output_pure_content()
     }
 

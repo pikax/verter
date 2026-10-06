@@ -1,0 +1,18 @@
+error[E0061]: this enum variant takes 1 argument but 2 arguments were supplied
+ --> tests/compile-fail/flow_symbolic_call_positional_form_removed.rs:5:5
+  |
+5 |     SliceCall::Symbolic(callee.ty().clone(), None)
+  |     ^^^^^^^^^^^^^^^^^^^ -------------------  ---- unexpected argument #2 of type `Option<_>`
+  |                         |
+  |                         expected `SymbolicCallee`, found `TypeExpr`
+  |
+note: tuple variant defined here
+ --> src/flow/slice.rs
+  |
+  |     Symbolic(SymbolicCallee),
+  |     ^^^^^^^^
+help: remove the extra argument
+  |
+5 -     SliceCall::Symbolic(callee.ty().clone(), None)
+5 +     SliceCall::Symbolic(/* SymbolicCallee */)
+  |

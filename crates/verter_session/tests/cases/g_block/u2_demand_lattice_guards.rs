@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 // The NEW lattice vocabulary publishes through the `demand` module …
-use verter_session::semantic_query::demand::{
+use verter_type_engine::semantic_query::demand::{
     apply_mask, backfill_points, cached_satisfies, demand_at_hop, relevant_demand_axes,
     AliasPreservation, AxisMask, CarrierStopPolicy, Demand, DemandAxis, DisplayFacet, DisplayNeeds,
     EvalPolicy, GenericOpenPolicy, MaterializedPoint, MaterializedSet, MemberBodyDemand, MergeRole,
@@ -30,7 +30,7 @@ use verter_session::semantic_query::demand::{
 };
 // … while the pre-existing `PathSegment`/`ProjectionMode` stay on their owner
 // path (§3.6: the demand module does not re-export them).
-use verter_session::semantic_query::{PathSegment, ProjectionMode};
+use verter_type_engine::semantic_query::{PathSegment, ProjectionMode};
 
 fn seg(name: &str) -> PathSegment {
     PathSegment::Member(name.into())

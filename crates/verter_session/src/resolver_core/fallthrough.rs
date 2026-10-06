@@ -1,22 +1,23 @@
 use rustc_hash::{FxHashMap, FxHashSet};
-use verter_semantic::analysis::component_meta::{
+use verter_semantic::analysis::html_intrinsics::{
+    html_intrinsic_catalog, IntrinsicMemberKind, IntrinsicTypeShape,
+};
+use verter_session_query::analysis::component_meta::{
     AcceptedEventAnalysis, AcceptedEventKind, AcceptedPropAnalysis, AcceptedPropKind,
     AcceptedSurfaceCompleteness, BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings,
     FallthroughBranch, FallthroughEventEntry, FallthroughPropEntry, FallthroughSurface,
     InheritedSource, MemberAvailability, MemberProvenance, PartialBranchReason, ResolvedRootStep,
     RootReachability, RootTargetRef, UnresolvedBranchReason,
 };
-use verter_semantic::analysis::html_intrinsics::{
-    html_intrinsic_catalog, IntrinsicMemberKind, IntrinsicTypeShape,
-};
-use verter_semantic::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImport;
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource, SourcePosition};
 use verter_type_expr::intrinsics::StaticIntrinsicTypeId;
 use verter_type_expr::{
     PublicationPolicy, ResolutionExactness, ResolutionProvenance, TypeExpr, TypePublication,
 };
 
-use crate::resolver_core::{FactVersionRef, FallthroughNodeKey, FallthroughOverrideIdentity};
+use crate::resolver_core::{FallthroughNodeKey, FallthroughOverrideIdentity};
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// One intrinsic member on a native-root fallthrough surface: member identity
 /// (`name`, `kind`) plus its type carried as [`IntrinsicMemberTypeSource`].
@@ -240,7 +241,7 @@ pub struct KnownSpreadKeys {
 #[derive(Debug, Clone)]
 pub struct FallthroughPropOverride {
     pub name: String,
-    pub node: crate::semantic_query::SemanticNodeId,
+    pub node: verter_type_engine::semantic_query::SemanticNodeId,
 }
 
 /// Node-backed child prop-type override set threaded through fallthrough
@@ -257,7 +258,7 @@ pub struct FallthroughPropOverrideSet {
 impl FallthroughPropOverrideSet {
     /// Look up the override value node for `name`, if present.
     #[must_use]
-    pub fn lookup(&self, name: &str) -> Option<crate::semantic_query::SemanticNodeId> {
+    pub fn lookup(&self, name: &str) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
         self.entries
             .iter()
             .find(|entry| entry.name == name)
@@ -1091,7 +1092,7 @@ pub fn resolve_fallthrough_surface<H: FallthroughComputeHost>(
 pub fn structural_substitute_typeof_refs(
     expr: &TypeExpr,
     owner: verter_type_expr::TopLevelOwnerId,
-    env: &verter_semantic::analysis::type_eval::EvalEnv,
+    env: &verter_session_query::declarations::EvalEnv,
 ) -> TypeExpr {
     match expr {
         TypeExpr::TypeOf(value_ref) if value_ref.path.len() == 1 => env
@@ -1125,7 +1126,7 @@ pub fn structural_substitute_typeof_refs(
 ///   (the fact producer guarantees a single-hop, non-self target), rebuilt as
 ///   the target's `TypeOf` reference;
 /// - a closed LEAF annotation projects through the shared closed-grammar
-///   [`leaf_type_fact_expr`](crate::project_semantic_dispatch::lower::leaf_type_fact_expr)
+///   [`leaf_type_fact_expr`](verter_type_engine::project_semantic_dispatch::lower::leaf_type_fact_expr)
 ///   projection.
 ///
 /// Any other source (an authored body locator, a projected / synthesized
@@ -1146,7 +1147,7 @@ fn concrete_annotation_expr(
     }
     match fact.annotation.as_ref()? {
         SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf)) => {
-            Some(crate::project_semantic_dispatch::lower::leaf_type_fact_expr(leaf))
+            Some(verter_type_engine::project_semantic_dispatch::lower::leaf_type_fact_expr(leaf))
         }
         _ => None,
     }
@@ -1249,13 +1250,13 @@ pub fn component_import_candidate_for_binding(
                     import_source: import.source.clone(),
                     imported_name: binding.imported_name.clone(),
                     binding_kind: Some(match binding.kind {
-                        verter_semantic::analysis::types::ImportBindingKind::Named => {
+                        verter_session_query::analysis::types::ImportBindingKind::Named => {
                             crate::resolver_core::ImportBindingKind::Named
                         }
-                        verter_semantic::analysis::types::ImportBindingKind::Default => {
+                        verter_session_query::analysis::types::ImportBindingKind::Default => {
                             crate::resolver_core::ImportBindingKind::Default
                         }
-                        verter_semantic::analysis::types::ImportBindingKind::Namespace => {
+                        verter_session_query::analysis::types::ImportBindingKind::Namespace => {
                             crate::resolver_core::ImportBindingKind::Namespace
                         }
                     }),
@@ -1728,17 +1729,17 @@ mod tests {
     };
     use rustc_hash::{FxHashMap, FxHashSet};
     use std::sync::Arc;
-    use verter_semantic::analysis::component_meta::{
+    use verter_semantic::analysis::html_intrinsics::{
+        html_intrinsic_catalog, intrinsic_listeners_for_tag, owned_intrinsic_members_for_tag,
+        IntrinsicMemberKind, IntrinsicTypeShape,
+    };
+    use verter_session_query::analysis::component_meta::{
         AcceptedEventAnalysis, AcceptedPropAnalysis, AcceptedPropKind, AcceptedSurfaceCompleteness,
         BranchStatus, ComponentMetaAnalysis, ConsumedRootBindings, FallthroughBranch,
         FallthroughSurface, InheritedSource, MemberAvailability, MemberProvenance,
         ResolvedRootStep, RootBranch, RootReachability, RootTargetRef,
     };
-    use verter_semantic::analysis::html_intrinsics::{
-        html_intrinsic_catalog, intrinsic_listeners_for_tag, owned_intrinsic_members_for_tag,
-        IntrinsicMemberKind, IntrinsicTypeShape,
-    };
-    use verter_semantic::analysis::types::{
+    use verter_session_query::analysis::types::{
         AnalyzedImport, AnalyzedImportBinding, ImportBindingKind,
     };
     use verter_span::Span;
@@ -1755,7 +1756,7 @@ mod tests {
         accepted_props: Vec<AcceptedPropAnalysis>,
         accepted_events: Vec<AcceptedEventAnalysis>,
         fallthrough_surface: FallthroughSurface,
-        fact_versions: Vec<crate::resolver_core::FactVersionRef>,
+        fact_versions: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     }
 
     #[test]
@@ -1797,7 +1798,7 @@ mod tests {
             &self.fallthrough_surface
         }
 
-        fn fact_versions(&self) -> &[crate::resolver_core::FactVersionRef] {
+        fn fact_versions(&self) -> &[verter_session_query::facts::fact_cache::FactVersionRef] {
             &self.fact_versions
         }
     }
@@ -1836,11 +1837,13 @@ mod tests {
         fn current_dependency_fact_versions(
             &self,
             canonical_id: &str,
-        ) -> Vec<crate::resolver_core::FactVersionRef> {
-            vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                canonical_id: canonical_id.to_string(),
-                hash: [1; 16],
-            }]
+        ) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+            vec![
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: canonical_id.to_string(),
+                    hash: [1; 16],
+                },
+            ]
         }
 
         fn resolve_child_fallthrough(
@@ -1919,7 +1922,8 @@ mod tests {
             accepted_events: Vec::new(),
             accepted_surface_completeness: AcceptedSurfaceCompleteness::Exact,
             fallthrough_surface: FallthroughSurface::None {
-                reason: verter_semantic::analysis::component_meta::NoFallthroughReason::NoTemplate,
+                reason:
+                    verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
             },
             macro_expansion_diagnostics: Vec::new(),
             options_api: false,
@@ -1934,7 +1938,7 @@ mod tests {
         // two key values differ and the override-bearing one is never
         // warm-reused. An empty set canonicalizes to the same key as `None`.
         use crate::resolver_core::FallthroughPropOverride;
-        use crate::semantic_query::SemanticNodeId;
+        use verter_type_engine::semantic_query::SemanticNodeId;
 
         let none_key = fallthrough_cache_key("/App.vue", true, None);
         assert!(none_key.is_cacheable(), "a no-override key is cacheable");
@@ -1968,7 +1972,7 @@ mod tests {
     #[test]
     fn for_overrides_maps_nonempty_to_uncacheable_and_empty_to_no_overrides() {
         use crate::resolver_core::{FallthroughOverrideIdentity, FallthroughPropOverride};
-        use crate::semantic_query::SemanticNodeId;
+        use verter_type_engine::semantic_query::SemanticNodeId;
 
         assert_eq!(
             FallthroughOverrideIdentity::for_overrides(None),
@@ -2272,10 +2276,12 @@ mod tests {
                         status: BranchStatus::Resolved,
                     }],
                 },
-                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: "/Child.vue".to_string(),
-                    hash: [2; 16],
-                }],
+                fact_versions: vec![
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                        canonical_id: "/Child.vue".to_string(),
+                        hash: [2; 16],
+                    },
+                ],
             },
         );
 
@@ -2370,10 +2376,12 @@ mod tests {
                         status: BranchStatus::Resolved,
                     }],
                 },
-                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
-                    canonical_id: "/Child.svelte".to_string(),
-                    hash: [2; 16],
-                }],
+                fact_versions: vec![
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                        canonical_id: "/Child.svelte".to_string(),
+                        hash: [2; 16],
+                    },
+                ],
             },
         );
 
@@ -2435,7 +2443,7 @@ mod tests {
             FallthroughBranch {
                 branch_key: "0".to_string(),
                 condition_text: None,
-                props: vec![verter_semantic::analysis::component_meta::FallthroughPropEntry {
+                props: vec![verter_session_query::analysis::component_meta::FallthroughPropEntry {
                     name: "id".to_string(),
                     callable_role: verter_type_expr::PropCallableRole::default(),
                     publication: crate::test_only::type_publication_fixture(
@@ -2468,7 +2476,7 @@ mod tests {
                 root_chain: vec![],
                 status: BranchStatus::Unresolved {
                     reason:
-                        verter_semantic::analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
+                        verter_session_query::analysis::component_meta::UnresolvedBranchReason::DynamicComponentIs,
                 },
             },
         ];
@@ -2604,16 +2612,16 @@ mod tests {
     fn leaf_annotated_const(
         name: &str,
         literal: &str,
-    ) -> verter_semantic::analysis::type_eval::ValueDeclInfo {
+    ) -> verter_session_query::declarations::ValueDeclInfo {
         use verter_type_expr::facts::{
             ClosedTypeFact, LeafTypeFact, SemanticTypeSource, ValueAnnotationClass,
             ValueTypeAnnotationFact,
         };
-        verter_semantic::analysis::type_eval::ValueDeclInfo {
+        verter_session_query::declarations::ValueDeclInfo {
             name: name.to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
@@ -2638,16 +2646,16 @@ mod tests {
         name: &str,
         target_owner: verter_type_expr::TopLevelOwnerId,
         target: &str,
-    ) -> verter_semantic::analysis::type_eval::ValueDeclInfo {
+    ) -> verter_session_query::declarations::ValueDeclInfo {
         use verter_type_expr::facts::{
             ValueAnnotationClass, ValueDeclIdentityPart, ValueTypeAnnotationFact,
         };
 
-        verter_semantic::analysis::type_eval::ValueDeclInfo {
+        verter_session_query::declarations::ValueDeclInfo {
             name: name.to_string(),
             owner,
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
@@ -2672,7 +2680,7 @@ mod tests {
 
     #[test]
     fn structural_substitute_typeof_refs_substitutes_length_one_value_refs() {
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(leaf_annotated_const("as", "input"));
 
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
@@ -2692,7 +2700,7 @@ mod tests {
 
     #[test]
     fn structural_substitute_typeof_refs_preserves_unresolved_refs() {
-        let env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let env = verter_session_query::declarations::EvalEnv::new();
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["missing".to_string()],
             type_args: Vec::new(),
@@ -2714,12 +2722,12 @@ mod tests {
         use verter_type_expr::facts::{
             ValueAnnotationClass, ValueDeclIdentityPart, ValueTypeAnnotationFact,
         };
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+        let mut env = verter_session_query::declarations::EvalEnv::new();
+        env.add_value(verter_session_query::declarations::ValueDeclInfo {
             name: "alias".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
@@ -2764,7 +2772,7 @@ mod tests {
     fn structural_substitute_typeof_refs_selects_same_name_in_exact_owner() {
         let module_owner = verter_type_expr::TopLevelOwnerId::module(0);
         let instance_owner = verter_type_expr::TopLevelOwnerId::instance(0);
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(typeof_alias_const(
             module_owner,
             "alias",
@@ -2801,7 +2809,7 @@ mod tests {
     #[test]
     fn structural_substitute_typeof_refs_peels_ordinary_file_alias() {
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(typeof_alias_const(owner, "alias", owner, "target"));
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
             path: vec!["alias".to_string()],
@@ -2825,12 +2833,12 @@ mod tests {
         use verter_type_expr::locators::{
             AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
         };
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
-        env.add_value(verter_semantic::analysis::type_eval::ValueDeclInfo {
+        let mut env = verter_session_query::declarations::EvalEnv::new();
+        env.add_value(verter_session_query::declarations::ValueDeclInfo {
             name: "routes".to_string(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             declaration_id: 0,
-            kind: verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+            kind: verter_session_query::declarations::ValueDeclKind::Const,
             type_annotation: ValueTypeAnnotationFact {
                 is_unique_symbol: false,
                 unique_symbol_members: std::sync::Arc::from([]),
@@ -2876,7 +2884,7 @@ mod tests {
 
     #[test]
     fn structural_substitute_typeof_refs_recurses_into_union_and_intersection() {
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(leaf_annotated_const("a", "A"));
         env.add_value(leaf_annotated_const("b", "B"));
 
@@ -2906,7 +2914,7 @@ mod tests {
 
     #[test]
     fn structural_substitute_typeof_refs_leaves_multi_segment_paths_untouched() {
-        let mut env = verter_semantic::analysis::type_eval::EvalEnv::new();
+        let mut env = verter_session_query::declarations::EvalEnv::new();
         env.add_value(leaf_annotated_const("props", "ignored"));
 
         let lowered = TypeExpr::TypeOf(verter_type_expr::ValueRef {
@@ -2959,9 +2967,9 @@ mod tests {
                 }],
                 accepted_events: vec![],
                 fallthrough_surface: FallthroughSurface::None {
-                    reason: verter_semantic::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
+                    reason: verter_session_query::analysis::component_meta::NoFallthroughReason::InheritAttrsFalse,
                 },
-                fact_versions: vec![crate::resolver_core::FactVersionRef::FileWholeHash {
+                fact_versions: vec![verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id: "/Child.vue".to_string(),
                     hash: [3; 16],
                 }],
@@ -3166,8 +3174,8 @@ mod tests {
 
     fn resolved_branch(
         key: &str,
-        props: Vec<verter_semantic::analysis::component_meta::FallthroughPropEntry>,
-        events: Vec<verter_semantic::analysis::component_meta::FallthroughEventEntry>,
+        props: Vec<verter_session_query::analysis::component_meta::FallthroughPropEntry>,
+        events: Vec<verter_session_query::analysis::component_meta::FallthroughEventEntry>,
     ) -> FallthroughBranch {
         FallthroughBranch {
             branch_key: key.to_string(),
@@ -3183,8 +3191,8 @@ mod tests {
         name: &str,
         source: Option<SemanticTypeSource>,
         origin: &str,
-    ) -> verter_semantic::analysis::component_meta::FallthroughPropEntry {
-        verter_semantic::analysis::component_meta::FallthroughPropEntry {
+    ) -> verter_session_query::analysis::component_meta::FallthroughPropEntry {
+        verter_session_query::analysis::component_meta::FallthroughPropEntry {
             name: name.to_string(),
             callable_role: verter_type_expr::PropCallableRole::default(),
             publication: crate::test_only::type_publication_fixture(
@@ -3208,8 +3216,8 @@ mod tests {
         name: &str,
         payload: Option<SemanticTypeSource>,
         origin: &str,
-    ) -> verter_semantic::analysis::component_meta::FallthroughEventEntry {
-        verter_semantic::analysis::component_meta::FallthroughEventEntry {
+    ) -> verter_session_query::analysis::component_meta::FallthroughEventEntry {
+        verter_session_query::analysis::component_meta::FallthroughEventEntry {
             name: name.to_string(),
             payload: payload
                 .map(SourcePosition::Present)
@@ -3547,7 +3555,7 @@ mod tests {
     /// unconditionally, every `None` assert below fails RED.
     #[test]
     fn producer_scope_attaches_only_to_scope_relative_inherited_sources() {
-        use verter_semantic::analysis::component_meta::AcceptedEventKind;
+        use verter_session_query::analysis::component_meta::AcceptedEventKind;
 
         let prop_row = |name: &str,
                         source: Option<SemanticTypeSource>,

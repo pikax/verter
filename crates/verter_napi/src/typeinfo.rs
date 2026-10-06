@@ -15,7 +15,7 @@ use verter_audit::{AuditCaptureState, RequestAuditRecord};
 use verter_protocol::typeinfo::graph::{TypeInfoGraphRequest, TypeInfoGraphResponse};
 use verter_protocol::typeinfo::FfiSymbolEntry;
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
-use verter_session::semantic_query::{ProjectionMode, SemanticNodeId};
+use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
 use verter_type_expr::TypeExpr;
 
 /// Split a resolve / evaluate outcome into the resolved node (if any)

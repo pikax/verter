@@ -12,8 +12,8 @@ use super::*;
 /// MEMBER-tier dependencies; this walk only follows the transparent shapes
 /// that participate in broad constructor inference.
 pub(super) fn direct_member_dependency_is_missing(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    subject: crate::semantic_query::SemanticNodeId,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    subject: verter_type_engine::semantic_query::SemanticNodeId,
     dependency_names: &FxHashSet<&str>,
 ) -> bool {
     if dependency_names.is_empty() {
@@ -31,7 +31,8 @@ pub(super) fn direct_member_dependency_is_missing(
         if !visited.insert((node, tracked_dependency)) {
             continue;
         }
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        let Some(data) =
+            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
         else {
             continue;
         };
@@ -108,7 +109,7 @@ pub(super) fn direct_member_dependency_is_missing(
                         canonical_id: Arc::clone(&identity.canonical_id),
                         owner: identity.owner,
                         local_scope: None,
-                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                        binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                             identity.owner,
                         ),
                     },
@@ -117,9 +118,9 @@ pub(super) fn direct_member_dependency_is_missing(
                     QueryResult::Value(resolved) if resolved.value != node => {
                         work.push((resolved.value, tracked_dependency));
                     }
-                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                    QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
                         if tracked_dependency
-                            && !crate::request_context::current_cold_compute_completeness()
+                            && !verter_type_engine::request_context::current_cold_compute_completeness()
                                 .is_partial() =>
                     {
                         return true;
@@ -134,7 +135,7 @@ pub(super) fn direct_member_dependency_is_missing(
                 let args = Arc::clone(args);
                 drop(data);
                 match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(
+                    verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(
                             Arc::clone(&base.canonical_id),
                             base.owner,
@@ -154,9 +155,9 @@ pub(super) fn direct_member_dependency_is_missing(
                     QueryResult::Value(resolved) if resolved.value != node => {
                         work.push((resolved.value, tracked_dependency));
                     }
-                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                    QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
                         if tracked_dependency
-                            && !crate::request_context::current_cold_compute_completeness()
+                            && !verter_type_engine::request_context::current_cold_compute_completeness()
                                 .is_partial() =>
                     {
                         return true;
@@ -164,12 +165,14 @@ pub(super) fn direct_member_dependency_is_missing(
                     _ => {}
                 }
             }
-            SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
-                canonical_id,
-                owner,
-                name,
-                ..
-            }) => {
+            SemanticNodeData::Opaque(
+                verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
+                    canonical_id,
+                    owner,
+                    name,
+                    ..
+                },
+            ) => {
                 let tracked_dependency =
                     tracked_dependency || dependency_names.contains(name.as_ref());
                 let canonical_id = Arc::clone(canonical_id);
@@ -177,7 +180,7 @@ pub(super) fn direct_member_dependency_is_missing(
                 let name = Arc::clone(name);
                 drop(data);
                 match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(
+                    verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(Arc::clone(&canonical_id), owner, name),
                         Arc::from([]),
                         dispatch.instantiate_context_for(
@@ -193,9 +196,9 @@ pub(super) fn direct_member_dependency_is_missing(
                     QueryResult::Value(resolved) if resolved.value != node => {
                         work.push((resolved.value, tracked_dependency));
                     }
-                    QueryResult::Error(crate::semantic_query::QueryError::Miss)
+                    QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
                         if tracked_dependency
-                            && !crate::request_context::current_cold_compute_completeness()
+                            && !verter_type_engine::request_context::current_cold_compute_completeness()
                                 .is_partial() =>
                     {
                         return true;
@@ -203,10 +206,11 @@ pub(super) fn direct_member_dependency_is_missing(
                     _ => {}
                 }
             }
-            SemanticNodeData::Opaque(crate::semantic_query::QueryError::Miss)
+            SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::Miss)
                 if tracked_dependency
-                    && !crate::request_context::current_cold_compute_completeness()
-                        .is_partial() =>
+                    && !verter_type_engine::request_context::current_cold_compute_completeness(
+                    )
+                    .is_partial() =>
             {
                 return true;
             }
@@ -221,15 +225,16 @@ pub(super) fn direct_member_dependency_is_missing(
 }
 
 fn is_definitely_non_object_root(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    mut subject: crate::semantic_query::SemanticNodeId,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    mut subject: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
     let mut visited = FxHashSet::default();
     let resolution_context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
 
     while visited.insert(subject) {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
+        let Some(data) =
+            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
         else {
             return false;
         };
@@ -271,9 +276,10 @@ fn is_definitely_non_object_root(
                             canonical_id: Arc::clone(&identity.canonical_id),
                             owner: identity.owner,
                             local_scope: None,
-                            binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                                identity.owner,
-                            ),
+                            binder_scope_id:
+                                verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                                    identity.owner,
+                                ),
                         },
                         name: Arc::clone(&identity.decl_name),
                     }));
@@ -290,7 +296,7 @@ fn is_definitely_non_object_root(
                 let args = Arc::clone(args);
                 drop(data);
                 let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(
+                    verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(
                             Arc::clone(&base.canonical_id),
                             base.owner,
@@ -308,18 +314,20 @@ fn is_definitely_non_object_root(
                 }
                 subject = resolved.value;
             }
-            SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder {
-                canonical_id,
-                owner,
-                name,
-                ..
-            }) => {
+            SemanticNodeData::Opaque(
+                verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
+                    canonical_id,
+                    owner,
+                    name,
+                    ..
+                },
+            ) => {
                 let canonical_id = Arc::clone(canonical_id);
                 let owner = *owner;
                 let name = Arc::clone(name);
                 drop(data);
                 let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(
+                    verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(Arc::clone(&canonical_id), owner, name),
                         Arc::from([]),
                         dispatch.instantiate_context_for(&canonical_id, resolution_context),
@@ -345,10 +353,10 @@ fn is_definitely_non_object_root(
 /// missing root/surface arm. A `true` result is authoritative and retains any
 /// partiality encountered while reaching the non-object terminal.
 pub(super) fn probe_definitely_non_object_root(
-    dispatch: &ProjectSemanticDispatch<'_>,
-    subject: crate::semantic_query::SemanticNodeId,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    subject: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
-    let probe_scope = crate::request_context::ColdComputeCompletenessScope::enter();
+    let probe_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let definitely_non_object = is_definitely_non_object_root(dispatch, subject);
     if definitely_non_object {
         drop(probe_scope);
@@ -364,7 +372,7 @@ pub(super) struct RuntimeClassification {
 }
 
 pub(super) fn classify_runtime(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: BroadRuntimeSubjectLocator,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
@@ -439,11 +447,11 @@ fn runtime_constructor(kind: BroadRuntimeKind) -> RuntimeConstructor {
 /// scalar/object/array payloads cannot satisfy Vue's tuple/function payload
 /// contract and invalidate the enclosing macro.
 pub(super) fn emits_surface_has_invalid_member(
-    dispatch: &ProjectSemanticDispatch<'_>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     surface: &TypeInfoSurface,
     context: ProjectionReductionContext,
 ) -> bool {
-    use crate::semantic_query::{PrimitiveKind, SemanticNodeData};
+    use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData};
 
     let shape_context = ProjectionReductionContext::published(ProjectionMode::Navigate)
         .with_orthogonal_axes_from(context);
@@ -458,7 +466,11 @@ pub(super) fn emits_surface_has_invalid_member(
             else {
                 return false;
             };
-            match crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node).as_deref()
+            match verter_type_engine::project_semantic_dispatch::node_data_for(
+                dispatch.graph(),
+                node,
+            )
+            .as_deref()
             {
                 Some(SemanticNodeData::Primitive(kind)) => {
                     !matches!(kind, PrimitiveKind::Any | PrimitiveKind::Unknown)
@@ -664,14 +676,14 @@ impl MacroProjectionLane {
 
 /// Whether the observed completeness FAULTS `lane`'s projection.
 pub(super) fn macro_projection_faulted(lane: MacroProjectionLane) -> bool {
-    let completeness = crate::request_context::current_cold_compute_completeness();
+    let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
     !macro_projection_residual(completeness, lane).is_empty()
 }
 
 /// The reasons of `completeness` that FAULT `lane` — the observed set
 /// minus [`MacroProjectionLane::contained`].
 pub(super) fn macro_projection_residual(
-    completeness: crate::semantic_query::ResultCompleteness,
+    completeness: verter_type_engine::semantic_query::ResultCompleteness,
     lane: MacroProjectionLane,
 ) -> PartialReasonSet {
     completeness.reasons().without(lane.contained())
@@ -691,7 +703,8 @@ pub(super) fn macro_projection_residual(
 /// the runtime lane CONTAINS: a no-surface observation already faulted the
 /// lane through [`macro_projection_faulted`] and never reaches here.
 pub(super) fn flow_return_degradation_observed() -> bool {
-    let reasons = crate::request_context::current_cold_compute_completeness().reasons();
+    let reasons =
+        verter_type_engine::request_context::current_cold_compute_completeness().reasons();
     reasons.contains(PartialReasonSet::FLOW_RETURN_UNINFERRED)
         || reasons.contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED)
 }
@@ -717,9 +730,10 @@ pub(super) fn resolution_failure(lane: MacroProjectionLane) -> ProjectionFailure
 
 /// The typed refusal of a lane whose inputs are incomplete. An abort class
 /// the computation observed makes the whole production publish nothing
-/// ([`crate::semantic_query::ExecutionAbort::observed_in`]), so it has no refusal row of its own here.
+/// ([`verter_type_engine::semantic_query::ExecutionAbort::observed_in`]), so it has no refusal row of its own here.
 pub(super) fn partial_failure() -> ProjectionFailure {
-    let reasons = crate::request_context::current_cold_compute_completeness().reasons();
+    let reasons =
+        verter_type_engine::request_context::current_cold_compute_completeness().reasons();
     let reason = if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
         || reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
         || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
@@ -748,7 +762,7 @@ fn member_ordinal(index: usize) -> u32 {
 #[cfg(test)]
 mod lane_containment_tests {
     use super::{macro_projection_residual, MacroProjectionLane};
-    use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
+    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
 
     fn residual(reason: PartialReasonSet, lane: MacroProjectionLane) -> PartialReasonSet {
         macro_projection_residual(ResultCompleteness::Partial(reason), lane)

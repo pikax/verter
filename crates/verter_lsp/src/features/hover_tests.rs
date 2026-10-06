@@ -1,15 +1,27 @@
 use super::*;
 use crate::documents::carrier_structure::test_carrier_blocks;
 use std::sync::Arc;
-use verter_semantic::analysis::types::ImportBindingKind;
-use verter_semantic::analysis::types::VueApiCallSite;
-use verter_semantic::analysis::*;
 use verter_session::framework::{
     ComponentContractAvailability, ComponentPublicContract, ContractExactness, ContractProvenance,
     FrameworkAdapterId, PublicCallSignature, PublicDerivedHandlerShape, PublicEvent,
     PublicHandlerSignature, PublicParameter, PublicProp, PublicSlot, PublicSlotBinding,
     PublicSlotInput, PublicTypeReference,
 };
+use verter_session_query::analysis::template::ElementNamespace;
+use verter_session_query::analysis::template::TemplateAnalysisSnapshot;
+use verter_session_query::analysis::template::TemplateAttribute;
+use verter_session_query::analysis::template::TemplateDirective;
+use verter_session_query::analysis::template::TemplateElement;
+use verter_session_query::analysis::types::AnalyzedBinding;
+use verter_session_query::analysis::types::AnalyzedBindingKind;
+use verter_session_query::analysis::types::AnalyzedImport;
+use verter_session_query::analysis::types::AnalyzedImportBinding;
+use verter_session_query::analysis::types::AnalyzedMacro;
+use verter_session_query::analysis::types::BindingInitializer;
+use verter_session_query::analysis::types::ImportBindingKind;
+use verter_session_query::analysis::types::ReactivityKind;
+use verter_session_query::analysis::types::VueApiCallSite;
+use verter_session_query::analysis::types::VueApiClassification;
 use verter_type_expr::{PrimitiveName, TupleElement, TypeExpr};
 
 fn make_analysis(
@@ -547,17 +559,17 @@ fn test_hover_on_component_shows_prop_constness() {
     let analysis = FileAnalysisSnapshot {
         template: Some(
             (TemplateAnalysisSnapshot {
-                components: vec![verter_semantic::analysis::template::TemplateComponentUsage {
+                components: vec![verter_session_query::analysis::template::TemplateComponentUsage {
                     name: "MyButton".into(),
                     import_source: Some("./MyButton.vue".into()),
                     is_dynamic: false,
                     props: vec![
-                        verter_semantic::analysis::template::TemplatePropUsage {
+                        verter_session_query::analysis::template::TemplatePropUsage {
                             name: "title".into(),
                             is_bound: true,
                             expression: None,
                             expression_locator: None,
-                            constness: verter_semantic::analysis::template::PropValueConstness::Dynamic,
+                            constness: verter_session_query::analysis::template::PropValueConstness::Dynamic,
                             referenced_bindings: vec!["msg".into()],
                             from_spread: false,
                             span: verter_span::Span::new(
@@ -567,12 +579,12 @@ fn test_hover_on_component_shows_prop_constness() {
                             name_span: verter_span::Span::new(0, 0),
                             is_shorthand: false,
                         },
-                        verter_semantic::analysis::template::TemplatePropUsage {
+                        verter_session_query::analysis::template::TemplatePropUsage {
                             name: "disabled".into(),
                             is_bound: false,
                             expression: None,
                             expression_locator: None,
-                            constness: verter_semantic::analysis::template::PropValueConstness::Const,
+                            constness: verter_session_query::analysis::template::PropValueConstness::Const,
                             referenced_bindings: vec![],
                             from_spread: false,
                             span: verter_span::Span::new(
@@ -661,7 +673,7 @@ fn child_component_hover_recovers_import_source_from_script_binding() {
         template: Some(
             TemplateAnalysisSnapshot {
                 components: vec![
-                    verter_semantic::analysis::template::TemplateComponentUsage {
+                    verter_session_query::analysis::template::TemplateComponentUsage {
                         name: "DirectChild".to_string(),
                         import_source: None,
                         is_dynamic: false,
@@ -807,7 +819,7 @@ fn test_hover_on_component_with_no_props() {
         template: Some(
             (TemplateAnalysisSnapshot {
                 components: vec![
-                    verter_semantic::analysis::template::TemplateComponentUsage {
+                    verter_session_query::analysis::template::TemplateComponentUsage {
                         name: "Popup".into(),
                         import_source: Some("./Popup.vue".into()),
                         is_dynamic: false,
@@ -1157,17 +1169,17 @@ fn test_hover_on_component_attr_does_not_show_constness() {
         template: Some(
             (TemplateAnalysisSnapshot {
                 components: vec![
-                    verter_semantic::analysis::template::TemplateComponentUsage {
+                    verter_session_query::analysis::template::TemplateComponentUsage {
                         name: "Popup".into(),
                         import_source: Some("./Popup.vue".into()),
                         is_dynamic: false,
-                        props: vec![verter_semantic::analysis::template::TemplatePropUsage {
+                        props: vec![verter_session_query::analysis::template::TemplatePropUsage {
                             name: "icon".into(),
                             is_bound: true,
                             expression: None,
                             expression_locator: None,
                             constness:
-                                verter_semantic::analysis::template::PropValueConstness::Dynamic,
+                                verter_session_query::analysis::template::PropValueConstness::Dynamic,
                             referenced_bindings: vec!["x".into()],
                             from_spread: false,
                             span: verter_span::Span::new(
@@ -2025,8 +2037,8 @@ fn b4_class_element(
     class_value: &str,
     attr_span: verter_span::Span,
     el_span: verter_span::Span,
-) -> verter_semantic::analysis::template::TemplateElement {
-    use verter_semantic::analysis::template::*;
+) -> verter_session_query::analysis::template::TemplateElement {
+    use verter_session_query::analysis::template::*;
     TemplateElement {
         tag: "div".to_string(),
         namespace: ElementNamespace::Html,
@@ -2052,7 +2064,7 @@ fn b4_hover_analysis(source: &str, scoped: bool, class_value: &str) -> FileAnaly
     let attr = source.find(&attr_needle).unwrap() as u32;
     FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![b4_class_element(
                     class_value,
                     verter_span::Span::new(attr, attr + attr_needle.len() as u32),
@@ -2202,7 +2214,7 @@ fn b4_svelte_analysis(source: &str, token_name: &str) -> FileAnalysisSnapshot {
     FileAnalysisSnapshot {
         template: None,
         markup_class_tokens: std::sync::Arc::new(vec![
-            verter_semantic::analysis::MarkupClassToken {
+            verter_session_query::analysis::template::MarkupClassToken {
                 name: token_name.to_string(),
                 span: verter_span::Span::new(
                     token_start as u32,
@@ -2212,7 +2224,7 @@ fn b4_svelte_analysis(source: &str, token_name: &str) -> FileAnalysisSnapshot {
             },
         ]),
         styles: (vec![verter_semantic::analysis::build_scanned_style_analysis(
-            verter_semantic::analysis::StyleAnalysisLang::Css,
+            verter_session_query::analysis::style::StyleAnalysisLang::Css,
             style_css,
             verter_semantic::analysis::VueStyleInput::default(),
             true,
@@ -2294,7 +2306,7 @@ fn module_class_rule_never_renders_in_class_token_hover() {
     let attr = source.find("class=\"btn\"").unwrap() as u32;
     let analysis = FileAnalysisSnapshot {
         template: Some(
-            (verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+            (verter_session_query::analysis::template::TemplateAnalysisSnapshot {
                 elements: vec![b4_class_element(
                     "btn",
                     verter_span::Span::new(attr, attr + 11),

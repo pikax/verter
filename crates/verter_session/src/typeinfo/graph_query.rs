@@ -65,10 +65,10 @@ use verter_protocol::verter::v1::{
 
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
-use crate::instant::Instant;
-use crate::request_context::{RequestContext, RequestContextGuard};
-use crate::semantic_query::ProjectionMode;
 use crate::VerterHost;
+use verter_type_engine::instant::Instant;
+use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::ProjectionMode;
 
 impl VerterHost {
     /// Resolve a named declaration through the typeinfo graph operation
@@ -85,7 +85,7 @@ impl VerterHost {
         envelope: TypeInfoGraphRequest,
     ) -> AuditedResult<TypeInfoGraphResponse, TypeInfoRequestError> {
         let request_id = self.next_request_id();
-        crate::request_context::increment_requests_created();
+        verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
@@ -106,7 +106,7 @@ impl VerterHost {
             self.config.projection_op_budget,
         );
         let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        let _ = ctx.install_audit_registration(Arc::clone(&registration));
+        let _ = ctx.install_audit_registration(registration.clone());
 
         let request_start = Instant::now();
         let (response, payload) = match registration.as_ref() {
@@ -479,9 +479,9 @@ fn textual_fault(message: String) -> (GraphQueryError, Option<String>) {
 /// operation fuse onto solver resolve steps) would misreport WHAT
 /// tripped to every graph consumer.
 fn budget_domain(
-    domain: crate::resolver_core::shallow_file_state::BudgetDomain,
+    domain: verter_session_query::inputs::budget::BudgetDomain,
 ) -> Option<wire::BudgetDomain> {
-    use crate::resolver_core::shallow_file_state::BudgetDomain as Session;
+    use verter_session_query::inputs::budget::BudgetDomain as Session;
     match domain {
         Session::LocalClosure => Some(wire::BudgetDomain::LocalClosure),
         Session::Frontier => Some(wire::BudgetDomain::Frontier),
@@ -497,10 +497,8 @@ fn budget_domain(
 /// domains with no wire variant, so the textual arm still names WHAT
 /// tripped). Exhaustive by construction: a new domain fails to compile
 /// until it is labeled or mapped.
-fn budget_domain_label(
-    domain: crate::resolver_core::shallow_file_state::BudgetDomain,
-) -> &'static str {
-    use crate::resolver_core::shallow_file_state::BudgetDomain as Session;
+fn budget_domain_label(domain: verter_session_query::inputs::budget::BudgetDomain) -> &'static str {
+    use verter_session_query::inputs::budget::BudgetDomain as Session;
     match domain {
         Session::LocalClosure => "local closure",
         Session::Frontier => "frontier",
@@ -624,8 +622,8 @@ fn graph_payload(
 mod tests {
     use super::*;
     use crate::host_resolve_type_audit::TypeResolutionRequestError;
-    use crate::resolver_core::shallow_file_state::BudgetDomain as SessionBudgetDomain;
-    use crate::semantic_query::BudgetExceededFailure;
+    use verter_session_query::inputs::budget::BudgetDomain as SessionBudgetDomain;
+    use verter_session_query::inputs::budget::BudgetExceededFailure;
 
     #[test]
     fn a_projection_operation_budget_fault_never_aliases_a_closed_wire_domain() {

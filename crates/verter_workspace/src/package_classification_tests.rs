@@ -23,7 +23,7 @@ use crate::canonical_path::CanonicalPath;
 use crate::project_graph::{ProjectGraph, ProjectRank, VfsProjectConfig};
 use crate::traits::WorkspaceRead;
 use crate::{MemoryOptions, MemoryWorkspace};
-use verter_semantic::resolver_core::IdeProjectCompilerOptions;
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 
 #[allow(deprecated)]
 fn make_project(root: &str, tsconfig: Option<&str>) -> VfsProjectConfig {

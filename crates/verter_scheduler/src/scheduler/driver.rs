@@ -47,7 +47,7 @@ pub(super) fn dispatch_ready_job_to_executor(
     cancellation: &CancellationToken,
 ) -> Option<Submission> {
     let _cancellation_guard =
-        crate::cancellation::JobCancellationGuard::install(cancellation.clone());
+        verter_execution::cancellation::JobCancellationGuard::install(cancellation.clone());
     match (&job.kind, &job.identity) {
         // Cache-node work routes straight to the cache-materialisation hook,
         // taking the full identity directly: `cache_id` + `key_hash` ride the
@@ -950,9 +950,9 @@ impl Scheduler {
             // between jobs without an explicit clear.
             let _ctx_guard: InlineTlsGuard = match winner_ctx.as_ref() {
                 Some(opaque) => InlineTlsGuard::Install(Arc::clone(&opaque.0).install_tls()),
-                None => {
-                    InlineTlsGuard::ClearAll(crate::request_context::AllSlotsClearGuard::clear_all())
-                }
+                None => InlineTlsGuard::ClearAll(
+                    verter_execution::request_context::AllSlotsClearGuard::clear_all(),
+                ),
             };
             // Audit pool tag mirrors the pool the inline branch is
             // running on: `IoWorker × Source` runs inline on the
@@ -1023,8 +1023,9 @@ impl Scheduler {
             let task_kind_for_panic = task_kind.clone();
             let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
                 let job = job.started(&inbox_sender);
-                let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
-                    winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
+                let _guard: Option<
+                    Box<dyn verter_execution::request_context::TlsUninstall + Send>,
+                > = winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
                     audit_publish::WorkerPoolTag::Io,
                     audit_publish::SchedulerDepthsSnapshot {
@@ -1084,8 +1085,9 @@ impl Scheduler {
             let task_kind_for_panic = task_kind.clone();
             let task: crate::execution::pool::SchedulerPoolTask = Box::new(move || {
                 let job = job.started(&inbox_sender);
-                let _guard: Option<Box<dyn crate::request_context::TlsUninstall + Send>> =
-                    winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
+                let _guard: Option<
+                    Box<dyn verter_execution::request_context::TlsUninstall + Send>,
+                > = winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
                     audit_publish::WorkerPoolTag::Cpu,
                     audit_publish::SchedulerDepthsSnapshot {

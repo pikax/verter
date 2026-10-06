@@ -228,7 +228,7 @@ where
     let package_runtime = host.resolve_loaded_dependency_canonical(
         "/workspace/src/flow_return_cross_package_main.ts",
         "synthetic-flow-values",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(
         package_runtime.as_deref(),
@@ -452,7 +452,7 @@ fn flow_return_xf_fixture_routes_are_hermetic_and_resolvable() {
     let types = host.resolve_loaded_dependency_canonical(
         "/fixtures/flow_return_cross_main.ts",
         "./flow_return_cross_types",
-        verter_semantic::resolver_core::ResolveRequestKind::TypeImport,
+        verter_session_query::resolution::ResolveRequestKind::TypeImport,
     );
     assert_eq!(
         types.as_deref(),
@@ -462,7 +462,7 @@ fn flow_return_xf_fixture_routes_are_hermetic_and_resolvable() {
     let factory = host.resolve_loaded_dependency_canonical(
         "/fixtures/flow_return_cross_main.ts",
         "./flow_return_cross_factory",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(
         factory.as_deref(),
@@ -472,7 +472,7 @@ fn flow_return_xf_fixture_routes_are_hermetic_and_resolvable() {
     let guards = host.resolve_loaded_dependency_canonical(
         "/fixtures/flow_return_cross_main.ts",
         "./flow_return_cross_guards",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(
         guards.as_deref(),
@@ -482,7 +482,7 @@ fn flow_return_xf_fixture_routes_are_hermetic_and_resolvable() {
     let index = host.resolve_loaded_dependency_canonical(
         "/fixtures/flow_return_cross_main.ts",
         "./flow_return_cross_index",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(
         index.as_deref(),
@@ -492,7 +492,7 @@ fn flow_return_xf_fixture_routes_are_hermetic_and_resolvable() {
     let source = host.resolve_loaded_dependency_canonical(
         "/fixtures/flow_return_cross_index.ts",
         "./flow_return_cross_source",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(
         source.as_deref(),
@@ -502,7 +502,7 @@ fn flow_return_xf_fixture_routes_are_hermetic_and_resolvable() {
     let barrel_guards = host.resolve_loaded_dependency_canonical(
         "/fixtures/flow_return_cross_index.ts",
         "./flow_return_cross_guards",
-        verter_semantic::resolver_core::ResolveRequestKind::EsmImport,
+        verter_session_query::resolution::ResolveRequestKind::EsmImport,
     );
     assert_eq!(
         barrel_guards.as_deref(),

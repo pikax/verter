@@ -44,7 +44,7 @@ use super::harness::{build_hermetic_host_with_lib, resolve_under_audit, STUB_LIB
 fn prop_type_repr(
     host: &verter_session::VerterHost,
     owner: &str,
-    analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) -> Option<String> {
     analysis
@@ -73,7 +73,7 @@ fn prop_type_repr(
 fn assert_prop_resolved(
     host: &verter_session::VerterHost,
     owner: &str,
-    analysis: &verter_semantic::analysis::component_meta::ComponentMetaAnalysis,
+    analysis: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
     name: &str,
 ) {
     let repr = prop_type_repr(host, owner, analysis, name).unwrap_or_else(|| {

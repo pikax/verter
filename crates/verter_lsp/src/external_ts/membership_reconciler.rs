@@ -54,8 +54,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::Mutex as AsyncMutex;
 
-use verter_semantic::analysis::types::Hash16;
 use verter_session::external_ts::{CarrierOwnershipResolution, ProjectBinding, SnapshotRole};
+use verter_session_query::analysis::types::Hash16;
 use verter_workspace::workspace_snapshot::SnapshotGeneration;
 
 use super::membership_ledger::{

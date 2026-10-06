@@ -3,7 +3,7 @@
 //!
 //! The workspace side publishes `VfsReadEvent`s
 //! to every registered [`VfsAuditSink`]. Session-side audit
-//! (`verter_session::component_meta_audit::session_vfs_sink::SessionVfsSink`)
+//! (`verter_session::session_vfs_sink::SessionVfsSink`)
 //! registers one sink per audited request and filters events by
 //! `request_id`.
 
@@ -40,7 +40,7 @@ pub struct VfsReadEvent {
     /// enabled at event time; `None` on the zero-cost fast path.
     pub read_ns: Option<u64>,
     /// Request id of the active audited request at event time, read
-    /// from `verter_scheduler::request_context::current_request_id()`.
+    /// from `verter_execution::request_context::current_request_id()`.
     /// `None` when no context is installed.
     pub request_id: Option<u64>,
     /// Thread id of the worker that emitted the event.

@@ -83,7 +83,7 @@ fn make_project() -> Arc<MetaProject> {
 fn get_meta(
     project: &Arc<MetaProject>,
     canonical_id: &str,
-) -> verter_semantic::analysis::component_meta::ComponentMetaAnalysis {
+) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     let session = project.open_session_batch().unwrap();
     session
         .get_component_meta(canonical_id)

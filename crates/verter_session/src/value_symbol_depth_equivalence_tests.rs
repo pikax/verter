@@ -219,7 +219,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         .expect("cfg present");
     assert_eq!(
         cfg.kind,
-        verter_semantic::analysis::type_eval::ValueDeclKind::Const,
+        verter_session_query::declarations::ValueDeclKind::Const,
         "control: `cfg` is a const"
     );
     assert!(
@@ -241,7 +241,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         .expect("Color present");
     assert_eq!(
         color.kind,
-        verter_semantic::analysis::type_eval::ValueDeclKind::Enum,
+        verter_session_query::declarations::ValueDeclKind::Enum,
         "control: `Color` is an enum"
     );
     let color_member_names: Vec<&str> = color
@@ -263,7 +263,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
         .expect("single present");
     assert_eq!(
         single.kind,
-        verter_semantic::analysis::type_eval::ValueDeclKind::Function,
+        verter_session_query::declarations::ValueDeclKind::Function,
         "control: `single` is a function"
     );
     assert_eq!(
@@ -409,7 +409,7 @@ fn cross_file_value_symbol_depth_matches_oracle_on_present_facets() {
     );
     assert_eq!(
         oracle_peel,
-        crate::resolver_core::ValueDeclIdentity {
+        verter_session_query::declarations::metadata::ValueDeclIdentity {
             canonical_id: "/dep.ts".to_string(),
             owner,
             name: "base".to_string(),

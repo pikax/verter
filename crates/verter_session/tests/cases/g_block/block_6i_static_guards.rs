@@ -126,10 +126,10 @@ fn strip_comments_and_strings(src: &str) -> String {
 // ---------------------------------------------------------------------------
 // Guard A.2 — `projection_demand` module exists with the substrate types.
 //
-// `SurfaceProjection`, `ProjectionNode`, `KeyFilter`, `PathSegment`
-// (re-used from `semantic_query`), `ProjectionCursor`,
-// `PublishedSurfaceKind` are the path-precise projection architectural
-// vocabulary. The module being present + naming all of these is the
+// `SurfaceProjection`, `ProjectionNode`, `PathSegment` (re-used from
+// `semantic_query`) and `ProjectionCursor` are the path-precise projection
+// architectural vocabulary; its cache-key vocabulary (`KeyFilter`,
+// `PublishedSurfaceKind`) lives with the shape cache key (guard B.1). The module being present + naming all of these is the
 // minimal contract subsequent passes depend on.
 // ---------------------------------------------------------------------------
 #[test]
@@ -139,8 +139,6 @@ fn projection_demand_substrate_present() {
     for symbol in [
         "pub(crate) struct SurfaceProjection",
         "pub(crate) struct ProjectionNode",
-        "pub(crate) enum KeyFilter",
-        "pub(crate) enum PublishedSurfaceKind",
         "pub(crate) struct ProjectionCursor",
         "pub(crate) fn descend",
         "pub(crate) fn is_terminal",
@@ -165,13 +163,15 @@ fn projection_demand_substrate_present() {
 // ---------------------------------------------------------------------------
 #[test]
 fn shape_cache_db_replaces_split_caches() {
-    let src = read_workspace_file("crates/verter_session/src/component_meta_caches.rs");
+    let src = read_workspace_file("crates/verter_type_engine/src/component_meta_caches.rs");
 
     for symbol in [
         "pub struct ShapeCacheDb",
         "pub enum ShapeSubject",
         "pub struct ShapeDemand",
         "pub struct ShapeCacheKey",
+        "enum KeyFilter",
+        "enum PublishedSurfaceKind",
     ] {
         assert!(
             src.contains(symbol),
@@ -280,7 +280,8 @@ fn peek_primitive_arms_admit_to_cache() {
 // ---------------------------------------------------------------------------
 #[test]
 fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
-    let src = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/walk.rs");
+    let src =
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/walk.rs");
 
     // Locate the `SemanticNodeData::Mapped` arm inside `PathWalker::advance_step`.
     let mapped_arm_idx = src
@@ -364,7 +365,7 @@ fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
 /// structural evasions (hoisted casts, same-statement predicate
 /// laundering, textual identity-copies), so the invariant moved INTO
 /// the type system: `IndexKey::Number` carries the proof-carrying
-/// [`verter_session::semantic_query::CanonicalIndexInt`] newtype whose
+/// [`verter_type_engine::semantic_query::CanonicalIndexInt`] newtype whose
 /// field is PRIVATE to `semantic_query::index_key`. The only ways to
 /// construct one are the module's two blessed constructors — the
 /// f64-checked fold `integer_convention_index_key` and the
@@ -459,7 +460,7 @@ fn index_key_number_convention_is_type_enforced() {
     // convention; pinning only the first window would let the second
     // revert silently.
     let walk_src =
-        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/walk.rs");
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/walk.rs");
     let walk_anchor = "LiteralKey::Number(";
     let clamp_to_char_boundary = |src: &str, mut idx: usize| {
         while !src.is_char_boundary(idx) {
@@ -839,7 +840,7 @@ fn ax_cursor_threaded_functions_keep_parameter() {
 /// does not poison a `Published/Shallow` cache slot.
 #[test]
 fn ax_hybrid_three_keys_carry_reduction_context() {
-    let src = read_workspace_file("crates/verter_session/src/semantic_query.rs");
+    let src = read_workspace_file("crates/verter_type_engine/src/semantic_query.rs");
 
     for symbol in [
         "pub enum ReductionDemand",
@@ -914,7 +915,7 @@ fn ax_hybrid_three_keys_carry_reduction_context() {
 #[test]
 fn ax_hybrid_relation_engine_uses_structural_transit() {
     let src =
-        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/relation.rs");
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/relation.rs");
 
     let count = src
         .matches("ProjectionReductionContext::structural_transit()")
@@ -944,7 +945,8 @@ fn ax_hybrid_relation_engine_uses_structural_transit() {
 /// via the demand context.
 #[test]
 fn ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate() {
-    let src = read_workspace_file("crates/verter_session/src/project_semantic_dispatch/build.rs");
+    let src =
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/build.rs");
 
     let key_of_body = extract_fn_body(&src, "pub(super) fn build_key_of(");
     assert!(
@@ -1055,7 +1057,7 @@ fn ax_hybrid_projector_layer_name_predicates_retired() {
 #[test]
 fn ax_hybrid_evaluate_is_context_explicit() {
     let src =
-        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/evaluate.rs");
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/evaluate.rs");
 
     assert!(
         src.contains("pub(super) fn evaluate_deferred_semantic_node_with_context("),
@@ -1107,7 +1109,7 @@ fn ax_hybrid_evaluate_is_context_explicit() {
 #[test]
 fn block_6i_commit_ax_no_implicit_lower_type_expr_in_scope_wrapper() {
     let dispatch_mod =
-        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/mod.rs");
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/mod.rs");
 
     // The wrapper signature must NOT exist (it is deleted; every
     // caller passes mode explicitly).
@@ -1165,7 +1167,10 @@ fn block_6i_commit_ax_audit_is_passive_observer() {
     // The replacement marker — production capture variable — MUST
     // exist.
     assert!(
-        eval_env.contains("produced_node_id: Option<crate::semantic_query::SemanticNodeId>"),
+        eval_env
+            .split_whitespace()
+            .collect::<String>()
+            .contains("produced_node_id:Option<verter_type_engine::semantic_query::SemanticNodeId"),
         "`compute_evaluated_types_via_dispatch` \
          MUST declare a `produced_node_id` capture variable so each \
          production dispatch branch records its terminal node id. \
@@ -1176,7 +1181,7 @@ fn block_6i_commit_ax_audit_is_passive_observer() {
     // Slot-binding terminal-id variant — production identity exposed
     // before raise.
     let dispatch_mod =
-        read_workspace_file("crates/verter_session/src/project_semantic_dispatch/mod.rs");
+        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/mod.rs");
     assert!(
         dispatch_mod.contains("project_slot_binding_member_with_terminal_id"),
         "`project_slot_binding_member_with_terminal_id` \

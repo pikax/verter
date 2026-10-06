@@ -1,0 +1,5 @@
+error[E0277]: the trait bound `verter_analyzer_mint::MemberListAnchorMint: std::default::Default` is not satisfied
+ --> tests/cases/compile-fail/member_list_anchor_mint_by_inference.rs:9:9
+  |
+9 |         Default::default(),
+  |         ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `verter_analyzer_mint::MemberListAnchorMint`

@@ -79,7 +79,7 @@
 
 use std::sync::Arc;
 
-use verter_semantic::resolver_core::WorkspaceAlias;
+use verter_session_query::resolution::WorkspaceAlias;
 
 use crate::{HostConfig, UpsertRequest, VerterHost};
 
@@ -266,9 +266,12 @@ fn validator_finds_the_bundle_a_non_default_project_owner_admitted() {
 /// `validates_resolve_imports_domain_for_content_hash`, each turn this red.
 #[test]
 fn production_validator_accepts_a_fact_for_a_non_default_project_owner() {
-    use verter_semantic::facts::registry::{FactKey, FactLane, InternedName, InternedSpecifier};
+    use verter_session_query::facts::registry::{
+        FactKey, FactLane, InternedName, InternedSpecifier,
+    };
 
-    use crate::resolver_core::{FactVersionRef, ResolveImportsFactRef, StoreView};
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ResolveImportsFactRef};
+    use verter_session_query::facts::store_view::StoreView;
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     configure_two_projects(&host);

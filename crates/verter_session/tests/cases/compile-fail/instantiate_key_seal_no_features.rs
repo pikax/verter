@@ -1,17 +1,19 @@
 //! Compile-FAIL fixture: the sealed `Instantiate` cache-family key cannot be
-//! forged from outside `verter_session`. Every seal asserted here is
-//! UNCONDITIONAL — none is gated behind an opt-in feature — so it holds in
-//! every build profile (the deleted ctors, the `pub(crate)` axis enum, the
-//! private payload fields, and the tuple variant are all unconditional).
+//! forged from outside `verter_type_engine` in a build without the
+//! `test-support` feature. The constructor deletions, the private payload
+//! fields and the tuple variant hold in EVERY build; the source-kind axis enum
+//! is crate-private in every build without `test-support` (that opt-in
+//! re-exports it `pub` for the host's test suites only, and no production
+//! crate enables it).
 //!
 //! `SemanticQueryKey::Instantiate` carries the opaque `InstantiateKey`
-//! (private fields) whose `InstantiateContext` embeds the sealed, `pub(crate)`
+//! (private fields) whose `InstantiateContext` embeds the sealed
 //! `InstantiateBodySource` source-kind axis. An external crate therefore
 //! cannot:
 //!
 //! 1. call the DELETED raw test constructors
 //!    `InstantiateContext::{non_file,file_backed}_for_tests` (E0599);
-//! 2. name the `pub(crate)` `InstantiateBodySource::NonFile` variant (E0603);
+//! 2. name the crate-private `InstantiateBodySource::NonFile` variant (E0603);
 //! 3. struct-literal `InstantiateContext` / `InstantiateKey` (private fields,
 //!    E0451);
 //! 4. use struct-variant syntax on the `Instantiate` TUPLE variant (E0559 /
@@ -22,10 +24,7 @@
 //! corresponding line would COMPILE and trybuild would fail this fixture.
 
 use std::sync::Arc;
-use verter_session::semantic_query::{
-    InstantiateContext, InstantiateKey, ProjectionMode, ProjectionReductionContext,
-    ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey,
-};
+use verter_type_engine::semantic_query::{InstantiateContext, InstantiateKey, ProjectionMode, ProjectionReductionContext, ResolvedDeclSlotIdentity, SemanticNodeId, SemanticQueryKey};
 
 fn main() {
     let prc = ProjectionReductionContext::published(ProjectionMode::Expanded);
@@ -41,9 +40,9 @@ fn main() {
     let _deleted_file_backed =
         InstantiateContext::file_backed_for_tests(prc, Default::default(), Default::default());
 
-    // 2. The source-kind axis is a `pub(crate)` enum — its variants are not
-    //    nameable outside the crate.
-    let _forged_source = verter_session::semantic_query::InstantiateBodySource::NonFile;
+    // 2. The source-kind axis is crate-private without `test-support` — its
+    //    variants are not nameable outside the crate.
+    let _forged_source = verter_type_engine::semantic_query::InstantiateBodySource::NonFile;
 
     // 3. `InstantiateContext` has private fields — not struct-literal-able.
     let _forged_context = InstantiateContext {

@@ -48,14 +48,15 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use verter_session::resolver_core::{FactVersionRef, PermissiveStoreView, RouteDb, RouteResult};
+use verter_session::resolver_core::{PermissiveStoreView, RouteDb, RouteResult};
 use verter_session::VerterHost;
+use verter_session_query::facts::fact_cache::FactVersionRef;
 
 fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey {
     verter_session::resolver_core::RouteNameKey::new(
         provider,
         name,
-        verter_semantic::facts::registry::SymbolSpace::Type,
+        verter_session_query::facts::registry::SymbolSpace::Type,
         verter_session::file_artifact_store::ProjectIdentity([0u8; 16]),
         [0u8; 16],
         [0u8; 16],
@@ -76,7 +77,7 @@ const LEADER_AND_SIBLING_PIN_INFLIGHT_REFS: usize = 3;
 /// fails loudly rather than blocking the suite forever.
 fn wait_for_route_follower_admitted<V>(db: &RouteDb, provider: &str, name: &str, view: &V)
 where
-    V: verter_session::resolver_core::StoreView + ?Sized,
+    V: verter_session_query::facts::store_view::StoreView + ?Sized,
 {
     let deadline = Instant::now() + Duration::from_secs(10);
     while db.test_route_inflight_strong_count(&rk(provider, name), view)

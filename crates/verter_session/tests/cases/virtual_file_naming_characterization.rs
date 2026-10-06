@@ -9,7 +9,7 @@
 //! derivation disagree). It is DISCRIMINATING: a column edit that diverges from
 //! the production formula fails here.
 
-use verter_semantic::resolver_core::ModuleResolverCore;
+use verter_resolution::ModuleResolverCore;
 use verter_session::framework::descriptor::{
     svelte_descriptor, vue_descriptor, VirtualFileNaming, VirtualPathPolicy,
 };

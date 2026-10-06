@@ -43,7 +43,7 @@ use nav_features_support::*;
 
 pub(super) fn child_contract_completion_analysis(
     availability: verter_session::framework::ComponentContractAvailability,
-) -> Option<verter_session::FileAnalysisSnapshot> {
+) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
     let verter_session::framework::ComponentContractAvailability::Supported(contract) =
         availability
     else {
@@ -54,7 +54,7 @@ pub(super) fn child_contract_completion_analysis(
         .iter()
         .map(|prop| {
             let materialized = prop.ty.publication.materialized_type();
-            verter_semantic::analysis::AnalyzedPropDefinition {
+            verter_session_query::analysis::template::AnalyzedPropDefinition {
                 name: prop.name.to_string(),
                 callable_role: verter_type_expr::PropCallableRole::Other,
                 type_annotation: materialized.and_then(|expression| {
@@ -75,7 +75,7 @@ pub(super) fn child_contract_completion_analysis(
         .events
         .iter()
         .map(
-            |event| verter_semantic::analysis::template::AnalyzedEmitDefinition {
+            |event| verter_session_query::analysis::template::AnalyzedEmitDefinition {
                 event_name: event.name.to_string(),
                 has_validator: false,
                 is_declared: true,
@@ -94,7 +94,7 @@ pub(super) fn child_contract_completion_analysis(
                 .iter()
                 .map(|binding| binding.name.to_string())
                 .collect::<Vec<_>>();
-            verter_semantic::analysis::template::DefinedSlot {
+            verter_session_query::analysis::template::DefinedSlot {
                 name: slot.name.to_string(),
                 has_bindings: !binding_names.is_empty(),
                 binding_expressions: vec![String::new(); binding_names.len()],
@@ -105,9 +105,10 @@ pub(super) fn child_contract_completion_analysis(
             }
         })
         .collect();
-    let mut analysis = verter_session::FileAnalysisSnapshot::default();
+    let mut analysis =
+        verter_session_query::analysis::file_analysis::FileAnalysisSnapshot::default();
     analysis.template = Some(std::sync::Arc::new(
-        verter_semantic::analysis::template::TemplateAnalysisSnapshot {
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot {
             prop_definitions,
             emit_definitions,
             defined_slots,
@@ -786,7 +787,7 @@ async fn handle_completion_attempt(
         edit_fence = server.did_change_mutex.lock().await;
     }
 
-    let final_settlement = native_only
+    let mut final_settlement = native_only
         .then(|| crate::documents::ForegroundSettlement::capture(&server.documents, uri));
     let completion_ssr_context = {
         let canonical_id = server.documents.get_canonical_id(uri);
@@ -799,13 +800,13 @@ async fn handle_completion_attempt(
     struct NativeCompletionSnapshot {
         source: std::sync::Arc<str>,
         line_index: crate::documents::line_index::LineIndex,
-        analysis: Option<verter_session::FileAnalysisSnapshot>,
+        analysis: Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
         blocks: Vec<crate::documents::carrier_structure::CarrierBlockView>,
         structure: Option<verter_session::carrier_publication_store::RegisteredFileStructure>,
         canonical_id: String,
         authored_component_ingress_captured: bool,
     }
-    let native_snapshot = (|| {
+    let capture_native_snapshot = || {
         let (source, line_index, blocks, structure, feature_analysis, canonical_id) = {
             let doc = server.documents.get(uri)?;
             let (blocks, structure, feature_analysis) = if let Some(snapshot) =
@@ -881,15 +882,15 @@ async fn handle_completion_attempt(
                     })
             })?;
             if import.resolved_canonical_id.is_none()
-                && verter_semantic::resolver_core::is_relative_specifier(&import.source)
-                && verter_semantic::resolver_core::path_is_carrier(&import.source)
+                && verter_session_query::resolution::is_relative_specifier(&import.source)
+                && verter_session_query::resolution::path_is_carrier(&import.source)
             {
-                import.resolved_canonical_id = Some(verter_semantic::resolver_core::join_paths(
-                    &verter_semantic::resolver_core::parent_dir(&canonical_id),
+                import.resolved_canonical_id = Some(verter_session_query::resolution::join_paths(
+                    &verter_session_query::resolution::parent_dir(&canonical_id),
                     &import.source,
                 ));
             }
-            let analysis = verter_session::FileAnalysisSnapshot {
+            let analysis = verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
                 imports,
                 ..Default::default()
             };
@@ -915,12 +916,17 @@ async fn handle_completion_attempt(
             canonical_id,
             authored_component_ingress_captured,
         })
-    })();
+    };
+    let native_snapshot = capture_native_snapshot();
     // Normal attempts release the typing fence before cold child/meta work and
     // validate identity after provider awaits. The bounded final native-only
-    // attempt deliberately retains the fence through the synchronous native
-    // calculation: it has no provider await and therefore returns one coherent,
-    // current snapshot instead of panicking or failing open under sustained churn.
+    // attempt deliberately retains the fence through its native calculation, so
+    // it returns one coherent, current snapshot instead of panicking or failing
+    // open under sustained churn. Its only provider await is the bounded
+    // style `v-bind(|)` detail enrichment of its first computation. The fence
+    // stops edits and membership changes, not background settlement, so the
+    // final attempt recomputes under the same fence when only the diagnostics
+    // generation moved (see the settlement check below).
     let native_edit_fence = if native_only {
         Some(edit_fence)
     } else {
@@ -934,118 +940,175 @@ async fn handle_completion_attempt(
         server.maybe_pause_final_completion_after_snapshot().await;
     }
 
-    let recognized_authored_component_contract_miss = std::cell::Cell::new(false);
-    let verter_result = native_snapshot.as_ref().and_then(|native| {
-        let canonical_id = &native.canonical_id;
-        // The WORKSPACE component scan is opt-in: it enumerates components the
-        // document does not import yet (the auto-import tag surface), which is
-        // the background-enrichment lane's job. Resolving the ONE child the
-        // cursor is already inside is not — a `<template #|` slot name has no
-        // TypeScript surface at all, so Verter is its only possible owner and
-        // the resolver must be available whether or not the analysis sidebar
-        // is switched on.
-        let workspace_component_scan = server.documents.semantic_analysis_enabled()
-            && !native.authored_component_ingress_captured;
-        let resolve_component = |import_source: &str,
-                                 component_name: Option<&str>|
-         -> Option<verter_session::FileAnalysisSnapshot> {
-            let local_component_name = component_name?;
-            let (import, binding) =
-                native
-                    .analysis
-                    .as_ref()?
-                    .imports
-                    .iter()
-                    .find_map(|import| {
-                        if import.is_type_only || import.source != import_source {
-                            return None;
-                        }
-                        import
-                            .bindings
-                            .iter()
-                            .find(|binding| {
-                                !binding.is_type_only
-                                    && (binding.name == local_component_name
-                                        || to_kebab_case(&binding.name) == local_component_name
-                                        || binding.name == to_pascal_case(local_component_name))
-                            })
-                            .map(|binding| (import, binding))
-                    })?;
+    // Answers the native completion together with whether it recognized an
+    // authored component whose child contract is not cached yet.
+    let native_completion = |native_snapshot: Option<&NativeCompletionSnapshot>| {
+        let recognized_authored_component_contract_miss = std::cell::Cell::new(false);
+        let result = native_snapshot.and_then(|native| {
+            let canonical_id = &native.canonical_id;
+            // The WORKSPACE component scan is opt-in: it enumerates components the
+            // document does not import yet (the auto-import tag surface), which is
+            // the background-enrichment lane's job. Resolving the ONE child the
+            // cursor is already inside is not — a `<template #|` slot name has no
+            // TypeScript surface at all, so Verter is its only possible owner and
+            // the resolver must be available whether or not the analysis sidebar
+            // is switched on.
+            let workspace_component_scan = server.documents.semantic_analysis_enabled()
+                && !native.authored_component_ingress_captured;
+            let resolve_component = |import_source: &str,
+                                     component_name: Option<&str>|
+             -> Option<
+                verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+            > {
+                let local_component_name = component_name?;
+                let (import, binding) =
+                    native
+                        .analysis
+                        .as_ref()?
+                        .imports
+                        .iter()
+                        .find_map(|import| {
+                            if import.is_type_only || import.source != import_source {
+                                return None;
+                            }
+                            import
+                                .bindings
+                                .iter()
+                                .find(|binding| {
+                                    !binding.is_type_only
+                                        && (binding.name == local_component_name
+                                            || to_kebab_case(&binding.name) == local_component_name
+                                            || binding.name == to_pascal_case(local_component_name))
+                                })
+                                .map(|binding| (import, binding))
+                        })?;
 
-            if let Some(contract) =
-                server.cached_barrel_component_contract(canonical_id, import_source, &binding.name)
-            {
-                let analysis = child_contract_completion_analysis(contract);
-                if analysis.is_none() {
-                    recognized_authored_component_contract_miss.set(true);
-                }
-                return analysis;
-            }
-
-            let resolved = import
-                .resolved_canonical_id
-                .as_deref()
-                .filter(|resolved| {
-                    crate::server::is_default_export_component_carrier(
-                        server.documents.language_classifier(),
-                        resolved,
-                    )
-                })
-                .map(str::to_string)
-                .or_else(|| {
-                    (verter_semantic::resolver_core::is_relative_specifier(&import.source)
-                        && verter_semantic::resolver_core::path_is_carrier(&import.source))
-                    .then(|| {
-                        verter_semantic::resolver_core::join_paths(
-                            &verter_semantic::resolver_core::parent_dir(canonical_id),
-                            &import.source,
-                        )
-                    })
-                });
-            let Some(resolved) = resolved else {
-                recognized_authored_component_contract_miss.set(true);
-                return None;
-            };
-            match server.cached_child_public_contract(&resolved) {
-                Some(contract) => {
+                if let Some(contract) = server.cached_barrel_component_contract(
+                    canonical_id,
+                    import_source,
+                    &binding.name,
+                ) {
                     let analysis = child_contract_completion_analysis(contract);
                     if analysis.is_none() {
                         recognized_authored_component_contract_miss.set(true);
                     }
-                    analysis
+                    return analysis;
                 }
-                None => {
+
+                let resolved = import
+                    .resolved_canonical_id
+                    .as_deref()
+                    .filter(|resolved| {
+                        crate::server::is_default_export_component_carrier(
+                            server.documents.language_classifier(),
+                            resolved,
+                        )
+                    })
+                    .map(str::to_string)
+                    .or_else(|| {
+                        (verter_session_query::resolution::is_relative_specifier(&import.source)
+                            && verter_session_query::resolution::path_is_carrier(&import.source))
+                        .then(|| {
+                            verter_session_query::resolution::join_paths(
+                                &verter_session_query::resolution::parent_dir(canonical_id),
+                                &import.source,
+                            )
+                        })
+                    });
+                let Some(resolved) = resolved else {
                     recognized_authored_component_contract_miss.set(true);
-                    None
+                    return None;
+                };
+                match server.cached_child_public_contract(&resolved) {
+                    Some(contract) => {
+                        let analysis = child_contract_completion_analysis(contract);
+                        if analysis.is_none() {
+                            recognized_authored_component_contract_miss.set(true);
+                        }
+                        analysis
+                    }
+                    None => {
+                        recognized_authored_component_contract_miss.set(true);
+                        None
+                    }
                 }
-            }
-        };
-        let ws_components = if workspace_component_scan {
-            build_workspace_components(&server.documents.host(), canonical_id)
-        } else {
-            Vec::new()
-        };
-        type NativeComponentResolver<'a> =
-            dyn Fn(&str, Option<&str>) -> Option<verter_session::FileAnalysisSnapshot> + 'a;
-        let resolve_component: Option<&NativeComponentResolver<'_>> = Some(&resolve_component);
-        completions_at_position(
-            server.documents.language_classifier(),
-            position,
-            &native.source,
-            &native.blocks,
-            native.analysis.as_ref(),
-            &native.line_index,
-            resolve_component,
-            if ws_components.is_empty() {
-                None
+            };
+            let ws_components = if workspace_component_scan {
+                build_workspace_components(&server.documents.host(), canonical_id)
             } else {
-                Some(&ws_components)
-            },
-            Some(uri.as_str()),
-            completion_ssr_context,
-            native.structure.as_ref(),
-        )
-    });
+                Vec::new()
+            };
+            type NativeComponentResolver<'a> = dyn Fn(
+                    &str,
+                    Option<&str>,
+                )
+                    -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>
+                + 'a;
+            let resolve_component: Option<&NativeComponentResolver<'_>> = Some(&resolve_component);
+            completions_at_position(
+                server.documents.language_classifier(),
+                position,
+                &native.source,
+                &native.blocks,
+                native.analysis.as_ref(),
+                &native.line_index,
+                resolve_component,
+                if ws_components.is_empty() {
+                    None
+                } else {
+                    Some(&ws_components)
+                },
+                Some(uri.as_str()),
+                completion_ssr_context,
+                native.structure.as_ref(),
+            )
+        });
+        (result, recognized_authored_component_contract_miss.get())
+    };
+    struct NativeCompletionItems {
+        is_incomplete: bool,
+        items: Option<Vec<CompletionItem>>,
+        maybe_style_position: bool,
+        recognized_authored_component_contract_miss: bool,
+    }
+    // B4: typed detail for `v-bind(|)` completions — the style position has
+    // no TSX projection, so each offered binding's type comes from a provider
+    // quickinfo at its DECLARATION position (bounded; fail-closed to the
+    // native kind detail when the mapping or provider is unavailable).
+    let native_items = |native_snapshot: Option<&NativeCompletionSnapshot>| {
+        let (verter_result, recognized_authored_component_contract_miss) =
+            native_completion(native_snapshot);
+        let (is_incomplete, items) = if provider_only {
+            (false, None)
+        } else {
+            verter_result
+                .map(|result| (result.is_incomplete, Some(result.items)))
+                .unwrap_or((false, None))
+        };
+        let maybe_style_position = native_snapshot.is_some_and(|native| {
+            native
+                .line_index
+                .position_to_offset(position)
+                .is_some_and(|offset| {
+                    native.blocks.iter().any(|block| {
+                        let (start, end) = block.content_range();
+                        block.tag_name == "style" && offset >= start && offset <= end
+                    })
+                })
+        });
+        NativeCompletionItems {
+            is_incomplete,
+            items,
+            maybe_style_position,
+            recognized_authored_component_contract_miss,
+        }
+    };
+    let NativeCompletionItems {
+        is_incomplete: verter_is_incomplete,
+        items: verter_items,
+        maybe_style_position,
+        recognized_authored_component_contract_miss,
+    } = native_items(native_snapshot.as_ref());
 
     // Provider-attribution E2E still computes Verter's template-visible NAME set,
     // but only as a subtractive scope boundary. No Verter completion item is ever
@@ -1083,28 +1146,6 @@ async fn handle_completion_attempt(
         }
         scope
     });
-    let (verter_is_incomplete, verter_items) = if provider_only {
-        (false, None)
-    } else {
-        verter_result
-            .map(|result| (result.is_incomplete, Some(result.items)))
-            .unwrap_or((false, None))
-    };
-    // B4: typed detail for `v-bind(|)` completions — the style position has
-    // no TSX projection, so each offered binding's type comes from a provider
-    // quickinfo at its DECLARATION position (bounded; fail-closed to the
-    // native kind detail when the mapping or provider is unavailable).
-    let maybe_style_position = native_snapshot.as_ref().is_some_and(|native| {
-        native
-            .line_index
-            .position_to_offset(position)
-            .is_some_and(|offset| {
-                native.blocks.iter().any(|block| {
-                    let (start, end) = block.content_range();
-                    block.tag_name == "style" && offset >= start && offset <= end
-                })
-            })
-    });
     let verter_items = match verter_items {
         Some(items) if maybe_style_position && is_style_v_bind_context(server, uri, position) => {
             Some(enrich_v_bind_completion_details(server, uri, items).await)
@@ -1112,7 +1153,7 @@ async fn handle_completion_attempt(
         other => other,
     };
 
-    if recognized_authored_component_contract_miss.get() {
+    if recognized_authored_component_contract_miss {
         server.enqueue_import_dependency_publication_if_idle(uri);
     }
 
@@ -1121,14 +1162,46 @@ async fn handle_completion_attempt(
     // its own. A cold native contract cache must not turn that provider-only
     // probe into a synthetic empty response; normal product requests retain
     // the cache-only fail-closed behavior above.
-    if native_only || (recognized_authored_component_contract_miss.get() && !provider_only) {
-        if final_settlement
+    if native_only || (recognized_authored_component_contract_miss && !provider_only) {
+        let (mut verter_is_incomplete, mut verter_items) = (verter_is_incomplete, verter_items);
+        // The commit fence pins the document, so only background settlement (an
+        // open importer re-armed by a dependency's settled publication, a
+        // resync or a compile of this file) can move the final basis. A
+        // generation-only move is not a content change: recompute the native
+        // answer against a fresh basis under the SAME fence, bounded like every
+        // other route. A workspace replacement still fails closed at once, as
+        // does churn past the bound. A recomputation is synchronous and native:
+        // it keeps the native kind detail instead of repeating the provider
+        // `v-bind(|)` enrichment while every document commit waits on the fence.
+        let mut generation_recomputations = 0;
+        while let Some(settlement) = final_settlement
             .as_ref()
-            .is_some_and(|settlement| !settlement.is_current(&server.documents, uri))
+            .filter(|settlement| !settlement.is_current(&server.documents, uri))
         {
-            return Err(tower_lsp_server::jsonrpc::Error::new(
-                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+            if generation_recomputations == super::GENERATION_ONLY_RECOMPUTE_LIMIT
+                || !settlement.document_and_workspace_are_current(&server.documents, uri)
+            {
+                return Err(tower_lsp_server::jsonrpc::Error::new(
+                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                ));
+            }
+            generation_recomputations += 1;
+            tracing::debug!(
+                "completion: recomputing final native answer for {} after a diagnostics-generation-only move ({generation_recomputations})",
+                uri.as_str()
+            );
+            final_settlement = Some(crate::documents::ForegroundSettlement::capture(
+                &server.documents,
+                uri,
             ));
+            let recomputed = native_items(capture_native_snapshot().as_ref());
+            if recomputed.recognized_authored_component_contract_miss {
+                server.enqueue_import_dependency_publication_if_idle(uri);
+            }
+            verter_is_incomplete = recomputed.is_incomplete;
+            verter_items = recomputed.items;
+            #[cfg(test)]
+            server.run_final_completion_recompute_hook();
         }
         drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
