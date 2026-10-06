@@ -67,15 +67,13 @@ fn assert_struct_carries_fact_carrier(src: &str, ty: &str) {
         "{ty} must carry the carrier `read_set_signature: ReadSetSignature` — its `facts` rail \
          is the sole cache-validity oracle. Window:\n{window}"
     );
-    // Negative assertion: no separate public `dep_signature:
-    // DepSignature` validity rail. The legacy bundled rail is retired.
+    // Negative assertion: no separate public `dep_signature` validity
+    // rail, under any path spelling of its type. The legacy bundled rail
+    // is retired.
     assert!(
-        !window.contains("    pub dep_signature: DepSignature")
-            && !window.contains("    pub dep_signature: crate::semantic_query::DepSignature")
-            && !window.contains(
-                "    pub dep_signature: verter_type_engine::semantic_query::DepSignature",
-            )
-            && !window.contains("    pub(super) dep_signature: DepSignature"),
+        !window.contains("    pub dep_signature:")
+            && !window.contains("    pub(crate) dep_signature:")
+            && !window.contains("    pub(super) dep_signature:"),
         "{ty} must NOT carry a separate `dep_signature: DepSignature` validity field — the \
          legacy bundled cache-validity rail is retired; `read_set_signature.facts` is the sole \
          oracle. Window:\n{window}"
@@ -131,9 +129,9 @@ fn family_d_app_config_proof_entry_uses_fact_signature_only() {
          as its path-precise cache-validity rail. Window:\n{window}"
     );
     assert!(
-        !window.contains("dep_signature: DepSignature")
-            && !window.contains("dep_signature: crate::semantic_query::DepSignature")
-            && !window.contains("dep_signature: verter_type_engine::semantic_query::DepSignature"),
+        // A bare `dep_signature` field under any path spelling of its type;
+        // the leading space keeps `fact_dep_signature` out of the match.
+        !window.contains(" dep_signature:"),
         "AppConfigNoOverrideProofEntry must NOT carry a legacy `dep_signature: DepSignature` \
          field — the path-precise fact signature is the sole cache-validity rail. \
          Window:\n{window}"
