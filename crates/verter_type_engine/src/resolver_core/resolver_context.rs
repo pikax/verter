@@ -1,4 +1,4 @@
-//! Request-bound adapter implementations for the sealed `ResolverContext`.
+//! Request-bound adapter implementations for `ResolverContext`.
 //!
 //! The method-free marker composes six dyn-compatible services: indexed
 //! inputs, owned lowering, routing, fact validation, cancellation and execution
@@ -12,9 +12,15 @@
 //! Private lifecycle adapters select the captured request view and completion
 //! overlay. The query facade owns execution and output capabilities, and nested
 //! semantic demands reuse that facade. The concrete host remains confined to
-//! these private backend owners. External implementations cannot name the
-//! private sealing marker. Production requests use `HostResolverContext` or
-//! `SessionResolverContext`; direct-host support remains test-only.
+//! these private backend owners.
+//!
+//! The adapter markers in [`sealed`] are `pub`, because the host implements
+//! them from its own crate and Rust has no friend visibility. Any crate can
+//! name and implement them, so they state a workspace contract rather than
+//! enforce a visibility seal. The request-bound guarantee is held by
+//! construction instead: production requests use `HostResolverContext` or
+//! `SessionResolverContext`, which only the host's request entry boundary
+//! builds, and direct-host support remains test-only.
 
 use std::sync::Arc;
 
@@ -103,12 +109,12 @@ impl MaterializeScopeObservation {
 /// `project_semantic_dispatch/*`).
 ///
 /// `ResolverContext` composes six request ports, their two capability
-/// refinements and private structural seals. All service traits are
+/// refinements and the adapter markers in [`sealed`]. All service traits are
 /// dyn-compatible and expose no ambient host access.
 ///
-/// Visibility is `pub(crate)` because this is purely an internal seal — no
-/// external integrators construct
-/// `&dyn ResolverContext`.
+/// The trait is `pub` because the host implements it from its own crate. It
+/// is not an integration point: the only production implementers are the
+/// host's request-bound contexts.
 ///
 /// `C` names the concrete capability types the request ports hand out, so a
 /// selected expression source or a live clock sample dispatches statically
@@ -152,22 +158,21 @@ pub trait ResolverCapabilities: 'static {
 // borrowed `HostStoreView`, and `SessionResolverContext` is the
 // overlay-aware wrapper that delegates every method to a borrowed host
 // alongside an overlay-rooted view.
-/// Sealed marker subtrait: a [`ResolverContext`] that is genuinely
+/// Marker subtrait: a [`ResolverContext`] that is genuinely
 /// REQUEST-BOUND — it carries a per-request [`HostStoreView`] (and, for a
 /// session query, an overlay) constructed at the request entry boundary,
 /// so [`ResolverContext::is_request_bound`] is `true` and every artifact
 /// serve is view-correct for the requesting caller.
 ///
-/// This is the STRUCTURAL rail behind every [`ResolverContext`] use: the
-/// base trait itself requires the private request-bound seal, and the query
-/// host port retains this narrower marker to state its request-bound API
+/// Every [`ResolverContext`] requires the request-bound marker, and the query
+/// host port retains this narrower trait to state its request-bound API
 /// contract directly.
 ///
-/// Sealed via [`sealed::RequestBoundSealed`]. The direct
-/// [`crate::VerterHost`] implementation exists only behind the
-/// compile-absent production test-support fence. The private seal makes an
-/// external or in-crate-laundered production implementation impossible
-/// without a visible coherence change here.
+/// Marked via [`sealed::RequestBoundSealed`]. That marker is `pub`, so it
+/// states the contract rather than enforcing it: a new implementation is a
+/// visible `impl` that review must catch, not a compile error. The host's
+/// direct `VerterHost` implementation exists only behind the compile-absent
+/// production test-support fence.
 ///
 /// The marker deliberately does NOT distinguish a base
 /// [`crate::resolver_core::HostResolverContext`] from an overlay
