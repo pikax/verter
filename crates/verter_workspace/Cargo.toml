@@ -10,6 +10,13 @@ description = "Workspace layer for Verter — file access, resolution, project o
 publish = false
 
 [features]
+semantic-observe = [
+  "verter_audit/semantic-observe",
+  "verter_scheduler/semantic-observe",
+  "verter_semantic/semantic-observe",
+  "currency_probe",
+  "hotpath",
+]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 # Measurement-only: enables the `currency_probe` wall-clock/call-count rail
 # (`src/currency_probe.rs`). Absent from `default`; requested ONLY by the
