@@ -7,7 +7,10 @@ to both tools. Future performance work is baselined on it, so every run is
 validated before any number in it is read.
 
 This page records the harness's structure and contracts, not numbers. Results
-are machine-bound and belong to a run's own `results.md`.
+are machine-bound and belong to a run's own `results.md`. What a run may
+claim on which machine is fixed by the [measurement rule](#measurement-rule);
+named, repeatable runs will go through [evidence runs](#evidence-runs), a
+planned layer.
 
 ## What it measures
 
@@ -31,6 +34,16 @@ same files on disk, byte for byte.
 | `verter-counted` | the probe's twin with a counting global allocator | no: allocation counts only |
 | `tsc-cli` | `tsc -p --extendedDiagnostics`, default (parallel) checkers | no: whole-program reference |
 | `tsc-cli-1` | `tsc -p --extendedDiagnostics --singleThreaded` | no: whole-program reference |
+
+Observability is compared outside the head-to-head. Today that comparison is
+runtime-only: the `verter-obs` arm turns the host's runtime bookkeeping on in
+the production build. A build-level comparison — pairing the
+production-default probe with one that differs only in the default-off
+`semantic-observe` Cargo feature (see `docs/arch/semantic-observe.md`), both
+builds retaining identical required state so the pair isolates what the
+optional observation layer costs — **is planned and not yet in this
+repository**: the runner builds and pins only `semantic_perf_probe` and
+`semantic_perf_probe_counted` (see [Running it](#running-it)).
 
 Verter exposes no whole-program diagnostic pass, so the `tsc -p` arms have no
 Verter counterpart. They show what tsc's full check costs, in both thread
@@ -416,6 +429,41 @@ Verter), omitted when a median is below the resolution. Absolute numbers of
 both arms are always shown; nothing is baseline-subtracted.
 `baseline-empty` (a trivial module and probe) is its own row, reported alone.
 
+## Measurement rule
+
+Workers differ and share their machine with other work, so what a run may
+claim depends on where it ran:
+
+- **On any worker**, a run establishes **answer classes** (see Correctness)
+  and **work counts and growth ratios** (relation proofs, semantic nodes,
+  memo entries, hops, expansions, allocation counts, and how they grow with a
+  scenario's size). These are machine-independent: the same commit gives the
+  same classes and counts everywhere. They are what a change's performance
+  acceptance rests on.
+- **Time and memory** cells (phase and request times, first type handle,
+  peaks, retained memory) are
+  **measured only on the benchmark machine**: a worker tagged `bench-m3`.
+  On any other worker they are reported as `not measured`, never as zero,
+  never as a pass and never as a failure. A timing or memory gate exists only
+  on `bench-m3`, owned by the performance work that runs there. The planned
+  Capacity report (tsc's outcome at the engine budget in the API and CLI arms
+  with time-to-cap and peak at kill; Verter's answer class, peak and time)
+  will be measured under this same rule when its workload lands.
+- A comparison (a baseline commit against a candidate) measures both on the
+  same worker in the same session, interleaved — never against a stored
+  number from another host or another session.
+- A metric, control or containment backend the worker does not provide is
+  reported `unavailable`, with the reason. Unavailable or inconclusive
+  performance evidence is reported, never a failure of the run.
+- No test or gate asserts a timing, sleeps, or compares a wall-clock reading.
+  The self-tests prove validation and classification on synthetic records
+  only.
+
+The direct harness (`semantic-perf.mjs`) still records the times and memory
+it observes on any machine, labelled with that machine's provenance, for
+local investigation; those figures are evidence about that machine only.
+An evidence run will apply the rule to its summary's cells (see below).
+
 ## Tiers
 
 `--tier` chooses what a run covers; every tier keeps the fairness
@@ -423,7 +471,7 @@ properties below (fresh processes for cold measurements, warm repeats in one
 live process per arm, counterbalanced order, one supervisor and budget for
 every arm, the same validation).
 
-| Tier | Scenarios | Arms | Deadline | Time (measured on a Ryzen 9 7950X, Windows) |
+| Tier | Scenarios | Arms | Deadline | Indicative duration (one developer machine, Ryzen 9 7950X on Windows; a planning figure, not a measurement) |
 |---|---|---|---|---|
 | `quick` (default) | one representative normal size per scenario series (21) | Verter, tsc API, and the labelled observability-on and counting Verter arms | 60 s | 62 s (336 invocations) |
 | `standard` | + the other normal sizes and the sizes at tsc's own limits (48) — the baseline | + `tsc -p` in both thread modes | 120 s | 564 s (1152 invocations) |
@@ -538,12 +586,19 @@ Results land in `target/semantic-perf/<timestamp>/`:
   (`cli/` holds the whole-program arms' program);
 - `bin/` — the pinned binaries that ran.
 
+CLI invocations must use the verified tsc executable, the cell's project, and
+the arm's exact thread mode. Runtime and build environment receipts require
+64-character hexadecimal SHA-256 digests. Whole-program OS memory peaks are
+attributed to the engine only for the Windows job commit-charge or macOS
+physical-footprint metric paired with its owning backend. Cgroup peaks remain
+raw containment telemetry; the summary and report mark engine memory unavailable.
+
 The command exits 0 only when validation passes. Standalone validation
 re-reads every raw record — the supervisor's, and for every probe invocation
 its own probe record and phase marker at the path derived from the
 invocation, whether or not `results.json` embeds them, and for every
-whole-program run the stdout file the supervisor recorded (from which its
-diagnostics, times and memory are read) — and fails on any that differs from
+whole-program run the complete stdout file the supervisor recorded — including
+middle diagnostics above 1 MiB — and fails on any that differs from
 `results.json` (a record on disk that `results.json` omits included). Re-validate any
 run with
 
@@ -570,6 +625,94 @@ node scripts/benchmark/semantic-perf/measure-expected.mjs --only <ids> --allow-s
 
 The run fails validation until the reference matches the scenario sources,
 the library and the method.
+
+## Evidence runs
+
+An evidence run is a **named, frozen** benchmark invocation: a manifest fixes
+what is run and which cells must come back, so the same run can be repeated
+on the benchmark machine and its answer attached to the work that asked for
+it.
+
+The evidence-run layer **is planned and not yet in this repository**: no
+runner, self-tests, fixtures or shipped manifests exist yet, and the
+harness's entry point today is `semantic-perf.mjs` (see [Running
+it](#running-it)). This section is the contract that layer will implement
+when it lands: a thin wrapper that validates the manifest, drives
+`semantic-perf.mjs` with the manifest's options, validates the result with
+the same `validate.mjs`, and writes one machine-readable summary. It adds no
+second harness, classifier or validator. Its CLI will be:
+
+```bash
+node scripts/benchmark/evidence-run.mjs --run <name> --dry-run   # validate the manifest, emit a summary skeleton
+node scripts/benchmark/evidence-run.mjs --run <name>             # execute it
+```
+
+`--dry-run` will run nothing: it loads and validates the manifest and writes
+the summary skeleton — every required cell present, none measured — on any
+worker. Its self-tests (`scripts/benchmark/evidence-run.test.mjs`, with
+planted manifests under `scripts/benchmark/evidence-run-fixtures/`) will
+join `pnpm test:scripts`.
+
+### Manifests
+
+A manifest will be `scripts/benchmark/evidence-runs/<name>.json`. Each run
+name has exactly one owner: the change that needs the run adds its manifest,
+and no other change edits it. The first shipped manifest will be
+`skr-perf0-structural`, the structural baseline run.
+
+| Field | Meaning |
+|---|---|
+| `name` | the run's name; must equal the file name without `.json`. Two manifests with one name are rejected |
+| `description` | what the run is for, in one sentence |
+| `tier` | `quick`, `standard` or `stress` (see Tiers): the default scenario set, deadline and repetition counts |
+| `scenarios` | scenario ids or prefixes from the catalog (`scenarios.mjs`), as `--only` takes them; omitted means the tier's set |
+| `settings` | `strictNullChecks` × `noImplicitAny` setting ids (`strict`, `snc-off`, `nia-off`, `both-off`); omitted means the harness default |
+| `arms` | arm ids from the harness's arm registry (`ARMS` in `semantic-perf/analyze.mjs`); an id the registry does not define is rejected |
+| `modes` | the workload modes measured (the harness's cold and warm demands); a mode the harness does not define is rejected |
+| `threads` | the thread counts each threaded arm runs at |
+| `repeat`, `warmup`, `warmRepeats` | measured invocations, unmeasured warmups and in-process warm repeats per cell; omitted means the tier's defaults. `repeat` takes any count from 2 up, like `--repeat`: even counts balance arm order exactly, odd counts — the tier default is 3 — within one (see Schedule) |
+| `noise` | a reference to the noise methodology the run's figures are read under: a link to a section of this page (normally [Verdicts](#verdicts) and [Schedule](#schedule)) |
+| `requiredCells` | the cells the summary must contain: each names its scenario, setting, arm, mode, thread count and the metrics it must carry |
+
+The loader will reject a manifest that is not valid JSON, carries an unknown
+field, misses a required one, names anything the harness does not define, or
+lists a required cell outside the run's own scenarios, settings, arms, modes
+and threads. A run whose result lacks a required cell, or whose validation
+fails (an invalid answer never counts as a win), fails.
+
+### Summary
+
+Each run (and each dry run) will write one JSON summary into its output
+directory, beside the harness's `results.json`. It will hold:
+
+- `run`: the manifest name and the digest of the manifest's bytes;
+- `dryRun`: whether anything executed;
+- `worker`: the machine identity the Tama evidence job recorded for the
+  worker that ran it, its tags, and whether it is `bench-m3`. A run without
+  that record is treated as not `bench-m3`;
+- `provenance`: the harness's provenance (binaries, toolchain, environment
+  digests, TypeScript version, containment backend), as in `results.json`;
+- `prerequisites`: every prerequisite the run needs (supervisor, containment
+  backend, toolchain, the tsc package), each `met` or `unavailable` with its
+  reason;
+- `cells`: one entry per required cell, with its answer class (see
+  Correctness), its work counts, and each metric as `measured` (with its
+  values), `not measured` (time and memory off `bench-m3`, and every metric of
+  a dry run) or `unavailable` (with the reason);
+- `validation`: the harness validation's verdict and problems.
+
+A Tama evidence job will run the manifest and attach this summary to the task
+that requested it. The summary is the run's evidence; the raw records stay in
+the output directory for re-validation.
+
+### The bench-m3 rule
+
+Time and memory cells are evaluated only when the run executes on a worker
+tagged `bench-m3`. On any other worker a real run still executes every arm,
+classifies every answer and records the work counts, and reports its time and
+memory cells `not measured` — never zero and never a pass. Answer classes and
+work-growth ratios from any worker are valid evidence (see
+[Measurement rule](#measurement-rule)).
 
 ## Not covered here
 

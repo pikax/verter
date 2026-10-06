@@ -11,6 +11,26 @@ For end-user API reference and debug workflows see [`docs/audit-footprint/`](../
 
 ## Architecture Overview — Substrate Vs Session
 
+### Optional capture policy and availability
+
+The binding REQUIRED / REQUIRED-budget / REQUIRED-lifetime / OPTIONAL policy,
+per-owner inventory format, default-off `semantic-observe` feature and generator
+constraints live in [`docs/arch/semantic-observe.md`](../../../docs/arch/semantic-observe.md).
+Inventory files are `crates/*/observe-inventory/*.md`; extend the owning file,
+not a shared table. Required validity, budgets, diagnostic data and current
+occupancy/ownership charges remain independent of capture.
+
+`verter_audit::observe::CaptureAvailability::compiled()` reports `Unavailable`
+when `semantic-observe` is off and `Available` when on. `observe::capture`
+returns `None` without calling its collector when off; it returns the collected
+payload when on, never fabricated zero metrics. `ObserveMode` supplies the
+uncaptured/captured vocabulary; root selection and existing audit-endpoint
+migration remain with the execution/consolidation owner. The feature currently
+implies legacy measurement gates without removing them. Integration tests in
+`crates/verter_audit/tests/cases/observe_feature_closure.rs` check resolver-2
+production and dev-unified closures on host/WASM; run the audit tests both with
+and without `--features semantic-observe`.
+
 Audit state is split between a leaf substrate crate (`verter_audit`) and the session crate (`verter_session`). `verter_audit` may depend only on `verter_span` plus ecosystem crates — never on `verter_session` or any other `verter_*` crate.
 
 | Layer | Crate | Owns |

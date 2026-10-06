@@ -10,6 +10,15 @@ publish = false
 description = "Benchmarks and examples for verter_compiler"
 
 [features]
+semantic-observe = [
+  "verter_audit/semantic-observe",
+  "verter_compiler/semantic-observe",
+  "verter_workspace/semantic-observe",
+  "verter_semantic/semantic-observe",
+  "attribution",
+  "currency_probe",
+  "hotpath",
+]
 hotpath = [
   "verter_compiler/hotpath",
   "verter_session/hotpath",

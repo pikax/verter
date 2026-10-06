@@ -10,6 +10,7 @@ description = "Async file scheduler for Verter — driver-owned DAG with typed i
 publish = false
 
 [features]
+semantic-observe = ["verter_audit/semantic-observe", "hotpath"]
 # `hotpath/parking_lot` turns on hotpath's drop-in instrumented wrapper for
 # `parking_lot::Mutex`, used for the scheduler's central DAG lock
 # (`new_dag_mutex` in scheduler.rs — every admission, dispatch, and

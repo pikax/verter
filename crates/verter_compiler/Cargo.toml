@@ -12,6 +12,7 @@ keywords = ["vue", "compiler", "sfc", "typescript", "codegen"]
 categories = ["compilers", "template-engine"]
 
 [features]
+semantic-observe = ["verter_audit/semantic-observe", "verter_semantic/semantic-observe", "hotpath"]
 # Exposes `template` (and `script`) as `pub` instead of `pub(crate)` — see
 # `src/lib.rs`. Primarily for the benchmark harness, but it also provides the
 # visibility surface required by the bench-feature compile contracts: with `template`
