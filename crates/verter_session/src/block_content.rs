@@ -1336,12 +1336,16 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         scope: SuppliedBlockScope<'_>,
+        captured_source: &verter_scheduler::node::SourceWitness,
         captured_whole_hash: verter_session_query::analysis::types::Hash16,
         captured_stamp: &BlockContentHashToken,
     ) -> bool {
+        // The owner is current only on the node incarnation the capture read:
+        // after a delete/re-add or reset the successor may serve the same
+        // bytes at the same generation, but the capture is not its output.
         let owner_is_current = self
             .scheduler
-            .try_get_source(canonical_id)
+            .try_get_source_for_witness(captured_source)
             .is_some_and(|source| {
                 source
                     .downcast_data::<HostSourceData>()

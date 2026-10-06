@@ -655,7 +655,7 @@ pub fn compile_scheduler_artifact_present_for_tests(
 /// invariant from the generation-coherence filter on
 /// [`try_get_artifact`](verter_scheduler::scheduler::Scheduler::try_get_artifact):
 /// a stale artifact left in the map (because the refusal arm did not
-/// call `remove_artifact_if_not_newer_than`) is invisible to
+/// call `remove_artifact_not_newer_than`) is invisible to
 /// `try_get_artifact` after a generation bump, but visible here via
 /// `last_known_good_artifact`. After an overflowed compile that
 /// follows a successful one this MUST return `false`.
