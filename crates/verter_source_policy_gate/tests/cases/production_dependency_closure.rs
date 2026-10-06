@@ -294,6 +294,51 @@ impl ProductionGraph {
         Ok(lines)
     }
 
+    /// The workspace members `root`'s production closure reaches, by name.
+    fn workspace_closure(&self, root: &str) -> Result<BTreeSet<String>, String> {
+        let members: BTreeSet<&str> = self
+            .workspace_members
+            .iter()
+            .map(|id| self.name(id))
+            .collect();
+        let roots: Vec<&String> = self
+            .workspace_members
+            .iter()
+            .filter(|id| self.name(id) == root)
+            .collect();
+        if roots.is_empty() {
+            return Err(format!("`{root}` is not a workspace member"));
+        }
+        Ok(roots
+            .into_iter()
+            .flat_map(|id| self.production_closure(id))
+            .map(|chain| chain.last().expect("non-empty chain").clone())
+            .filter(|name| members.contains(name.as_str()))
+            .collect())
+    }
+
+    /// Every difference between the workspace crates `root` reaches and
+    /// `expected`, in both directions: a reached crate missing from the
+    /// list, and a listed crate no longer reached.
+    fn exact_closure_drift(&self, root: &str, expected: &[&str]) -> Result<Vec<String>, String> {
+        let reached = self.workspace_closure(root)?;
+        let expected: BTreeSet<&str> = expected.iter().copied().collect();
+        let mut drift: Vec<String> = reached
+            .iter()
+            .filter(|name| !expected.contains(name.as_str()))
+            .map(|name| format!("`{root}` reaches workspace crate `{name}`, which its exact closure does not list"))
+            .collect();
+        drift.extend(
+            expected
+                .iter()
+                .filter(|name| !reached.contains(**name))
+                .map(|name| {
+                    format!("`{root}` lists workspace crate `{name}` but no longer reaches it")
+                }),
+        );
+        Ok(drift)
+    }
+
     fn check(&self, rule: &ClosureRule) -> Result<(), String> {
         let violations = self.violations(rule)?;
         if violations.is_empty() {
@@ -391,6 +436,114 @@ fn type_engine_production_closure_stays_syntax_host_and_provider_free() {
 #[test]
 fn semantic_source_production_closure_stays_engine_host_and_provider_free() {
     assert_live_rule("verter_semantic_source");
+}
+
+/// The exact workspace crates each extracted layer's production closure
+/// reaches. The forbidden lists above catch the known-dangerous crates; this
+/// list catches everything else, so a new same-layer dependency of the type
+/// engine or the source layer is a reviewed edit here, never an automatic pass.
+/// External packages are not listed: they are reviewed through the manifests.
+const EXACT_WORKSPACE_CLOSURES: &[(&str, &[&str])] = &[
+    (
+        "verter_type_engine",
+        &[
+            "verter_analysis_inputs",
+            "verter_analyzer_mint",
+            "verter_audit",
+            "verter_debug_assert",
+            "verter_ecma",
+            "verter_execution",
+            "verter_identity",
+            "verter_language",
+            "verter_macro_dto",
+            "verter_no_storedspan",
+            "verter_no_storedspan_derive",
+            "verter_no_typeexpr",
+            "verter_no_typeexpr_derive",
+            "verter_session_query",
+            "verter_span",
+            "verter_type_expr",
+        ],
+    ),
+    (
+        "verter_semantic_source",
+        &[
+            "verter_analysis_inputs",
+            "verter_analyzer_mint",
+            "verter_audit",
+            "verter_css_syntax",
+            "verter_debug_assert",
+            "verter_ecma",
+            "verter_execution",
+            "verter_identity",
+            "verter_language",
+            "verter_macro_dto",
+            "verter_no_storedspan",
+            "verter_no_storedspan_derive",
+            "verter_no_typeexpr",
+            "verter_no_typeexpr_derive",
+            "verter_parser",
+            "verter_semantic",
+            "verter_session_query",
+            "verter_span",
+            "verter_type_expr",
+            "verter_type_expr_oxc",
+        ],
+    ),
+];
+
+#[test]
+fn extracted_layers_reach_exactly_their_listed_workspace_crates() {
+    let graph = live_graph();
+    let mut drift = Vec::new();
+    for (root, expected) in EXACT_WORKSPACE_CLOSURES {
+        drift.extend(
+            graph
+                .exact_closure_drift(root, expected)
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+    }
+    assert!(
+        drift.is_empty(),
+        "{}",
+        drift.join(
+            "
+"
+        )
+    );
+}
+
+#[test]
+fn exact_closure_reports_unlisted_and_stale_workspace_crates() {
+    let graph = fixture_graph(
+        &[
+            "verter_type_engine",
+            "verter_identity",
+            "verter_span",
+            "verter_new_leaf",
+        ],
+        &[
+            ("verter_type_engine", "verter_identity", Kind::Normal),
+            ("verter_identity", "verter_new_leaf", Kind::Normal),
+        ],
+    );
+    let drift = graph
+        .exact_closure_drift("verter_type_engine", &["verter_identity", "verter_span"])
+        .expect("root is a fixture member");
+    assert_eq!(
+        drift,
+        vec![
+            "`verter_type_engine` reaches workspace crate `verter_new_leaf`, which its exact closure does not list".to_owned(),
+            "`verter_type_engine` lists workspace crate `verter_span` but no longer reaches it".to_owned(),
+        ]
+    );
+    assert_eq!(
+        graph.exact_closure_drift(
+            "verter_type_engine",
+            &["verter_identity", "verter_new_leaf"]
+        ),
+        Ok(Vec::new())
+    );
 }
 
 // ---------------------------------------------------------------------------
