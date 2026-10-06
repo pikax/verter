@@ -124,36 +124,29 @@ The per-site gates below are still correct and still carry their own
 tests, but they are now defence in depth rather than the only thing
 standing between a retired generation and an admission.
 
-**KNOWN OPEN RESIDUAL — `remove()` is not atomic across `nodes` and the
-DAG.** Between `remove()`'s cancellation sweep and its `nodes.remove()`,
-an admission can take the DAG lock, observe the node STILL PUBLISHED at
-the same incarnation, pass the crossing gate below, bump to `G+1`, and be
-admitted — because `G+1` is exactly the retirement floor and the test is
-`<`. That identity is never cancelled; a later dequeue reserves capacity,
-finds no `FileNode`, and skips without cancelling ⇒ **a leaked admission
-permit in RELEASE builds.** In DEBUG builds the skip's `debug_assert`
-fires FIRST, so what you actually meet is a PANIC, not a leak — if you
-are debugging that assertion, this is the residual, not a new defect. The
-waiter IS woken by `signal_file_shutdown` either way, so this is a
-capacity leak / assertion panic, never a hang. It is a strict subset of a window already
-present before the surrounding fixes landed, which is why it was landed
-rather than held.
+**Removal is one lifecycle transition under `dag.lock()`.**
+`Scheduler::remove` is owned by `scheduler/lifecycle.rs`. It reads the live
+node generation, installs the removal barrier, signals `Shutdown`, retires
+and cancels work, scrubs blocker/failure/tracking state, records the restart
+generation floor, removes the node with its source-root `Absent` publication,
+and clears its edges while holding the SAME DAG lock. The restart floor is
+published before the node shard entry disappears, since preparation can
+ensure an unpublished replacement outside the DAG lock. Stranded-waiter wakes
+run after unlock.
 
-Do NOT close this with another per-window gate at an admission site —
-four review rounds of evidence say that closes one instant and reveals
-the next. It closes at the lifecycle-unification cutover:
-[`.claude/skills/scheduler/SKILL.md`](../../../.claude/skills/scheduler/SKILL.md),
-debt row `SCHED-UNIFY-LIFECYCLE-ATOMICITY`, ruling
-`GB4-S0-DEFER-2026-07-26`, acceptance `SCHED-UNIFY-A1`. The generating
-condition is that `Scheduler.nodes` and `SchedulerDag` are two
-authorities with INDEPENDENT transition points; every independent
-transition point is a window.
+A prepared request cannot acquire the DAG lock between the cancellation sweep
+and node unpublication. Once removal releases the lock, the admission crossing
+gate observes either no live node (`Shutdown`) or a different incarnation
+(`Superseded`); it never bumps the removed node beyond the completed sweep.
+`removal_cannot_admit_prepared_work_between_sweep_and_unpublication` attempts
+an actual admission from a competing thread at that boundary, checks that no
+DAG work survives, checks the crossing sender's `Shutdown`, and verifies a
+fresh post-removal request succeeds.
 
-Also carried there, and unseen by either review seat: the reset/clear-all
-path at `scheduler.rs:2040-2050` has the identical split-phase shape
-(`nodes.remove` outside the DAG lock, lock taken after). It may be
-self-healing via the subsequent `dag.clear()`, but the shape is the same
-and UNIFY subsumes it.
+The reset/clear-all path still removes nodes outside the DAG lock and clears
+the DAG afterward; stopping the dedicated driver does not by itself exclude
+cooperative pumps. Reset remains a separate lifecycle boundary requiring the
+same atomicity rule.
 
 **The floor is necessary but NOT sufficient — liveness is the other
 half.** `prepare_request` runs OUTSIDE `dag.lock()`, so a prepared

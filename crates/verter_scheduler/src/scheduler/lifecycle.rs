@@ -13,6 +13,103 @@ pub(super) fn num_cpus() -> usize {
         .unwrap_or(4)
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn removal_cannot_admit_prepared_work_between_sweep_and_unpublication() {
+        let loader = Arc::new(crate::source_loader::MemorySourceLoader::new());
+        loader.insert("/removed.vue".into(), Arc::from("old"));
+        let scheduler = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
+        let request = || Request {
+            file_id: "/removed.vue".into(),
+            source: Some(Arc::from("new")),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            file_language: None,
+            request_context: None,
+        };
+        let first = scheduler.submit_request(request());
+        scheduler.drive_all();
+        assert!(matches!(first.try_get(), Some(CompletionState::Ready(_))));
+
+        let (handle, sender) = completion_pair();
+        let prepared = scheduler
+            .prepare_request(QueuedRequest {
+                file_id: "/removed.vue".into(),
+                source: Some(Arc::from("crossing")),
+                target: TargetStage::Analysis,
+                priority: Priority::Interactive,
+                file_language: None,
+                request_context: None,
+                submitted_epoch: scheduler.removal_epoch.load(Ordering::Acquire),
+                sender,
+            })
+            .expect("live request must prepare");
+
+        let enter = Arc::new(Barrier::new(2));
+        let leave = Arc::new(Barrier::new(2));
+        let competitor = {
+            let scheduler = Arc::clone(&scheduler);
+            let enter = Arc::clone(&enter);
+            let leave = Arc::clone(&leave);
+            std::thread::spawn(move || {
+                enter.wait();
+                let mut prepared = Some(prepared);
+                let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(mut dag) = scheduler.dag.try_lock() {
+                        let mut post = AdmissionPostWork::default();
+                        scheduler.admit_prepared_under_lock(
+                            &mut dag,
+                            prepared.take().unwrap(),
+                            &mut post,
+                        );
+                        let admitted = dag.total_active() > 0;
+                        drop(dag);
+                        post.run(&scheduler);
+                        admitted
+                    } else {
+                        false
+                    }
+                }));
+                // Release the remover even if the attempted admission panics.
+                leave.wait();
+                let admitted = attempt.expect("crossing admission panicked");
+                if let Some(prepared) = prepared {
+                    let mut dag = scheduler.dag.lock();
+                    let mut post = AdmissionPostWork::default();
+                    scheduler.admit_prepared_under_lock(&mut dag, prepared, &mut post);
+                    drop(dag);
+                    post.run(&scheduler);
+                }
+                admitted
+            })
+        };
+        scheduler.remove_with_after_sweep("/removed.vue", || {
+            enter.wait();
+            leave.wait();
+        });
+        let admitted_during_removal = competitor.join().expect("admission observer panicked");
+        assert!(
+            !admitted_during_removal,
+            "crossing admission escaped the removal sweep"
+        );
+        assert!(!scheduler.has_node("/removed.vue"));
+        assert_eq!(scheduler.dag.lock().total_active(), 0);
+        assert!(matches!(handle.try_get(), Some(CompletionState::Shutdown)));
+
+        // A fresh request after the completed removal must still succeed.
+        let replacement = scheduler.submit_request(request());
+        scheduler.drive_all();
+        assert!(matches!(
+            replacement.try_get(),
+            Some(CompletionState::Ready(_))
+        ));
+    }
+}
+
 impl Drop for Scheduler {
     fn drop(&mut self) {
         // Set shutdown flag
@@ -90,6 +187,73 @@ impl Scheduler {
             language,
             floor_gen.max(min_generation),
         ))
+    }
+
+    /// Remove a file from the scheduler.
+    ///
+    /// Signals shutdown to pending request handles, removes the node,
+    /// cleans up forward/reverse edges, and unblocks any dependents that
+    /// were waiting on this file (since the blocker can never resolve).
+    pub fn remove(&self, id: &str) {
+        self.remove_with_after_sweep(
+            id,
+            #[cfg(test)]
+            || {},
+        );
+    }
+
+    fn remove_with_after_sweep(&self, id: &str, #[cfg(test)] after_sweep: impl FnOnce()) {
+        let canonical: Arc<str> = Arc::from(id);
+        let stranded = {
+            // Admission, retirement and node unpublication share one
+            // linearization point. A prepared request cannot bump the live
+            // node past the sweep before that node is removed.
+            let mut dag = self.dag.lock();
+            let epoch = self.removal_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            self.tombstones.insert(id.to_string(), epoch);
+            let last_gen = self.nodes.get(id).map(|n| n.generation()).unwrap_or(0);
+
+            // Preserve removal's Shutdown cause before the supersede sweep.
+            dag.signal_file_shutdown(&canonical);
+            let mut stranded = dag.retire_generations_below(&canonical, last_gen.saturating_add(1));
+            let (_, also_stranded) = dag.cancel_matching(|identity| match identity {
+                WorkNodeIdentity::FileStage { canonical, .. }
+                | WorkNodeIdentity::Artifact { canonical, .. } => canonical.as_ref() == id,
+                WorkNodeIdentity::CacheNode { .. } => false,
+            });
+            stranded.extend(also_stranded);
+            dag.artifact_blocker_deps_remove_owner(id);
+            dag.scrub_artifact_blockers_referencing(id);
+            dag.scrub_terminal_dep_failures_referencing(id);
+
+            #[cfg(test)]
+            after_sweep();
+            self.deferred_blocker_ids.remove(id);
+            self.auto_ingested_recent.remove(&canonical);
+
+            // Publish the floor before removing the node: preparation may
+            // ensure a replacement outside the DAG lock as soon as the shard
+            // entry disappears, and must start that replacement above it.
+            if self.nodes.contains_key(id) {
+                self.generation_floors.insert(id.to_string(), last_gen);
+            }
+            let removed = self.source_root.publish_transition(|publication| {
+                let removed = self.nodes.remove(id);
+                if let Some((_, node)) = removed.as_ref() {
+                    publication.absent(&canonical, node.incarnation_id(), node.generation());
+                }
+                removed
+            });
+            if removed.is_some() {
+                self.edges.remove_file(id);
+            }
+            stranded
+        };
+
+        // The wake can re-enter the pump; it belongs outside the DAG hold.
+        for token in stranded {
+            self.requeue_stranded_waiter(token);
+        }
     }
 
     /// TEST-ONLY: fire `attempt` after the node snapshot and BEFORE
