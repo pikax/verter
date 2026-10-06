@@ -318,7 +318,7 @@ fn run_matrix_row(row: &MatrixRow) {
     let (forced, dead_fact_reads) = dead_file_fact_reads(&host, || match &row.path {
         Some(path) => force_projecting(&dispatch, &operand, context, Arc::clone(path)),
         None => match dispatch
-            .force_semantic_operand(&operand, SemanticOperandForceRequest::new(context))
+            .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context))
         {
             crate::semantic_query::QueryResult::Value(forced) => forced,
             other => panic!(
@@ -399,7 +399,7 @@ fn run_matrix_row(row: &MatrixRow) {
     let warm_forced = match &row.path {
         Some(path) => force_projecting(&dispatch, &operand, context, Arc::clone(path)),
         None => match dispatch
-            .force_semantic_operand(&operand, SemanticOperandForceRequest::new(context))
+            .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context))
         {
             crate::semantic_query::QueryResult::Value(forced) => forced,
             other => panic!(
@@ -501,7 +501,7 @@ fn row_conditional_dead_branch() -> MatrixRow {
         operand: |dispatch| {
             // The check operand `Text` (= string) is forced OUTSIDE the
             // row so the window observes only the conditional's own work.
-            let check = match dispatch.force_semantic_operand(
+            let check = match dispatch.force_semantic_operand_for_tests(
                 &mint(dispatch, whole("Text")),
                 SemanticOperandForceRequest::new(ProjectionReductionContext::published(
                     ProjectionMode::Identity,
@@ -511,10 +511,13 @@ fn row_conditional_dead_branch() -> MatrixRow {
                 other => panic!("check operand must force, got {other:?}"),
             };
             let check_operand = dispatch
-                .mint_node_semantic_operand(&check)
+                .mint_node_semantic_operand_for_tests(&check)
                 .expect("check node operand must mint");
             dispatch
-                .mint_authored_semantic_operand(locator("Cond"), Arc::from([check_operand]))
+                .mint_authored_semantic_operand_for_tests(
+                    locator("Cond"),
+                    Arc::from([check_operand]),
+                )
                 .expect("substituted conditional operand must mint")
         },
         answer: |host, forced| {
@@ -605,7 +608,7 @@ fn row_unrelated_mapped_key() -> MatrixRow {
             // Force the declaration at Identity OUTSIDE the row's demand
             // to obtain its carrier node, then mint the NODE operand the
             // selective demand is actually addressed to.
-            let carrier = match dispatch.force_semantic_operand(
+            let carrier = match dispatch.force_semantic_operand_for_tests(
                 &mint(dispatch, whole("Boxed")),
                 SemanticOperandForceRequest::new(ProjectionReductionContext::published(
                     ProjectionMode::Identity,
@@ -615,7 +618,7 @@ fn row_unrelated_mapped_key() -> MatrixRow {
                 other => panic!("mapped carrier must force, got {other:?}"),
             };
             dispatch
-                .mint_node_semantic_operand(&carrier)
+                .mint_node_semantic_operand_for_tests(&carrier)
                 .expect("carrier node operand must mint")
         },
         answer: |host, forced| {
@@ -626,7 +629,7 @@ fn row_unrelated_mapped_key() -> MatrixRow {
             );
         },
         dead_keys: |dispatch| {
-            let carrier = match dispatch.force_semantic_operand(
+            let carrier = match dispatch.force_semantic_operand_for_tests(
                 &mint(dispatch, whole("Boxed")),
                 SemanticOperandForceRequest::new(ProjectionReductionContext::published(
                     ProjectionMode::Identity,
@@ -781,7 +784,9 @@ fn matrix_dead_key_probe_discriminates() {
         "control precondition: the sibling is untouched before the probe"
     );
     // ...becomes live work the moment it IS demanded.
-    match dispatch.force_semantic_operand(&sibling, SemanticOperandForceRequest::new(context)) {
+    match dispatch
+        .force_semantic_operand_for_tests(&sibling, SemanticOperandForceRequest::new(context))
+    {
         crate::semantic_query::QueryResult::Value(forced) => {
             // Shallow-by-default: the sibling's value publishes as its local
             // `ColdShell` alias carrier, never the dead file's body.

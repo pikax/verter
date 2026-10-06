@@ -180,7 +180,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// hop read, a partial hop read, a missing body, a scanner fuse, a
     /// missing graph node) do not stop the walk; they demote the final
     /// outcome to `LegacyFallback` — never `Decided`.
-    pub(crate) fn build_classify_materialization_cycle_gate(
+    pub(super) fn build_classify_materialization_cycle_gate(
         &self,
         key: &MaterializationCycleGateKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {

@@ -148,7 +148,7 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// `RecursiveRef`, which is never produced by fresh OXC lowering and cannot
 /// be reconstructed structurally).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StructuralLowerError {
+enum StructuralLowerError {
     /// `shape` names the offending `TypeExpr` variant for diagnostics.
     UnsupportedWithoutResolution { shape: &'static str },
 }
@@ -167,7 +167,7 @@ pub(crate) enum StructuralLowerError {
 /// producer is NOT compiler-confined (Rust privacy is module-scoped, so code
 /// written INSIDE this module CAN name it) and is instead POLICED by the bounded
 /// single-producer architecture guards.
-pub(crate) fn lower_type_expr_structural(
+fn lower_type_expr_structural(
     graph: &SemanticGraphStore,
     expr: &TypeExpr,
     scope: NodeScopeId,
@@ -1126,7 +1126,7 @@ fn register_structural_function_alias(
 /// binder-seed lowering is part of building the macro handle's scope, NOT a
 /// second macro-arg producer.
 #[cfg(test)]
-pub(crate) fn build_script_setup_seed_frames(
+fn build_script_setup_seed_frames(
     indexed: &crate::project_type_store::IndexedReady,
     graph: &SemanticGraphStore,
     scope: &NodeScopeId,
@@ -1291,7 +1291,7 @@ impl MacroHotMirror {
     }
 
     #[cfg(test)]
-    pub(crate) fn demanded_count(&self) -> usize {
+    fn demanded_count(&self) -> usize {
         self.cells.get().map_or(0, |cells| {
             cells
                 .iter()
@@ -1642,3 +1642,11 @@ fn inline_macro_object_property_type<'a>(
 #[cfg(test)]
 #[path = "structural_lower_tests.rs"]
 mod structural_lower_tests;
+
+#[cfg(test)]
+#[path = "macro_hot_mirror_tests.rs"]
+mod macro_hot_mirror_tests;
+
+#[cfg(test)]
+#[path = "script_setup_binder_tests.rs"]
+mod script_setup_binder_tests;

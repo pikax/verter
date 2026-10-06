@@ -23,7 +23,7 @@ use crate::semantic_query::{
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 #[derive(Clone)]
-pub(crate) struct MemoEntry {
+pub(super) struct MemoEntry {
     pub(super) result: QueryResult<SemanticQueryValue>,
     /// Carrier holding the path-precise R28 fact signature for this
     /// entry — the sole cache-validity rail. Warm-hit reads validate
@@ -127,7 +127,7 @@ impl MemoEntry {
 
     /// The portion of this candidate's footprint that remains distinct
     /// when an SCC component shares its carrier and self-root list.
-    pub(crate) fn unique_retained_footprint_bytes(&self) -> usize {
+    pub(super) fn unique_retained_footprint_bytes(&self) -> usize {
         /// One observed dependency fact on the dispatch-return rail.
         const FACT_BYTES: usize = 64;
         /// One recorded materialised `(path, point)` record.
@@ -1227,7 +1227,7 @@ pub(super) const CANDIDATE_LIST_INLINE_CAP: usize = 4;
 /// the back ([`FamilySlots::mark_validated_freshest`]). Eviction at the
 /// family cap is invalid-first, then the front of this order — see
 /// [`FamilySlots::publish_one`] and [`select_eviction_victim`].
-pub(crate) type CandidateList = smallvec::SmallVec<[MemoEntry; CANDIDATE_LIST_INLINE_CAP]>;
+pub(super) type CandidateList = smallvec::SmallVec<[MemoEntry; CANDIDATE_LIST_INLINE_CAP]>;
 
 /// The eviction victim a publish site selected for a slot at its
 /// family cap. Computed by [`select_eviction_victim`] OUTSIDE the

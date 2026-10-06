@@ -436,7 +436,7 @@ fn both_locator_navigators_select_the_same_authored_position() {
             Arc::from(steps.into_boxed_slice())
         };
         let select = |symbol: &str, path: Arc<[TypeBodyPathStep]>| match dispatch
-            .force_semantic_operand(
+            .force_semantic_operand_for_tests(
                 &mint(&dispatch, locator(symbol, path)),
                 request(ProjectionMode::Identity),
             ) {
@@ -603,7 +603,7 @@ fn republication_inside_the_environment_read_window_refuses_to_seal() {
     }));
 
     assert_operand_error(
-        dispatch.force_semantic_operand(&operand, request(ProjectionMode::Identity)),
+        dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Identity)),
         QueryError::UnstableState { attempts: 3 },
     );
     assert_eq!(republications.load(Ordering::Relaxed), 3);
@@ -671,8 +671,8 @@ fn refusal_after_a_completed_child_still_withholds_the_forced_candidate() {
         }));
         let guard = RequestContextGuard::install(Arc::clone(&ctx));
 
-        let result =
-            dispatch.force_semantic_operand(&operand, SemanticOperandForceRequest::new(context));
+        let result = dispatch
+            .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context));
         if cancelling {
             assert!(
                 matches!(result, QueryResult::Error(QueryError::Cancelled)),
@@ -729,14 +729,14 @@ fn sealing_refuses_an_absent_or_wrong_space_anchor() {
     let dispatch = ProjectSemanticDispatch::new(&host);
 
     assert!(matches!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "Absent", LocatorSymbolSpace::Type, Arc::from([])),
             Arc::from([]),
         ),
         Err(SemanticOperandMintError::MissingAuthoredDeclaration)
     ));
     assert!(matches!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "value", LocatorSymbolSpace::Type, Arc::from([])),
             Arc::from([]),
         ),
@@ -746,7 +746,7 @@ fn sealing_refuses_an_absent_or_wrong_space_anchor() {
         })
     ));
     assert!(matches!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "Alias", LocatorSymbolSpace::Value, Arc::from([])),
             Arc::from([]),
         ),
@@ -758,13 +758,13 @@ fn sealing_refuses_an_absent_or_wrong_space_anchor() {
     // Positive control: both spaces seal when the locator names the space
     // the declaration actually lives in.
     assert!(dispatch
-        .mint_authored_semantic_operand(
+        .mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "Alias", LocatorSymbolSpace::Type, Arc::from([])),
             Arc::from([]),
         )
         .is_ok());
     assert!(dispatch
-        .mint_authored_semantic_operand(
+        .mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "value", LocatorSymbolSpace::Value, Arc::from([])),
             Arc::from([]),
         )
@@ -840,11 +840,13 @@ fn first_step_only_vocabulary_fails_closed_mid_path_on_direct_and_crossing_route
             // The refusal may land at either admission point: the seal
             // (a typed mint error) or the force (a typed query error).
             // Both are fail-closed; silently returning a node is not.
-            match dispatch.mint_authored_semantic_operand(selected, Arc::from([])) {
+            match dispatch.mint_authored_semantic_operand_for_tests(selected, Arc::from([])) {
                 Err(_) => {}
                 Ok(operand) => {
-                    let outcome = dispatch
-                        .force_semantic_operand(&operand, request(ProjectionMode::Identity));
+                    let outcome = dispatch.force_semantic_operand_for_tests(
+                        &operand,
+                        request(ProjectionMode::Identity),
+                    );
                     assert!(
                         matches!(outcome, QueryResult::Error(_)),
                         "{label}/{symbol}: a first-step-only step used mid-path must fail \

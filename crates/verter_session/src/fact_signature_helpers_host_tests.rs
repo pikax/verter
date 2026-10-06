@@ -106,7 +106,6 @@ mod file_source_env_observation_tests {
 /// carrier's `dep_signature`, the keyed canonical's observed hash) never inspects
 /// the tracer's finalised set, so an `Overflow` seen only there would be dropped on
 /// the floor and a rootless entry would warm the shared cache.
-
 mod tracer_cacheability_tests {
     use super::*;
     use crate::{HostConfig, VerterHost};

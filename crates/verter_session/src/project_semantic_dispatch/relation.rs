@@ -14965,15 +14965,14 @@ pub(crate) mod reverse_ownership_tests {
     /// than a standalone binding map.
     #[expect(dead_code, reason = "type-checked signature witness; never called")]
     fn reverse_mapped_pass_returns_relation_result<
-        'dispatch,
         C: crate::resolver_core::ResolverCapabilities,
     >() {
         let _pass: fn(
-            &ProjectSemanticDispatch<'dispatch, C>,
+            &ProjectSemanticDispatch<'static, C>,
             SemanticNodeId,
             &ReverseHomomorphicSpec,
             &mut Vec<InferBinding>,
-        ) -> RelationResult = ProjectSemanticDispatch::<'dispatch, C>::relate_reverse_homomorphic;
+        ) -> RelationResult = ProjectSemanticDispatch::<'static, C>::relate_reverse_homomorphic;
     }
 
     fn classify_relation_result_exhaustively(result: RelationResult) {

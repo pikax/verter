@@ -546,42 +546,6 @@ impl SemanticGraphStore {
         )
     }
 
-    /// Stage one SCC batch candidate exactly as the batched publish does.
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn stage_entry_for_tests(
-        &self,
-        retention_charge: Option<Arc<verter_session_query::retention::RetentionCharge>>,
-        value: SemanticQueryValue,
-        satisfied_projection: MaterializedSet,
-        carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
-        self_root_canonicals: &Arc<[Arc<str>]>,
-        dispatch_dep_signature: &DepSignature,
-        validated_at_generation: u64,
-    ) -> MemoEntry {
-        self.stage_entry(
-            retention_charge,
-            value,
-            satisfied_projection,
-            carrier,
-            self_root_canonicals,
-            dispatch_dep_signature,
-            validated_at_generation,
-        )
-    }
-
-    /// Reserve the aggregate charge for a staged SCC batch.
-    #[doc(hidden)]
-    pub(crate) fn reserve_scc_batch_for_tests(
-        &self,
-        members: &[&MemoEntry],
-    ) -> Result<
-        verter_session_query::retention::RetentionCharge,
-        verter_session_query::retention::RetentionRefusal,
-    > {
-        self.reserve_scc_batch(members)
-    }
-
     /// Claim an inline member's family flight exactly as the relation
     /// drain does.
     #[doc(hidden)]

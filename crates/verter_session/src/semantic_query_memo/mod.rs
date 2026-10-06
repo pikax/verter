@@ -2814,3 +2814,6 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod scc_publish_tests;

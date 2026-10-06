@@ -12541,7 +12541,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// [`crate::semantic_query::MapperKind::classify_value_expr`]);
     /// `build_mapped_type` matches on `mapper.kind` directly rather
     /// than re-classifying the runtime AST shape.
-    pub(crate) fn build_mapped_type(
+    pub(super) fn build_mapped_type(
         &self,
         source: SemanticNodeId,
         mapper: &crate::semantic_query::MapperKey,

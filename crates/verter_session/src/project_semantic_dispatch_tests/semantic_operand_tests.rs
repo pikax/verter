@@ -191,7 +191,7 @@ pub(super) fn mint(
     locator: AuthoredBodyLocator,
 ) -> SemanticOperand {
     dispatch
-        .mint_authored_semantic_operand(locator, Arc::from([]))
+        .mint_authored_semantic_operand_for_tests(locator, Arc::from([]))
         .expect("fixture operand must mint")
 }
 
@@ -208,7 +208,7 @@ fn force_result(
     operand: &SemanticOperand,
     mode: ProjectionMode,
 ) -> ForcedSemanticOperand {
-    match dispatch.force_semantic_operand(operand, request(mode)) {
+    match dispatch.force_semantic_operand_for_tests(operand, request(mode)) {
         QueryResult::Value(forced) => forced,
         other => panic!("operand must force, got {other:?}"),
     }
@@ -219,7 +219,9 @@ fn force_with_context(
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
 ) -> ForcedSemanticOperand {
-    match dispatch.force_semantic_operand(operand, SemanticOperandForceRequest::new(context)) {
+    match dispatch
+        .force_semantic_operand_for_tests(operand, SemanticOperandForceRequest::new(context))
+    {
         QueryResult::Value(forced) => forced,
         other => panic!("operand must force, got {other:?}"),
     }
@@ -491,7 +493,10 @@ fn every_sealed_environment_axis_changes_family_identity_and_wrong_env_refuses_d
         let variant = with_split_env(&operand, split_env);
         assert_ne!(force_key(&dispatch, &variant, context), base_key);
         assert_operand_error(
-            dispatch.force_semantic_operand(&variant, SemanticOperandForceRequest::new(context)),
+            dispatch.force_semantic_operand_for_tests(
+                &variant,
+                SemanticOperandForceRequest::new(context),
+            ),
             QueryError::StaleSemanticOperand,
         );
     }
@@ -626,14 +631,18 @@ fn authority_derived_binder_and_substitution_do_not_alias() {
         &mint(&dispatch, whole("Count")),
         ProjectionMode::Identity,
     );
-    let text = dispatch.mint_node_semantic_operand(&text_forced).unwrap();
-    let count = dispatch.mint_node_semantic_operand(&count_forced).unwrap();
+    let text = dispatch
+        .mint_node_semantic_operand_for_tests(&text_forced)
+        .unwrap();
+    let count = dispatch
+        .mint_node_semantic_operand_for_tests(&count_forced)
+        .unwrap();
 
     let text_box = dispatch
-        .mint_authored_semantic_operand(member_value("Box", 0), Arc::from([text]))
+        .mint_authored_semantic_operand_for_tests(member_value("Box", 0), Arc::from([text]))
         .unwrap();
     let count_box = dispatch
-        .mint_authored_semantic_operand(member_value("Box", 0), Arc::from([count]))
+        .mint_authored_semantic_operand_for_tests(member_value("Box", 0), Arc::from([count]))
         .unwrap();
     assert_ne!(text_box, count_box);
     assert_primitive(
@@ -665,11 +674,14 @@ fn nested_function_mapper_and_infer_binders_are_not_captured_by_outer_substituti
         ProjectionMode::Identity,
     );
     let number = dispatch
-        .mint_node_semantic_operand(&number_forced)
+        .mint_node_semantic_operand_for_tests(&number_forced)
         .expect("number operand");
     let substituted = |path: Arc<[TypeBodyPathStep]>, symbol: &str| {
         dispatch
-            .mint_authored_semantic_operand(locator(symbol, path), Arc::from([number.clone()]))
+            .mint_authored_semantic_operand_for_tests(
+                locator(symbol, path),
+                Arc::from([number.clone()]),
+            )
             .expect("generic operand")
     };
 
@@ -731,11 +743,11 @@ fn defaults_augmentation_and_structural_child_locators_use_canonical_instantiati
         ProjectionMode::Identity,
     );
     let number = dispatch
-        .mint_node_semantic_operand(&number_forced)
+        .mint_node_semantic_operand_for_tests(&number_forced)
         .expect("number operand");
     let instantiate = |body: AuthoredBodyLocator| {
         dispatch
-            .mint_authored_semantic_operand(body, Arc::from([number.clone()]))
+            .mint_authored_semantic_operand_for_tests(body, Arc::from([number.clone()]))
             .expect("generic operand")
     };
 
@@ -950,9 +962,11 @@ fn substituted_authored_identity_includes_its_runtime_confinement() {
         &mint(&dispatch, whole("Text")),
         ProjectionMode::Identity,
     );
-    let argument = dispatch.mint_node_semantic_operand(&forced).unwrap();
+    let argument = dispatch
+        .mint_node_semantic_operand_for_tests(&forced)
+        .unwrap();
     let operand = dispatch
-        .mint_authored_semantic_operand(member_value("Box", 0), Arc::from([argument]))
+        .mint_authored_semantic_operand_for_tests(member_value("Box", 0), Arc::from([argument]))
         .unwrap();
     let SemanticOperandParts::Authored(authored) =
         operand.parts(SemanticOperandAuthority::mint_for_tests())
@@ -983,10 +997,11 @@ fn foreign_substitution_nodes_cannot_be_minted() {
         ProjectionMode::Identity,
     );
     let foreign = foreign_dispatch
-        .mint_node_semantic_operand(&foreign_forced)
+        .mint_node_semantic_operand_for_tests(&foreign_forced)
         .unwrap();
     assert!(matches!(
-        dispatch.mint_authored_semantic_operand(member_value("Box", 0), Arc::from([foreign])),
+        dispatch
+            .mint_authored_semantic_operand_for_tests(member_value("Box", 0), Arc::from([foreign])),
         Err(SemanticOperandMintError::ForeignNode)
     ));
 }
@@ -1002,7 +1017,10 @@ fn authored_substitution_arguments_are_rejected_as_unbound() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let unforced = mint(&dispatch, whole("Text"));
     assert!(matches!(
-        dispatch.mint_authored_semantic_operand(member_value("Box", 0), Arc::from([unforced])),
+        dispatch.mint_authored_semantic_operand_for_tests(
+            member_value("Box", 0),
+            Arc::from([unforced])
+        ),
         Err(SemanticOperandMintError::UnboundSubstitution)
     ));
 }
@@ -1017,19 +1035,21 @@ fn node_operand_is_confined_to_store_and_generation() {
         &mint(&dispatch, whole("Owned")),
         ProjectionMode::Shallow,
     );
-    let operand = dispatch.mint_node_semantic_operand(&forced).unwrap();
+    let operand = dispatch
+        .mint_node_semantic_operand_for_tests(&forced)
+        .unwrap();
 
     let other = make_host();
     upsert(&other, SOURCE_V1);
     let other_dispatch = ProjectSemanticDispatch::new(&other);
     assert_operand_error(
-        other_dispatch.force_semantic_operand(&operand, request(ProjectionMode::Shallow)),
+        other_dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Shallow)),
         QueryError::ForeignSemanticOperand,
     );
 
     host.project_type_store().bump_project_generation();
     assert_operand_error(
-        dispatch.force_semantic_operand(&operand, request(ProjectionMode::Shallow)),
+        dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Shallow)),
         QueryError::StaleSemanticOperand,
     );
 }
@@ -1057,7 +1077,7 @@ fn mint_node_semantic_operand_rejects_a_foreign_store_and_generation() {
     );
 
     assert!(matches!(
-        dispatch.mint_node_semantic_operand(&foreign_forced),
+        dispatch.mint_node_semantic_operand_for_tests(&foreign_forced),
         Err(SemanticOperandMintError::ForeignNode)
     ));
 
@@ -1068,7 +1088,7 @@ fn mint_node_semantic_operand_rejects_a_foreign_store_and_generation() {
     );
     host.project_type_store().bump_project_generation();
     assert!(matches!(
-        dispatch.mint_node_semantic_operand(&stale_forced),
+        dispatch.mint_node_semantic_operand_for_tests(&stale_forced),
         Err(SemanticOperandMintError::ForeignNode)
     ));
 }
@@ -1084,7 +1104,9 @@ fn node_operand_merges_producer_roots_into_active_candidate() {
         ProjectionMode::Identity,
     );
     let node = forced.node();
-    let operand = dispatch.mint_node_semantic_operand(&forced).unwrap();
+    let operand = dispatch
+        .mint_node_semantic_operand_for_tests(&forced)
+        .unwrap();
     let SemanticOperandParts::Node { evidence, .. } =
         operand.parts(SemanticOperandAuthority::mint_for_tests())
     else {
@@ -1126,7 +1148,7 @@ fn node_operand_merges_producer_roots_into_active_candidate() {
 
     upsert(&host, SOURCE_V2);
     assert_operand_error(
-        dispatch.force_semantic_operand(&operand, request(ProjectionMode::Expanded)),
+        dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Expanded)),
         QueryError::StaleSemanticOperand,
     );
 }
@@ -1205,7 +1227,7 @@ fn concurrent_same_force_joins_the_existing_flight(
     let winner_operand = operand.clone();
     let winner_precision = precision.clone();
     let winner = std::thread::spawn(move || {
-        ProjectSemanticDispatch::new(winner_host.as_ref()).force_semantic_operand(
+        ProjectSemanticDispatch::new(winner_host.as_ref()).force_semantic_operand_for_tests(
             &winner_operand,
             request_at(force_context, &winner_precision),
         )
@@ -1218,7 +1240,7 @@ fn concurrent_same_force_joins_the_existing_flight(
     let joiner_operand = operand.clone();
     let joiner_precision = precision.clone();
     let joiner = std::thread::spawn(move || {
-        ProjectSemanticDispatch::new(joiner_host.as_ref()).force_semantic_operand(
+        ProjectSemanticDispatch::new(joiner_host.as_ref()).force_semantic_operand_for_tests(
             &joiner_operand,
             request_at(force_context, &joiner_precision),
         )
@@ -1289,7 +1311,7 @@ fn cancellation_before_entry_performs_zero_semantic_work() {
     let _trace = enable_dispatch_trace_for_test();
     let before = host.project_type_store().semantic_graph().node_count();
     assert!(matches!(
-        dispatch.force_semantic_operand(&operand, request(ProjectionMode::Expanded)),
+        dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Expanded)),
         QueryResult::Error(QueryError::Cancelled)
     ));
     assert_eq!(
@@ -1345,7 +1367,8 @@ fn force_boundary_and_nested_dispatches_are_budget_charged() {
     );
     let _limited_guard = RequestContextGuard::install(Arc::clone(&limited));
     assert!(matches!(
-        limited_dispatch.force_semantic_operand(&operand, request(ProjectionMode::Expanded)),
+        limited_dispatch
+            .force_semantic_operand_for_tests(&operand, request(ProjectionMode::Expanded)),
         QueryResult::Error(QueryError::BudgetExceeded(_))
     ));
     assert_eq!(limited.projection_budget.projection_ops_executed_count(), 2);
@@ -1428,7 +1451,7 @@ fn cancellation_discovered_inside_the_cold_build_never_warms() {
         .lock() = Some(Arc::new(move || cancel.cancel()));
     let _guard = RequestContextGuard::install(ctx);
     assert!(matches!(
-        dispatch.force_semantic_operand(&operand, request(ProjectionMode::Expanded)),
+        dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Expanded)),
         QueryResult::Error(QueryError::Cancelled)
     ));
     // Both the nested `LowerLocator` slot AND the outer `Instantiate`
@@ -1477,7 +1500,8 @@ fn partial_and_signature_overflow_discovered_during_force_never_warm() {
                 .force_result_partial_for_tests
                 .store(true, Ordering::Relaxed);
         }
-        let result = dispatch.force_semantic_operand(&operand, request(ProjectionMode::Expanded));
+        let result =
+            dispatch.force_semantic_operand_for_tests(&operand, request(ProjectionMode::Expanded));
         if overflow {
             assert!(matches!(
                 result,
@@ -1726,7 +1750,7 @@ fn substitution_producer_roots_reach_the_forced_candidate_but_not_its_locator_ch
         ProjectionMode::Identity,
     );
     let argument = dispatch
-        .mint_node_semantic_operand(&argument_forced)
+        .mint_node_semantic_operand_for_tests(&argument_forced)
         .expect("argument operand must seal");
     let SemanticOperandParts::Node { evidence, .. } =
         argument.parts(SemanticOperandAuthority::mint_for_tests())
@@ -1747,7 +1771,7 @@ fn substitution_producer_roots_reach_the_forced_candidate_but_not_its_locator_ch
     let boxed_locator = member_value("Box", 0);
     let lower_key = locator_key(&host, &dispatch, boxed_locator.clone());
     let operand = dispatch
-        .mint_authored_semantic_operand(boxed_locator, Arc::from([argument]))
+        .mint_authored_semantic_operand_for_tests(boxed_locator, Arc::from([argument]))
         .expect("substituted operand must seal");
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let forced_key = force_key(&dispatch, &operand, context);
@@ -1806,13 +1830,16 @@ fn a_forced_operand_returns_its_own_producer_roots_even_on_a_warm_candidate() {
         ProjectionMode::Identity,
     );
     let narrow = dispatch
-        .mint_node_semantic_operand(&argument_forced)
+        .mint_node_semantic_operand_for_tests(&argument_forced)
         .expect("argument operand must seal");
 
     // `Box<T> = { value: T }` lives in OWNER; substituting `T` with the
     // OTHER_OWNER node reproduces that node under a force rooted at both.
     let substituted = dispatch
-        .mint_authored_semantic_operand(member_value("Box", 0), Arc::from([narrow.clone()]))
+        .mint_authored_semantic_operand_for_tests(
+            member_value("Box", 0),
+            Arc::from([narrow.clone()]),
+        )
         .expect("substituted operand must seal");
     let wide_forced = force_result(&dispatch, &substituted, ProjectionMode::Identity);
     assert_eq!(
@@ -1821,7 +1848,7 @@ fn a_forced_operand_returns_its_own_producer_roots_even_on_a_warm_candidate() {
         "the fixture requires the substituted force to reproduce the argument node"
     );
     let wide = dispatch
-        .mint_node_semantic_operand(&wide_forced)
+        .mint_node_semantic_operand_for_tests(&wide_forced)
         .expect("substituted node operand must seal");
 
     let names = |forced: &ForcedSemanticOperand, canonical: &str| {
@@ -1871,7 +1898,7 @@ fn the_force_evidence_channel_is_scoped_and_retains_nothing() {
         ProjectionMode::Identity,
     );
     let node_operand = dispatch
-        .mint_node_semantic_operand(&forced)
+        .mint_node_semantic_operand_for_tests(&forced)
         .expect("node operand must seal");
     // bounded-loop: four fixed repetitions of one force pair.
     for _ in 0..4 {
@@ -1914,7 +1941,7 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let argument = dispatch
-        .mint_node_semantic_operand(&force_result(
+        .mint_node_semantic_operand_for_tests(&force_result(
             &dispatch,
             &mint(&dispatch, whole("Text")),
             ProjectionMode::Identity,
@@ -1922,7 +1949,7 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
         .expect("argument operand must seal");
 
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             whole("Box"),
             Arc::from([argument.clone(), argument.clone()]),
         ),
@@ -1932,14 +1959,17 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
         })
     );
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(whole("Plain"), Arc::from([argument.clone()])),
+        dispatch.mint_authored_semantic_operand_for_tests(
+            whole("Plain"),
+            Arc::from([argument.clone()])
+        ),
         Err(SemanticOperandMintError::SubstitutionArity {
             expected: 0,
             actual: 1
         })
     );
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator(
                 "Bound",
                 Arc::from([TypeBodyPathStep::TypeParamBound {
@@ -1958,13 +1988,13 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
     // Positive controls: the exact arity seals, an under-supply seals, and
     // the in-range bound frame seals and forces to the declared bound.
     assert!(dispatch
-        .mint_authored_semantic_operand(whole("Box"), Arc::from([argument]))
+        .mint_authored_semantic_operand_for_tests(whole("Box"), Arc::from([argument]))
         .is_ok());
     assert!(dispatch
-        .mint_authored_semantic_operand(whole("Box"), Arc::from([]))
+        .mint_authored_semantic_operand_for_tests(whole("Box"), Arc::from([]))
         .is_ok());
     let in_range = dispatch
-        .mint_authored_semantic_operand(
+        .mint_authored_semantic_operand_for_tests(
             locator(
                 "Bound",
                 Arc::from([TypeBodyPathStep::TypeParamBound {
@@ -1997,14 +2027,14 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let argument = dispatch
-        .mint_node_semantic_operand(&force_result(
+        .mint_node_semantic_operand_for_tests(&force_result(
             &dispatch,
             &mint(&dispatch, whole("Text")),
             ProjectionMode::Identity,
         ))
         .expect("argument operand must seal");
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator_at(
                 OWNER,
                 "boxed",
@@ -2019,7 +2049,7 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
         })
     );
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "mixed", LocatorSymbolSpace::Value, Arc::from([])),
             Arc::from([argument.clone()]),
         ),
@@ -2033,7 +2063,7 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
     // surplus argument is refused rather than admitted to fragment the
     // Instantiate family.
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "marker", LocatorSymbolSpace::Value, Arc::from([]),),
             Arc::from([argument.clone()]),
         ),
@@ -2046,7 +2076,7 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
     // signature of its own, but its type-space header (`class Holder<T>`)
     // binds, so the arity comes from that prepared header.
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "Holder", LocatorSymbolSpace::Value, Arc::from([]),),
             Arc::from([argument.clone(), argument.clone()]),
         ),
@@ -2056,7 +2086,7 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
         })
     );
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
                 anchor: AuthoredAnchor {
                     canonical_id: Arc::from(OWNER),
@@ -2077,7 +2107,7 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
         })
     );
     assert!(dispatch
-        .mint_authored_semantic_operand(
+        .mint_authored_semantic_operand_for_tests(
             locator_at(
                 OWNER,
                 "boxed",
@@ -2088,7 +2118,7 @@ fn sealing_refuses_surplus_arguments_and_out_of_range_bound_ordinals() {
         )
         .is_ok());
     assert!(dispatch
-        .mint_authored_semantic_operand(
+        .mint_authored_semantic_operand_for_tests(
             locator_at(OWNER, "Holder", LocatorSymbolSpace::Value, Arc::from([])),
             Arc::from([argument]),
         )
@@ -2121,11 +2151,11 @@ fn non_class_value_header_arity_is_not_stolen_by_a_same_named_generic_type() {
         ProjectionMode::Identity,
     );
     let unit = dispatch
-        .mint_node_semantic_operand(&unit_forced)
+        .mint_node_semantic_operand_for_tests(&unit_forced)
         .expect("argument operand must seal");
     for symbol in ["Foo", "plain"] {
         assert_eq!(
-            dispatch.mint_authored_semantic_operand(
+            dispatch.mint_authored_semantic_operand_for_tests(
                 locator_at(OWNER, symbol, LocatorSymbolSpace::Value, Arc::from([])),
                 Arc::from([unit.clone()]),
             ),
@@ -2137,7 +2167,7 @@ fn non_class_value_header_arity_is_not_stolen_by_a_same_named_generic_type() {
         );
         // The same anchor with NO arguments still seals.
         assert!(dispatch
-            .mint_authored_semantic_operand(
+            .mint_authored_semantic_operand_for_tests(
                 locator_at(OWNER, symbol, LocatorSymbolSpace::Value, Arc::from([])),
                 Arc::from([]),
             )
@@ -2146,11 +2176,13 @@ fn non_class_value_header_arity_is_not_stolen_by_a_same_named_generic_type() {
     // The TYPE-space anchor of the same name keeps the interface's header:
     // one argument seals, two are refused.
     assert!(dispatch
-        .mint_authored_semantic_operand(whole("Foo"), Arc::from([unit.clone()]))
+        .mint_authored_semantic_operand_for_tests(whole("Foo"), Arc::from([unit.clone()]))
         .is_ok());
     assert_eq!(
-        dispatch
-            .mint_authored_semantic_operand(whole("Foo"), Arc::from([unit.clone(), unit.clone()]),),
+        dispatch.mint_authored_semantic_operand_for_tests(
+            whole("Foo"),
+            Arc::from([unit.clone(), unit.clone()]),
+        ),
         Err(SemanticOperandMintError::SubstitutionArity {
             expected: 1,
             actual: 2
@@ -2182,11 +2214,11 @@ fn an_unreadable_header_arity_is_a_typed_mint_refusal() {
         ProjectionMode::Identity,
     );
     let unit = dispatch
-        .mint_node_semantic_operand(&unit_forced)
+        .mint_node_semantic_operand_for_tests(&unit_forced)
         .expect("argument operand must seal");
 
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             locator_at(
                 OWNER,
                 "solo",
@@ -2214,12 +2246,13 @@ fn an_unreadable_header_arity_is_a_typed_mint_refusal() {
     };
     // The inner declaration is absent from the augmentation scope.
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(augmentation("Ghost", OWNER), Arc::from([])),
+        dispatch
+            .mint_authored_semantic_operand_for_tests(augmentation("Ghost", OWNER), Arc::from([])),
         Err(SemanticOperandMintError::MissingAuthoredDeclaration)
     );
     // The owning canonical has no prepared bundle at all.
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             augmentation("Present", "/w/operand/nowhere.ts"),
             Arc::from([]),
         ),
@@ -2227,7 +2260,7 @@ fn an_unreadable_header_arity_is_a_typed_mint_refusal() {
     );
     // The PRESENT inner declaration still seals and enforces its arity.
     assert_eq!(
-        dispatch.mint_authored_semantic_operand(
+        dispatch.mint_authored_semantic_operand_for_tests(
             augmentation("Present", OWNER),
             Arc::from([unit.clone(), unit.clone()]),
         ),
@@ -2237,7 +2270,7 @@ fn an_unreadable_header_arity_is_a_typed_mint_refusal() {
         })
     );
     assert!(dispatch
-        .mint_authored_semantic_operand(augmentation("Present", OWNER), Arc::from([unit]))
+        .mint_authored_semantic_operand_for_tests(augmentation("Present", OWNER), Arc::from([unit]))
         .is_ok());
 }
 
@@ -2259,11 +2292,11 @@ fn whole_declaration_force_shares_the_declaration_instantiate_memo() {
         ProjectionMode::Identity,
     );
     let text = dispatch
-        .mint_node_semantic_operand(&text_forced)
+        .mint_node_semantic_operand_for_tests(&text_forced)
         .expect("argument operand must seal");
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let operand = dispatch
-        .mint_authored_semantic_operand(whole("Box"), Arc::from([text.clone()]))
+        .mint_authored_semantic_operand_for_tests(whole("Box"), Arc::from([text.clone()]))
         .expect("substituted operand must seal");
     let _ = force_with_context(&dispatch, &operand, context);
 
@@ -2358,12 +2391,15 @@ fn a_warm_force_roots_the_enclosing_candidate_at_its_own_operand_producer() {
         ProjectionMode::Identity,
     );
     let narrow = dispatch
-        .mint_node_semantic_operand(&argument_forced)
+        .mint_node_semantic_operand_for_tests(&argument_forced)
         .expect("argument operand must seal");
     let wide_forced = force_result(
         &dispatch,
         &dispatch
-            .mint_authored_semantic_operand(member_value("Box", 0), Arc::from([narrow.clone()]))
+            .mint_authored_semantic_operand_for_tests(
+                member_value("Box", 0),
+                Arc::from([narrow.clone()]),
+            )
             .expect("substituted operand must seal"),
         ProjectionMode::Identity,
     );
@@ -2373,7 +2409,7 @@ fn a_warm_force_roots_the_enclosing_candidate_at_its_own_operand_producer() {
         "the fixture requires the substituted force to reproduce the argument node"
     );
     let wide = dispatch
-        .mint_node_semantic_operand(&wide_forced)
+        .mint_node_semantic_operand_for_tests(&wide_forced)
         .expect("substituted node operand must seal");
 
     // NARROW wins the cold build for the shared key and roots the
@@ -2588,7 +2624,7 @@ fn try_force_demanding(
     context: ProjectionReductionContext,
     segments: Arc<[ForceProjectionSegment]>,
 ) -> QueryResult<ForcedSemanticOperand> {
-    dispatch.force_semantic_operand(
+    dispatch.force_semantic_operand_for_tests(
         operand,
         SemanticOperandForceRequest::projecting(context, segments),
     )
@@ -2604,7 +2640,8 @@ fn force_key_domain(
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
 ) -> ForcedSemanticOperand {
-    match dispatch.force_semantic_operand(operand, SemanticOperandForceRequest::key_domain(context))
+    match dispatch
+        .force_semantic_operand_for_tests(operand, SemanticOperandForceRequest::key_domain(context))
     {
         QueryResult::Value(forced) => forced,
         other => panic!("key-domain force must resolve, got {other:?}"),
@@ -2941,7 +2978,7 @@ fn an_empty_residual_path_is_the_whole_surface_precision_and_shares_its_entry() 
     let key = force_key(&dispatch, &operand, context);
     let via_empty_path = force_projecting(&dispatch, &operand, context, empty_path());
     let via_whole_surface = match dispatch
-        .force_semantic_operand(&operand, SemanticOperandForceRequest::new(context))
+        .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context))
     {
         QueryResult::Value(forced) => forced,
         other => panic!("whole-surface force must resolve, got {other:?}"),
@@ -2987,8 +3024,10 @@ fn distinct_force_precisions_never_alias_and_warm_repeats_add_no_candidates() {
         for _ in 0..2 {
             forced.push(match precision {
                 SemanticOperandForceProjection::WholeSurface => match dispatch
-                    .force_semantic_operand(&operand, SemanticOperandForceRequest::new(context))
-                {
+                    .force_semantic_operand_for_tests(
+                        &operand,
+                        SemanticOperandForceRequest::new(context),
+                    ) {
                     QueryResult::Value(value) => value.node(),
                     other => panic!("whole-surface force must resolve, got {other:?}"),
                 },

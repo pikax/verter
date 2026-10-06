@@ -1,4 +1,4 @@
-//! Tests for the macro hot mirror producer ([`crate::structural_carrier_producer::macro_arg_producer::macro_type_arg_hot_ref`]).
+//! Tests for the macro hot mirror producer ([`super::macro_type_arg_hot_ref`]).
 //!
 //! Each fixture is a REAL Vue SFC whose macro type-argument is lowered ONCE
 //! through the mirror to a mode-NEUTRAL [`HotTypeRef`]. The tests assert the
@@ -6,24 +6,17 @@
 //! dispatch from the handle yields the SAME resolved node the eager macro-arg
 //! lowering produced). Negative assertions throughout.
 
-use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-use crate::semantic_query::HotTypeRef;
-use crate::semantic_query::PathSegment;
-use crate::semantic_query::ProjectionMode;
-use crate::semantic_query::ProjectionReductionContext;
-use crate::semantic_query::QueryResult;
-use crate::semantic_query::SemanticNodeData;
-use crate::semantic_query::SemanticNodeId;
-use crate::semantic_query::SemanticQueryApi;
-use crate::semantic_query::SemanticQueryKey;
-use crate::semantic_query::SemanticQueryOutput;
-use crate::types::HostConfig;
-use crate::CompileErrorPolicy;
-use crate::FileLanguage;
-use crate::UpsertRequest;
-use crate::VerterHost;
 use std::sync::Arc;
+
 use verter_type_expr::TypeExpr;
+
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
+use crate::semantic_query::{
+    HotTypeRef, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+};
+use crate::types::HostConfig;
+use crate::{CompileErrorPolicy, FileLanguage, UpsertRequest, VerterHost};
 
 fn macro_type_arg_hot_ref(
     host: &VerterHost,

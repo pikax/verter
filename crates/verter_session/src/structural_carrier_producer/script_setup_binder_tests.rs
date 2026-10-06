@@ -1,5 +1,5 @@
 //! Isolation tests for the module-private shared binder-frame builder
-//! ([`crate::structural_carrier_producer::macro_arg_producer::build_script_setup_seed_frames`]).
+//! ([`super::build_script_setup_seed_frames`]).
 //!
 //! These call the module-private helper DIRECTLY (not through the macro hot
 //! mirror), as an in-module test child, to prove it produces the correct
@@ -9,18 +9,14 @@
 //! unbound `BareRef` — the exact contract a `<script setup generic="…">` SFC's
 //! open generics depend on.
 
-use crate::semantic_query::NodeScopeId;
-use crate::semantic_query::SemanticNodeData;
-use crate::semantic_query::SemanticNodeId;
-use crate::structural_carrier_producer::infer_binder_names::BinderScope;
-use crate::structural_carrier_producer::infer_binder_names::StructuralLowerContext;
-use crate::structural_carrier_producer::macro_arg_producer::build_script_setup_seed_frames;
-use crate::types::HostConfig;
-use crate::FileLanguage;
-use crate::UpsertRequest;
-use crate::VerterHost;
 use std::sync::Arc;
+
 use verter_type_expr::TypeExpr;
+
+use super::{build_script_setup_seed_frames, BinderScope, StructuralLowerContext};
+use crate::semantic_query::{NodeScopeId, SemanticNodeData, SemanticNodeId};
+use crate::types::HostConfig;
+use crate::{FileLanguage, UpsertRequest, VerterHost};
 
 fn host() -> VerterHost {
     VerterHost::new_standalone(HostConfig::default())
@@ -54,13 +50,7 @@ fn lower_ref_through(
         type_arguments: Arc::from(Vec::new()),
     };
     let ctx = StructuralLowerContext::new(frames);
-    let handle =
-        crate::structural_carrier_producer::macro_arg_producer::lower_type_expr_structural(
-            graph,
-            &expr,
-            scope.clone(),
-            &ctx,
-        )
+    let handle = super::lower_type_expr_structural(graph, &expr, scope.clone(), &ctx)
         .expect("a bare Ref must lower structurally");
     let node: SemanticNodeId = handle.node();
     (*graph

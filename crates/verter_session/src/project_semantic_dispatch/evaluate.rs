@@ -662,7 +662,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    pub(crate) fn evaluate_deferred_semantic_node(&self, node: SemanticNodeId) -> SemanticNodeId {
+    pub(super) fn evaluate_deferred_semantic_node(&self, node: SemanticNodeId) -> SemanticNodeId {
         // Default to a `Published + Expanded` context. Publication
         // callers (the bounded reducer, mapper value substitution,
         // conditional check evaluation, builtin-utility argument

@@ -675,7 +675,7 @@ fn cycle_gate_observed_self_roots_cover_root_and_every_visited_decl() {
     else {
         panic!("key builder must produce the gate variant");
     };
-    let output = dispatch.build_classify_materialization_cycle_gate(&key);
+    let output = dispatch.build_classify_materialization_cycle_gate_for_tests(&key);
 
     assert!(
         output

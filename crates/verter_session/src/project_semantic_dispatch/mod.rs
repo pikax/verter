@@ -4391,3 +4391,74 @@ pub(crate) mod memo;
 
 #[cfg(test)]
 mod tests;
+
+/// Test-support entries into dispatch-private builders: each delegates to the
+/// production builder unchanged, so a suite drives exactly what dispatch runs.
+/// None is compiled into a production build.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The production mapped-type builder.
+    #[doc(hidden)]
+    pub(crate) fn build_mapped_type_for_tests(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> walk::QueryBuildOutput {
+        self.build_mapped_type(source, mapper, context)
+    }
+
+    /// The production deferred-node evaluation under the publication context.
+    #[doc(hidden)]
+    pub(crate) fn evaluate_deferred_semantic_node_for_tests(
+        &self,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        self.evaluate_deferred_semantic_node(node)
+    }
+
+    /// The production forcing boundary for one semantic operand.
+    #[doc(hidden)]
+    pub(crate) fn force_semantic_operand_for_tests(
+        &self,
+        operand: &crate::semantic_query::operand::SemanticOperand,
+        request: crate::semantic_query::operand::SemanticOperandForceRequest,
+    ) -> QueryResult<crate::semantic_query::operand::ForcedSemanticOperand> {
+        self.force_semantic_operand(operand, request)
+    }
+
+    /// The production node-operand mint over a forced operand.
+    #[doc(hidden)]
+    pub(crate) fn mint_node_semantic_operand_for_tests(
+        &self,
+        forced: &crate::semantic_query::operand::ForcedSemanticOperand,
+    ) -> Result<
+        crate::semantic_query::operand::SemanticOperand,
+        crate::semantic_query::operand::SemanticOperandMintError,
+    > {
+        self.mint_node_semantic_operand(forced)
+    }
+
+    /// The production authored-operand mint.
+    #[doc(hidden)]
+    pub(crate) fn mint_authored_semantic_operand_for_tests(
+        &self,
+        locator: verter_type_expr::locators::AuthoredBodyLocator,
+        substitution: Arc<[crate::semantic_query::operand::SemanticOperand]>,
+    ) -> Result<
+        crate::semantic_query::operand::SemanticOperand,
+        crate::semantic_query::operand::SemanticOperandMintError,
+    > {
+        self.mint_authored_semantic_operand(locator, substitution)
+    }
+
+    /// The production materialization cycle-gate builder.
+    #[doc(hidden)]
+    pub(crate) fn build_classify_materialization_cycle_gate_for_tests(
+        &self,
+        key: &crate::semantic_query::MaterializationCycleGateKey,
+    ) -> walk::QueryBuildOutput<SemanticQueryValue> {
+        self.build_classify_materialization_cycle_gate(key)
+    }
+}

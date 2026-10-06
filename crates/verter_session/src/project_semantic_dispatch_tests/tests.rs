@@ -176,7 +176,7 @@ fn conditional_substitution_defers_branches_until_demand() {
             );
         }
         assert_eq!(
-            dispatch.evaluate_deferred_semantic_node(instantiated),
+            dispatch.evaluate_deferred_semantic_node_for_tests(instantiated),
             argument
         );
         for untouched in [loser, loser_arg] {
@@ -193,7 +193,7 @@ fn conditional_substitution_defers_branches_until_demand() {
                 instantiated
             );
             assert_eq!(
-                dispatch.evaluate_deferred_semantic_node(instantiated),
+                dispatch.evaluate_deferred_semantic_node_for_tests(instantiated),
                 argument
             );
         }
@@ -405,7 +405,7 @@ fn pending_arguments_remain_visible_to_clause_instantiation() {
             before,
             "clause instantiation does not select a branch"
         );
-        let result = dispatch.evaluate_deferred_semantic_node(instantiated);
+        let result = dispatch.evaluate_deferred_semantic_node_for_tests(instantiated);
         let expected = if default.is_some() {
             PrimitiveKind::String
         } else {
@@ -720,7 +720,7 @@ fn distributive_pending_substitution_does_not_traverse_the_losing_branch() {
         None,
         "an undemanded distributive loser must not be traversed"
     );
-    let result = dispatch.evaluate_deferred_semantic_node(instantiated);
+    let result = dispatch.evaluate_deferred_semantic_node_for_tests(instantiated);
     assert_eq!(result, yes, "both union members select the true branch");
     assert_eq!(
         graph.substitute_memo_get(loser, parameter, union),
@@ -20946,7 +20946,7 @@ fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
         kind: MapperKind::Computed,
     };
 
-    let output = dispatch.build_mapped_type(
+    let output = dispatch.build_mapped_type_for_tests(
         source,
         &mapper,
         ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -29540,7 +29540,7 @@ fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
         .store(true, std::sync::atomic::Ordering::Relaxed);
     // FRAMELESS release through the build-scoped sugar. Post-change this panics
     // (the assert fires on the suppressed-Complete with no active frame).
-    let _ = dispatch.evaluate_deferred_semantic_node(mapped);
+    let _ = dispatch.evaluate_deferred_semantic_node_for_tests(mapped);
 }
 
 /// LB1 — the `evaluate_deferred_memo` publish gate must REFUSE a

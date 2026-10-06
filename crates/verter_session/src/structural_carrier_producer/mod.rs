@@ -32,8 +32,8 @@
 //! a sibling it cannot name the child-private producer builders, so it is not
 //! producer-capable and does not create a second producer surface.
 
-pub(crate) mod infer_binder_names;
-pub(crate) mod macro_arg_producer;
+mod infer_binder_names;
+mod macro_arg_producer;
 
 // External consumers reach the macro hot mirror through these re-exports; the
 // raw structural lowerer, the binder-seed builder, and the mirror builder stay

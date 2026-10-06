@@ -427,8 +427,6 @@ mod store_view_manager_tests;
 mod store_view_non_current_contract_tests;
 mod store_view_roots;
 pub(crate) mod structural_carrier_producer;
-#[cfg(test)]
-mod structural_carrier_producer_tests;
 pub(crate) mod template_convert;
 /// Test-only re-exports for integration tests in `tests/`.
 ///
