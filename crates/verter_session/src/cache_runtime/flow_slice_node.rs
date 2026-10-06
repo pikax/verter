@@ -49,9 +49,9 @@
 //! [`FlowSliceBudget`] cell. The `FlowReturn` executor consumes the hash
 //! node on its cold path (the budget outcome gates memo admission); the
 //! lowered node serves slice-IR demand through the same store.
-use verter_session_query::flow::bundle::{
-    BoundFlowGraph, FlowGraphBundle, FlowSliceFunctionKey, KeyedFunctionStructure,
-};
+#[cfg(any(test, feature = "test-support"))]
+use verter_session_query::flow::bundle::KeyedFunctionStructure;
+use verter_session_query::flow::bundle::{BoundFlowGraph, FlowGraphBundle, FlowSliceFunctionKey};
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -61,7 +61,9 @@ use dashmap::DashMap;
 use verter_session_query::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
 use verter_session_query::flow::hashing::FlowSliceHash;
 use verter_session_query::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
-use verter_session_query::flow::skeleton::{FunctionBodySkeleton, PreparedFunctionBodySkeleton};
+use verter_session_query::flow::skeleton::FunctionBodySkeleton;
+#[cfg(any(test, feature = "test-support"))]
+use verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton;
 
 use super::admission::CacheEntry;
 use super::node::QueryFlightKey;

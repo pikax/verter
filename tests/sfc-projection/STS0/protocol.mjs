@@ -114,6 +114,9 @@ export const REQUIRED_POLICY_PROFILE_IDS = Object.freeze([
 
 export const PINNED_DERIVED_DECLARE = "declare function $derived<T>(expression: T): T";
 export const SVELTE_PRELUDE = "crates/verter_compiler/src/svelte/ide/prelude.rs";
+/// The rune ambient declarations (including the pinned `$derived` signature)
+/// that the prelude renders; the compiler and the source inventory share it.
+export const SVELTE_RUNE_AMBIENT = "crates/verter_language/src/svelte_rune_ambient.rs";
 export const PINNED_SVELTE_TYPES = "node_modules/svelte/types/index.d.ts";
 
 export const SVELTE_OPTIONS_TSV =
@@ -207,6 +210,7 @@ export const MODE_LEGACY_ONLY_FEATURE = "legacy-export-let";
 export const SVELTE_OWNED_SOURCE_FILES = Object.freeze([
   "crates/verter_compiler/src/svelte/svelte_projection_backend.rs",
   "crates/verter_compiler/src/svelte/ide/prelude.rs",
+  "crates/verter_language/src/svelte_rune_ambient.rs",
   "crates/verter_compiler/src/svelte/semantic_authority.rs",
 ]);
 
@@ -2124,11 +2128,12 @@ export function assertPredecessorJoins({
       );
     }
   }
-  const preludeAbs = path.resolve(repoRoot, "crates/verter_compiler/src/svelte/ide/prelude.rs");
-  if (fs.existsSync(preludeAbs)) {
-    const prelude = fs.readFileSync(preludeAbs, "utf8");
+  for (const ambientPath of [SVELTE_PRELUDE, SVELTE_RUNE_AMBIENT]) {
+    const ambientAbs = path.resolve(repoRoot, ambientPath);
+    if (!fs.existsSync(ambientAbs)) continue;
+    const ambient = fs.readFileSync(ambientAbs, "utf8");
     for (const token of VUE_CONSTRUCTOR_SOURCE_TOKENS) {
-      if (prelude.includes(token)) {
+      if (ambient.includes(token)) {
         errors.push(
           err(
             "STS0-svelte-abi",
@@ -2823,7 +2828,7 @@ export function evaluateSts0(input = {}) {
     ...assertInstanceShapePin(positiveSource, loadSts0Manifest()?.probes?.expectedInstanceType),
   );
   const probeAbs = path.join(STS0_DIR, "probes", "state-module.svelte.ts");
-  const preludeAbs = path.resolve(REPO_ROOT, SVELTE_PRELUDE);
+  const preludeAbs = path.resolve(REPO_ROOT, SVELTE_RUNE_AMBIENT);
   const typesAbs = path.resolve(REPO_ROOT, PINNED_SVELTE_TYPES);
   errors.push(
     ...assertRuneProbeMatchesPinnedProjection(fs.readFileSync(probeAbs, "utf8"), {
