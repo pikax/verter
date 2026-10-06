@@ -35,13 +35,15 @@ same files on disk, byte for byte.
 | `tsc-cli` | `tsc -p --extendedDiagnostics`, default (parallel) checkers | no: whole-program reference |
 | `tsc-cli-1` | `tsc -p --extendedDiagnostics --singleThreaded` | no: whole-program reference |
 
-Observability is compared at two levels, neither in the head-to-head:
-`verter-obs` turns the host's runtime bookkeeping on in the production build,
-and the build-level comparison pairs the production-default probe with one
-that differs only in the default-off `semantic-observe` Cargo feature (see
-`docs/arch/semantic-observe.md`). Both builds
-retain identical required state, so the pair isolates what the optional
-observation layer costs.
+Observability is compared outside the head-to-head. Today that comparison is
+runtime-only: the `verter-obs` arm turns the host's runtime bookkeeping on in
+the production build. A build-level comparison — pairing the
+production-default probe with one that differs only in the default-off
+`semantic-observe` Cargo feature (see `docs/arch/semantic-observe.md`), both
+builds retaining identical required state so the pair isolates what the
+optional observation layer costs — **is planned and not yet in this
+repository**: the runner builds and pins only `semantic_perf_probe` and
+`semantic_perf_probe_counted` (see [Running it](#running-it)).
 
 Verter exposes no whole-program diagnostic pass, so the `tsc -p` arms have no
 Verter counterpart. They show what tsc's full check costs, in both thread
@@ -439,11 +441,14 @@ claim depends on where it ran:
   same classes and counts everywhere. They are what a change's performance
   acceptance rests on.
 - **Time and memory** cells (phase and request times, first type handle,
-  peaks, retained memory, Capacity time-to-cap and peak at kill) are
+  peaks, retained memory) are
   **measured only on the benchmark machine**: a worker tagged `bench-m3`.
   On any other worker they are reported as `not measured`, never as zero,
   never as a pass and never as a failure. A timing or memory gate exists only
-  on `bench-m3`, owned by the performance work that runs there.
+  on `bench-m3`, owned by the performance work that runs there. The planned
+  Capacity report (tsc's outcome at the engine budget in the API and CLI arms
+  with time-to-cap and peak at kill; Verter's answer class, peak and time)
+  will be measured under this same rule when its workload lands.
 - A comparison (a baseline commit against a candidate) measures both on the
   same worker in the same session, interleaved — never against a stored
   number from another host or another session.
