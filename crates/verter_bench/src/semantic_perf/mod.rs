@@ -32,6 +32,8 @@
 
 pub mod cli;
 pub mod disk;
+#[cfg(feature = "semantic-observe")]
+pub mod dispatch_profile;
 pub mod process_stats;
 
 use std::path::{Path, PathBuf};

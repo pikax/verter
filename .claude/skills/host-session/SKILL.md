@@ -26,8 +26,20 @@ description: "LSP host integration: TypeProvider (TSGO/tsserver), workspace mana
 Host view: resolver-path helpers receive `&HostStoreView` directly as result-DB fence authority; `IndexedReady` is the single canonical post-parse artifact (former `ModuleFactsDb` deleted). Validated-cache writes record a `ReadSetSignature.facts` fact signature; warm hits revalidate it against the live `StoreView` before returning. Full store-view contract: "Host Store View" + "Store-View Token, Lane Identity, and Singleflight" below.
 
 **Resolver-context seal:** `ResolverContext` is a method-free sealed composition
-of six request-bound ports: `IndexedInputs`, `OwnedLowering`, `RouteLookup`,
-`FactValidation`, `Cancellation`, and `ExecutionSubmission`. Production contexts
+of five request-bound ports: `IndexedInputs`, `OwnedLowering`, `RouteLookup`,
+`FactValidation`, and `ExecutionSubmission`. The reads the engine makes once per
+semantic node or more — cancellation, the project generation and the live
+aggregate clocks — are not port methods: they are handles on the engine-owned
+`RequestSnapshot` (`resolver_core/resolver_context.rs`) that each request
+lifecycle captures once at admission (`VerterHost::capture_request_snapshot`)
+and serves through `LiveFactValidation::request_snapshot` /
+`FactValidation::request_flags`; `ProjectSemanticDispatch` borrows it once at
+construction and reads it as plain fields. The snapshot holds handles only, so
+every read is live: a mid-request cancellation, project reset or workspace edit
+is observed by the next read. Per-method call counts of these ports, per lane,
+come from the default-off `semantic-observe` counter
+(`count_resolver_context_call!`, read by the `resolver_dispatch_profile`
+example in `verter_bench`). Production contexts
 are `HostResolverContext` and `SessionResolverContext`; the direct-host seam is
 compiled only for tests or explicit `test-support`. Ports return owned input
 records, typed source demands, validation answers, or an opaque engine binding.
@@ -39,7 +51,7 @@ an observed record keeps its original source identity across edits.
 `EnginePolicy`. Its static `FlowCx`, `RelationCx`, and `InferenceTxn` views use
 generic demand drivers and selected arena operations. Request-local `MemoRead`
 and `MemoPublish` coordinate fact validation and publication; durable storage
-does not invoke source services or evaluate types. The six request-bound ports in `resolver_core::request_ports` are the
+does not invoke source services or evaluate types. The five request-bound ports in `resolver_core::request_ports` are the
 resolver-tier boundary: each returns owned records or typed demands and none
 returns a host, store or config handle, so only their implementations reach
 ambient host state. The

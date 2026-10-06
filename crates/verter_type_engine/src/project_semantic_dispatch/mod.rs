@@ -328,6 +328,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     binding: EngineBinding<C::MacroMirrors>,
     pub policy: EnginePolicy,
     cancellation: crate::resolver_core::request_ports::CancellationCheckpoint,
+    /// The request snapshot the host captured at admission, borrowed once
+    /// here so the per-node generation reads are plain field reads.
+    pub(crate) snapshot: &'a crate::resolver_core::RequestSnapshot<C::Clocks>,
     pub ctx: &'a dyn ResolverContext<C>,
     /// The request's host attachment, selected once at construction. The
     /// engine never reads it; host facades borrow it beside the dispatch.
@@ -713,10 +716,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !ctx.is_request_bound() {
             crate::request_context::bump_bare_engine_construction();
         }
+        let snapshot =
+            crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
         Self {
             binding: ctx.attach_engine(),
             policy: ctx.engine_policy(),
-            cancellation: ctx.cancellation_checkpoint(),
+            cancellation: snapshot.flags().cancellation_checkpoint(),
+            snapshot,
             host_attachment:
                 crate::resolver_core::request_ports::HostAttachmentPort::host_attachment(ctx),
             ctx,
@@ -1781,7 +1787,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         canonical_id: &Arc<str>,
         hash: [u8; 16],
     ) -> DepSignature {
-        let project_gen = self.ctx.current_project_generation();
+        let project_gen = self.snapshot.current_project_generation();
         Arc::from(
             vec![
                 (canonical_id.clone(), DepVersion::WholeHash(hash)),
@@ -1800,7 +1806,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// dep signatures flow in through the warm memo hits of the bases the
     /// caller already supplied.
     pub(super) fn project_generation_signature(&self) -> DepSignature {
-        let project_gen = self.ctx.current_project_generation();
+        let project_gen = self.snapshot.current_project_generation();
         Arc::from(
             vec![(
                 Arc::<str>::from("<project>"),

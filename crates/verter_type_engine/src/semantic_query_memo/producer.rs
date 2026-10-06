@@ -303,7 +303,7 @@ impl SemanticGraphStore {
         // Request cancellation is a typed ReturnOnly terminal and must be
         // observed before even a warm probe: canceled requests do not consume
         // shared semantic work or reuse a value as if they completed normally.
-        if ctx.is_cancelled() {
+        if ctx.request_flags().is_cancelled() {
             return Err(cancelled_cache_read());
         }
 
@@ -332,7 +332,7 @@ impl SemanticGraphStore {
         // returned, so a stale candidate misses and the claim below
         // recomputes it.
         if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared, capture) {
-            return Err(if ctx.is_cancelled() {
+            return Err(if ctx.request_flags().is_cancelled() {
                 cancelled_cache_read()
             } else {
                 hit
@@ -370,7 +370,7 @@ impl SemanticGraphStore {
         task: &ExecutionTask,
         capture: &mut ReadCapture<'_>,
     ) -> Claim<'s> {
-        if ctx.is_cancelled() {
+        if ctx.request_flags().is_cancelled() {
             return Claim::Read(cancelled_cache_read());
         }
         let prepared = &attempt.prepared;
@@ -507,15 +507,16 @@ impl Subscription<'_> {
         } = self;
         let prepared = &attempt.prepared;
         let mut state = inflight.state.lock();
-        let wait_edge = if state.completed.is_none() && !state.aborted && !ctx.is_cancelled() {
-            let producer = state.owner.unwrap_or(waiter);
-            match store.task_registry.register_wait(waiter, producer) {
-                Ok(edge) => Some(edge),
-                Err(WaitCycle) => return Joined::Recursive(Recursion::WaitCycle),
-            }
-        } else {
-            None
-        };
+        let wait_edge =
+            if state.completed.is_none() && !state.aborted && !ctx.request_flags().is_cancelled() {
+                let producer = state.owner.unwrap_or(waiter);
+                match store.task_registry.register_wait(waiter, producer) {
+                    Ok(edge) => Some(edge),
+                    Err(WaitCycle) => return Joined::Recursive(Recursion::WaitCycle),
+                }
+            } else {
+                None
+            };
         // Cooperative wait on the flight's condvar until it completes, is
         // aborted by a canonical-invalidation sweep, or this request is
         // cancelled. Subscribers never busy-spin.
@@ -525,7 +526,7 @@ impl Subscription<'_> {
         // which atomically releases `state` and parks).
         #[cfg(any(test, feature = "test-support"))]
         store.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
-        while state.completed.is_none() && !state.aborted && !ctx.is_cancelled() {
+        while state.completed.is_none() && !state.aborted && !ctx.request_flags().is_cancelled() {
             // Timed parking is the cancellation observation rail. A canceled
             // subscriber detaches by returning; it never marks the shared
             // flight aborted, so it cannot disturb an uncancelled producer or
@@ -545,7 +546,7 @@ impl Subscription<'_> {
             ctx.0
                 .record_cache_event(verter_execution::request_context::CacheEventKind::JoinedWait);
         }
-        if ctx.is_cancelled() {
+        if ctx.request_flags().is_cancelled() {
             drop(state);
             return Joined::Read(cancelled_cache_read());
         }
@@ -713,7 +714,7 @@ impl<'s> ProducerLease<'s> {
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_BUILD_NS_TOTAL
             .fetch_add(build_held_ns, Ordering::Relaxed);
 
-        if ctx.is_cancelled() {
+        if ctx.request_flags().is_cancelled() {
             store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
             return Err(cancelled_cache_read());
         }
@@ -797,7 +798,7 @@ impl SettledProducer<'_> {
         capture: &mut ReadCapture<'_>,
     ) -> Result<(), ValueRead> {
         let store = self.store;
-        if ctx.is_cancelled() {
+        if ctx.request_flags().is_cancelled() {
             return Err(self.abort_for_cancellation());
         }
         let mut root_publication = None;
@@ -830,7 +831,7 @@ impl SettledProducer<'_> {
                 WarmPublishOutcome::Skipped => true,
                 WarmPublishOutcome::Aborted => false,
             };
-            if !self.admission_linearized && ctx.is_cancelled() {
+            if !self.admission_linearized && ctx.request_flags().is_cancelled() {
                 if let Some(slot) = capture.publication.as_deref_mut() {
                     *slot = None;
                 }
@@ -879,7 +880,7 @@ impl SettledProducer<'_> {
                 ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
             }
         }
-        if !self.admission_linearized && ctx.is_cancelled() {
+        if !self.admission_linearized && ctx.request_flags().is_cancelled() {
             if let Some(slot) = capture.publication.as_deref_mut() {
                 *slot = None;
             }

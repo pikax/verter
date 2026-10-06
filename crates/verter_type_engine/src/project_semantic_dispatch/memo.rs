@@ -416,7 +416,7 @@ where
     V: Clone,
 {
     let entry_arc = entries.get(key).map(|e| e.clone())?;
-    if entry_arc.validated_at_generation == ctx.current_project_generation()
+    if entry_arc.validated_at_generation == ctx.request_flags().current_project_generation()
         && entry_arc
             .signature
             .validate_with_self_roots(ctx, &entry_arc.self_root_canonicals)
@@ -497,7 +497,7 @@ impl MemoRead<'_, ImportedRegistryDb> {
         let ctx = self.facts;
 
         let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
-        let generation = ctx.current_project_generation();
+        let generation = ctx.request_flags().current_project_generation();
         crate::project_semantic_dispatch::memo::read_candidate(storage.store, key, |candidate| {
             // The carrier validates only file-content whole-hashes; a
             // `ProjectGeneration` reset bumps no file content, so the
@@ -1193,7 +1193,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     /// The request's live project generation.
     #[must_use]
     pub fn current_project_generation(&self) -> u64 {
-        FactValidation::current_project_generation(self.ctx)
+        FactValidation::request_flags(self.ctx).current_project_generation()
     }
 
     /// Whether every fact in `facts` still validates under the request's live
@@ -1216,7 +1216,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         let (value, read_set) = crate::resolver_core::resolver_context::with_fact_tracer_cell(
             verter_session_query::facts::fact_cache::AggregateGenerations::from_seed(
                 &verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
-                &self.ctx.aggregate_clock_reader().live(),
+                &self.ctx.request_snapshot().clocks().live(),
             ),
             |_cell| compute(),
         );

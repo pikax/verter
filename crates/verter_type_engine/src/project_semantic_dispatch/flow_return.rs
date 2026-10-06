@@ -3729,7 +3729,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let runtime_identity = self.dispatch_txn.borrow().obligations.instance_identity();
         FlowEvaluationProvenance::new(
             store_identity,
-            self.ctx.current_project_generation(),
+            self.snapshot.current_project_generation(),
             runtime_identity,
             // The sentinel ordinal: no installed demand bears it (ledger
             // ordinals are small counting numbers), so a bare freshness

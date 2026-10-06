@@ -80,7 +80,7 @@ impl<'a> ComputeCtx<'a> {
     pub fn from_resolver(resolver: &'a dyn FactValidation) -> Self {
         Self {
             compat_token: resolver.compat_token(),
-            generation: resolver.current_project_generation(),
+            generation: resolver.request_flags().current_project_generation(),
             resolver,
         }
     }
@@ -183,7 +183,7 @@ pub fn lookup<N: ArtifactNode>(
     // to the entry's stamp: a project-generation bump that lands during
     // the cold window leaves the stamp behind the live generation, so
     // the entry is rejected (no stale publish, no warm hit).
-    let snapshot_generation = resolver.current_project_generation();
+    let snapshot_generation = resolver.request_flags().current_project_generation();
     let flight_key = QueryFlightKey {
         key: key.clone(),
         compat_token,
@@ -199,7 +199,7 @@ pub fn lookup<N: ArtifactNode>(
             let cx = ComputeCtx {
                 resolver,
                 compat_token,
-                generation: resolver.current_project_generation(),
+                generation: resolver.request_flags().current_project_generation(),
             };
             node.validate(&key, entry, &cx)
         },
@@ -241,7 +241,7 @@ pub fn lookup<N: ArtifactNode>(
             // Post-compute revalidation: gate the freshly built entry's
             // stamp against the LIVE generation. A generation bump that
             // landed during the cold window rejects the publish.
-            entry.validated_at_generation == resolver.current_project_generation()
+            entry.validated_at_generation == resolver.request_flags().current_project_generation()
                 && entry
                     .signature
                     .validate_with_self_roots(resolver, &entry.self_root_canonicals)
@@ -396,7 +396,7 @@ pub mod query {
         // revalidation) re-read the LIVE generation each time so a
         // mid-compute generation bump rejects the candidate. See the
         // artifact `lookup` for the snapshot-vs-live rationale.
-        let snapshot_generation = resolver.current_project_generation();
+        let snapshot_generation = resolver.request_flags().current_project_generation();
         let flight_key = QueryFlightKey {
             key: key.clone(),
             compat_token,
@@ -413,7 +413,7 @@ pub mod query {
                 let cx = ComputeCtx {
                     resolver,
                     compat_token,
-                    generation: resolver.current_project_generation(),
+                    generation: resolver.request_flags().current_project_generation(),
                 };
                 node.lookup_candidate(&key, &cx)
             },
@@ -478,7 +478,8 @@ pub mod query {
                 })
             },
             |candidate: &Candidate<N::Discriminant, N::Value>| {
-                candidate.validated_at_generation == resolver.current_project_generation()
+                candidate.validated_at_generation
+                    == resolver.request_flags().current_project_generation()
                     && candidate
                         .signature
                         .validate_with_self_roots(resolver, &candidate.self_root_canonicals)

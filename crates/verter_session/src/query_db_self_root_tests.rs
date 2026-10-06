@@ -260,7 +260,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "stale"))),
                     fact_dep_signature: planted_self_root(c),
-                    validated_at_generation: ctx.current_project_generation(),
+                    validated_at_generation: ctx.request_flags().current_project_generation(),
                 },
             )
         });
@@ -274,7 +274,7 @@ fn imported_registry_db_untracked_self_root_rejects_warm_entry() {
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
-                    validated_at_generation: ctx.current_project_generation(),
+                    validated_at_generation: ctx.request_flags().current_project_generation(),
                 },
             )
         })
@@ -1075,7 +1075,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "stale"))),
                     fact_dep_signature: sig,
-                    validated_at_generation: ctx.current_project_generation(),
+                    validated_at_generation: ctx.request_flags().current_project_generation(),
                 },
             )
         })
@@ -1093,7 +1093,7 @@ fn imported_registry_db_self_root_sibling_edit_rejects_warm_entry() {
                 verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                     value: Some(Arc::new(imported_symbol(c, "recomputed"))),
                     fact_dep_signature: empty_fact_signature(),
-                    validated_at_generation: ctx2.current_project_generation(),
+                    validated_at_generation: ctx2.request_flags().current_project_generation(),
                 },
             )
         })
@@ -3252,7 +3252,7 @@ fn imported_registry_base_and_overlay_candidates_coexist() {
                     verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                         value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
                         fact_dep_signature: Arc::clone(&base_self_root),
-                        validated_at_generation: ctx.current_project_generation(),
+                        validated_at_generation: ctx.request_flags().current_project_generation(),
                     },
                 )
             })
@@ -3402,7 +3402,7 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
                     verter_type_engine::component_meta_caches::ImportedRegistryEntry {
                         value: Some(Arc::new(imported_symbol(canonical, "winner-base"))),
                         fact_dep_signature: Arc::clone(&base_self_root),
-                        validated_at_generation: ctx.current_project_generation(),
+                        validated_at_generation: ctx.request_flags().current_project_generation(),
                     },
                 )
             });

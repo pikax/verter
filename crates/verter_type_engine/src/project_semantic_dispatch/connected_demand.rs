@@ -186,7 +186,7 @@ impl<'a> DemandCancellation<'a> {
         ctx: &'a dyn ResolverContext<C>,
     ) -> Self {
         Self {
-            checkpoint: ctx.cancellation_checkpoint(),
+            checkpoint: ctx.request_flags().cancellation_checkpoint(),
             _request: std::marker::PhantomData,
         }
     }

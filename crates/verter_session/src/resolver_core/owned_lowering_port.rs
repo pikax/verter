@@ -372,6 +372,7 @@ macro_rules! expression_source_selection_from_source_inputs {
                 verter_session_query::inputs::indexed::IndexedInputServe,
                 Option<Self::ExpressionDemand>,
             )> {
+                verter_type_engine::count_resolver_context_call!("ExpressionSourceSelection::indexed_flow_source");
                 let serve =
                     verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
                 let demand = SourceInputProvider::source(self, &serve.indexed.shallow_state).map(|source| {
@@ -389,6 +390,7 @@ macro_rules! expression_source_selection_from_source_inputs {
                 verter_session_query::inputs::indexed::IndexedInputServe,
                 Self::ExpressionDemand,
             )> {
+                verter_type_engine::count_resolver_context_call!("ExpressionSourceSelection::indexed_expression_source");
                 let serve =
                     verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(self, canonical)?;
                 let source = SourceInputProvider::source(self, &serve.indexed.shallow_state)?;
@@ -539,6 +541,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 &self,
                 serve: &verter_session_query::inputs::indexed::IndexedInputServe,
             ) -> Vec<verter_type_expr::TypeParam> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::script_setup_type_params");
                 crate::host_resolve::sfc_script_setup_type_params(
                     &serve.indexed.raw_source,
                     HostSourcePort::framework_parse_artifact(self, &serve.indexed).as_deref(),
@@ -548,6 +551,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 &self,
                 canonical: &str,
             ) -> verter_type_engine::resolver_core::request_ports::TerminalMacroInventory {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::terminal_macro_inventory");
                 let indexed = verter_type_engine::resolver_core::request_ports::IndexedInputs::indexed_for_current_content(self, canonical);
                 let base_source = (indexed.is_none() && SourceInputProvider::source_session_view(self).is_none())
                     .then(|| SourceInputProvider::source_host(self).scheduler_source(canonical))
@@ -577,6 +581,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_value_decl");
                 SourceInputProvider::raw_prepared_value_decl(self, canonical_id, owner, symbol_name)
             }
 
@@ -589,6 +594,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_type_decl");
                 SourceInputProvider::raw_prepared_type_decl(self, canonical_id, owner, symbol_name)
             }
 
@@ -599,6 +605,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 crate::file_artifact_store::AugmentationTargetKey,
                 Arc<verter_session_query::resolution::AugmenterSet>,
             ) {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_index");
                 let host = SourceInputProvider::source_host(self);
                 host.ingest_program_ambient_roots();
                 let env = verter_type_engine::resolver_core::request_ports::IndexedInputs::host_view_env_hashes(self);
@@ -629,6 +636,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 name: &str,
                 space: verter_session_query::facts::SymbolSpace,
             ) -> verter_type_engine::resolver_core::request_ports::ContributorAnswer {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::global_contributor_answer");
                 SourceInputProvider::source_host(self).ingest_program_ambient_roots();
                 OwnedLowering::contributor_answer(self,
                     &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
@@ -644,6 +652,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 allow_automatic_libs: bool,
                 space: Option<verter_session_query::facts::SymbolSpace>,
             ) -> verter_type_engine::resolver_core::request_ports::ContributorAnswer {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::contributor_answer");
                 let host = SourceInputProvider::source_host(self);
                 let (_, discriminator) =
                     crate::session_view::augmentation_population_for_view(SourceInputProvider::source_session_view(self));
@@ -670,6 +679,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 captured: &verter_session_query::source::artifact_key::FileArtifactKey,
                 observed_hash: verter_session_query::analysis::types::Hash16,
             ) -> Option<verter_type_engine::resolver_core::request_ports::AugmenterArtifactAnswer> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::augmenter_artifact_answer");
                 let (artifact, refreshed_key) = SourceInputProvider::source_host(self)
                     .project_type_store()
                     .indexed()
@@ -688,6 +698,7 @@ macro_rules! owned_lowering_from_source_inputs {
                     verter_session_query::source::artifact_key::FileArtifactKey,
                 )>,
             ) {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::refresh_augmentation_keys");
                 if refreshed.is_empty() {
                     return;
                 }
@@ -708,6 +719,7 @@ macro_rules! owned_lowering_from_source_inputs {
             }
             #[cfg(any(test, feature = "test-support"))]
             fn augmentation_source_env_forced_unobservable(&self) -> bool {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_source_env_forced_unobservable");
                 SourceInputProvider::source_host(self)
                     .augmentation_force_source_env_unobservable
                     .load(std::sync::atomic::Ordering::Relaxed)
@@ -716,6 +728,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 &self,
                 canonical: &str,
             ) -> Option<verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::ordered_sfc_structure");
                 let host = SourceInputProvider::source_host(self);
                 let structure = match SourceInputProvider::source_session_view(self) {
                     Some(view) => host.registered_structure_for_view(canonical, view),
@@ -732,6 +745,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 observed: verter_session_query::analysis::types::Hash16,
                 key: verter_session_query::facts::registry::FactKey,
             ) -> Option<bool> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::member_presence_for_observed_content");
                 let normalized = verter_type_engine::resolver_core::request_ports::IndexedInputs::normalized_analysis_canonical(self, canonical);
                 let identity = verter_type_engine::resolver_core::request_ports::IndexedInputs::artifact_key_for_current_content(self, canonical)?;
                 if identity.content_hash != observed {
@@ -755,6 +769,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 key: verter_session_query::facts::registry::FactKey,
                 lane: verter_session_query::facts::registry::FactLane,
             ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::parse_fact_for_observed_content");
                 let normalized = verter_type_engine::resolver_core::request_ports::IndexedInputs::normalized_analysis_canonical(self, canonical);
                 let identity = verter_type_engine::resolver_core::request_ports::IndexedInputs::artifact_key_for_current_content(self, canonical)?;
                 if identity.content_hash != observed_hash {
@@ -775,6 +790,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 source: &verter_session_query::inputs::shallow::ShallowInputRecord,
                 origin: &verter_type_expr::span_origins::MemberSpansOrigin,
             ) -> verter_type_expr::MemberSpans {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::recover_member_spans");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return Default::default();
@@ -790,6 +806,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 verter_session_query::source::deref::DerefedAuthoredBody,
                 verter_session_query::source::deref::LocatorBodyDerefError,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::deref_authored_body");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss);
@@ -806,6 +823,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_type_from_input");
                 let Some(bundle) = SourceInputProvider::prepared(self, input) else {
                     missing_source();
                     return Ok(None);
@@ -818,6 +836,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 name: &str,
             ) -> verter_session_query::inputs::prepared::PreparedTypeDeclResolution {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_type_for_projection");
                 let Some(bundle) = SourceInputProvider::prepared(self, input) else {
                     missing_source();
                     return verter_session_query::inputs::prepared::PreparedTypeDeclResolution::Missing;
@@ -835,6 +854,7 @@ macro_rules! owned_lowering_from_source_inputs {
             ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<
                 verter_session_query::type_solver::PreparedTypeDecl,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::prepare_augmentation_type");
                 let Some(bundle) = SourceInputProvider::prepared(self, input) else {
                     missing_source();
                     return verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss;
@@ -850,6 +870,7 @@ macro_rules! owned_lowering_from_source_inputs {
             ) -> verter_session_query::inputs::prepared::PreparedDeclOutcome<
                 verter_session_query::type_solver::PreparedValueDecl,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::prepare_augmentation_value");
                 let Some(bundle) = SourceInputProvider::prepared(self, input) else {
                     missing_source();
                     return verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss;
@@ -858,12 +879,14 @@ macro_rules! owned_lowering_from_source_inputs {
             }
 
             fn lower_authored_body(&self, locator: &AuthoredBodyLocator) -> QueryHostServe {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::lower_authored_body");
                 lower_authored(self, locator)
             }
             fn prepare_function_structure(
                 &self,
                 key: &FlowSliceFunctionKey,
             ) -> Result<Option<KeyedFunctionStructure>, FlowBindingMapError> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::prepare_function_structure");
                 prepare_structure(self, key)
             }
             fn transient_type_parts(
@@ -874,6 +897,7 @@ macro_rules! owned_lowering_from_source_inputs {
             ) -> verter_session_query::source::demand::DemandOutcome<
                 verter_session_query::source::transient_parts::TransientTypeParts,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::transient_type_parts");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return verter_session_query::source::demand::DemandOutcome::LeaseMiss;
@@ -888,6 +912,7 @@ macro_rules! owned_lowering_from_source_inputs {
             ) -> verter_session_query::source::demand::DemandOutcome<
                 verter_session_query::source::transient_parts::TransientValueParts,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::transient_value_parts");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return verter_session_query::source::demand::DemandOutcome::LeaseMiss;
@@ -901,6 +926,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 name: &str,
             ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredValueDecl>> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::lowered_value_decl");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return None;
@@ -913,6 +939,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 name: &str,
             ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredTypeDecl>> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::effective_type_decl");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return None;
@@ -925,6 +952,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 name: &str,
             ) -> Option<Arc<verter_semantic_source::decl_body_memo::LoweredValueDecl>> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::effective_value_decl");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return None;
@@ -937,6 +965,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 name: &str,
             ) -> Option<Arc<verter_session_query::inputs::shallow::ClassifiedTypeDeps>> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::type_dependencies");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return None;
@@ -951,6 +980,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 verter_type_expr::TypeExpr,
                 verter_session_query::source::deref::LocatorBodyDerefError,
             > {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::deref_type_argument");
                 let Some(source) = SourceInputProvider::source(self, source) else {
                     missing_source();
                     return Err(verter_session_query::source::deref::LocatorBodyDerefError::LeaseMiss);
