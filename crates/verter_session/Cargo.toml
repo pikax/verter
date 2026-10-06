@@ -20,6 +20,22 @@ currency_probe = ["verter_workspace/currency_probe"]
 # tests can read the CSS-domain counters. NOT in `default`; requested by this
 # crate's test self-edge only. No production binary enables it.
 attribution = ["verter_audit/attribution"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# forwards it to every lower layer this crate builds on and implies the legacy
+# measurement features above plus `hotpath`. Requested only by the `verter_bench`
+# measurement harness; no production edge enables it.
+semantic-observe = [
+  "verter_audit/semantic-observe",
+  "verter_scheduler/semantic-observe",
+  "verter_workspace/semantic-observe",
+  "verter_semantic/semantic-observe",
+  "verter_compiler/semantic-observe",
+  "verter_semantic_source/semantic-observe",
+  "verter_type_engine/semantic-observe",
+  "attribution",
+  "currency_probe",
+  "hotpath",
+]
 # Opt-in test-support seam for items the SEPARATE integration-test binary
 # (`tests/cases/**`) must see but a normal `cargo build` / `pnpm run build:lsp`
 # / `pnpm dev-extension` (debug or release) must NOT compile. The integration

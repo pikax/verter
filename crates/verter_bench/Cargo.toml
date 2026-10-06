@@ -15,6 +15,7 @@ semantic-observe = [
   "verter_compiler/semantic-observe",
   "verter_workspace/semantic-observe",
   "verter_semantic/semantic-observe",
+  "verter_session/semantic-observe",
   "attribution",
   "currency_probe",
   "hotpath",

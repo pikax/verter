@@ -17,6 +17,9 @@ publish = false
 test-support = ["verter_execution/test-support", "verter_session_query/test-support"]
 # Measurement-only instrumentation, forwarded by `verter_session`'s `hotpath`.
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md).
+# Forwarded by `verter_session`; no production edge enables it.
+semantic-observe = ["verter_audit/semantic-observe", "hotpath"]
 
 # Dependency closure is a layering contract: the engine depends only on the
 # shared query vocabulary, the execution substrate and parser-free leaves — never

@@ -15,6 +15,9 @@ publish = false
 # builds MUST NOT enable this feature; `verter_session`'s own `test-support`
 # forwards it so one session opt-in turns on the matching seam here.
 test-support = ["verter_session_query/test-support", "verter_semantic/test-support"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md).
+# Forwarded by `verter_session`; no production edge enables it.
+semantic-observe = ["verter_audit/semantic-observe", "verter_semantic/semantic-observe"]
 
 # Dependency closure is a layering contract: this crate sits below the type
 # engine and the session, and depends on neither, nor on the workspace, the
