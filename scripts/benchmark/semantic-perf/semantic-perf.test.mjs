@@ -18,8 +18,9 @@ import { test } from "node:test";
 import { classifyVerterAnswer, compactProbeRecord, parseCli, verdict } from "./analyze.mjs";
 import { canonicalDigest, canonicalType } from "./canonical.mjs";
 import { MEASURING_SUFFIX, parseMeasurement } from "./measure-expected.mjs";
-import { sha256Text, toolchainPin } from "./provenance.mjs";
+import { buildProblems, sha256Text, toolchainPin } from "./provenance.mjs";
 import { interpretMeasurement } from "./reference.mjs";
+import { renderMarkdown } from "./report.mjs";
 import {
   sameArchitecture,
   schedule,
@@ -34,8 +35,23 @@ import {
   moduleText,
   scenariosForTier,
   SETTINGS,
+  TIERS,
   tsconfigText,
 } from "./scenarios.mjs";
+import {
+  classifyMeta,
+  requiredStateComparison,
+  sessionArmsOf,
+  sessionInputs,
+} from "./session-analyze.mjs";
+import {
+  allSessions,
+  INCREMENTAL_FACILITY,
+  SESSION_TIERS,
+  sessionProblems,
+  sessionsFor,
+  tscFiles,
+} from "./sessions.mjs";
 import { summarize, timerResolution } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
@@ -754,6 +770,7 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
           identity: {
             debugAssertions: false,
             instrumented: false,
+            captureAvailable: false,
             targetArch: "x86_64",
             nativeArch: "x86_64",
           },
@@ -1565,7 +1582,7 @@ test("environment receipts require SHA-256 digests in tuned and constructed runs
 test("the real quick catalog and invocation manifest validate and reject a missing cell", () => {
   const scenarios = scenariosForTier("quick");
   assert.ok(scenarios.length > 0);
-  const run = syntheticRun();
+  const run = withObserveBuild(syntheticRun());
   Object.assign(run.meta.options, TIER_DEFAULTS.quick);
   run.meta.options.only = [];
   const keys = scenarios.map((s) => `${s.id}/strict`);
@@ -1631,12 +1648,39 @@ test("the real quick catalog and invocation manifest validate and reject a missi
       warmup: p.warmup,
       probe,
       command: [
-        p.arm === "verter-counted" ? "/bin/counted" : p.arm === "tsc-api" ? "node" : "/bin/probe",
+        {
+          "verter-counted": "/bin/counted",
+          "verter-observe": "/bin/observe",
+          "tsc-api": "node",
+        }[p.arm] ?? "/bin/probe",
       ],
     };
   });
+  addSessions(run, sessionsFor("quick", TIERS, []));
   run.summary = summarize(run, expected, scenarios);
   assert.deepEqual(validateRun(run, expected, scenarios).failures, []);
+  // AC: the quick tier holds the INCREMENTAL, EDITOR SESSION and CONCURRENT
+  // workloads with answers validated, a Capacity row per cell, and the
+  // observe build's comparison.
+  assert.deepEqual(run.summary.sessions.cells.map((c) => c.family).sort(), [
+    "concurrent",
+    "editor",
+    "incremental",
+  ]);
+  for (const cell of run.summary.sessions.cells) {
+    assert.equal(cell.arms.verter.class, "matched", cell.key);
+    assert.equal(cell.arms["verter-observe"].class, "matched", cell.key);
+    assert.equal(cell.arms["tsc-api"].class, "reference", cell.key);
+    assert.equal(cell.requiredState.state, "identical", cell.key);
+  }
+  assert.equal(run.summary.cells.length, scenarios.length);
+  for (const cell of run.summary.cells) {
+    assert.ok(cell.capacity?.verter && cell.capacity?.tscApi, `${cell.key} has a capacity row`);
+    assert.equal(cell.observeBuild?.requiredState?.state, "identical", cell.key);
+  }
+  const report = renderMarkdown({ ...run, validation: { ok: true, failures: [], warnings: [] } });
+  for (const section of ["## Session workloads", "## Capacity", "## Observe build"])
+    assert.ok(report.includes(section), `the report has ${section}`);
   // Program roots spelled with the platform's separators are the same
   // program: the probe normalises to forward slashes, and validation must
   // not depend on which spelling a record carries.
@@ -1648,4 +1692,383 @@ test("the real quick catalog and invocation manifest validate and reject a missi
   assert.ok(
     validateRun(run, expected, scenarios).failures.some((f) => /recorded scenarios/.test(f)),
   );
+});
+
+// ---------------------------------------------------------------- session workloads
+
+const verterObservation = (text) => ({
+  text,
+  error: null,
+  shape: "union",
+  unionMembers: null,
+  unknownLeaves: 0,
+  unknownSamples: [],
+  conditionalNodes: 0,
+});
+const RETENTION = {
+  semanticNodes: 5,
+  semanticMemoEntries: 4,
+  relationProofs: 0,
+  relateKeys: 0,
+  unionViews: 1,
+  shapeCacheEntries: 0,
+  activeBytes: 0,
+  retainedBytes: 100,
+  pinnedBytes: 0,
+  peakTotalBytes: 120,
+};
+const isConcurrent = (step) => Boolean(step.concurrent && step.requests.length > 1);
+
+/** A Verter session record answering `session`'s script with its constructed answers (or `answers[step/request]`). */
+function verterSessionRecord(session, { arm = "verter", answers = {} } = {}) {
+  return {
+    schema: 1,
+    tool: "verter",
+    kind: "session",
+    observability: false,
+    captureAvailable: arm === "verter-observe",
+    stage: "complete",
+    pid: 1,
+    phases: { engineStart: 10, setup: 100, init: 50 },
+    initOutcome: { kind: "value" },
+    steps: session.steps.map((step, s) => {
+      if (step.kind === "edit") return { kind: "edit", file: step.file, micros: 20 };
+      if (step.kind === "meta")
+        return {
+          kind: "meta",
+          file: step.file,
+          micros: 30,
+          outcome: { kind: "value" },
+          surface: structuredClone(step.expect),
+        };
+      return {
+        kind: "demand",
+        concurrent: isConcurrent(step),
+        threads: isConcurrent(step) ? step.requests.length : 1,
+        wallMicros: 100,
+        requests: step.requests.map((r, k) => ({
+          file: r.file,
+          alias: r.alias,
+          micros: 50,
+          outcome: { kind: "value" },
+          observation: verterObservation(answers[`${s}/${k}`] ?? r.expect),
+        })),
+      };
+    }),
+    afterSteps: {
+      pid: 1,
+      metric: "private-commit",
+      peakBytes: 2000,
+      currentBytes: 1500,
+      cpuMicros: 1,
+    },
+    statsErrors: [],
+    retention: { ...RETENTION },
+  };
+}
+
+/** A tsc session record: answers, and the API snapshot evidence of program reuse. */
+function tscSessionRecord(session, projectDir, { answers = {} } = {}) {
+  let snapshot = 1;
+  return {
+    schema: 1,
+    tool: "tsc",
+    kind: "session",
+    stage: "complete",
+    incremental: INCREMENTAL_FACILITY,
+    tscExe: "/tsc/tsc",
+    serverPid: 2,
+    rootFiles: ["lib.bench.d.ts", ...tscFiles(session)].map((f) => `${projectDir}/${f}`),
+    phases: { spawnMs: 1, setupMs: 2, setupRoundTripMs: 3, initMs: 1, initRoundTripMs: 2 },
+    initOutcome: { kind: "value" },
+    steps: session.steps.map((step, s) => {
+      if (step.kind === "meta") return { kind: "meta", file: step.file, applicable: false };
+      if (step.kind === "edit")
+        return {
+          kind: "edit",
+          file: step.file,
+          serverMs: 0.3,
+          roundTripMs: 1,
+          snapshot: ++snapshot,
+          fileChanges: { changed: [`${projectDir}/${step.file}`] },
+        };
+      return {
+        kind: "demand",
+        concurrent: isConcurrent(step),
+        threads: isConcurrent(step) ? step.requests.length : 1,
+        basis: isConcurrent(step) ? "round-trip" : "server",
+        wallMs: 2,
+        requests: step.requests.map((r, k) => ({
+          file: r.file,
+          alias: r.alias,
+          serverMs: isConcurrent(step) ? null : 1,
+          outcome: { kind: "value" },
+          observation: {
+            text: answers[`${s}/${k}`] ?? r.expect,
+            error: null,
+            errorType: false,
+            unionMembers: null,
+          },
+        })),
+      };
+    }),
+    serverAfterSteps: {
+      pid: 2,
+      metric: "private-commit",
+      peakBytes: 3000,
+      currentBytes: 2500,
+      cpuMicros: 1,
+    },
+    statsErrors: [],
+  };
+}
+
+/** Add `sessions`' records to `run` in its counterbalanced session plan. */
+function addSessions(run, sessions) {
+  const o = run.meta.options;
+  run.meta.sessions = Object.fromEntries(
+    sessions.map((session) => [
+      session.id,
+      {
+        id: session.id,
+        family: session.family,
+        note: session.note,
+        dir: `/s/${session.id}`,
+        inputs: sessionInputs(session, "lib"),
+      },
+    ]),
+  );
+  const plan = schedule(
+    sessions.map((x) => x.id),
+    sessionArmsOf(o.arms),
+    o.repeat,
+    o.warmup,
+  );
+  run.meta.sessionPlan = plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`);
+  const byId = new Map(sessions.map((x) => [x.id, x]));
+  run.sessionInvocations = plan.map((p, index) => {
+    const session = byId.get(p.key);
+    const projectDir = `/s/${p.key}/${p.arm}/${p.warmup ? "w" : "r"}${p.rep}/project`;
+    return {
+      index,
+      sessionId: p.key,
+      arm: p.arm,
+      rep: p.rep,
+      warmup: p.warmup,
+      command:
+        p.arm === "tsc-api"
+          ? ["node", "tsc-session-probe.mjs"]
+          : [p.arm === "verter-observe" ? "/bin/observe" : "/bin/probe", "session"],
+      projectDir,
+      supervisorOut: `/nonexistent/s${index}.sup.json`,
+      supervisorExit: 0,
+      supervisor: supervisorRecord({ timeoutMs: o.timeoutMs + o.startupAllowanceMs }),
+      sessionOut: `/nonexistent/s${index}.session.json`,
+      spawnedAtMs: 1000,
+      phase: "done",
+      phaseHistory: [{ phase: "done", atMs: 1010 }],
+      session:
+        p.arm === "tsc-api"
+          ? tscSessionRecord(session, projectDir)
+          : verterSessionRecord(session, { arm: p.arm }),
+    };
+  });
+  return run;
+}
+
+/** The run's observe build: the probe with semantic-observe compiled in. */
+function withObserveBuild(run) {
+  run.meta.binaries.observe = {
+    sha256: "o",
+    pinned: "/bin/observe",
+    identity: {
+      debugAssertions: false,
+      instrumented: false,
+      captureAvailable: true,
+      targetArch: "x86_64",
+      nativeArch: "x86_64",
+    },
+  };
+  run.meta.binariesAfter.observe = "o";
+  const packages = structuredClone(run.meta.build.packages);
+  packages.verter_bench.features = ["attribution", "currency_probe", "hotpath", "semantic-observe"];
+  packages.verter_audit.features = ["attribution", "semantic-observe"];
+  run.meta.observeBuild = { ...run.meta.build, observe: true, packages };
+  return run;
+}
+
+/** A synthetic run with the incremental session (verter and tsc-api arms). */
+function sessionRun() {
+  const run = syntheticRun();
+  run.meta.options.only = ["synthetic", "incremental-edits"];
+  addSessions(run, sessionsFor("quick", TIERS, run.meta.options.only));
+  return resummarize(run);
+}
+const INCREMENTAL = allSessions().find((x) => x.id === "incremental-edits");
+
+test("the session catalog is well-formed and its workloads sit in the quick tier", () => {
+  const sessions = allSessions();
+  assert.deepEqual(sessions.map((x) => x.family).sort(), ["concurrent", "editor", "incremental"]);
+  for (const session of sessions) {
+    assert.deepEqual(sessionProblems(session), [], session.id);
+    assert.equal(SESSION_TIERS[session.id], "quick");
+  }
+  // The incremental script edits a leaf, an intermediate type and an
+  // unrelated file, re-requesting after each; the editor session demands
+  // component metadata; the concurrent one issues its demands at once.
+  assert.deepEqual(
+    INCREMENTAL.steps.filter((x) => x.kind === "edit").map((x) => x.file),
+    ["leaf.ts", "mid.ts", "unrelated.ts"],
+  );
+  assert.ok(sessions.find((x) => x.family === "editor").steps.some((x) => x.kind === "meta"));
+  assert.ok(sessions.find((x) => x.family === "concurrent").steps.every((x) => isConcurrent(x)));
+  // A malformed construction is refused.
+  const broken = structuredClone(INCREMENTAL);
+  broken.steps[1].text = broken.files["leaf.ts"];
+  broken.steps[0].requests[0].alias = "__Missing";
+  const problems = sessionProblems(broken);
+  assert.ok(problems.some((p) => /changes nothing/.test(p)));
+  assert.ok(problems.some((p) => /declares __Missing 0 times/.test(p)));
+});
+
+test("a session run validates; tsc contradicting a constructed answer fails it, a wrong Verter answer is a finding", () => {
+  const run = sessionRun();
+  assert.deepEqual(validate(run).failures, []);
+  const cell = run.summary.sessions.cells[0];
+  assert.equal(cell.arms.verter.class, "matched");
+  // Every edit and every re-request after it is compared.
+  assert.deepEqual(
+    cell.comparison.map((c) => `${c.step}:${c.kind}`),
+    ["0:demand", "1:edit", "2:demand", "3:edit", "4:demand", "5:edit", "6:demand"],
+  );
+
+  const wrongTsc = sessionRun();
+  wrongTsc.sessionInvocations.find((i) => i.arm === "tsc-api").session = tscSessionRecord(
+    INCREMENTAL,
+    wrongTsc.sessionInvocations.find((i) => i.arm === "tsc-api").projectDir,
+    { answers: { "2/0": '1 | "m" | "mid0"' } },
+  );
+  failsWith(resummarize(wrongTsc), /wrong answer against the constructed answer/);
+
+  const wrongVerter = sessionRun();
+  for (const inv of wrongVerter.sessionInvocations.filter((i) => i.arm === "verter"))
+    inv.session = verterSessionRecord(INCREMENTAL, { answers: { "2/0": '1 | "m" | "mid0"' } });
+  resummarize(wrongVerter);
+  assert.deepEqual(validate(wrongVerter).failures, []);
+  const verter = wrongVerter.summary.sessions.cells[0].arms.verter;
+  assert.equal(verter.class, "mismatch");
+  assert.equal(verter.demands.find((d) => d.step === 2).class, "mismatch");
+  // The stale answer after the leaf edit is never compared.
+  assert.ok(!wrongVerter.summary.sessions.cells[0].comparison.some((c) => c.step === 2));
+});
+
+test("tsc's incremental arm must reuse the API program: each edit names its file and advances the snapshot", () => {
+  const noReuse = sessionRun();
+  const inv = noReuse.sessionInvocations.find((i) => i.arm === "tsc-api");
+  inv.session.steps[1].fileChanges = { invalidateAll: true };
+  failsWith(noReuse, /did not name the edited file/);
+
+  const stale = sessionRun();
+  const staleInv = stale.sessionInvocations.find((i) => i.arm === "tsc-api");
+  staleInv.session.steps[3].snapshot = staleInv.session.steps[1].snapshot;
+  failsWith(stale, /did not advance the API snapshot/);
+
+  const other = sessionRun();
+  other.sessionInvocations.find((i) => i.arm === "tsc-api").session.incremental = "fresh-program";
+  failsWith(other, /incremental facility/);
+});
+
+test("session records must follow the script, and the stored session summary must match them", () => {
+  const skipped = sessionRun();
+  skipped.sessionInvocations.find((i) => i.arm === "verter").session.steps.pop();
+  failsWith(resummarize(skipped), /steps recorded, the script has/);
+
+  const missing = sessionRun();
+  missing.sessionInvocations.pop();
+  failsWith(missing, /missing session record/);
+
+  const claimed = sessionRun();
+  for (const inv of claimed.sessionInvocations.filter((i) => i.arm === "verter"))
+    inv.session = verterSessionRecord(INCREMENTAL, { answers: { "0/0": "never" } });
+  // The stored summary still claims the match.
+  failsWith(claimed, /stored session summary disagrees/);
+
+  const observe = sessionRun();
+  observe.sessionInvocations.find((i) => i.arm === "verter").session.captureAvailable = true;
+  failsWith(observe, /capture availability/);
+});
+
+test("a component's metadata is matched only on equal prop names, required flags and events", () => {
+  const expect = {
+    props: [
+      { name: "items", required: true },
+      { name: "size", required: false },
+    ],
+    events: ["focus"],
+  };
+  const step = (surface) => ({ kind: "meta", outcome: { kind: "value" }, surface });
+  assert.equal(classifyMeta(step(structuredClone(expect)), expect).class, "matched");
+  const reordered = { props: [...expect.props].reverse(), events: ["focus"] };
+  assert.equal(classifyMeta(step(reordered), expect).class, "matched");
+  const required = structuredClone(expect);
+  required.props[1].required = true;
+  assert.equal(classifyMeta(step(required), expect).class, "mismatch");
+  assert.equal(classifyMeta(step({ ...expect, events: [] }), expect).class, "mismatch");
+  assert.equal(
+    classifyMeta({ kind: "meta", outcome: { kind: "fault", detail: "x" } }, expect).class,
+    "error",
+  );
+});
+
+test("the observe arm's build carries semantic-observe, the production probe never does, and both retain one REQUIRED state", () => {
+  const run = withObserveBuild(syntheticRun());
+  assert.deepEqual(buildProblems(run.meta.observeBuild), []);
+  // The gate itself is required of the observe build ...
+  const gateless = structuredClone(run.meta.observeBuild);
+  gateless.packages.verter_bench.features = ["attribution"];
+  assert.ok(buildProblems(gateless).some((p) => /lacks semantic-observe/.test(p)));
+  // ... and refused in the production build.
+  const production = structuredClone(run.meta.build);
+  production.packages.verter_audit.features = ["semantic-observe"];
+  assert.ok(buildProblems(production).some((p) => /semantic-observe/.test(p)));
+  const captured = syntheticRun();
+  captured.meta.binaries.probe.identity.captureAvailable = true;
+  failsWith(captured, /capture compiled in/);
+
+  const a = { ...RETENTION };
+  assert.equal(requiredStateComparison([a, a], [{ ...a }]).state, "identical");
+  // Histories and peaks are optional state: they may differ.
+  assert.equal(requiredStateComparison([a], [{ ...a, peakTotalBytes: 999 }]).state, "identical");
+  const differs = requiredStateComparison([a], [{ ...a, semanticNodes: 6 }]);
+  assert.equal(differs.state, "differs");
+  assert.deepEqual(differs.fields, ["semanticNodes"]);
+  assert.equal(
+    requiredStateComparison([a, { ...a, relateKeys: 2 }], [a]).state,
+    "nondeterministic",
+  );
+});
+
+test("the Capacity row reports each arm's outcome, and a kill's tree peak and time to it", () => {
+  const run = syntheticRun();
+  const inv = firstOf(run, "tsc-api");
+  inv.supervisor = supervisorRecord({
+    killedBy: "memory",
+    exitCode: null,
+    peakBytes: 9e9,
+    wallMs: 4321,
+    timeoutMs: 1500,
+  });
+  inv.supervisorExit = 137;
+  inv.phase = "cold";
+  inv.probe = null;
+  resummarize(run);
+  const row = run.summary.cells[0].capacity;
+  assert.equal(row.budgetBytes, MEM_MB * 1024 * 1024);
+  assert.equal(row.verter.outcome, "matched");
+  assert.equal(row.tscApi.kills, 1);
+  // A tsc API tree's memory kill is never attributed to the engine.
+  assert.equal(row.tscApi.attributedKills, 0);
+  assert.equal(row.tscApi.peakAtKillBytes.median, 9e9);
+  assert.equal(row.tscApi.timeToKillMs.median, 4321);
+  assert.deepEqual(row.tscApi.killedBy, ["memory"]);
 });

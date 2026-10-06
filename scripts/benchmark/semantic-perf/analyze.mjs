@@ -21,6 +21,13 @@ export const ARMS = {
     headline: false,
     label: "Verter, observability on (labelled; not compared)",
   },
+  "verter-observe": {
+    tool: "verter",
+    kind: "probe",
+    headline: false,
+    label:
+      "Verter built with semantic-observe (optional capture compiled in; the production probe has it physically compiled out; labelled; not compared)",
+  },
   "verter-counted": {
     tool: "verter",
     kind: "probe",
