@@ -257,15 +257,14 @@ const SFC_FIXTURES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The fixtures whose component metadata the lane demands.
+const SFC_COMPONENTS: &[&str] = &["table.vue", "tabs.vue", "editor_toolbar.vue"];
+
 /// Profile component metadata over the vendored SFC fixtures.
 pub fn profile_component_meta() -> LaneProfile {
     let (_workspace, host) = fresh_host();
     let id = |name: &str| format!("{PROJECT_ROOT}/{name}");
-    let components: Vec<String> = SFC_FIXTURES
-        .iter()
-        .filter(|(name, _)| name.ends_with(".vue"))
-        .map(|(name, _)| id(name))
-        .collect();
+    let components: Vec<String> = SFC_COMPONENTS.iter().map(|name| id(name)).collect();
     let mut phases = Vec::new();
     let ((), p) = phase(&host, "setup", || {
         host.configure_projects(vec![verter_workspace::ide_project_config(
@@ -338,7 +337,7 @@ pub fn main() -> std::process::ExitCode {
     let json = serde_json::to_string_pretty(&lanes).expect("profile serialises");
     match out {
         Some(path) => {
-            if let Err(err) = std::fs::write(&path, json) {
+            if let Err(err) = super::disk::write(&path, &json) {
                 eprintln!("write {}: {err}", path.display());
                 return std::process::ExitCode::FAILURE;
             }
