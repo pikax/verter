@@ -53,6 +53,10 @@ const PAGE_SIZE: u32 = 100;
 const LISTING_RETRIES: u8 = 3;
 const MAX_SCAN_MISMATCHES: u8 = 3;
 const WORKFLOW_PATH: &str = ".github/workflows/validation-probe.yml";
+/// The workflow's default-branch triggers. Only runs started by one of these
+/// carry a trusted observation; a pull-request run is never trusted, whatever
+/// its head branch is named.
+const TRUSTED_EVENTS: [&str; 2] = ["schedule", "workflow_dispatch"];
 
 /// Cold or warm execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1542,7 +1546,7 @@ impl ObservationInventory {
                 continue;
             };
             if run.path != WORKFLOW_PATH
-                || run.event != "push"
+                || !TRUSTED_EVENTS.contains(&run.event.as_str())
                 || run.conclusion != "success"
                 || run.head_branch != repo.default_branch
                 || run.run_attempt != name_attempt

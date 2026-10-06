@@ -1133,7 +1133,7 @@ fn trusted_run() -> WorkflowRun {
     WorkflowRun {
         id: 1,
         path: ".github/workflows/validation-probe.yml".to_string(),
-        event: "push".to_string(),
+        event: "schedule".to_string(),
         conclusion: "success".to_string(),
         head_branch: "main".to_string(),
         run_attempt: 1,
@@ -1337,6 +1337,33 @@ fn a_post_cutoff_insert_that_shifts_a_page_does_not_change_membership() {
         ObservationInventory::fetch_with(&source, dir.path()).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(inventory.artifacts.len(), 1);
     assert!(source.scans.get() >= 2);
+}
+
+/// Only the workflow's own default-branch triggers are trusted: the nightly
+/// schedule and a manual dispatch. A pull-request run is refused even when its
+/// head branch is spelled like the default branch (a fork's `main`), and so is
+/// any event the workflow is not triggered by.
+#[test]
+fn only_scheduled_or_dispatched_default_branch_runs_are_trusted() {
+    for (event, trusted) in [
+        ("schedule", true),
+        ("workflow_dispatch", true),
+        ("pull_request", false),
+        ("pull_request_target", false),
+        ("push", false),
+    ] {
+        let mut source = base_mock();
+        source.runs.get_mut(&1).expect("run").event = event.to_string();
+        let dir = fetch_dir();
+        let inventory = ObservationInventory::fetch_with(&source, dir.path())
+            .unwrap_or_else(|e| panic!("{event}: {e}"));
+        assert_eq!(
+            inventory.artifacts.len(),
+            usize::from(trusted),
+            "a `{event}` run on the default branch must be {}",
+            if trusted { "trusted" } else { "refused" },
+        );
+    }
 }
 
 /// LISTING_RETRIES is three total attempts. One transient page failure is
