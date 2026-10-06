@@ -3069,19 +3069,21 @@ fn event_names_concrete_non_literal_arm_is_skipped_not_failed() {
     let number = prim(&graph, PrimitiveKind::Number);
     let symbol = prim(&graph, PrimitiveKind::Symbol);
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
-    let nominal = graph.intern_node(SemanticNodeData::new_nominal_typeof(
-        verter_type_engine::semantic_query::ValueRootKey {
-            scope: ScopeId::file(Arc::from("/events.ts"), owner),
-            name: Arc::from("TOKEN"),
-        },
-        Arc::from([]),
-        verter_type_expr::facts::ValueDeclIdentityPart {
-            canonical_id: Arc::from("/events.ts"),
-            owner,
-            symbol: Arc::from("TOKEN"),
-            member_path: Arc::from([]),
-        },
-    ));
+    let nominal = graph.intern_node(
+        verter_type_engine::semantic_query::new_nominal_typeof_for_tests(
+            verter_type_engine::semantic_query::ValueRootKey {
+                scope: ScopeId::file(Arc::from("/events.ts"), owner),
+                name: Arc::from("TOKEN"),
+            },
+            Arc::from([]),
+            verter_type_expr::facts::ValueDeclIdentityPart {
+                canonical_id: Arc::from("/events.ts"),
+                owner,
+                symbol: Arc::from("TOKEN"),
+                member_path: Arc::from([]),
+            },
+        ),
+    );
     for (label, leaf) in [("number", number), ("symbol", symbol), ("nominal", nominal)] {
         let names_union = union(&graph, vec![a, leaf]);
         let f = function(
@@ -3803,9 +3805,9 @@ fn realize_of_derived_union_collapses_duplicate_realized_arms() {
     // The production shape: `default: SlotA | SlotB` raises an AUTHORED
     // union shell of reference carriers.
     let authored = graph.intern_node(SemanticNodeData::Union(
-        verter_type_engine::semantic_query::composite::CompositeList::authored_shell(Arc::from(
-            vec![via_one, via_two].into_boxed_slice(),
-        )),
+        verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
+            Arc::from(vec![via_one, via_two].into_boxed_slice()),
+        ),
     ));
     assert_eq!(
         realize_callable_member(&dispatch, authored, navigate()).resolved_for_tests(),

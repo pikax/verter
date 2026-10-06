@@ -18,8 +18,8 @@ error[E0053]: method `query` has an incompatible type for trait
 38 |     fn query(&self, _project: &BoundProject, _query: Query) -> Result<QueryOutcome, EngineError> {
    |                               ^^^^^^^^^^^^^ expected `CertifiedTypeEngineBinding`, found `BoundProject`
    |
-   = note: expected signature `fn(&Seam, &CertifiedTypeEngineBinding, Query) -> std::result::Result<verter_session::external_ts::QueryOutcome, EngineError>`
-              found signature `fn(&Seam, &BoundProject, Query) -> std::result::Result<verter_session::external_ts::QueryOutcome, EngineError>`
+   = note: expected signature `fn(&Seam, &CertifiedTypeEngineBinding, Query) -> std::result::Result<QueryOutcome, EngineError>`
+              found signature `fn(&Seam, &BoundProject, Query) -> std::result::Result<QueryOutcome, EngineError>`
 help: change the parameter type to match the trait
    |
 38 -     fn query(&self, _project: &BoundProject, _query: Query) -> Result<QueryOutcome, EngineError> {

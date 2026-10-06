@@ -961,7 +961,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `substitutions` accumulates `(param_name, arg_id)` facts for
     /// `SubstituteTypeParam` origin-edge emission at the shell level.
     #[allow(clippy::too_many_arguments)]
-    pub fn shallow_lower_type_expr_with_context(
+    pub(crate) fn shallow_lower_type_expr_with_context(
         &self,
         expr: &TypeExpr,
         env: &FxHashMap<String, SemanticNodeId>,
@@ -975,6 +975,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let infer_binders = crate::semantic_query::InferBinderFactory::new(scope, expr);
         self.lower_type_expr_with_infer_factory(
             &infer_binders,
+            expr,
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+            substitutions,
+            reduction_context,
+        )
+    }
+
+    /// Test-support entry to [`Self::shallow_lower_type_expr_with_context`]
+    /// for the host's lowering suites; the reducing lowerer stays
+    /// crate-private.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn shallow_lower_type_expr_with_context_for_tests(
+        &self,
+        expr: &TypeExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        reduction_context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        self.shallow_lower_type_expr_with_context(
             expr,
             env,
             scope,

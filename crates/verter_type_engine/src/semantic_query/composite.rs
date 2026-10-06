@@ -381,7 +381,15 @@ impl<K: CompositeKind> CompositeList<K> {
 
     /// Mint under [`CompositeCarrierCategory::AuthoredShell`].
     #[must_use]
-    pub fn authored_shell(members: Arc<[SemanticNodeId]>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn authored_shell_for_tests(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::authored_shell(members)
+    }
+
+    /// Mint under [`CompositeCarrierCategory::AuthoredShell`].
+    #[must_use]
+    pub(crate) fn authored_shell(members: Arc<[SemanticNodeId]>) -> Self {
         Self::minted(
             members,
             CompositeCarrierCategory::AuthoredShell(AuthoredShellMint { _sealed: () }),
@@ -390,7 +398,15 @@ impl<K: CompositeKind> CompositeList<K> {
 
     /// Mint under [`CompositeCarrierCategory::OrderedCarrier`].
     #[must_use]
-    pub fn ordered_carrier(members: Arc<[SemanticNodeId]>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn ordered_carrier_for_tests(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::ordered_carrier(members)
+    }
+
+    /// Mint under [`CompositeCarrierCategory::OrderedCarrier`].
+    #[must_use]
+    pub(crate) fn ordered_carrier(members: Arc<[SemanticNodeId]>) -> Self {
         Self::minted(
             members,
             CompositeCarrierCategory::OrderedCarrier(OrderedCarrierMint { _sealed: () }),
@@ -439,7 +455,15 @@ impl<K: CompositeKind> CompositeList<K> {
 
     /// Mint under [`CompositeCarrierCategory::QuerySubject`].
     #[must_use]
-    pub fn query_subject(members: Arc<[SemanticNodeId]>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn query_subject_for_tests(members: Arc<[SemanticNodeId]>) -> Self {
+        Self::query_subject(members)
+    }
+
+    /// Mint under [`CompositeCarrierCategory::QuerySubject`].
+    #[must_use]
+    pub(crate) fn query_subject(members: Arc<[SemanticNodeId]>) -> Self {
         Self::minted(
             members,
             CompositeCarrierCategory::QuerySubject(QuerySubjectMint { _sealed: () }),

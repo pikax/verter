@@ -4,12 +4,12 @@ error[E0308]: arguments to this function are incorrect
   |     let _ = EngineStores::create(live_graph, live_account, &counter);
   |             ^^^^^^^^^^^^^^^^^^^^
   |
-note: expected `Option<Arc<MetaProvenance>>`, found `Arc<SemanticGraphStore>`
+note: expected `Option<Arc<EngineProvenance>>`, found `Arc<SemanticGraphStore>`
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_reminted_from_live_stores.rs
   |
   |     let _ = EngineStores::create(live_graph, live_account, &counter);
   |                                  ^^^^^^^^^^
-  = note: expected enum `std::option::Option<Arc<MetaProvenance>>`
+  = note: expected enum `std::option::Option<Arc<EngineProvenance>>`
            found struct `Arc<SemanticGraphStore>`
 note: expected `StoreAccount`, found `Arc<SemanticRetentionAccount>`
  --> $WORKSPACE/crates/verter_session/tests/cases/compile-fail/output_authority_not_reminted_from_live_stores.rs
@@ -19,7 +19,7 @@ note: expected `StoreAccount`, found `Arc<SemanticRetentionAccount>`
   = note: expected struct `verter_session_query::retention::StoreAccount`
              found struct `Arc<verter_session_query::retention::SemanticRetentionAccount>`
 note: associated function defined here
- --> $WORKSPACE/crates/verter_session/src/project_semantic_dispatch/engine_resources.rs
+ --> $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/engine_resources.rs
   |
   |     pub fn create(
   |            ^^^^^^

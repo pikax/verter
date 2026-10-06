@@ -317,9 +317,10 @@ fn run_matrix_row(row: &MatrixRow) {
     let stats_before = stats(&host);
     let (forced, dead_fact_reads) = dead_file_fact_reads(&host, || match &row.path {
         Some(path) => force_projecting(&dispatch, &operand, context, Arc::clone(path)),
-        None => match dispatch
-            .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context))
-        {
+        None => match dispatch.force_semantic_operand_for_tests(
+            &operand,
+            SemanticOperandForceRequest::new_for_tests(context),
+        ) {
             verter_type_engine::semantic_query::QueryResult::Value(forced) => forced,
             other => panic!(
                 "row {}: whole-surface force must resolve, got {other:?}",
@@ -398,9 +399,10 @@ fn run_matrix_row(row: &MatrixRow) {
     let warm_nodes_before = interned_nodes(&host);
     let warm_forced = match &row.path {
         Some(path) => force_projecting(&dispatch, &operand, context, Arc::clone(path)),
-        None => match dispatch
-            .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context))
-        {
+        None => match dispatch.force_semantic_operand_for_tests(
+            &operand,
+            SemanticOperandForceRequest::new_for_tests(context),
+        ) {
             verter_type_engine::semantic_query::QueryResult::Value(forced) => forced,
             other => panic!(
                 "row {}: warm whole-surface force must resolve, got {other:?}",
@@ -503,7 +505,7 @@ fn row_conditional_dead_branch() -> MatrixRow {
             // row so the window observes only the conditional's own work.
             let check = match dispatch.force_semantic_operand_for_tests(
                 &mint(dispatch, whole("Text")),
-                SemanticOperandForceRequest::new(ProjectionReductionContext::published(
+                SemanticOperandForceRequest::new_for_tests(ProjectionReductionContext::published(
                     ProjectionMode::Identity,
                 )),
             ) {
@@ -610,7 +612,7 @@ fn row_unrelated_mapped_key() -> MatrixRow {
             // selective demand is actually addressed to.
             let carrier = match dispatch.force_semantic_operand_for_tests(
                 &mint(dispatch, whole("Boxed")),
-                SemanticOperandForceRequest::new(ProjectionReductionContext::published(
+                SemanticOperandForceRequest::new_for_tests(ProjectionReductionContext::published(
                     ProjectionMode::Identity,
                 )),
             ) {
@@ -631,7 +633,7 @@ fn row_unrelated_mapped_key() -> MatrixRow {
         dead_keys: |dispatch| {
             let carrier = match dispatch.force_semantic_operand_for_tests(
                 &mint(dispatch, whole("Boxed")),
-                SemanticOperandForceRequest::new(ProjectionReductionContext::published(
+                SemanticOperandForceRequest::new_for_tests(ProjectionReductionContext::published(
                     ProjectionMode::Identity,
                 )),
             ) {
@@ -784,9 +786,10 @@ fn matrix_dead_key_probe_discriminates() {
         "control precondition: the sibling is untouched before the probe"
     );
     // ...becomes live work the moment it IS demanded.
-    match dispatch
-        .force_semantic_operand_for_tests(&sibling, SemanticOperandForceRequest::new(context))
-    {
+    match dispatch.force_semantic_operand_for_tests(
+        &sibling,
+        SemanticOperandForceRequest::new_for_tests(context),
+    ) {
         verter_type_engine::semantic_query::QueryResult::Value(forced) => {
             // Shallow-by-default: the sibling's value publishes as its local
             // `ColdShell` alias carrier, never the dead file's body.
@@ -896,14 +899,16 @@ fn builtin_utility_route_is_one_instantiate_family() {
 
     let build_key = |name: &str| {
         let key_set = graph.intern_node(SemanticNodeData::Union(
-            verter_type_engine::semantic_query::composite::CompositeList::query_subject(Arc::from(
-                vec![
-                    graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
-                        "foo".to_string(),
-                    ))),
-                ]
-                .into_boxed_slice(),
-            )),
+            verter_type_engine::semantic_query::composite::CompositeList::query_subject_for_tests(
+                Arc::from(
+                    vec![
+                        graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                            "foo".to_string(),
+                        ))),
+                    ]
+                    .into_boxed_slice(),
+                ),
+            ),
         ));
         SemanticQueryKey::Instantiate(InstantiateKey::new(
             dispatch.builtin_type_slot(name),

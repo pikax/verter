@@ -183,7 +183,7 @@ pub(super) fn member_value(symbol: &str, ordinal: u32) -> AuthoredBodyLocator {
 }
 
 pub(super) fn request(mode: ProjectionMode) -> SemanticOperandForceRequest {
-    SemanticOperandForceRequest::new(ProjectionReductionContext::published(mode))
+    SemanticOperandForceRequest::new_for_tests(ProjectionReductionContext::published(mode))
 }
 
 pub(super) fn mint(
@@ -219,9 +219,10 @@ fn force_with_context(
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
 ) -> ForcedSemanticOperand {
-    match dispatch
-        .force_semantic_operand_for_tests(operand, SemanticOperandForceRequest::new(context))
-    {
+    match dispatch.force_semantic_operand_for_tests(
+        operand,
+        SemanticOperandForceRequest::new_for_tests(context),
+    ) {
         QueryResult::Value(forced) => forced,
         other => panic!("operand must force, got {other:?}"),
     }
@@ -495,7 +496,7 @@ fn every_sealed_environment_axis_changes_family_identity_and_wrong_env_refuses_d
         assert_operand_error(
             dispatch.force_semantic_operand_for_tests(
                 &variant,
-                SemanticOperandForceRequest::new(context),
+                SemanticOperandForceRequest::new_for_tests(context),
             ),
             QueryError::StaleSemanticOperand,
         );
@@ -1179,12 +1180,14 @@ fn request_at(
     precision: &SemanticOperandForceProjection,
 ) -> SemanticOperandForceRequest {
     match precision {
-        SemanticOperandForceProjection::WholeSurface => SemanticOperandForceRequest::new(context),
+        SemanticOperandForceProjection::WholeSurface => {
+            SemanticOperandForceRequest::new_for_tests(context)
+        }
         SemanticOperandForceProjection::Path(path) => {
-            SemanticOperandForceRequest::projecting(context, demand_from_known_path(path))
+            SemanticOperandForceRequest::projecting_for_tests(context, demand_from_known_path(path))
         }
         SemanticOperandForceProjection::KeyDomain => {
-            SemanticOperandForceRequest::key_domain(context)
+            SemanticOperandForceRequest::key_domain_for_tests(context)
         }
     }
 }
@@ -2626,7 +2629,7 @@ fn try_force_demanding(
 ) -> QueryResult<ForcedSemanticOperand> {
     dispatch.force_semantic_operand_for_tests(
         operand,
-        SemanticOperandForceRequest::projecting(context, segments),
+        SemanticOperandForceRequest::projecting_for_tests(context, segments),
     )
 }
 
@@ -2640,9 +2643,10 @@ fn force_key_domain(
     operand: &SemanticOperand,
     context: ProjectionReductionContext,
 ) -> ForcedSemanticOperand {
-    match dispatch
-        .force_semantic_operand_for_tests(operand, SemanticOperandForceRequest::key_domain(context))
-    {
+    match dispatch.force_semantic_operand_for_tests(
+        operand,
+        SemanticOperandForceRequest::key_domain_for_tests(context),
+    ) {
         QueryResult::Value(forced) => forced,
         other => panic!("key-domain force must resolve, got {other:?}"),
     }
@@ -2968,18 +2972,21 @@ fn an_empty_residual_path_is_the_whole_surface_precision_and_shares_its_entry() 
     // axis, and only the whole-surface precision converges onto the
     // declaration-source `Instantiate` family the compiler dispatches.
     assert!(
-        SemanticOperandForceRequest::projecting(context, demand_from_known_path(&empty_path()))
-            .demand()
-            .is_whole_surface(),
+        SemanticOperandForceRequest::projecting_for_tests(
+            context,
+            demand_from_known_path(&empty_path())
+        )
+        .demand_is_whole_surface_for_tests(),
         "an empty residual path must canonicalise to the whole-surface precision"
     );
 
     let operand = mint(&dispatch, deep_locator());
     let key = force_key(&dispatch, &operand, context);
     let via_empty_path = force_projecting(&dispatch, &operand, context, empty_path());
-    let via_whole_surface = match dispatch
-        .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context))
-    {
+    let via_whole_surface = match dispatch.force_semantic_operand_for_tests(
+        &operand,
+        SemanticOperandForceRequest::new_for_tests(context),
+    ) {
         QueryResult::Value(forced) => forced,
         other => panic!("whole-surface force must resolve, got {other:?}"),
     };
@@ -3026,7 +3033,7 @@ fn distinct_force_precisions_never_alias_and_warm_repeats_add_no_candidates() {
                 SemanticOperandForceProjection::WholeSurface => match dispatch
                     .force_semantic_operand_for_tests(
                         &operand,
-                        SemanticOperandForceRequest::new(context),
+                        SemanticOperandForceRequest::new_for_tests(context),
                     ) {
                     QueryResult::Value(value) => value.node(),
                     other => panic!("whole-surface force must resolve, got {other:?}"),

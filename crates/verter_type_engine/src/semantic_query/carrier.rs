@@ -378,7 +378,7 @@ impl SemanticNodeData {
     /// minted from prepared facts once; readers never repeat declaration or
     /// route resolution merely to classify the carrier.
     #[must_use]
-    pub fn new_nominal_typeof(
+    pub(crate) fn new_nominal_typeof(
         value_root: ValueRootKey,
         path: Arc<[Arc<str>]>,
         nominal_identity: ValueDeclIdentityPart,

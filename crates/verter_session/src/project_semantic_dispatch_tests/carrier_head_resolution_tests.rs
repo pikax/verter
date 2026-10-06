@@ -206,7 +206,7 @@ fn eager_lower_subject(
     });
     let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
     let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-    dispatch.shallow_lower_type_expr_with_context(
+    dispatch.shallow_lower_type_expr_with_context_for_tests(
         expr,
         &env,
         &scope,
@@ -681,7 +681,7 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         );
         let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        let lowered = dispatch.shallow_lower_type_expr_with_context(
+        let lowered = dispatch.shallow_lower_type_expr_with_context_for_tests(
             &TypeExpr::Ref {
                 name: Arc::from("Sib"),
                 type_arguments: verter_type_expr::empty_type_args(),
@@ -1111,7 +1111,7 @@ fn eager_resolved_with_name_resolution(
     }
     let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
     let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-    let lowered = dispatch.shallow_lower_type_expr_with_context(
+    let lowered = dispatch.shallow_lower_type_expr_with_context_for_tests(
         expr,
         &env,
         &scope,

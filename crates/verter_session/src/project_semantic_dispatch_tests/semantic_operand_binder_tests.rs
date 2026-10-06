@@ -671,8 +671,10 @@ fn refusal_after_a_completed_child_still_withholds_the_forced_candidate() {
         }));
         let guard = RequestContextGuard::install(Arc::clone(&ctx));
 
-        let result = dispatch
-            .force_semantic_operand_for_tests(&operand, SemanticOperandForceRequest::new(context));
+        let result = dispatch.force_semantic_operand_for_tests(
+            &operand,
+            SemanticOperandForceRequest::new_for_tests(context),
+        );
         if cancelling {
             assert!(
                 matches!(result, QueryResult::Error(QueryError::Cancelled)),

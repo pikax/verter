@@ -23982,7 +23982,7 @@ fn constructor_type_lowers_function_like_not_opaque_miss() {
         ProjectionMode::Shallow,
     );
 
-    let lowered = dispatch.shallow_lower_type_expr_with_context(
+    let lowered = dispatch.shallow_lower_type_expr_with_context_for_tests(
         &ctor,
         &env,
         &scope,
@@ -24101,7 +24101,7 @@ fn multi_segment_import_type_with_generic_args_fails_loud_not_silent_drop() {
     // Lower one `ImportType` shape and return its interned node data.
     let lower = |expr: &TypeExpr| -> Arc<SemanticNodeData> {
         let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        let id = dispatch.shallow_lower_type_expr_with_context(
+        let id = dispatch.shallow_lower_type_expr_with_context_for_tests(
             expr,
             &env,
             &scope,
@@ -24251,7 +24251,7 @@ fn typeof_import_value_member_applies_generic_instantiation_args() {
     // Lower one `ImportType` shape and return its interned node data.
     let lower = |expr: &TypeExpr| -> Arc<SemanticNodeData> {
         let mut subs: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        let id = dispatch.shallow_lower_type_expr_with_context(
+        let id = dispatch.shallow_lower_type_expr_with_context_for_tests(
             expr,
             &env,
             &scope,
@@ -31853,9 +31853,9 @@ fn expanded_projection_of_alias_twin_union_collapses_to_the_shared_object() {
         },
     ));
     let base = graph.intern_node(SemanticNodeData::Union(
-        verter_type_engine::semantic_query::composite::CompositeList::authored_shell(Arc::from(
-            vec![placeholder, shared_object].into_boxed_slice(),
-        )),
+        verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
+            Arc::from(vec![placeholder, shared_object].into_boxed_slice()),
+        ),
     ));
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
@@ -31972,7 +31972,7 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
     // routes the changed rebuild through the canonical authority — Global.
     let union_node = graph.intern_node_with_scope(
         SemanticNodeData::Union(
-            verter_type_engine::semantic_query::composite::CompositeList::authored_shell(
+            verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
                 Arc::from(vec![parameter_node, string_node].into_boxed_slice()),
             ),
         ),
@@ -32015,7 +32015,7 @@ fn substituted_union_interns_global_while_callable_intersection_preserves_scope(
     });
     let intersection_node = graph.intern_node_with_scope(
         SemanticNodeData::Intersection(
-            verter_type_engine::semantic_query::composite::CompositeList::authored_shell(
+            verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
                 Arc::from(vec![callable, parameter_node].into_boxed_slice()),
             ),
         ),
@@ -32164,9 +32164,9 @@ fn expanded_projection_preserves_ordered_carrier_arm_order() {
         },
     ));
     let base = graph.intern_node(SemanticNodeData::Union(
-        verter_type_engine::semantic_query::composite::CompositeList::ordered_carrier(Arc::from(
-            vec![placeholder_a, obj_b].into_boxed_slice(),
-        )),
+        verter_type_engine::semantic_query::composite::CompositeList::ordered_carrier_for_tests(
+            Arc::from(vec![placeholder_a, obj_b].into_boxed_slice()),
+        ),
     ));
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,

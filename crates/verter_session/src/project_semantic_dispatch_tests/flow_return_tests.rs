@@ -4492,7 +4492,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                     }
                 })
                 .collect();
-            let published_any = graph.publish_scc_members_fenced(
+            let published_any = graph.publish_scc_members_fenced_for_tests(
                 Some(dispatch.ctx),
                 &verter_type_engine::semantic_query_memo::SccRootWitness::flow_return(
                     root_key.clone(),
@@ -11746,7 +11746,7 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
         );
         let written = graph.intern_node(
             verter_type_engine::semantic_query::SemanticNodeData::Intersection(
-                verter_type_engine::semantic_query::composite::CompositeList::authored_shell(
+                verter_type_engine::semantic_query::composite::CompositeList::authored_shell_for_tests(
                     Arc::from(vec![string, empty].into_boxed_slice()),
                 ),
             ),

@@ -1,140 +1,176 @@
-error[E0603]: enum `InstantiateBodySource` is private
-  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:46:58
-   |
-46 |     let _forged_source = verter_session::semantic_query::InstantiateBodySource::NonFile;
-   |                                                          ^^^^^^^^^^^^^^^^^^^^^  ------- unit variant `NonFile` is not publicly re-exported
-   |                                                          |
-   |                                                          private enum
-   |
-note: the enum `InstantiateBodySource` is defined here
-  --> src/semantic_query.rs
-   |
-   | pub(crate) enum InstantiateBodySource {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
 error[E0599]: no associated function or constant named `non_file_for_tests` found for struct `InstantiateContext` in the current scope
-  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:40:49
+  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:37:49
    |
-40 |     let _deleted_non_file = InstantiateContext::non_file_for_tests(prc, Default::default());
+37 |     let _deleted_non_file = InstantiateContext::non_file_for_tests(prc, Default::default());
    |                                                 ^^^^^^^^^^^^^^^^^^ associated function or constant not found in `InstantiateContext`
+   |
+note: if you're trying to build a new `InstantiateContext` consider using one of the following associated functions:
+      InstantiateContext::file_backed
+      InstantiateContext::non_file
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
+   |
+   | /     pub const fn file_backed(
+   | |         projection_reduction: ProjectionReductionContext,
+   | |         resolve_env_hash: HashValue,
+   | |         parse_env_hash: ParseEnvHash,
+   | |         _witness: crate::project_semantic_dispatch::BodySourceWitness,
+   | |     ) -> Self {
+   | |_____________^
+...
+   | /     pub const fn non_file(
+   | |         projection_reduction: ProjectionReductionContext,
+   | |         resolve_env_hash: HashValue,
+   | |         _witness: crate::project_semantic_dispatch::BodySourceWitness,
+   | |     ) -> Self {
+   | |_____________^
 
 error[E0599]: no associated function or constant named `file_backed_for_tests` found for struct `InstantiateContext` in the current scope
-  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:42:29
+  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:39:29
    |
-42 |         InstantiateContext::file_backed_for_tests(prc, Default::default(), Default::default());
+39 |         InstantiateContext::file_backed_for_tests(prc, Default::default(), Default::default());
    |                             ^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `InstantiateContext`
+   |
+note: if you're trying to build a new `InstantiateContext` consider using one of the following associated functions:
+      InstantiateContext::file_backed
+      InstantiateContext::non_file
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
+   |
+   | /     pub const fn file_backed(
+   | |         projection_reduction: ProjectionReductionContext,
+   | |         resolve_env_hash: HashValue,
+   | |         parse_env_hash: ParseEnvHash,
+   | |         _witness: crate::project_semantic_dispatch::BodySourceWitness,
+   | |     ) -> Self {
+   | |_____________^
+...
+   | /     pub const fn non_file(
+   | |         projection_reduction: ProjectionReductionContext,
+   | |         resolve_env_hash: HashValue,
+   | |         _witness: crate::project_semantic_dispatch::BodySourceWitness,
+   | |     ) -> Self {
+   | |_____________^
+help: there is an associated function `file_backed` with a similar name
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
+   |
+   | /     pub const fn file_backed(
+   | |         projection_reduction: ProjectionReductionContext,
+   | |         resolve_env_hash: HashValue,
+   | |         parse_env_hash: ParseEnvHash,
+   | |         _witness: crate::project_semantic_dispatch::BodySourceWitness,
+   | |     ) -> Self {
+   | |_____________^
 
 error: cannot construct `InstantiateContext` with struct literal syntax due to private fields
-  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:49:27
+  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:46:27
    |
-49 |     let _forged_context = InstantiateContext {
+46 |     let _forged_context = InstantiateContext {
    |                           ^^^^^^^^^^^^^^^^^^
-50 |         projection_reduction: prc,
+47 |         projection_reduction: prc,
    |         ------------------------- private field
-51 |         resolve_env_hash: Default::default(),
+48 |         resolve_env_hash: Default::default(),
    |         ------------------------------------ private field
    |
    = note: ...and other private field `body_source` that was not provided
 help: you might have meant to use an associated function to build this type
    |
-49 -     let _forged_context = InstantiateContext {
-50 -         projection_reduction: prc,
-51 -         resolve_env_hash: Default::default(),
-52 -     };
-49 +     let _forged_context = InstantiateContext::file_backed(_, _, _, _);
+46 -     let _forged_context = InstantiateContext {
+47 -         projection_reduction: prc,
+48 -         resolve_env_hash: Default::default(),
+49 -     };
+46 +     let _forged_context = InstantiateContext::file_backed(_, _, _, _);
    |
-49 -     let _forged_context = InstantiateContext {
-50 -         projection_reduction: prc,
-51 -         resolve_env_hash: Default::default(),
-52 -     };
-49 +     let _forged_context = InstantiateContext::non_file(_, _, _);
+46 -     let _forged_context = InstantiateContext {
+47 -         projection_reduction: prc,
+48 -         resolve_env_hash: Default::default(),
+49 -     };
+46 +     let _forged_context = InstantiateContext::non_file(_, _, _);
    |
 
 error: cannot construct `InstantiateKey` with struct literal syntax due to private fields
-  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:58:23
+  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:55:23
    |
-58 |     let _forged_key = InstantiateKey {
+55 |     let _forged_key = InstantiateKey {
    |                       ^^^^^^^^^^^^^^
-59 |         base: base.clone(),
+56 |         base: base.clone(),
    |         ------------------ private field
-60 |         args: args.clone(),
+57 |         args: args.clone(),
    |         ------------------ private field
    |
    = note: ...and other private fields `source` and `context` that were not provided
 help: you might have meant to use an associated function to build this type
    |
-58 -     let _forged_key = InstantiateKey {
-59 -         base: base.clone(),
-60 -         args: args.clone(),
-61 -     };
-58 +     let _forged_key = InstantiateKey::new(_, _, _);
+55 -     let _forged_key = InstantiateKey {
+56 -         base: base.clone(),
+57 -         args: args.clone(),
+58 -     };
+55 +     let _forged_key = InstantiateKey::new(_, _, _);
    |
-58 -     let _forged_key = InstantiateKey {
-59 -         base: base.clone(),
-60 -         args: args.clone(),
-61 -     };
-58 +     let _forged_key = InstantiateKey::new_authored(_, _, _, _, _, _);
+55 -     let _forged_key = InstantiateKey {
+56 -         base: base.clone(),
+57 -         args: args.clone(),
+58 -     };
+55 +     let _forged_key = InstantiateKey::new_authored(_, _, _, _, _, _);
    |
 
 error[E0559]: variant `SemanticQueryKey::Instantiate` has no field named `base`
-  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:66:9
+  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:63:9
    |
-66 |         base,
+63 |         base,
    |         ^^^^ field does not exist
    |
-  ::: src/semantic_query.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
    |
    |     Instantiate(InstantiateKey),
    |     ----------- `SemanticQueryKey::Instantiate` defined here
    |
 help: `SemanticQueryKey::Instantiate` is a tuple variant, use the appropriate syntax
    |
-65 -     let _forged_variant = SemanticQueryKey::Instantiate {
-66 -         base,
-67 -         args,
-68 -         context: prc,
-69 -     };
-65 +     let _forged_variant = SemanticQueryKey::Instantiate(/* InstantiateKey */);
+62 -     let _forged_variant = SemanticQueryKey::Instantiate {
+63 -         base,
+64 -         args,
+65 -         context: prc,
+66 -     };
+62 +     let _forged_variant = SemanticQueryKey::Instantiate(/* InstantiateKey */);
    |
 
 error[E0559]: variant `SemanticQueryKey::Instantiate` has no field named `args`
-  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:67:9
+  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:64:9
    |
-67 |         args,
+64 |         args,
    |         ^^^^ field does not exist
    |
-  ::: src/semantic_query.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
    |
    |     Instantiate(InstantiateKey),
    |     ----------- `SemanticQueryKey::Instantiate` defined here
    |
 help: `SemanticQueryKey::Instantiate` is a tuple variant, use the appropriate syntax
    |
-65 -     let _forged_variant = SemanticQueryKey::Instantiate {
-66 -         base,
-67 -         args,
-68 -         context: prc,
-69 -     };
-65 +     let _forged_variant = SemanticQueryKey::Instantiate(/* InstantiateKey */);
+62 -     let _forged_variant = SemanticQueryKey::Instantiate {
+63 -         base,
+64 -         args,
+65 -         context: prc,
+66 -     };
+62 +     let _forged_variant = SemanticQueryKey::Instantiate(/* InstantiateKey */);
    |
 
 error[E0559]: variant `SemanticQueryKey::Instantiate` has no field named `context`
-  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:68:9
+  --> tests/cases/compile-fail/instantiate_key_seal_no_features.rs:65:9
    |
-68 |         context: prc,
+65 |         context: prc,
    |         ^^^^^^^ field does not exist
    |
-  ::: src/semantic_query.rs
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
    |
    |     Instantiate(InstantiateKey),
    |     ----------- `SemanticQueryKey::Instantiate` defined here
    |
 help: `SemanticQueryKey::Instantiate` is a tuple variant, use the appropriate syntax
    |
-65 -     let _forged_variant = SemanticQueryKey::Instantiate {
-66 -         base,
-67 -         args,
-68 -         context: prc,
-69 -     };
-65 +     let _forged_variant = SemanticQueryKey::Instantiate(/* InstantiateKey */);
+62 -     let _forged_variant = SemanticQueryKey::Instantiate {
+63 -         base,
+64 -         args,
+65 -         context: prc,
+66 -     };
+62 +     let _forged_variant = SemanticQueryKey::Instantiate(/* InstantiateKey */);
    |

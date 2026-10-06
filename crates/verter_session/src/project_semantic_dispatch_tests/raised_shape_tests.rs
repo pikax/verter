@@ -2622,22 +2622,24 @@ fn publication_score_corpus(
         ),
         (
             "typeof_nominal",
-            graph.intern_node(SemanticNodeData::new_nominal_typeof(
-                verter_type_engine::semantic_query::ValueRootKey {
-                    scope: verter_type_engine::semantic_query::ScopeId::file(
-                        Arc::from("/w/m.ts"),
-                        verter_type_expr::TopLevelOwnerId::module(0),
-                    ),
-                    name: Arc::from("TOKEN"),
-                },
-                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-                verter_type_expr::facts::ValueDeclIdentityPart {
-                    canonical_id: Arc::from("/w/m.ts"),
-                    owner: verter_type_expr::TopLevelOwnerId::module(0),
-                    symbol: Arc::from("TOKEN"),
-                    member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
-                },
-            )),
+            graph.intern_node(
+                verter_type_engine::semantic_query::new_nominal_typeof_for_tests(
+                    verter_type_engine::semantic_query::ValueRootKey {
+                        scope: verter_type_engine::semantic_query::ScopeId::file(
+                            Arc::from("/w/m.ts"),
+                            verter_type_expr::TopLevelOwnerId::module(0),
+                        ),
+                        name: Arc::from("TOKEN"),
+                    },
+                    Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                    verter_type_expr::facts::ValueDeclIdentityPart {
+                        canonical_id: Arc::from("/w/m.ts"),
+                        owner: verter_type_expr::TopLevelOwnerId::module(0),
+                        symbol: Arc::from("TOKEN"),
+                        member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+                    },
+                ),
+            ),
         ),
         ("alias", graph.intern_node(SemanticNodeData::Alias(foo))),
         (

@@ -10,17 +10,6 @@ error[E0277]: the trait bound `SurfaceResolution<Vec<u8>>: std::default::Default
 35 |     let _defaulted: SurfaceResolution<Vec<u8>> = Default::default();
    |                                                  ^^^^^^^^^^^^^^^^^^ the trait `std::default::Default` is not implemented for `SurfaceResolution<Vec<u8>>`
 
-error[E0624]: associated function `incomplete` is private
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:36:66
-   |
-36 |     let _minted: SurfaceResolution<Vec<u8>> = SurfaceResolution::incomplete(todo!());
-   |                                                                  ^^^^^^^^^^ private associated function
-   |
-  ::: src/semantic_query/surface_resolution.rs
-   |
-   |     pub(crate) fn incomplete(reason: NonEmptyReasons) -> Self {
-   |     --------------------------------------------------------- private associated function defined here
-
 warning: unreachable call
   --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:36:47
    |
@@ -42,29 +31,7 @@ error[E0308]: mismatched types
    = note: expected struct `Witnessed<TypeInfoSurface>`
               found struct `TypeInfoSurface`
 note: tuple variant defined here
-  --> src/semantic_query/surface_resolution.rs
+  --> $WORKSPACE/crates/verter_type_engine/src/semantic_query/surface_resolution.rs
    |
    |     Resolved(Witnessed<T>),
    |     ^^^^^^^^
-
-error[E0624]: associated function `resolved` is private
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:40:28
-   |
-40 |         SurfaceResolution::resolved(TypeInfoSurface::empty());
-   |                            ^^^^^^^^ private associated function
-   |
-  ::: src/semantic_query/surface_resolution.rs
-   |
-   |     pub(crate) fn resolved(value: T) -> Self {
-   |     ---------------------------------------- private associated function defined here
-
-error[E0624]: associated function `no_surface` is private
-  --> tests/cases/compile-fail/surface_resolution_empty_success_unconstructible.rs:41:85
-   |
-41 |     let _sealed_no_surface: SurfaceResolution<TypeInfoSurface> = SurfaceResolution::no_surface();
-   |                                                                                     ^^^^^^^^^^ private associated function
-   |
-  ::: src/semantic_query/surface_resolution.rs
-   |
-   |     pub(crate) fn no_surface() -> Self {
-   |     ---------------------------------- private associated function defined here

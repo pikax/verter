@@ -180,7 +180,35 @@ impl SemanticGraphStore {
     /// invalidation aborted a flight, a member's result is not
     /// admissible, or the component cannot fit the retention budget.
     /// Waiting joiners wake on the abort sentinel and retry admission.
-    pub fn publish_scc_members_fenced<C: crate::resolver_core::ResolverCapabilities>(
+    /// Test-support entry to [`Self::publish_scc_members_fenced`] for the
+    /// host's admission suites; the production write stays crate-private.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_scc_members_fenced_for_tests<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        ctx: Option<&dyn crate::resolver_core::ResolverContext<C>>,
+        required_root: &SccRootWitness,
+        carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
+        self_root_canonicals: &Arc<[Arc<str>]>,
+        validated_at_generation: u64,
+        relation_members: Vec<PendingRelationMember>,
+        flow_members: Vec<PendingFlowReturnMember>,
+        call_members: Vec<PendingResolveCallMember>,
+    ) -> bool {
+        self.publish_scc_members_fenced(
+            ctx,
+            required_root,
+            carrier,
+            self_root_canonicals,
+            validated_at_generation,
+            relation_members,
+            flow_members,
+            call_members,
+        )
+    }
+
+    pub(crate) fn publish_scc_members_fenced<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         ctx: Option<&dyn crate::resolver_core::ResolverContext<C>>,
         required_root: &SccRootWitness,

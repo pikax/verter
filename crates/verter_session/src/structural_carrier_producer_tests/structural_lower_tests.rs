@@ -1378,7 +1378,7 @@ fn lower_eager(host: &VerterHost, expr: &TypeExpr) -> SemanticNodeId {
     let name_resolution = FxHashMap::default();
     let shadowing = ScopeShadowing::empty();
     let mut substitutions = Vec::new();
-    dispatch.shallow_lower_type_expr_with_context(
+    dispatch.shallow_lower_type_expr_with_context_for_tests(
         expr,
         &env,
         &fixture_scope(),

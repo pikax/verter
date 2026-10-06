@@ -391,7 +391,7 @@ fn locator_shape_nodes_exclude_caller_relative_stamps() {
     let name_resolution = rustc_hash::FxHashMap::default();
     let shadowing = verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing::empty();
     let mut substitutions = Vec::new();
-    let stamped = dispatch.shallow_lower_type_expr_with_context(
+    let stamped = dispatch.shallow_lower_type_expr_with_context_for_tests(
         &expr,
         &env,
         &scope,
@@ -488,7 +488,7 @@ fn locator_shape_infer_identity_matches_eager_and_relowering() {
     let name_resolution = rustc_hash::FxHashMap::default();
     let shadowing = ScopeShadowing::empty();
     let mut substitutions = Vec::new();
-    let _eager = dispatch.shallow_lower_type_expr_with_context(
+    let _eager = dispatch.shallow_lower_type_expr_with_context_for_tests(
         &expr,
         &env,
         &scope,

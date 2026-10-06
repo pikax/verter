@@ -11572,3 +11572,15 @@ impl<T: NodeRead + ?Sized> NodeRead for &T {
         (**self).node_data(node)
     }
 }
+
+/// Test-support entry to the nominal `TypeOf` carrier mint, for the host's
+/// suites; the mint itself stays crate-private.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub fn new_nominal_typeof_for_tests(
+    value_root: ValueRootKey,
+    path: std::sync::Arc<[std::sync::Arc<str>]>,
+    nominal_identity: verter_type_expr::facts::ValueDeclIdentityPart,
+) -> SemanticNodeData {
+    SemanticNodeData::new_nominal_typeof(value_root, path, nominal_identity)
+}

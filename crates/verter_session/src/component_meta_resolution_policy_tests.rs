@@ -1813,7 +1813,7 @@ fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
     // which the lowered fixtures above cannot guarantee (their heads carry
     // each consumer's own scope).
     {
-        use verter_type_engine::semantic_query::{ScopeId, SemanticNodeData, ValueRootKey};
+        use verter_type_engine::semantic_query::{ScopeId, ValueRootKey};
         let graph = host.project_type_store().semantic_graph();
         let head = || ValueRootKey {
             scope: ScopeId::file(
@@ -1828,16 +1828,20 @@ fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
             symbol: Arc::from("TOKEN"),
             member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
         };
-        let before_retarget = graph.intern_node(SemanticNodeData::new_nominal_typeof(
-            head(),
-            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-            identity_for("/workspace/a/token.ts"),
-        ));
-        let after_retarget = graph.intern_node(SemanticNodeData::new_nominal_typeof(
-            head(),
-            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-            identity_for("/workspace/b/token.ts"),
-        ));
+        let before_retarget = graph.intern_node(
+            verter_type_engine::semantic_query::new_nominal_typeof_for_tests(
+                head(),
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                identity_for("/workspace/a/token.ts"),
+            ),
+        );
+        let after_retarget = graph.intern_node(
+            verter_type_engine::semantic_query::new_nominal_typeof_for_tests(
+                head(),
+                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                identity_for("/workspace/b/token.ts"),
+            ),
+        );
         assert_ne!(
             before_retarget, after_retarget,
             "fixture: same head, distinct identities intern apart"

@@ -2833,7 +2833,7 @@ fn inline_nonbinding_relation_flight_wakes_concurrent_top_level_joiner() {
     let generation = host.project_type_store().current_project_generation();
     let root_witness = seed_relation_scc_root(&store, target, source, generation);
     assert!(
-        store.publish_scc_members_fenced(
+        store.publish_scc_members_fenced_for_tests(
             Some(&host),
             &root_witness,
             &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -2925,7 +2925,7 @@ fn invalidating_an_scc_root_before_member_publish_cannot_resurrect_the_member() 
     let _gate = store.test_relation_member_pre_entries_gate(Arc::clone(&barrier));
     let publisher_store = Arc::clone(&store);
     let publisher = thread::spawn(move || {
-        publisher_store.publish_scc_members_fenced(
+        publisher_store.publish_scc_members_fenced_for_tests(
             None::<
                 &dyn verter_type_engine::resolver_core::ResolverContext<
                     crate::resolver_core::HostCapabilities,
@@ -3160,7 +3160,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let refuse_flight = store
         .begin_inline_relation_flight(&refuse_key)
         .expect("the refused member claims its family flight");
-    let published = store.publish_scc_members_fenced(
+    let published = store.publish_scc_members_fenced_for_tests(
         None::<
             &dyn verter_type_engine::resolver_core::ResolverContext<
                 crate::resolver_core::HostCapabilities,
@@ -3188,7 +3188,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let refuse_flight = store
         .begin_inline_relation_flight(&refuse_key)
         .expect("the refused member re-claims its family flight");
-    let published = store.publish_scc_members_fenced(
+    let published = store.publish_scc_members_fenced_for_tests(
         None::<
             &dyn verter_type_engine::resolver_core::ResolverContext<
                 crate::resolver_core::HostCapabilities,
@@ -3240,7 +3240,7 @@ fn relation_admission_is_decided_only_and_unknown_never_enters() {
     let flight = store
         .begin_inline_relation_flight(&flight_key)
         .expect("fixture: the vacant relation family flight must be claimable");
-    let flight_published = store.publish_scc_members_fenced(
+    let flight_published = store.publish_scc_members_fenced_for_tests(
         Some(&host),
         &root_witness,
         &verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -12304,9 +12304,9 @@ fn release_canonical_drops_the_union_views_of_the_closed_document() {
     let (b_param, _, _, _) = release_intern_document(&store, "/w/b.ts", 1, shared);
     let union_of = |canonical: &str, member: SemanticNodeId| {
         store.intern_node_with_scope(
-            SemanticNodeData::Union(CompositeList::<UnionKind>::authored_shell(Arc::from([
-                member, shared,
-            ]))),
+            SemanticNodeData::Union(CompositeList::<UnionKind>::authored_shell_for_tests(
+                Arc::from([member, shared]),
+            )),
             release_file_scope(canonical, 1),
         )
     };

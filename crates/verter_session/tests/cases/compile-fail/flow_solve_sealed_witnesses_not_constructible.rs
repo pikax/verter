@@ -7,9 +7,7 @@
 //! widened to `pub`, this fixture would COMPILE and trybuild would turn red.
 #![allow(unreachable_code)]
 
-use verter_session::for_tests::{
-    DischargeEvidence, FlowConvergenceEvidence, SealedFlowCompletion,
-};
+use verter_type_engine::project_semantic_dispatch::dispatch_txn::flow_obligation_state::{DischargeEvidence, FlowConvergenceEvidence, SealedFlowCompletion};
 
 fn main() {
     let _ = DischargeEvidence {

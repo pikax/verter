@@ -708,7 +708,7 @@ pub enum ForceProjectionSegment {
 /// spelling, and its [`Self::Path`] carries sealed segments rather than
 /// raw graph handles.
 #[derive(Debug, Clone)]
-pub enum SemanticOperandForceDemand {
+pub(crate) enum SemanticOperandForceDemand {
     /// The explicit whole-surface case.
     WholeSurface,
     /// A non-empty residual path in the sealed segment vocabulary.
@@ -737,7 +737,14 @@ impl SemanticOperandForceRequest {
     /// A whole-surface force: the operand's entire surface at the request
     /// context's precision. The empty path is the EXPLICIT whole-surface
     /// case, never an accidental side effect of forcing a base.
-    pub fn new(context: ProjectionReductionContext) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn new_for_tests(context: ProjectionReductionContext) -> Self {
+        Self::new(context)
+    }
+
+    /// A whole-surface force (see [`Self::new_for_tests`]).
+    pub(crate) fn new(context: ProjectionReductionContext) -> Self {
         Self {
             context,
             demand: SemanticOperandForceDemand::WholeSurface,
@@ -753,7 +760,17 @@ impl SemanticOperandForceRequest {
     /// [`SemanticOperandForceDemand::WholeSurface`] so the two spellings
     /// of "walk nothing" cannot occupy two family identities for one
     /// value.
-    pub fn projecting(
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn projecting_for_tests(
+        context: ProjectionReductionContext,
+        segments: Arc<[ForceProjectionSegment]>,
+    ) -> Self {
+        Self::projecting(context, segments)
+    }
+
+    /// A residual-path force (see the canonicalisation above).
+    pub(crate) fn projecting(
         context: ProjectionReductionContext,
         segments: Arc<[ForceProjectionSegment]>,
     ) -> Self {
@@ -767,7 +784,14 @@ impl SemanticOperandForceRequest {
 
     /// A force requesting the operand's key domain (`keyof`): only
     /// key-producing structure is forced, never member values.
-    pub fn key_domain(context: ProjectionReductionContext) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn key_domain_for_tests(context: ProjectionReductionContext) -> Self {
+        Self::key_domain(context)
+    }
+
+    /// A key-domain force (see [`Self::key_domain_for_tests`]).
+    pub(crate) fn key_domain(context: ProjectionReductionContext) -> Self {
         Self {
             context,
             demand: SemanticOperandForceDemand::KeyDomain,
@@ -782,9 +806,11 @@ impl SemanticOperandForceRequest {
         (self.context, self.demand)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn demand(&self) -> &SemanticOperandForceDemand {
-        &self.demand
+    /// Test-support read: whether the request names the whole-surface precision.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn demand_is_whole_surface_for_tests(&self) -> bool {
+        self.demand.is_whole_surface()
     }
 }
 
