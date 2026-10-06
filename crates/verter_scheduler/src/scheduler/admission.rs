@@ -6,17 +6,19 @@
 
 use super::*;
 
-/// Admit a unit of work into the DAG for `(canonical, generation, task)`.
+/// Admit work for the captured node incarnation and generation.
 /// Returns the submission token. Used by every admission site
 /// (`handle_new_request`, stage-completion driven transitions, etc.).
 pub(super) fn admit_work(
     dag: &mut SchedulerDag,
+    node: &FileNode,
     canonical: &Arc<str>,
     generation: u64,
     task: TaskKind,
     priority: Priority,
     request_context: Option<crate::request_context::OpaqueRequestContext>,
 ) -> Option<crate::dag::SubmissionToken> {
+    let incarnation = node.incarnation_id();
     let (identity, kind) = match task {
         // The live `FileStage{Source}` DAG node maps to `Load`; the
         // load+parse work runs in one source-stage execution path, so
@@ -24,6 +26,7 @@ pub(super) fn admit_work(
         TaskKind::Load => (
             WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 stage: FileStageKey::Source,
             },
@@ -32,6 +35,7 @@ pub(super) fn admit_work(
         TaskKind::Analysis => (
             WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 stage: FileStageKey::Analysis,
             },
@@ -40,6 +44,7 @@ pub(super) fn admit_work(
         TaskKind::Artifact { profile_hash } => (
             WorkNodeIdentity::Artifact {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 profile_hash: profile_hash_to_bytes(profile_hash),
                 content_hash: [0u8; 16],
@@ -59,7 +64,11 @@ pub(super) fn admit_work(
             )
         }
     };
-    dag.submit(identity, kind, priority, Vec::new(), request_context)
+    let token = dag.submit_file(node, identity, kind, priority, Vec::new(), request_context);
+    if token.is_some() && task == TaskKind::Load {
+        node.mark_source_admitted();
+    }
+    token
 }
 
 /// Test-only rendezvous fired by [`Scheduler::handle_new_request_batch`]
@@ -130,14 +139,11 @@ impl BatchAdmitSeamHook {
     }
 }
 
-/// A request after pre-lock preparation (tombstone gate + node ensure),
-/// carrying everything the shared admission core needs to admit it
-/// under the DAG lock. The `node` `Arc` was cloned out of the `nodes`
-/// DashMap so no shard `Ref` is held across `dag.lock()`.
+/// A request carrying its submission lifetime into lock-held admission.
+/// No node or map guard is retained across the lifecycle lock boundary.
 pub(super) struct PreparedRequest {
     pub(super) file_id: String,
     pub(super) canonical: Arc<str>,
-    pub(super) node: Arc<FileNode>,
     pub(super) target: TargetStage,
     pub(super) priority: Priority,
     pub(super) source: Option<Arc<str>>,
@@ -148,15 +154,9 @@ pub(super) struct PreparedRequest {
     /// deliberately does NOT re-home: that advances a published file's
     /// generation and must be atomic with the supersede sweep.
     pub(super) requested_language: Option<FileLanguage>,
-    /// Incarnation of the `FileNode` this request was PREPARED against.
-    ///
-    /// Preparation runs outside `dag.lock()`, so a prepared request can
-    /// cross a retirement boundary before it is admitted: a concurrent
-    /// `remove()` can install the floor, cancel the DAG and delete the
-    /// `FileNode` in the gap. Carrying the incarnation lets the
-    /// admission core prove the captured node is still the published one
-    /// BEFORE it registers a waiter or admits anything.
-    pub(super) prepared_incarnation: u64,
+    /// Removal/reset ends this lifetime; language re-home preserves it.
+    /// Admission revalidates it against the published node before mutation.
+    pub(super) prepared_lifetime: u64,
 }
 
 /// Work accumulated by the shared admission core that MUST run AFTER
@@ -170,7 +170,7 @@ pub(super) struct AdmissionPostWork {
     pub(super) dedup_events: Vec<DedupJoinerEvent>,
     /// `(canonical, generation)` pairs whose auto-ingest tracking entry
     /// should be cleared once a Source identity has been admitted.
-    pub(super) auto_ingest_clears: Vec<(Arc<str>, u64)>,
+    pub(super) auto_ingest_clears: Vec<(Arc<str>, u64, u64)>,
 }
 
 impl AdmissionPostWork {
@@ -181,8 +181,8 @@ impl AdmissionPostWork {
         for event in self.dedup_events {
             event.fire();
         }
-        for (canonical, generation) in self.auto_ingest_clears {
-            scheduler.clear_auto_ingest_tracking(&canonical, generation);
+        for (canonical, incarnation, generation) in self.auto_ingest_clears {
+            scheduler.clear_auto_ingest_tracking(&canonical, incarnation, generation);
         }
     }
 }
@@ -211,7 +211,7 @@ impl Scheduler {
     /// Handle a single new request submission.
     ///
     /// Thin wrapper over the shared admission core: prepare the request
-    /// (tombstone gate + node ensure) outside the DAG lock, then admit
+    /// (queued-lifetime gate + live-node lookup) outside the DAG lock, then admit
     /// it under ONE `dag.lock()` acquisition, then fire any deferred
     /// dedup callback + clear auto-ingest tracking after the lock
     /// releases. The single-request and the atomic-batch paths share
@@ -225,7 +225,7 @@ impl Scheduler {
         source: Option<Arc<str>>,
         file_language: Option<FileLanguage>,
         sender: CompletionSender<RequestResult>,
-        submitted_epoch: u64,
+        submitted_lifetime: u64,
         request_context: Option<crate::request_context::OpaqueRequestContext>,
     ) {
         let request = QueuedRequest {
@@ -235,14 +235,13 @@ impl Scheduler {
             source,
             file_language,
             sender,
-            submitted_epoch,
+            submitted_lifetime,
             request_context,
         };
-        // Prepare outside the lock (tombstone gate, node ensure — the
-        // node `Arc` is cloned out of the `nodes` DashMap and the shard
-        // `Ref` dropped BEFORE the lock per the AB-BA rule).
+        // Capture the lifetime outside the lock and drop the map guard
+        // before lock-held admission revalidates the published node.
         let Some(prepared) = self.prepare_request(request) else {
-            return; // tombstone-rejected; sender already signalled.
+            return; // Retired lifetime; sender already signalled.
         };
 
         // Admit under ONE DAG lock; collect the deferred dedup event +
@@ -258,10 +257,9 @@ impl Scheduler {
     /// Handle an atomic batch of new request submissions drained as ONE
     /// inbox item.
     ///
-    /// All N requests are prepared outside the DAG lock: the node-ensure
-    /// step clones each `FileNode` `Arc` out of the `nodes` DashMap and
-    /// drops the shard `Ref` BEFORE the lock is taken, so no prepared
-    /// request carries a `nodes` `Ref` INTO the critical section. They
+    /// All N requests capture their submission lifetimes outside the DAG
+    /// lock and drop the map guards before taking it. Prepared requests
+    /// retain no node objects or shard guards. They
     /// are then admitted under a SINGLE `dag.lock()` acquisition:
     /// generation bumps, supersede sweeps, waiter registration, and work
     /// admission for EVERY request happen inside that one critical
@@ -374,19 +372,9 @@ impl Scheduler {
     ///
     /// Performs the two steps that must NOT run under `dag.lock()`:
     ///
-    /// 1. **Tombstone gate.** A submission predating a removal (or a
-    ///    `source: None` reload of a since-deleted file) is rejected
-    ///    here; the sender receives `Failed(FileNotFound)` and `None`
-    ///    is returned. A genuine post-removal re-add clears the
-    ///    tombstone.
-    /// 2. **Node ensure.** The `FileNode` is created if absent and its
-    ///    `Arc` is cloned out of the `nodes` DashMap so the shard `Ref`
-    ///    drops before any caller takes the DAG mutex (the canonical
-    ///    DAG-first lock ordering — holding a `nodes` `Ref` across
-    ///    `dag.lock()` is the AB-BA hazard).
-    ///
-    /// Returns the [`PreparedRequest`] for an admissible request, or
-    /// `None` when the request was tombstone-rejected.
+    /// Reject requests whose submission lifetime is no longer live.
+    /// Drop the map guard before acquiring the lifecycle lock.
+    /// The under-lock admission pass revalidates it before mutation.
     pub(super) fn prepare_request(&self, request: QueuedRequest) -> Option<PreparedRequest> {
         let QueuedRequest {
             file_id,
@@ -395,73 +383,32 @@ impl Scheduler {
             source,
             file_language,
             sender,
-            submitted_epoch,
+            submitted_lifetime,
             request_context,
         } = request;
 
-        // Tombstone gate.
-        if let Some(tombstone_ref) = self.tombstones.get(&file_id) {
-            let tombstone_epoch = *tombstone_ref;
-            drop(tombstone_ref);
-            if submitted_epoch < tombstone_epoch {
-                // Submitted before the removal — always stale, even with source.
-                sender.send(CompletionState::Failed(
-                    crate::job::SchedulerError::FileNotFound {
-                        file_id: file_id.clone(),
-                    },
-                ));
+        // Preparation cannot recreate a node for a retired inbox item.
+        let prepared_lifetime = match self.nodes.get(&file_id) {
+            Some(live) if live.submission_lifetime() == submitted_lifetime => {
+                live.submission_lifetime()
+            }
+            _ => {
+                sender.send(CompletionState::Shutdown);
                 return None;
             }
-            // Submitted at or after the removal epoch.
-            if source.is_some() {
-                // Genuine re-add: clear tombstone and proceed.
-                self.tombstones.remove(&file_id);
-            } else {
-                // Source: None after removal — stale (e.g. close_file reload
-                // for a file that was subsequently deleted).
-                sender.send(CompletionState::Failed(
-                    crate::job::SchedulerError::FileNotFound {
-                        file_id: file_id.clone(),
-                    },
-                ));
-                return None;
-            }
-        }
-
-        // Ensure node exists. Clone the `Arc<FileNode>` out and drop the
-        // `nodes` shard `Ref` BEFORE returning so no caller holds it
-        // across `dag.lock()`.
-        //
-        // CREATING a node here is safe outside the DAG lock: a brand-new
-        // node has no admitted identity and no waiter to retire.
-        //
-        // RE-HOMING is not, so it is NOT done here. A request carrying a
-        // different resolved language must move the file onto a fresh
-        // node at a higher generation, and advancing a PUBLISHED file's
-        // generation has to be atomic with the supersede sweep that
-        // retires the old generation's identities and waiters. That is
-        // the admission core's job — it holds `dag.lock()`. The
-        // requested language is carried through instead.
-        let node = self
-            .nodes
-            .entry(file_id.clone())
-            .or_insert_with(|| self.create_node(&file_id, file_language.clone()))
-            .value()
-            .clone();
+        };
         let canonical: Arc<str> = Arc::from(file_id.as_str());
 
-        let prepared_incarnation = node.incarnation_id();
         Some(PreparedRequest {
             file_id,
             canonical,
-            node,
             target,
             priority,
             source,
             sender,
             request_context,
             requested_language: file_language,
-            prepared_incarnation,
+            prepared_lifetime,
         })
     }
 
@@ -507,14 +454,13 @@ impl Scheduler {
         let PreparedRequest {
             file_id,
             canonical,
-            node: _captured_node,
             target,
             priority,
             source,
             sender,
             request_context,
             requested_language,
-            prepared_incarnation,
+            prepared_lifetime,
         } = prepared;
 
         // Language re-home, under the caller-held DAG lock.
@@ -541,40 +487,15 @@ impl Scheduler {
         // CROSSING GATE — runs before ANY publication (no waiter
         // registration, no admission, no generation bump).
         //
-        // Preparation runs outside this lock, so a prepared request can
-        // cross a retirement boundary in the gap: a concurrent `remove()`
-        // installs the floor, cancels the DAG, deletes the `FileNode` and
-        // drains the shutdown waiters, all before this request resumes.
-        // The captured `Arc` is then DETACHED — it still exists because
-        // this request holds it, but it is no longer the published node
-        // for the canonical.
-        //
-        // Trusting it is not survivable. Bumping a detached node lands
-        // its generation exactly ON the removal floor, which the `<`
-        // comparison admits — and the floor cannot distinguish that from
-        // a legitimate re-add, because both arrive one above the removed
-        // generation. Liveness, not the floor, is what separates them.
-        // A dispatcher would then reserve capacity, find no `FileNode`,
-        // and skip without cancelling: a parked permit plus a waiter no
-        // producer will ever signal.
-        //
-        // So the prepared request must prove the node it captured is
-        // still the published one. Terminalize the sender here rather
-        // than registering a waiter that nothing can complete.
-        // Declared here and assigned ONLY from the live map. That is a
-        // CONVENTION, not enforcement: `_captured_node` remains an ordinary
-        // readable binding and the leading underscore only suppresses an
-        // unused-variable lint. Deleting the field outright is the structural
-        // fix, and that work is owned by
-        // `.claude/skills/scheduler/SKILL.md`.
+        // Removal/reset invalidates the queued lifetime. Language re-home
+        // preserves it, so later requests still reach the current object.
         let mut node: Arc<FileNode>;
         match self.nodes.get(&file_id) {
-            Some(live) if live.incarnation_id() == prepared_incarnation => {
+            Some(live) if live.submission_lifetime() == prepared_lifetime => {
                 node = Arc::clone(live.value());
             }
             Some(live) => {
-                // A different incarnation is published: this request was
-                // prepared against a node that has since been replaced.
+                // Removal/reset installed a different submission lifetime.
                 //
                 // Drop the shard READ guard BEFORE signalling. `let _ = live`
                 // does NOT drop it — a wildcard pattern neither moves nor
@@ -595,8 +516,15 @@ impl Scheduler {
         }
         if let Some(requested) = requested_language {
             if node.file_language != requested {
-                let fresh =
-                    self.create_node_at_least(&file_id, Some(requested), node.generation() + 1);
+                let fresh = Arc::new(
+                    node.rehome(
+                        requested,
+                        node.generation()
+                            .checked_add(1)
+                            .expect("file generation identity space exhausted"),
+                    ),
+                );
+                node.retire(dag);
                 let fresh_gen = fresh.generation();
                 // Publishing the replacement node and its `Absent`
                 // source version under ONE publication hold keeps a
@@ -620,6 +548,7 @@ impl Scheduler {
         // generation BEFORE the supersede sweep cancelled the stale
         // identity — the dispatch-time defensive `debug_assert!` would
         // then trip on a not-yet-terminalized stale identity.
+        let incarnation = node.incarnation_id();
         let generation = if source.is_some() {
             // Bump + publish atomically; see [`Self::invalidate`]. The
             // new generation has no committed snapshot yet, so the
@@ -698,16 +627,19 @@ impl Scheduler {
             // `CacheNode` are never produced by `required_task_kind`.
             TaskKind::Load => WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(&canonical),
+                incarnation,
                 generation,
                 stage: FileStageKey::Source,
             },
             TaskKind::Analysis => WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(&canonical),
+                incarnation,
                 generation,
                 stage: FileStageKey::Analysis,
             },
             TaskKind::Artifact { profile_hash } => WorkNodeIdentity::Artifact {
                 canonical: Arc::clone(&canonical),
+                incarnation,
                 generation,
                 profile_hash: profile_hash_to_bytes(*profile_hash),
                 content_hash: [0u8; 16],
@@ -743,6 +675,7 @@ impl Scheduler {
         // gate instead.
         let analysis_gate = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -762,6 +695,7 @@ impl Scheduler {
                 .admit_artifact_with_blockers(
                     dag,
                     &canonical,
+                    incarnation,
                     generation,
                     *profile_hash,
                     effective_priority,
@@ -769,7 +703,7 @@ impl Scheduler {
                 )
                 .is_none()
             {
-                // Refused by the retirement floor. The waiter group is
+                // Refused by the live object witness. The waiter group is
                 // already registered, so an ignored refusal is a hang:
                 // nothing will ever produce this identity. Terminalize
                 // the group instead of leaving it parked.
@@ -781,7 +715,7 @@ impl Scheduler {
         if matches!(first_missing, TaskKind::Analysis) {
             match self.ensure_analysis_for_demand(
                 dag,
-                &canonical,
+                &canonical,incarnation,
                 generation,
                 effective_priority,
                 AnalysisDemandKind::DirectRequest,
@@ -801,6 +735,7 @@ impl Scheduler {
         let is_source_admission = matches!(first_missing, TaskKind::Load);
         if admit_work(
             dag,
+            &node,
             &canonical,
             generation,
             first_missing,
@@ -819,13 +754,13 @@ impl Scheduler {
         // DAG lock and waiting on that shard).
         if is_source_admission {
             post.auto_ingest_clears
-                .push((Arc::clone(&canonical), generation));
+                .push((Arc::clone(&canonical), incarnation, generation));
         }
     }
 
     /// Signal every waiter group registered at `(canonical, generation)`
     /// when the admission that was supposed to produce their result was
-    /// refused by the retirement floor.
+    /// refused by the live object witness.
     ///
     /// Registration happens before admission, so a refusal that returns
     /// `None` and is ignored leaves a group waiting on work no producer
@@ -850,6 +785,7 @@ impl Scheduler {
     pub(super) fn admit_pending_artifacts(
         &self,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         inherited_priority: Priority,
     ) {
@@ -869,7 +805,11 @@ impl Scheduler {
         let mut dag = self.dag.lock();
         // The generation must still be live as of THIS acquisition: the
         // caller computed it before the lock was taken.
-        if self.nodes.get(&**canonical).map(|n| n.generation()) != Some(generation) {
+        if !self
+            .nodes
+            .get(&**canonical)
+            .is_some_and(|n| n.incarnation_id() == incarnation && n.generation() == generation)
+        {
             return;
         }
         let profiles: Vec<(u64, Priority)> = dag.pending_artifact_profiles(canonical, generation);
@@ -880,6 +820,7 @@ impl Scheduler {
             self.admit_artifact_with_blockers(
                 &mut dag,
                 canonical,
+                incarnation,
                 generation,
                 profile_hash,
                 effective,

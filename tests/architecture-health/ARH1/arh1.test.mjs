@@ -338,10 +338,35 @@ test("ARH1-surface dirty twin: a retained item that is not a live declaration is
   );
 });
 
+test("ARH1-surface dirty twin: a retained method owner must be a wired child of a retained type", () => {
+  for (const owner of [
+    { path: "crates/verter_scheduler/src/node.rs", type: "Scheduler" },
+    { path: "crates/verter_scheduler/src/scheduler/lifecycle.rs", type: "FileNode" },
+  ]) {
+    const dirty = cloneProducts();
+    hotspot(dirty, SCHEDULER).minimalPublicSurface.retainedFnOwners = { remove: owner };
+    const result = validate(dirty, loadManifest(), arh0);
+    assert.equal(result.ok, false);
+    assert.ok(
+      result.errors.some((e) => e.code === "surface-owner-invalid"),
+      JSON.stringify(result.errors),
+    );
+  }
+  const dirty = cloneProducts();
+  hotspot(dirty, SCHEDULER).minimalPublicSurface.retainedFnOwners.remove.path =
+    "crates/verter_scheduler/src/scheduler/admission.rs";
+  const result = validate(dirty, loadManifest(), arh0);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.code === "surface-item-missing" && e.detail.endsWith("fn remove")),
+    JSON.stringify(result.errors),
+  );
+});
+
 test("ARH1-surface dirty twin: narrowing to an invented visibility or naming absent consumers is rejected", () => {
   const dirty = cloneProducts();
   const row = hotspot(dirty, SCHEDULER).minimalPublicSurface.narrow.find(
-    (n) => n.item === "tombstones",
+    (n) => n.item === "generation_floors",
   );
   row.to = "pub"; // widening is not a narrowing disposition
   let result = validate(dirty, loadManifest(), arh0);
@@ -1202,10 +1227,9 @@ test("ARH1-import-direction: inline paths are measured and noise is not", () => 
 test("ARH1-surface dirty twin: a recorded field consumer without qualified use is rejected", () => {
   const dirty = cloneProducts();
   const row = hotspot(dirty, SCHEDULER).minimalPublicSurface.narrow.find(
-    (n) => n.item === "tombstones",
+    (n) => n.item === "generation_floors",
   );
-  // host_construction.rs hits "tombstones" in neither Scheduler-qualified
-  // form (SessionOverlayRoot owns the ambiguous mentions).
+  // host_construction.rs uses constructors, not the retained scheduler field.
   row.consumersAffected.push("crates/verter_session/src/host_construction.rs");
   const result = validate(dirty, loadManifest(), arh0);
   assert.equal(result.ok, false);
@@ -1214,7 +1238,7 @@ test("ARH1-surface dirty twin: a recorded field consumer without qualified use i
       (e) =>
         e.caseId === "ARH1-surface" &&
         e.code === "narrow-consumer-without-reference" &&
-        e.detail.includes("Scheduler.tombstones"),
+        e.detail.includes("Scheduler.generation_floors"),
     ),
     JSON.stringify(result.errors),
   );

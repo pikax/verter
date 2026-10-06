@@ -76,11 +76,13 @@ impl SchedulerDag {
     pub fn fanout_source_failure_to_analysis_waiters(
         &mut self,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         cause: &SchedulerError,
     ) -> Vec<SubmissionToken> {
         let analysis_dep_key = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -118,11 +120,13 @@ impl SchedulerDag {
     pub fn fanout_analysis_failure_to_waiters(
         &mut self,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         cause: &SchedulerError,
     ) -> Vec<SubmissionToken> {
         let analysis_dep_key = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -276,9 +280,15 @@ impl SchedulerDag {
     /// generation and succeeding) does not leave a stale record
     /// behind that would misclassify the dep as `Failed` on the
     /// next admission. Idempotent: a missing entry is a no-op.
-    pub fn clear_terminal_dep_failure_for_gen(&mut self, canonical: &Arc<str>, generation: u64) {
+    pub fn clear_terminal_dep_failure_for_gen(
+        &mut self,
+        canonical: &Arc<str>,
+        incarnation: u64,
+        generation: u64,
+    ) {
         let analysis_key = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };

@@ -47,7 +47,12 @@ mod live_generation {
         }
 
         pub(super) fn advance(&self, _publication: &SourcePublication) -> u64 {
-            self.raw.fetch_add(1, Ordering::AcqRel) + 1
+            self.raw
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |generation| {
+                    generation.checked_add(1)
+                })
+                .expect("file generation identity space exhausted")
+                + 1
         }
     }
 }
@@ -251,6 +256,13 @@ pub struct FileNode {
     /// Monotonic and never reused, so it cannot ABA the way a reclaimed
     /// pointer address can.
     incarnation_id: u64,
+    /// Submission lifetime survives language re-home and ends on removal/reset.
+    submission_lifetime: u64,
+    /// Distinguishes a queued Source at the current generation from a terminal producer.
+    source_admitted: AtomicBool,
+    /// Object-lifetime admission fence. Retired objects held by delayed work
+    /// cannot authorize any new DAG admission, even at a reused generation.
+    retired: AtomicBool,
 }
 
 /// Source of process-unique [`FileNode::incarnation_id`] values.
@@ -273,6 +285,9 @@ impl FileNode {
         file_language: FileLanguage,
         generation: u64,
     ) -> Self {
+        let incarnation_id = NEXT_INCARNATION_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("file incarnation identity space exhausted");
         Self {
             canonical_id,
             file_language,
@@ -283,7 +298,10 @@ impl FileNode {
             analysis: ArcSwap::new(Arc::new(None)),
             artifacts: DashMap::new(),
             pending_source: ArcSwap::new(Arc::new(None)),
-            incarnation_id: NEXT_INCARNATION_ID.fetch_add(1, Ordering::Relaxed),
+            incarnation_id,
+            submission_lifetime: incarnation_id,
+            source_admitted: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
         }
     }
 
@@ -291,6 +309,34 @@ impl FileNode {
     /// [`FileNode::incarnation_id`].
     pub fn incarnation_id(&self) -> u64 {
         self.incarnation_id
+    }
+
+    pub(crate) fn submission_lifetime(&self) -> u64 {
+        self.submission_lifetime
+    }
+
+    pub(crate) fn rehome(&self, language: FileLanguage, generation: u64) -> Self {
+        let mut replacement = Self::new_at(self.canonical_id.clone(), language, generation);
+        replacement.submission_lifetime = self.submission_lifetime;
+        replacement
+    }
+
+    pub(crate) fn source_admission_pending(&self) -> bool {
+        !self.source_admitted.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_source_admitted(&self) {
+        self.source_admitted.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn retire(&self, _lifecycle: &mut crate::dag::SchedulerDag) {
+        self.retired.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn admits_work(&self, incarnation: u64, generation: u64) -> bool {
+        !self.retired.load(Ordering::Acquire)
+            && self.incarnation_id == incarnation
+            && self.generation() == generation
     }
 
     /// Current generation (acquire ordering for cross-thread visibility).
@@ -306,6 +352,7 @@ impl FileNode {
     pub(crate) fn bump_generation(&self, proof: &crate::source_root::SourcePublication) -> u64 {
         self.source_integration_ready
             .store(false, Ordering::Release);
+        self.source_admitted.store(false, Ordering::Release);
         self.generation.advance(proof)
     }
 

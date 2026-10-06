@@ -21,14 +21,14 @@
     {
       "id": "ARH1-CUT-2",
       "candidatePath": "crates/verter_scheduler/src/scheduler.rs",
-      "decision": "narrow the three public Scheduler bookkeeping fields (tombstones, generation_floors, deferred_blocker_ids) to pub(crate)",
+      "decision": "narrow the retained public Scheduler bookkeeping fields (generation_floors, deferred_blocker_ids) to pub(crate); removal protection belongs to live FileNode incarnation and submission-lifetime witnesses",
       "disposition": "visibility narrowing with zero external consumers; lands under the host/session lifecycle reduction heir after ARH2 characterization",
       "owner": {
         "id": "ARH4",
         "kind": "node"
       },
       "class": "visibility-narrowing",
-      "evidence": "generation_floors and deferred_blocker_ids appear only inside crates/verter_scheduler; the tombstones hits in verter_session belong to SessionOverlayRoot (store_view_roots.rs), not Scheduler",
+      "evidence": "generation_floors and deferred_blocker_ids appear only inside crates/verter_scheduler; generation-floor migration and retirement belong to SKR-RET-FLOORS; remove is owned by scheduler/lifecycle.rs and rejects obsolete queued work through FileNode witnesses",
       "route": "crates/verter_scheduler/src/scheduler.rs#field"
     },
     {

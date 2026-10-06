@@ -291,17 +291,17 @@
       "narrowingOwner": { "id": "ARH4", "kind": "node" },
       "surface": {
         "kind": "fields",
-        "items": ["tombstones", "generation_floors", "deferred_blocker_ids"]
+        "items": ["generation_floors", "deferred_blocker_ids"]
       },
       "pins": [
         {
-          "behavior": "the three bookkeeping fields' current behavior: a tombstone rejects pre-remove source submission, reset seeds generation floors for cleared nodes, deferred blockers are replaced, not appended",
-          "command": "cargo nextest run -p verter_scheduler scheduler::tests",
-          "filter": "scheduler::tests",
+          "behavior": "incarnation identity rejects pre-remove source submission and late admission, lifecycle removal/reset drain work and capacity, unknown removals allocate no history, retained external generation floors are seeded by reset until SKR-RET-FLOORS migrates their consumers, and deferred blockers are replaced, not appended",
+          "command": "cargo nextest run -p verter_scheduler scheduler::",
+          "filter": "scheduler::",
           "witnesses": [
             {
               "file": "crates/verter_scheduler/src/scheduler.rs",
-              "test": "tombstone_rejects_pre_remove_source_submission"
+              "test": "incarnation_rejects_pre_remove_source_submission"
             },
             {
               "file": "crates/verter_scheduler/src/scheduler.rs",
@@ -310,6 +310,22 @@
             {
               "file": "crates/verter_scheduler/src/scheduler.rs",
               "test": "deferred_blockers_are_replaced_not_appended"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler.rs",
+              "test": "removal_retires_the_canonical_so_late_admission_is_refused"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler/lifecycle.rs",
+              "test": "unknown_removals_do_not_allocate_restart_history"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler/lifecycle.rs",
+              "test": "delayed_source_worker_cannot_republish_a_retired_incarnation"
+            },
+            {
+              "file": "crates/verter_scheduler/src/scheduler/lifecycle.rs",
+              "test": "delayed_failure_cannot_cancel_same_generation_successor_after_remove_or_reset"
             }
           ]
         }
@@ -326,8 +342,8 @@
       "pins": [
         {
           "behavior": "the hooks' current behavior through the seams they expose: atomic batch admission is not partially observable by the pump, and a single-worker-pool wait_or_drive executes a cpu dependency inline",
-          "command": "cargo nextest run -p verter_scheduler scheduler::tests",
-          "filter": "scheduler::tests",
+          "command": "cargo nextest run -p verter_scheduler scheduler::",
+          "filter": "scheduler::",
           "witnesses": [
             {
               "file": "crates/verter_scheduler/src/scheduler.rs",

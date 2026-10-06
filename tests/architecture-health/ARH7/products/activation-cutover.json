@@ -2,7 +2,6 @@
   "schema": "ARH7ActivationCutover",
   "version": 1,
   "contractNode": "ARH7",
-  "candidate": "fd8199e91c13c007c67cf50f8c67dc5a71c544ed",
   "predecessorProducts": {
     "characterization": "tests/architecture-health/ARH2/products/characterization.json"
   },
