@@ -14536,6 +14536,16 @@ fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
     //     `&AdmittedPublishedMember`, and the retired arbitrary-`SemanticNodeId`
     //     production constructor is gone.
     assert!(
+        named_fn_param_mentions_type(
+            &src,
+            "surface_member_value_whole_with_context",
+            "OutputAuthority"
+        ),
+        "the member-shape key constructor must take the engine's `OutputAuthority` IN ITS OWN \
+         SIGNATURE — only a terminal output sink holds it, so no query or dispatch handle can \
+         mint a member-shape key"
+    );
+    assert!(
         src.contains("fn surface_member_value_whole_with_context"),
         "the narrow production key constructor \
          `ShapeCacheKey::surface_member_value_whole_with_context(scope, \

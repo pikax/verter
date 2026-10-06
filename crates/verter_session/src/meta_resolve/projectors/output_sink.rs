@@ -329,10 +329,14 @@ fn member_shape_peek_or_compute(
                 member_value,
                 mode,
             );
+        // The member-shape key is minted under this sink's output authority,
+        // for the admitted member only.
+        let cap = MetaResolveProjectorsOutputCap::new(dispatch);
         let key =
             crate::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context(
+                cap.authority(),
                 Arc::<str>::from(scope_canonical_id),
-                admitted,
+                admitted.member(),
                 member_reduction_context,
             );
 
@@ -1017,7 +1021,7 @@ pub(crate) fn project_model(
     // surface. The sole production caller passes `Model`.
     if !matches!(
         cursor.surface,
-        crate::meta_resolve::projection_demand::PublishedSurfaceKind::Model
+        crate::component_meta_caches::PublishedSurfaceKind::Model
     ) {
         return None;
     }

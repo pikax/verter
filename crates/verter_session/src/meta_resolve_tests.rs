@@ -9275,7 +9275,8 @@ fn project_model_drops_non_model_cursor() {
     // weaker than the per-member admission invariant). A non-`Model` cursor MUST
     // early-return `None`; the production caller (project_evaluated_types) passes
     // a `Model` cursor, which is NOT gated by this check.
-    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::component_meta_caches::PublishedSurfaceKind;
+    use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::{build_owner_decl_identity, project_model};
     use crate::resolver_core::ComponentMetaQueryEngine;
 

@@ -231,7 +231,8 @@ pub(crate) fn project_evaluated_types(
     // projector entry receives a path-precise cursor.
     // `whole_surface(kind)` admits every published member name;
     // narrower cursors are threaded in when consumer demand is known.
-    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::component_meta_caches::PublishedSurfaceKind;
+    use crate::meta_resolve::projection_demand::SurfaceProjection;
 
     for (macro_index, mac) in snapshot.macros.iter().enumerate() {
         let owner = build_owner_decl_identity(query_engine.ctx, file, mac.owner);

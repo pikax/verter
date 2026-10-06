@@ -85,7 +85,7 @@ impl ComponentMetaQueryEngine<'_> {
         canonical_id: &str,
         source_owner: verter_type_expr::TopLevelOwnerId,
         exported_name: &str,
-    ) -> Option<super::ResolvedImportedRegistrySymbol> {
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol> {
         let key = (
             canonical_id.to_string(),
             source_owner,
@@ -259,7 +259,11 @@ impl ComponentMetaQueryEngine<'_> {
         exported_name: &str,
         observed_keyed_hash: Option<verter_session_query::analysis::types::Hash16>,
     ) -> crate::cache_runtime::singleflight::ComputeAdmission<
-        Option<std::sync::Arc<super::ResolvedImportedRegistrySymbol>>,
+        Option<
+            std::sync::Arc<
+                verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol,
+            >,
+        >,
         crate::component_meta_caches::ImportedRegistryEntry,
     > {
         #[cfg(test)]
@@ -292,31 +296,32 @@ impl ComponentMetaQueryEngine<'_> {
         let validated_at_generation = ctx.current_project_generation();
         // The single, side-effecting resolution: the wildcard-route fuse is
         // consumed here at most once per key.
-        let resolved: Option<super::ResolvedImportedRegistrySymbol> =
-            match resolve_imported_registry_symbol_with_budget(
-                ctx,
-                canonical_id,
-                source_owner,
-                exported_name,
-                || self.allow_wildcard_route(),
-            ) {
-                ImportedRegistrySymbolResolution::Resolved(opt) => opt,
-                ImportedRegistrySymbolResolution::FuseTripped => {
-                    // The wildcard route was needed but the per-request fuse was
-                    // exhausted, so the symbol was NEVER looked up. This `None`
-                    // is a GENUINE PARTIAL — admitting it as a warm negative
-                    // would poison subsequent identical requests that DO have
-                    // budget. Mark the request partial sticky so the whole
-                    // component-meta result refuses to warm, and route the
-                    // absent value through `ReturnOnly(None)` (NOT a cacheable
-                    // negative).
-                    crate::request_context::mark_request_result_partial();
-                    return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
-                        value: None,
-                        reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
-                    };
-                }
-            };
+        let resolved: Option<
+            verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol,
+        > = match resolve_imported_registry_symbol_with_budget(
+            ctx,
+            canonical_id,
+            source_owner,
+            exported_name,
+            || self.allow_wildcard_route(),
+        ) {
+            ImportedRegistrySymbolResolution::Resolved(opt) => opt,
+            ImportedRegistrySymbolResolution::FuseTripped => {
+                // The wildcard route was needed but the per-request fuse was
+                // exhausted, so the symbol was NEVER looked up. This `None`
+                // is a GENUINE PARTIAL — admitting it as a warm negative
+                // would poison subsequent identical requests that DO have
+                // budget. Mark the request partial sticky so the whole
+                // component-meta result refuses to warm, and route the
+                // absent value through `ReturnOnly(None)` (NOT a cacheable
+                // negative).
+                crate::request_context::mark_request_result_partial();
+                return crate::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                    value: None,
+                    reason: crate::cache_runtime::NonAdmissionReason::PartialResult,
+                };
+            }
+        };
         let resolved_value = resolved.map(std::sync::Arc::new);
         #[cfg(test)]
         if super::FORCE_IMPORTED_REGISTRY_ADMISSION_REFUSAL.with(|f| f.get()) {
@@ -366,8 +371,14 @@ impl ComponentMetaQueryEngine<'_> {
     fn finish_imported_registry_lookup(
         &mut self,
         key: (String, verter_type_expr::TopLevelOwnerId, String),
-        host_value: Option<Option<std::sync::Arc<super::ResolvedImportedRegistrySymbol>>>,
-    ) -> Option<super::ResolvedImportedRegistrySymbol> {
+        host_value: Option<
+            Option<
+                std::sync::Arc<
+                    verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol,
+                >,
+            >,
+        >,
+    ) -> Option<verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol> {
         let result = match host_value {
             Some(cached) => cached.as_deref().cloned(),
             None => None,

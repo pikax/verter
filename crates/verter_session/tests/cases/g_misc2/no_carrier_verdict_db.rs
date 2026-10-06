@@ -18,7 +18,7 @@
 //! `R22_CARRIER_GATE_SELF` so the recursive walk skips this file.
 //!
 //! `PublishedSurfaceKind` is NOT forbidden —
-//! `crate::meta_resolve::projection_demand::PublishedSurfaceKind`
+//! `crate::component_meta_caches::PublishedSurfaceKind`
 //! is a separate, live type that legitimately owns the same
 //! identifier. Forbidding the bare token would false-positive on it.
 //!
@@ -63,7 +63,7 @@ const RETIRED_SYMBOLS: &[&str] = &[
     // Module path of the retired `crate::carrier_verdict_db` module.
     "carrier_verdict_db",
     // NOTE: `PublishedSurfaceKind` is INTENTIONALLY omitted — the
-    // live `crate::meta_resolve::projection_demand::PublishedSurfaceKind`
+    // live `crate::component_meta_caches::PublishedSurfaceKind`
     // is a different, kept type that legitimately owns the same
     // identifier.
 ];

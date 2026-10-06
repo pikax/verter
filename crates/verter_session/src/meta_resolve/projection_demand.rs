@@ -46,98 +46,10 @@
 
 #![allow(dead_code)] // Substrate; full surface adopted across Commits A–F.
 
-use std::sync::Arc;
-
+use crate::component_meta_caches::{KeyFilter, PublishedSurfaceKind};
 use crate::semantic_query::PathSegment;
 use crate::types::ProjectionMode;
 use rustc_hash::FxHashMap;
-
-/// Which published surface a [`SurfaceProjection`] addresses.
-///
-/// Used by the registry walker to discriminate caller intent (the
-/// registry-side walker enqueues differently than a per-macro
-/// shape solver) and by the cache key to keep slot identity
-/// disjoint across surfaces.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum PublishedSurfaceKind {
-    Props,
-    Emits,
-    Slots,
-    Exposed,
-    Model,
-    /// `defineOptions({ ... })` / `defineOptions<T>()` — the component
-    /// options surface. The options projector publishes a real surface;
-    /// this is its own published-surface discriminant.
-    Options,
-    /// The component-meta type registry walker — sees imported
-    /// types reachable from the published surface.
-    Registry,
-    /// A non-publication call site that still requires path
-    /// precision (e.g. internal recursive projection). The
-    /// `caller` string is the call-site identifier for the audit
-    /// observer.
-    Internal {
-        caller: &'static str,
-    },
-}
-
-/// Filter on a node's keys.
-///
-/// - `All`: every key participates (bare carrier / open object).
-/// - `Include(set)`: only the listed keys (e.g., from `Pick<T, K>`).
-/// - `Exclude(set)`: every key EXCEPT the listed (e.g., `Omit<T, K>`).
-/// - `UnknownDeferred`: the demand is not resolved at this hop; the
-///   caller MUST resolve before walking. Reaching `UnknownDeferred`
-///   at the publication boundary is a Rule-5 violation site and
-///   triggers a `debug_assert!` panic in both
-///   [`KeyFilter::admits`] and [`ProjectionCursor::descend`] (Block
-///   6.i F6 — the impls panic in debug builds and conservative-
-///   reject in release builds so a stale filter cannot silently
-///   admit every key).
-///
-/// `UnknownDeferred` is reserved for a deferred-projection
-/// resolution pattern in a follow-up commit; production publication
-/// code must NEVER reach this variant at a hop it intends to walk.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum KeyFilter {
-    All,
-    Include(Arc<[crate::semantic_query::PropertyKey]>),
-    Exclude(Arc<[crate::semantic_query::PropertyKey]>),
-    UnknownDeferred,
-}
-
-impl KeyFilter {
-    /// Whether a candidate key passes this filter.
-    ///
-    /// `UnknownDeferred` at the publication boundary
-    /// is a Rule-5 violation site. The threaded helpers MUST resolve
-    /// the filter to `All`/`Include`/`Exclude` before walking. This
-    /// method panics via `debug_assert!` when `UnknownDeferred` is
-    /// reached (the doc-comment on the variant promises this); in
-    /// production builds the variant is conservative-rejected
-    /// (returns `false`) so a stale filter does NOT silently admit
-    /// every key — the prior behaviour traded a debug panic for
-    /// over-admission, which is the worse default.
-    pub(crate) fn admits(&self, key: &crate::semantic_query::PropertyKey) -> bool {
-        match self {
-            KeyFilter::All => true,
-            KeyFilter::Include(set) => set.iter().any(|candidate| candidate == key),
-            KeyFilter::Exclude(set) => set.iter().all(|candidate| candidate != key),
-            KeyFilter::UnknownDeferred => {
-                verter_debug_assert!(
-                    false,
-                    "KeyFilter::UnknownDeferred reached at publication \
-                     boundary in KeyFilter::admits — Rule-5 violation \
-                     site. The caller MUST resolve the filter to \
-                     All/Include/Exclude BEFORE walking. See \
-                     projection_demand.rs doc-comment for the STOP \
-                     contract."
-                );
-                false
-            }
-        }
-    }
-}
 
 /// One node in a [`SurfaceProjection`] — encodes per-child
 /// constraints plus the (terminal-only) mode to dispatch at.

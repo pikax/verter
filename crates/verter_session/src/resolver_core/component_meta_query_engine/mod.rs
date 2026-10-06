@@ -75,7 +75,7 @@
 //! `/type-resolution` skill for the cross-file resolver query modes.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
 
 use rustc_hash::FxHashMap;
 use verter_session_query::declarations::DeclarationId;
@@ -284,20 +284,6 @@ pub(crate) fn engine_dep_signature_for_two_canonicals(
 
 #[cfg(test)]
 use std::cell::Cell;
-
-#[derive(Debug, Clone)]
-pub struct ResolvedImportedRegistrySymbol {
-    pub canonical_id: String,
-    pub owner: verter_type_expr::TopLevelOwnerId,
-    pub exported_name: String,
-    /// The resolved declaration's narrowed body FACTS: classification plus the
-    /// content-free authored body-slot locator (never an embedded body).
-    /// Consumers lower the slot through the one shared dispatch on demand and
-    /// classify node-domain; the carrier itself stays `Send + Sync`
-    /// cache-safe (`ImportedRegistryDb` stores it cross-request).
-    pub body: verter_type_expr::facts::PreparedTypeBodyFacts,
-    pub canonical_dependencies: BTreeSet<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FastShallowFieldExprExactness {

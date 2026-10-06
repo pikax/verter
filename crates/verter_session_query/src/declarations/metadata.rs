@@ -53,3 +53,20 @@ pub struct ValueDeclIdentity {
     pub owner: verter_type_expr::TopLevelOwnerId,
     pub name: String,
 }
+
+/// An imported type-registry symbol resolved to its defining declaration: the
+/// owning file and owner, the exported name, the narrowed body facts and the
+/// canonical files it depends on.
+#[derive(Debug, Clone)]
+pub struct ResolvedImportedRegistrySymbol {
+    pub canonical_id: String,
+    pub owner: verter_type_expr::TopLevelOwnerId,
+    pub exported_name: String,
+    /// The resolved declaration's narrowed body FACTS: classification plus the
+    /// content-free authored body-slot locator (never an embedded body).
+    /// Consumers lower the slot through the one shared dispatch on demand and
+    /// classify node-domain; the carrier itself stays `Send + Sync`
+    /// cache-safe (`ImportedRegistryDb` stores it cross-request).
+    pub body: verter_type_expr::facts::PreparedTypeBodyFacts,
+    pub canonical_dependencies: std::collections::BTreeSet<String>,
+}

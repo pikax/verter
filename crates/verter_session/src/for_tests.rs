@@ -567,7 +567,7 @@ pub fn app_config_no_override_proof_get_or_compute_for_tests(
     host: &crate::VerterHost,
     key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
 ) -> Option<std::sync::Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
-    crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+    crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
         host,
         host.project_type_store().app_config_no_override_proof_db(),
         host.provenance(),

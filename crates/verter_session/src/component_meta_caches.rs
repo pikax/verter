@@ -83,7 +83,7 @@ use crate::cache_runtime::admission::{CacheEntry, NonAdmissionReason};
 use crate::cache_runtime::node::QueryFlightKey;
 use crate::cache_runtime::singleflight::InflightTable;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
-use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
+use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 #[cfg(any(test, feature = "test-support"))]
@@ -733,17 +733,16 @@ struct ConstructionSeal;
 struct MemberShapeNodeSubject(crate::semantic_query::SemanticNodeId);
 
 impl MemberShapeNodeSubject {
-    /// Sanctioned construction: a POLICY-ADMITTED component member's value
-    /// graph node. Takes the admitted publication token (not a raw
-    /// `&SurfaceMember`) so an arbitrary member cannot be routed through the
-    /// sealed shape subject — the only construction path for the member-shape
-    /// subject is from a member that passed publication admission.
+    /// Sanctioned construction: a published component member's value graph
+    /// node, under the engine's output authority. Only a terminal output sink
+    /// holds that authority, and the sink passes a member that passed
+    /// publication admission, so an arbitrary member cannot be routed through
+    /// the sealed shape subject.
     fn from_surface_member(
-        member: &crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember<
-            '_,
-        >,
+        _authority: &crate::project_semantic_dispatch::engine_resources::OutputAuthority,
+        member: &crate::semantic_query::SurfaceMember,
     ) -> Self {
-        Self(member.member().value)
+        Self(member.value)
     }
 
     /// Test-only construction from a raw `&SurfaceMember`. The cache-rail
@@ -762,6 +761,95 @@ impl MemberShapeNodeSubject {
     #[cfg(test)]
     fn from_semantic_node_for_test(node: crate::semantic_query::SemanticNodeId) -> Self {
         Self(node)
+    }
+}
+
+/// Which published surface a `SurfaceProjection` addresses.
+///
+/// Used by the registry walker to discriminate caller intent (the
+/// registry-side walker enqueues differently than a per-macro
+/// shape solver) and by the cache key to keep slot identity
+/// disjoint across surfaces.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum PublishedSurfaceKind {
+    Props,
+    Emits,
+    Slots,
+    Exposed,
+    Model,
+    /// `defineOptions({ ... })` / `defineOptions<T>()` — the component
+    /// options surface. The options projector publishes a real surface;
+    /// this is its own published-surface discriminant.
+    Options,
+    /// The component-meta type registry walker — sees imported
+    /// types reachable from the published surface.
+    Registry,
+    /// A non-publication call site that still requires path
+    /// precision (e.g. internal recursive projection). The
+    /// `caller` string is the call-site identifier for the audit
+    /// observer.
+    Internal {
+        caller: &'static str,
+    },
+}
+
+/// Filter on a node's keys.
+///
+/// - `All`: every key participates (bare carrier / open object).
+/// - `Include(set)`: only the listed keys (e.g., from `Pick<T, K>`).
+/// - `Exclude(set)`: every key EXCEPT the listed (e.g., `Omit<T, K>`).
+/// - `UnknownDeferred`: the demand is not resolved at this hop; the
+///   caller MUST resolve before walking. Reaching `UnknownDeferred`
+///   at the publication boundary is a Rule-5 violation site and
+///   triggers a `debug_assert!` panic in both
+///   [`KeyFilter::admits`] and `ProjectionCursor::descend` (Block
+///   6.i F6 — the impls panic in debug builds and conservative-
+///   reject in release builds so a stale filter cannot silently
+///   admit every key).
+///
+/// `UnknownDeferred` is reserved for a deferred-projection
+/// resolution pattern in a follow-up commit; production publication
+/// code must NEVER reach this variant at a hop it intends to walk.
+// The narrowing variants are built by the path-precise projection substrate.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum KeyFilter {
+    All,
+    Include(Arc<[crate::semantic_query::PropertyKey]>),
+    Exclude(Arc<[crate::semantic_query::PropertyKey]>),
+    UnknownDeferred,
+}
+
+impl KeyFilter {
+    /// Whether a candidate key passes this filter.
+    ///
+    /// `UnknownDeferred` at the publication boundary
+    /// is a Rule-5 violation site. The threaded helpers MUST resolve
+    /// the filter to `All`/`Include`/`Exclude` before walking. This
+    /// method panics via `debug_assert!` when `UnknownDeferred` is
+    /// reached (the doc-comment on the variant promises this); in
+    /// production builds the variant is conservative-rejected
+    /// (returns `false`) so a stale filter does NOT silently admit
+    /// every key — the prior behaviour traded a debug panic for
+    /// over-admission, which is the worse default.
+    pub(crate) fn admits(&self, key: &crate::semantic_query::PropertyKey) -> bool {
+        match self {
+            KeyFilter::All => true,
+            KeyFilter::Include(set) => set.iter().any(|candidate| candidate == key),
+            KeyFilter::Exclude(set) => set.iter().all(|candidate| candidate != key),
+            KeyFilter::UnknownDeferred => {
+                verter_debug_assert!(
+                    false,
+                    "KeyFilter::UnknownDeferred reached at publication \
+                     boundary in KeyFilter::admits — Rule-5 violation \
+                     site. The caller MUST resolve the filter to \
+                     All/Include/Exclude BEFORE walking. See \
+                     projection_demand.rs doc-comment for the STOP \
+                     contract."
+                );
+                false
+            }
+        }
     }
 }
 
@@ -856,11 +944,11 @@ pub struct ShapeDemand {
     /// not a Navigate boolean").
     pub(crate) terminal_context: crate::semantic_query::ProjectionReductionContext,
     /// Key filter at the terminal hop (Pick/Omit narrowing, etc.).
-    pub(crate) key_filter: crate::meta_resolve::projection_demand::KeyFilter,
+    pub(crate) key_filter: KeyFilter,
     /// Which published surface this demand serves. Used by the
     /// registry walker to discriminate caller intent + by the cache
     /// key to keep slot identity disjoint across surfaces.
-    pub(crate) surface: crate::meta_resolve::projection_demand::PublishedSurfaceKind,
+    pub(crate) surface: PublishedSurfaceKind,
 }
 
 impl ShapeDemand {
@@ -884,8 +972,8 @@ impl ShapeDemand {
         Self {
             path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
             terminal_context,
-            key_filter: crate::meta_resolve::projection_demand::KeyFilter::All,
-            surface: crate::meta_resolve::projection_demand::PublishedSurfaceKind::Internal {
+            key_filter: KeyFilter::All,
+            surface: PublishedSurfaceKind::Internal {
                 caller: "ShapeCacheDb::whole_subject",
             },
         }
@@ -953,21 +1041,21 @@ impl ShapeCacheKey {
 
     /// Construct a member-value-subject whole-subject key under an explicit
     /// [`ProjectionReductionContext`]. The SOLE production construction path
-    /// for the member-shape subject — it takes the POLICY-ADMITTED publication
-    /// token (not a raw `&SurfaceMember`) and reads the admitted member's
-    /// `value`, so an arbitrary `SemanticNodeId` / unadmitted member cannot be
-    /// routed through the sealed subject.
+    /// for the member-shape subject — gated by the engine's output authority,
+    /// which only a terminal output sink holds; the sink keys on a member that
+    /// passed publication admission and this reads that member's `value`, so
+    /// an arbitrary `SemanticNodeId` / unadmitted member cannot be routed
+    /// through the sealed subject.
     pub(crate) fn surface_member_value_whole_with_context(
+        authority: &crate::project_semantic_dispatch::engine_resources::OutputAuthority,
         scope: Arc<str>,
-        member: &crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember<
-            '_,
-        >,
+        member: &crate::semantic_query::SurfaceMember,
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
         Self {
             subject: ShapeSubject::MemberValueNode {
                 scope,
-                node: MemberShapeNodeSubject::from_surface_member(member),
+                node: MemberShapeNodeSubject::from_surface_member(authority, member),
             },
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
@@ -1393,157 +1481,5 @@ impl crate::invalidation_domain::InvalidationByCanonical for ShapeCacheDb {
         self.invalidate_canonical(canonical_id);
         let after = self.live_count();
         before.saturating_sub(after)
-    }
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// AppConfigNoOverrideProofDb production producer
-// ═══════════════════════════════════════════════════════════════════════════
-/// Production producer for [`crate::app_config_proof_db::AppConfigNoOverrideProofDb`].
-///
-/// Given a key `(decl_canonical, component_key_literal)`, returns
-/// the cached proof entry if one is valid under the live store
-/// view, OR runs a cold compute (wrapped in `install_fact_tracer`)
-/// and publishes a fresh proof.
-///
-/// The cold compute checks the `IndexedReady.declares_interface_app_config`
-/// flag for `decl_canonical` and observes its `FileWholeHash` fact
-/// through the active tracer. The proof's `fact_dep_signature`
-/// therefore captures (a) the decl-canonical's whole-hash so an
-/// edit to the file invalidates the proof, and (b) any transitive
-/// observations the call-chain made through the resolver substrate.
-///
-/// `publish()` accepts `Arc<[FactVersionRef]>` directly — the
-/// path-precise fact-signature substrate (`HostStoreView::validates`)
-/// is the sole cache-validity oracle.
-///
-/// **Cold-build outcome semantics:**
-/// - `Some(entry)` published — proof is valid. The fast-path
-///   consumer can rely on the fact-signature for warm-hit revalidation.
-/// - On `FactReadSetFinalise::Overflow` — refuse cache admission;
-///   the next call cold-recomputes. The provenance counter
-///   `app_config_proof_overflow_refusals` advances.
-///
-/// Resolver-tier producer that takes `&dyn ResolverContext` to stay
-/// inside the request-port contract (the six ports in
-/// `resolver_core::request_ports`, whose compile-contract fixtures prove a
-/// request cannot reach ambient host state). Integration tests reach this
-/// via the crate-public wrapper
-/// [`crate::for_tests::app_config_no_override_proof_get_or_compute_for_tests`].
-///
-/// The ComponentConfig theme-variant fast-path resolver (a future
-/// re-introduction of the retired rescue cascade) and the
-/// app-config no-override deferred-proof test both reach this
-/// producer.
-///
-/// Reached today only through tests and the `for_tests` wrapper (both
-/// gated by the explicit `test-support` feature); gated to match so the
-/// producer is absent from every ordinary production build.
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn app_config_no_override_proof_get_or_compute<
-    C: crate::resolver_core::ResolverCapabilities,
->(
-    ctx: &dyn crate::resolver_core::ResolverContext<C>,
-    proofs: &crate::app_config_proof_db::AppConfigNoOverrideProofDb,
-    provenance: &crate::meta_provenance::MetaProvenance,
-    key: &crate::app_config_proof_db::AppConfigNoOverrideProofKey,
-) -> Option<Arc<crate::app_config_proof_db::AppConfigNoOverrideProofEntry>> {
-    // Warm-hit peek — validate the cached fact_dep_signature against
-    // the live store view. The peek bubbles the signature into any
-    // active outer tracer on success.
-    if let Some(entry) = proofs.candidate(key) {
-        if ctx.validates_fact_signature(&entry.fact_dep_signature) {
-            ctx.observe_borrowed_signature(&entry.fact_dep_signature);
-            return Some(entry);
-        }
-    }
-
-    // Cold compute. The closure observes the decl-canonical's whole
-    // hash so an edit invalidates the proof.
-    let (decl_canonical, _component_key_literal) = key;
-    let decl_canonical_for_compute = Arc::clone(decl_canonical);
-    let cold_body = move || -> bool {
-        // Look up the IndexedReady for the decl canonical. The
-        // tracer fan-out picks up any indirect observations the
-        // resolver substrate emits.
-        //
-        // Content-pinned: the observed `FileWholeHash` fact becomes
-        // part of this proof entry's `read_set_signature`. A permissive
-        // `get_any` could observe a stale artifact's `whole_hash`,
-        // sealing the proof against a content hash that is no longer
-        // current. A stale candidate is treated identically to "file
-        // removed" — `current_content_pinned_indexed` returns `None`,
-        // the sentinel-zero hash is observed, and the validator
-        // re-derives the proof on the next read.
-        let ir = ctx.indexed_for_current_content(decl_canonical_for_compute.as_ref());
-        // Observe the file's whole-hash explicitly. If no IndexedReady
-        // is present (file removed), record a sentinel zero hash so
-        // the validator picks up the absence on the next read.
-        let whole_hash = ir.as_ref().map(|ir| ir.whole_hash).unwrap_or_default();
-        ctx.observe(
-            verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
-                canonical_id: decl_canonical_for_compute.as_ref().to_string(),
-                hash: whole_hash,
-            },
-        );
-        // The "no override" determination is a structural query
-        // into the interface members. For the producer's
-        // substrate-correctness contract, the
-        // `declares_interface_app_config` flag short-circuits the
-        // walk: a file without `interface AppConfig` cannot
-        // contribute an override.
-        //
-        // Files that DO declare `interface AppConfig` participate in
-        // the proof's fact_dep_signature via the file_whole_hash
-        // observation above; any edit to the interface body shifts
-        // the whole-hash and invalidates the proof. This is the
-        // R3/R26/R28 substrate contract — the producer does NOT
-        // need to walk the interface body to decide the proof's
-        // validation oracle.
-        ir.as_ref()
-            .map(|ir| !ir.declares_interface_app_config)
-            .unwrap_or(true)
-    };
-    let (no_override, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-        cold_body,
-    );
-    provenance
-        .app_config_proof_fact_tracer_installs
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // ReturnOnly never publishes — fenced-serve arm: a proof derived
-    // from a served-without-publication artifact must not seal a
-    // shared no-override entry whose facts validate against the live
-    // view. Decline to publish; the consumer takes the slow path.
-    match finalise {
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Ok(fact_dep_signature) => {
-            if !no_override {
-                // The file declares `interface AppConfig` — we
-                // cannot prove "no override" without walking the
-                // member set. Decline to publish; the fast-path
-                // consumer must take the slow path.
-                return None;
-            }
-            proofs.publish(key.clone(), Arc::clone(&fact_dep_signature));
-            Some(Arc::new(
-                crate::app_config_proof_db::AppConfigNoOverrideProofEntry { fact_dep_signature },
-            ))
-        }
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_) => {
-            provenance
-                .app_config_proof_overflow_refusals
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            None
-        }
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::Overflow => {
-            provenance
-                .app_config_proof_overflow_refusals
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            None
-        }
-        // Refuses like an overflow and is counted as neither: the
-        // overflow counter is a SIZE observable and a stability refusal
-        // must not inflate it.
-        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => None,
     }
 }

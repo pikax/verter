@@ -66,11 +66,11 @@ use verter_type_expr::{TypeExpr, UnknownValue};
 use crate::component_meta_caches::ComputedEntry;
 use crate::fact_signature_helpers::empty_fact_signature;
 use crate::project_semantic_dispatch::raise::MaterializedOutputTypeExpr;
-use crate::resolver_core::component_meta_query_engine::ResolvedImportedRegistrySymbol;
 use crate::resolver_core::{MaterializeScopeObservation, ResolverContext};
 use crate::semantic_query::ProjectionMode;
 use crate::{HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::declarations::metadata::ResolvedDeclarationKind;
+use verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol;
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
@@ -4770,7 +4770,8 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
     // sibling-collapse is asserted through the production seam, not only the
     // directly-built key. A fresh scope keeps the seam's own admitted entries
     // disjoint from the directly-keyed entries above.
-    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::component_meta_caches::PublishedSurfaceKind;
+    use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::output_sink::surface_member_to_expanded_field;
     use crate::meta_resolve::projectors::publication_authority::AdmittedPublishedMember;
     use crate::resolver_core::ComponentMetaQueryEngine;
@@ -4922,7 +4923,8 @@ fn member_value_node_equivalence_class_collapses_siblings_sharing_value_node() {
 /// `reduce_non_cacheable` refusal) the fenced shape LANDS in `ShapeCacheDb`.
 #[test]
 fn fenced_serve_surface_member_shape_is_not_admitted() {
-    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::component_meta_caches::PublishedSurfaceKind;
+    use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::output_sink::{
         surface_member_to_expanded_field, MemberValuePosition,
     };
@@ -5065,7 +5067,8 @@ fn fenced_serve_surface_member_shape_is_not_admitted() {
 /// overflowed compute must NOT.
 #[test]
 fn tracer_overflow_refuses_surface_member_shape_admission() {
-    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::component_meta_caches::PublishedSurfaceKind;
+    use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::output_sink::{
         surface_member_to_expanded_field, MemberValuePosition,
     };
@@ -5419,7 +5422,8 @@ mod fenced_gate_arm_admission_tests {
     use verter_type_expr::{PrimitiveName, TypeExpr};
 
     use super::shape_member;
-    use crate::meta_resolve::projection_demand::{PublishedSurfaceKind, SurfaceProjection};
+    use crate::component_meta_caches::PublishedSurfaceKind;
+    use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::meta_resolve::projectors::output_sink::{
         surface_member_to_expanded_field, MemberValuePosition,
     };

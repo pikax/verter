@@ -1319,7 +1319,7 @@ impl VerterHost {
         // admits every key + descend.
         let registry_projection =
             crate::meta_resolve::projection_demand::SurfaceProjection::whole_surface(
-                crate::meta_resolve::projection_demand::PublishedSurfaceKind::Registry,
+                crate::component_meta_caches::PublishedSurfaceKind::Registry,
             );
         let registry_cursor = registry_projection.cursor();
         fn track_component_meta_dependency(

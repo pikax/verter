@@ -204,7 +204,7 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let proof_cold = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+    let proof_cold = crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
         &*host,
         host.project_type_store().app_config_no_override_proof_db(),
         host.provenance(),
@@ -266,7 +266,7 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let proof_no_ac = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+    let proof_no_ac = crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
         &*host,
         host.project_type_store().app_config_no_override_proof_db(),
         host.provenance(),
@@ -295,7 +295,7 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let proof_warm = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+    let proof_warm = crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
         &*host,
         host.project_type_store().app_config_no_override_proof_db(),
         host.provenance(),
@@ -332,7 +332,7 @@ export type Button = ComponentConfig<typeof theme, AppConfig, 'variants'>
         .provenance
         .app_config_proof_fact_tracer_installs
         .load(std::sync::atomic::Ordering::Relaxed);
-    let _ = crate::component_meta_caches::app_config_no_override_proof_get_or_compute(
+    let _ = crate::app_config_proof_db::app_config_no_override_proof_get_or_compute(
         &*host,
         host.project_type_store().app_config_no_override_proof_db(),
         host.provenance(),

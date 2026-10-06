@@ -71,7 +71,8 @@ use verter_session_query::analysis::component_meta::{
 };
 use verter_session_query::analysis::types::{AnalyzedMacro, AnalyzedMacroKind};
 
-use crate::meta_resolve::projection_demand::{ProjectionCursor, PublishedSurfaceKind};
+use crate::component_meta_caches::PublishedSurfaceKind;
+use crate::meta_resolve::projection_demand::ProjectionCursor;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::{DeclIdentity, SemanticNodeId, SurfaceMember};

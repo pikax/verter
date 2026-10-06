@@ -126,10 +126,10 @@ fn strip_comments_and_strings(src: &str) -> String {
 // ---------------------------------------------------------------------------
 // Guard A.2 — `projection_demand` module exists with the substrate types.
 //
-// `SurfaceProjection`, `ProjectionNode`, `KeyFilter`, `PathSegment`
-// (re-used from `semantic_query`), `ProjectionCursor`,
-// `PublishedSurfaceKind` are the path-precise projection architectural
-// vocabulary. The module being present + naming all of these is the
+// `SurfaceProjection`, `ProjectionNode`, `PathSegment` (re-used from
+// `semantic_query`) and `ProjectionCursor` are the path-precise projection
+// architectural vocabulary; its cache-key vocabulary (`KeyFilter`,
+// `PublishedSurfaceKind`) lives with the shape cache key (guard B.1). The module being present + naming all of these is the
 // minimal contract subsequent passes depend on.
 // ---------------------------------------------------------------------------
 #[test]
@@ -139,8 +139,6 @@ fn projection_demand_substrate_present() {
     for symbol in [
         "pub(crate) struct SurfaceProjection",
         "pub(crate) struct ProjectionNode",
-        "pub(crate) enum KeyFilter",
-        "pub(crate) enum PublishedSurfaceKind",
         "pub(crate) struct ProjectionCursor",
         "pub(crate) fn descend",
         "pub(crate) fn is_terminal",
@@ -172,6 +170,8 @@ fn shape_cache_db_replaces_split_caches() {
         "pub enum ShapeSubject",
         "pub struct ShapeDemand",
         "pub struct ShapeCacheKey",
+        "enum KeyFilter",
+        "enum PublishedSurfaceKind",
     ] {
         assert!(
             src.contains(symbol),
