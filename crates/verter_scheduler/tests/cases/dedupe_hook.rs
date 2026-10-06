@@ -34,6 +34,7 @@ use verter_scheduler::dedupe_hook::{DedupeHook, DedupeJoiner, NoDedupeHook};
 fn file_stage(canonical: &str, generation: u64) -> WorkNodeIdentity {
     WorkNodeIdentity::FileStage {
         canonical: Arc::from(canonical),
+        incarnation: 1,
         generation,
         stage: FileStageKey::Source,
     }

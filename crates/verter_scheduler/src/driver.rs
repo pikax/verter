@@ -23,9 +23,9 @@ pub struct QueuedRequest {
     pub source: Option<std::sync::Arc<str>>,
     pub file_language: Option<FileLanguage>,
     pub sender: CompletionSender<RequestResult>,
-    /// Removal epoch at submission time. If a tombstone exists with a
-    /// higher epoch, this submission predates the removal and is rejected.
-    pub submitted_epoch: u64,
+    /// Lifetime bound at submission under the lifecycle lock.
+    /// Language re-home preserves it; removal/reset invalidates it.
+    pub submitted_lifetime: u64,
     /// Optional session-side request context. When present, the driver
     /// stores the winner's context on the dedup group and routes
     /// `on_dedup_joiner` callbacks when this request joins.
@@ -44,9 +44,9 @@ pub enum Submission {
         source: Option<std::sync::Arc<str>>,
         file_language: Option<FileLanguage>,
         sender: CompletionSender<RequestResult>,
-        /// Removal epoch at submission time. If a tombstone exists with a
-        /// higher epoch, this submission predates the removal and is rejected.
-        submitted_epoch: u64,
+        /// Lifetime bound at submission under the lifecycle lock.
+        /// Language re-home preserves it; removal/reset invalidates it.
+        submitted_lifetime: u64,
         /// Optional session-side request context. When present, the driver
         /// stores the winner's context on the dedup group and routes
         /// `on_dedup_joiner` callbacks when this request joins.

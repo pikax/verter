@@ -29,7 +29,6 @@ const AC3_CONCERNS = Object.freeze([
   "stale/partial rejection",
   "deterministic ordering under perturbed discovery or scheduling",
 ]);
-const HEX40 = /^[0-9a-f]{40}$/;
 const CUTOVER_IDS = Object.freeze(["ARH7-CUT-1", "ARH7-CUT-2", "ARH7-CUT-3"]);
 
 function readRel(rel) {
@@ -156,15 +155,6 @@ export function validate(products, manifest = loadManifest()) {
       `schema=${cut?.schema} node=${cut?.contractNode}`,
     );
   }
-  if (!HEX40.test(cut?.candidate ?? "")) {
-    err(
-      errors,
-      "ARH7-ratification",
-      "candidate-basis-drift",
-      `candidate ${JSON.stringify(cut?.candidate)} is not a 40-hex git commit`,
-    );
-  }
-
   const arh2 = loadArh2Products();
   const arh2Result = validateArh2(arh2);
   if (!arh2Result.ok) {

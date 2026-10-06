@@ -535,6 +535,7 @@ mod tests {
         let outer = SchedulerError::DependencyFailed {
             dep_key: DepKey::FileStage {
                 canonical: std::sync::Arc::from("/dep.ts"),
+                incarnation: 1,
                 generation: 1,
                 stage: FileStageKey::Analysis,
             },
@@ -620,6 +621,7 @@ mod tests {
         assert!(handle.target().is_none(), "fresh handle exposes no target",);
         let id = WorkNodeIdentity::FileStage {
             canonical: Arc::from("/x.vue"),
+            incarnation: 1,
             generation: 3,
             stage: crate::dag::FileStageKey::Analysis,
         };
