@@ -1504,6 +1504,17 @@ test("CLI engine memory refuses cgroup and unknown accounting without losing ans
     assert.equal(cell.status, "completed");
     assert.equal(cell.memoryUnavailable, "supervisor accounting is not attributable to the engine");
   }
+  // The published side of the same gate: a fully attributable cell whose
+  // engine passed its memory budget carries the verdict, not a refusal.
+  const over = cliFixture();
+  for (const inv of over.invocations) inv.supervisor.peakBytes = (MEM_MB + 1) * 1024 * 1024;
+  resummarize(over);
+  assert.deepEqual(validate(over).failures, []);
+  const verdict = over.summary.cells[0].arms["tsc-cli"];
+  assert.equal(verdict.status, "over the engine budget");
+  assert.equal(verdict.memoryUnavailable, null);
+  assert.equal(verdict.peakBytes.n, 2);
+  assert.equal(verdict.peakMetric, "job-peak-commit-charge");
 });
 
 test("CLI diagnostics beyond one MiB survive storage and raw verification", (t) => {
