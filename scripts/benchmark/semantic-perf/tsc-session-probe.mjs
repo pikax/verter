@@ -28,6 +28,7 @@
 // counterpart and is recorded as not applicable.
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -167,6 +168,7 @@ async function main() {
       steps.push({
         kind: "edit",
         file: step.file,
+        textSha256: createHash("sha256").update(step.text).digest("hex"),
         serverMs: await serverTime("updateSnapshot"),
         roundTripMs,
         snapshot: snapshot.id,

@@ -1740,7 +1740,13 @@ function verterSessionRecord(session, { arm = "verter", answers = {} } = {}) {
     phases: { engineStart: 10, setup: 100, init: 50 },
     initOutcome: { kind: "value" },
     steps: session.steps.map((step, s) => {
-      if (step.kind === "edit") return { kind: "edit", file: step.file, micros: 20 };
+      if (step.kind === "edit")
+        return {
+          kind: "edit",
+          file: step.file,
+          textSha256: sha256Text(step.text),
+          micros: 20,
+        };
       if (step.kind === "meta")
         return {
           kind: "meta",
@@ -1796,6 +1802,7 @@ function tscSessionRecord(session, projectDir, { answers = {} } = {}) {
         return {
           kind: "edit",
           file: step.file,
+          textSha256: sha256Text(step.text),
           serverMs: 0.3,
           roundTripMs: 1,
           snapshot: ++snapshot,
@@ -1966,6 +1973,11 @@ test("a session run validates; tsc contradicting a constructed answer fails it, 
     cell.comparison.map((c) => `${c.step}:${c.kind}`),
     ["0:demand", "1:edit", "2:demand", "3:edit", "4:demand", "5:edit", "6:demand"],
   );
+
+  const noopEdit = sessionRun();
+  const verterInv = noopEdit.sessionInvocations.find((i) => i.arm === "verter");
+  verterInv.session.steps.find((x) => x.file === "unrelated.ts").textSha256 = sha256Text("");
+  assert.ok(validate(noopEdit).failures.some((x) => /installed text other than/.test(x)));
 
   const wrongTsc = sessionRun();
   wrongTsc.sessionInvocations.find((i) => i.arm === "tsc-api").session = tscSessionRecord(

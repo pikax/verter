@@ -130,6 +130,8 @@ pub enum StepRecord {
     },
     Edit {
         file: String,
+        /// SHA-256 of the exact text the edit installed.
+        text_sha256: String,
         micros: u64,
     },
     Meta {
@@ -340,6 +342,7 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
                     .map_err(|err| JobError(format!("edit {file}: {err}")))?;
                 StepRecord::Edit {
                     file: file.clone(),
+                    text_sha256: sha256_hex(text.as_bytes()),
                     micros: micros(start),
                 }
             }
@@ -387,4 +390,15 @@ pub fn read_job(path: &Path) -> Result<SessionJob, String> {
     super::disk::read_to_string(path)
         .map_err(|err| err.to_string())
         .and_then(|text| serde_json::from_str(&text).map_err(|err| err.to_string()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }

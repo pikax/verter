@@ -380,6 +380,10 @@ export function sessionRecordProblems(record, session, { tool }) {
       need(stepMs(tool, got) !== null, `step ${s} has no valid time`);
     } else if (step.kind === "edit") {
       need(got.file === step.file, `step ${s} edited ${got.file}, not ${step.file}`);
+      need(
+        got.textSha256 === sha256Text(step.text),
+        `step ${s} installed text other than the script's edit of ${step.file}`,
+      );
       need(stepMs(tool, got) !== null, `step ${s} has no valid time`);
     } else if (step.kind === "meta") {
       need(got.file === step.file, `step ${s} read the metadata of ${got.file}, not ${step.file}`);
