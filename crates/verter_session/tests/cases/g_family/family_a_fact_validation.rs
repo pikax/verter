@@ -333,9 +333,9 @@ fn extract_fn_body<'a>(src: &'a str, needle: &str) -> &'a str {
 ///   the overlay's. A signature builder must NEVER observe a hash; it
 ///   takes the observed hash as a parameter.
 ///
-/// The three central helpers live in `fact_signature_helpers.rs`; the
-/// four `engine_fact_signature_for_*` wrappers live in the engine's
-/// `mod.rs`. The producers (the observation point) are responsible for
+/// The three central helpers and the materialize-memo builder live in
+/// `fact_signature_helpers.rs`; the exported-type engine wrapper lives in
+/// the engine's `mod.rs`. The producers (the observation point) are responsible for
 /// read-ordering — not token-checkable; the producer-level
 /// overlay-discrimination tests in `query_db_self_root_tests.rs` cover
 /// that. Re-introducing any forbidden token inside any builder below
@@ -376,23 +376,28 @@ fn central_fact_signature_helpers_are_provenance_pure() {
         }
     }
 
-    // The live engine wrappers in `component_meta_query_engine/mod.rs`.
-    // They delegate to the central helpers and must be provenance-pure
-    // for the same reason — a re-read inside a wrapper is the same
-    // publish-race hole as one inside the central helper. The
-    // walker-cluster's `engine_fact_signature_for_prepared_target`
-    // wrapper is DELETED (its `PreparedTargetDb` producer is gone), and
-    // `engine_fact_signature_for_canonical_member` had no surviving
-    // producer wrapper — the canonical-member signature builder lives in
+    // The live engine signature wrappers. They delegate to the central
+    // helpers and must be provenance-pure for the same reason — a re-read
+    // inside a wrapper is the same publish-race hole as one inside the
+    // central helper. The exported-type wrapper lives in the engine's
+    // `component_meta_query_engine/mod.rs`; the materialize-memo builder
+    // lives beside the central helpers in `fact_signature_helpers.rs`.
+    // The canonical-member signature builder is
     // `fact_signature_helpers.rs::fact_signature_for_canonical_member`,
     // already covered by the HELPERS list above.
-    let engine_src = read_session_source("resolver_core/component_meta_query_engine/mod.rs");
-    const ENGINE_WRAPPERS: &[&str] = &[
-        "pub(crate) fn engine_fact_signature_for_exported_type(",
-        "pub(crate) fn engine_fact_signature_for_materialize_memo(",
+    const ENGINE_WRAPPERS: &[(&str, &str)] = &[
+        (
+            "resolver_core/component_meta_query_engine/mod.rs",
+            "pub(crate) fn engine_fact_signature_for_exported_type(",
+        ),
+        (
+            "fact_signature_helpers.rs",
+            "pub(crate) fn engine_fact_signature_for_materialize_memo(",
+        ),
     ];
-    for wrapper in ENGINE_WRAPPERS {
-        let body = extract_fn_body(&engine_src, wrapper);
+    for (file, wrapper) in ENGINE_WRAPPERS {
+        let wrapper_src = read_session_source(file);
+        let body = extract_fn_body(&wrapper_src, wrapper);
         for forbidden in FORBIDDEN {
             assert!(
                 !body.contains(forbidden),

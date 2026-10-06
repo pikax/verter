@@ -288,7 +288,7 @@ fn producers() -> [Producer; 3] {
             kind: ProducerKind::EntryProducer,
         },
         Producer {
-            file: "resolver_core/component_meta_query_engine/mod.rs",
+            file: "fact_signature_helpers.rs",
             signature: "pub(crate) fn engine_fact_signature_for_materialize_memo(",
             kind: ProducerKind::EntryProducer,
         },
