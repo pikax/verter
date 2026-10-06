@@ -1375,7 +1375,7 @@ fn install_test_resolver(server: &VerterLanguageServer) {
     install_test_resolver_for_root(server, "/workspace", Some("/workspace/tsconfig.json"));
 }
 
-fn install_test_resolver_for_root(
+pub(super) fn install_test_resolver_for_root(
     server: &VerterLanguageServer,
     root: &str,
     tsconfig: Option<&str>,
@@ -1694,7 +1694,7 @@ fn hover_text(hover: Option<Hover>) -> String {
 /// WITHOUT completing a recorded sync, seed the committed sync state + recorded
 /// surface from the live artifacts (the exact data a successful sync would have
 /// recorded) and capture again.
-async fn synced_type_provider_context(
+pub(super) async fn synced_type_provider_context(
     server: &VerterLanguageServer,
     uri: &Uri,
 ) -> TypeProviderContext {
@@ -2259,7 +2259,7 @@ async fn make_default_profile_definition_test_server(
     .await
 }
 
-async fn make_definition_test_server_with_config(
+pub(super) async fn make_definition_test_server_with_config(
     files: &[(&str, &str, &str)],
     kind: crate::TypeProviderKind,
     host_config: HostConfig,
@@ -2403,7 +2403,7 @@ fn fixture_workspace_root_returns_canonical_path() {
     );
 }
 
-fn workspace_uri(workspace_id: &str, relative_path: &str) -> Uri {
+pub(super) fn workspace_uri(workspace_id: &str, relative_path: &str) -> Uri {
     crate::uri::path_to_file_uri(&format!("{workspace_id}/{relative_path}")).expect("file uri")
 }
 
@@ -2423,7 +2423,7 @@ async fn settle_child_contracts(
     }
 }
 
-fn find_document_position(
+pub(super) fn find_document_position(
     server: &VerterLanguageServer,
     uri: &Uri,
     needle: &str,
@@ -24611,7 +24611,7 @@ fn tsserver_resolve_envelope_item(
 /// `TsgoTypeProvider::resolve_completion` accepts. Tests must model the real
 /// per-provider data shape, not feed `TsserverEntry` to a tsgo provider.
 #[cfg(test)]
-fn tsgo_resolve_envelope_item(
+pub(super) fn tsgo_resolve_envelope_item(
     provider_id: &str,
     provider_path: &str,
     entry_name: &str,
@@ -37725,7 +37725,7 @@ const RENAME_COMPLETENESS_SVELTE: &str = "<script>\n// @ts-check\nlet jsValue = 
 /// The SET of authored `token` ranges in `source`, in the document's own
 /// coordinates. Asserting against this set — never against a count — keeps a
 /// future fourth occurrence from passing silently.
-fn authored_token_ranges(
+pub(super) fn authored_token_ranges(
     source: &str,
     token: &str,
 ) -> std::collections::BTreeSet<(u32, u32, u32, u32)> {
@@ -37754,7 +37754,7 @@ fn authored_token_ranges(
 }
 
 /// The SET of ranges a rename transaction mutates in `uri`.
-fn rename_edit_ranges(
+pub(super) fn rename_edit_ranges(
     edit: &WorkspaceEdit,
     uri: &Uri,
 ) -> std::collections::BTreeSet<(u32, u32, u32, u32)> {
