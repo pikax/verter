@@ -454,38 +454,51 @@ impl Scheduler {
                                     // against. The vacant entry holds the shard
                                     // lock, so a concurrent creator either wins
                                     // (we observe it and reuse it) or waits.
-                                    let mut created_node: Option<Arc<FileNode>> = None;
                                     if let Some(dep_language) = dep_languages.get(dep_id) {
-                                        let dep_language = dep_language.clone();
-                                        let _ensured =
-                                            self.nodes.entry(dep_id.clone()).or_insert_with(|| {
-                                                // `Some(..)` is load-bearing: it is
-                                                // what keeps the host classifier out
-                                                // of this doubly-locked region.
-                                                let dep_node = self.create_node_at_least(
-                                                    dep_id,
-                                                    Some(dep_language),
-                                                    1,
-                                                );
-                                                created_node = Some(Arc::clone(&dep_node));
-                                                dep_node
-                                            });
-                                    }
-                                    if let Some(dep_node) = created_node {
-                                        let dep_gen = dep_node.generation();
-                                        let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
-                                        admit_work(
-                                            &mut dag,
-                                            &dep_node,
-                                            &dep_canonical,
-                                            dep_gen,
-                                            TaskKind::Load,
-                                            std::cmp::min(
-                                                inherited_priority,
-                                                Priority::Interactive,
-                                            ),
-                                            parent_ctx,
+                                        let dep_node = Arc::clone(
+                                            self.nodes
+                                                .entry(dep_id.clone())
+                                                .or_insert_with(|| {
+                                                    self.create_node_at_least(
+                                                        dep_id,
+                                                        Some(dep_language.clone()),
+                                                        1,
+                                                    )
+                                                })
+                                                .value(),
                                         );
+                                        if dep_node.source_admission_pending()
+                                            && dep_node.current_source().is_none()
+                                        {
+                                            let dep_canonical: Arc<str> =
+                                                Arc::from(dep_id.as_str());
+                                            let dep_gen = if dep_node.generation() == 0 {
+                                                self.source_root.publish_transition(|publication| {
+                                                    let generation =
+                                                        publication.bump_node_generation(&dep_node);
+                                                    publication.absent(
+                                                        &dep_canonical,
+                                                        dep_node.incarnation_id(),
+                                                        generation,
+                                                    );
+                                                    generation
+                                                })
+                                            } else {
+                                                dep_node.generation()
+                                            };
+                                            admit_work(
+                                                &mut dag,
+                                                &dep_node,
+                                                &dep_canonical,
+                                                dep_gen,
+                                                TaskKind::Load,
+                                                std::cmp::min(
+                                                    inherited_priority,
+                                                    Priority::Interactive,
+                                                ),
+                                                parent_ctx,
+                                            );
+                                        }
                                     }
 
                                     // Route the blocker through the shared 3-state

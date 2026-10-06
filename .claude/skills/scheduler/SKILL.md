@@ -27,17 +27,17 @@ sweeps + waiter registration for every request inside one critical
 section): the pump can never observe a half-admitted batch, one batch is
 ONE wake + ONE `submit_count` bump, and a source-updating batch
 supersedes every file's old generation atomically. Both paths share one
-admission core — `prepare_request` (pre-lock: queued-incarnation gate + live-node
-lookup, cloning the `FileNode` `Arc` out of the `nodes` DashMap BEFORE
-locking, the AB-BA-safe DAG-first ordering; it never creates or re-homes
+admission core — `prepare_request` (pre-lock: queued-lifetime gate + live-node
+lookup, dropping the `nodes` DashMap guard BEFORE locking, the AB-BA-safe
+DAG-first ordering; it never creates or re-homes
 a node, carrying the resolved language forward as
 `PreparedRequest.requested_language` instead), `admit_prepared_under_lock`
 (sole place a request bumps generation, runs the supersede sweep,
 registers the waiter, admits work — including the LANGUAGE RE-HOME, which
 advances a published file's generation and therefore must be atomic with
-its sweep; it re-resolves the live `FileNode` first, because the `Arc`
-captured during preparation may already be detached by a concurrent
-re-home), and an `AdmissionPostWork`
+its sweep; it resolves the live `FileNode` and revalidates the queued
+lifetime first, since removal/reset may have invalidated it during
+preparation), and an `AdmissionPostWork`
 accumulator firing deferred dedup callbacks + clearing auto-ingest
 tracking AFTER the lock releases. `SchedulerDag::register_request`
 returns `Option<DedupJoinerEvent>` (fired post-unlock via
@@ -100,8 +100,12 @@ submission is test-only. Cache-node admission has a separate entry point.
 Neither queued work nor a delayed worker can reconstruct authority from a
 replacement node at the same generation.
 
-Queued requests bind to the live node during submission under `dag.lock()`.
-`prepare_request` looks up that exact incarnation and never creates a replacement
+Queued requests bind to a submission lifetime during submission under `dag.lock()`.
+That lifetime starts with the initial object incarnation and survives language
+re-home, so later queued source updates still reach the replacement. Removal/reset
+ends it; a new node receives a fresh lifetime. Work identities still carry the
+unique object incarnation, and retired objects cannot admit or publish work.
+`prepare_request` carries only the lifetime scalar and never creates a replacement
 for an obsolete inbox item. Fresh requests may load any readable SourceLoader
 backing after removal; scheduler removal does not permanently suppress paths.
 A missing backing file produces a terminal dependency failure.
@@ -126,27 +130,28 @@ precede reclamation of that remaining history. Internal admission, dispatch,
 publication, completion and failure use full incarnation identity independently
 of that fence.
 
-**Preparation must still name the live object at admission.** `prepare_request` runs OUTSIDE `dag.lock()`, so a prepared
-request can cross a retirement boundary before it is admitted: a
-concurrent `remove()` retires the object, cancels the DAG and deletes the
-`FileNode` in the gap, leaving the captured `Arc` detached. A replacement
-can reuse the same generation, so generation cannot separate them;
-only the live incarnation can. So
-`admit_prepared_under_lock` opens with a CROSSING GATE, before any
-publication: the live `FileNode` must exist AND its
-`incarnation_id()` must equal `PreparedRequest.prepared_incarnation`,
-otherwise the sender is terminalized (`Shutdown` when the file is gone,
-`Superseded` when a different incarnation is published) and nothing is
-registered or admitted. Registration precedes admission, so a refused
-`submit_file` must also terminalize: an ignored `None` leaves a waiter group
-parked on work no producer will ever run
-(`signal_file_shutdown_at`).
+**Preparation must still name a live submission lifetime at admission.**
+Preparation drops the node map guard before taking `dag.lock()`. The admission
+core revalidates `PreparedRequest.prepared_lifetime` against the published node
+before any mutation. Language re-home preserves this lifetime while allocating
+a new object incarnation; removal/reset invalidates it. A mismatch terminalizes
+the sender (`Shutdown` when absent, `Superseded` when replaced by another
+lifetime). Registration precedes work admission, so a refused `submit_file`
+must also terminalize the waiter rather than leave it parked.
 
-That is the same carried-witness rule the completion path uses, applied
-to the other direction. Both directions cross the lock boundary carrying
-captured authority state; both must revalidate against the live map
-before publishing. Treat them as one rule with two members, not two
-rules.
+A node published at submission can still lack admitted Source work. Its
+first-source admission marker distinguishes this pending producer from a dead
+producer. Both explicit blocker registration and Source-completion dependency
+integration start or track that producer before recording Analysis blockers.
+The initial generation is advanced above zero before those blockers are built.
+Explicit registration revalidates its captured owner incarnation/generation
+under every dependency mutation hold, including iterations after inbox
+backpressure has executed callbacks. No host callback or inbox send runs under
+the lifecycle hold.
+
+Generation allocation/advance uses checked arithmetic. Exhaustion refuses work
+before an external publication generation can be reused, including restart from
+a retained removal floor.
 
 **Generation-advance rule (both directions).** A generation advance and
 its supersede sweep are ONE critical section under `dag.lock()`

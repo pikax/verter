@@ -64,7 +64,11 @@ pub(super) fn admit_work(
             )
         }
     };
-    dag.submit_file(node, identity, kind, priority, Vec::new(), request_context)
+    let token = dag.submit_file(node, identity, kind, priority, Vec::new(), request_context);
+    if token.is_some() && task == TaskKind::Load {
+        node.mark_source_admitted();
+    }
+    token
 }
 
 /// Test-only rendezvous fired by [`Scheduler::handle_new_request_batch`]
@@ -135,14 +139,11 @@ impl BatchAdmitSeamHook {
     }
 }
 
-/// A request after pre-lock preparation (queued-incarnation gate + live-node lookup),
-/// carrying everything the shared admission core needs to admit it
-/// under the DAG lock. The `node` `Arc` was cloned out of the `nodes`
-/// DashMap so no shard `Ref` is held across `dag.lock()`.
+/// A request carrying its submission lifetime into lock-held admission.
+/// No node or map guard is retained across the lifecycle lock boundary.
 pub(super) struct PreparedRequest {
     pub(super) file_id: String,
     pub(super) canonical: Arc<str>,
-    pub(super) node: Arc<FileNode>,
     pub(super) target: TargetStage,
     pub(super) priority: Priority,
     pub(super) source: Option<Arc<str>>,
@@ -153,15 +154,9 @@ pub(super) struct PreparedRequest {
     /// deliberately does NOT re-home: that advances a published file's
     /// generation and must be atomic with the supersede sweep.
     pub(super) requested_language: Option<FileLanguage>,
-    /// Incarnation of the `FileNode` this request was PREPARED against.
-    ///
-    /// Preparation runs outside `dag.lock()`, so a prepared request can
-    /// cross a retirement boundary before it is admitted: a concurrent
-    /// `remove()` can install the floor, cancel the DAG and delete the
-    /// `FileNode` in the gap. Carrying the incarnation lets the
-    /// admission core prove the captured node is still the published one
-    /// BEFORE it registers a waiter or admits anything.
-    pub(super) prepared_incarnation: u64,
+    /// Removal/reset ends this lifetime; language re-home preserves it.
+    /// Admission revalidates it against the published node before mutation.
+    pub(super) prepared_lifetime: u64,
 }
 
 /// Work accumulated by the shared admission core that MUST run AFTER
@@ -216,7 +211,7 @@ impl Scheduler {
     /// Handle a single new request submission.
     ///
     /// Thin wrapper over the shared admission core: prepare the request
-    /// (queued-incarnation gate + live-node lookup) outside the DAG lock, then admit
+    /// (queued-lifetime gate + live-node lookup) outside the DAG lock, then admit
     /// it under ONE `dag.lock()` acquisition, then fire any deferred
     /// dedup callback + clear auto-ingest tracking after the lock
     /// releases. The single-request and the atomic-batch paths share
@@ -230,7 +225,7 @@ impl Scheduler {
         source: Option<Arc<str>>,
         file_language: Option<FileLanguage>,
         sender: CompletionSender<RequestResult>,
-        submitted_incarnation: u64,
+        submitted_lifetime: u64,
         request_context: Option<crate::request_context::OpaqueRequestContext>,
     ) {
         let request = QueuedRequest {
@@ -240,14 +235,13 @@ impl Scheduler {
             source,
             file_language,
             sender,
-            submitted_incarnation,
+            submitted_lifetime,
             request_context,
         };
-        // Prepare outside the lock (incarnation gate, live-node lookup — the
-        // node `Arc` is cloned out of the `nodes` DashMap and the shard
-        // `Ref` dropped BEFORE the lock per the AB-BA rule).
+        // Capture the lifetime outside the lock and drop the map guard
+        // before lock-held admission revalidates the published node.
         let Some(prepared) = self.prepare_request(request) else {
-            return; // incarnation-rejected; sender already signalled.
+            return; // Retired lifetime; sender already signalled.
         };
 
         // Admit under ONE DAG lock; collect the deferred dedup event +
@@ -263,10 +257,9 @@ impl Scheduler {
     /// Handle an atomic batch of new request submissions drained as ONE
     /// inbox item.
     ///
-    /// All N requests are prepared outside the DAG lock: the node-ensure
-    /// step clones each `FileNode` `Arc` out of the `nodes` DashMap and
-    /// drops the shard `Ref` BEFORE the lock is taken, so no prepared
-    /// request carries a `nodes` `Ref` INTO the critical section. They
+    /// All N requests capture their submission lifetimes outside the DAG
+    /// lock and drop the map guards before taking it. Prepared requests
+    /// retain no node objects or shard guards. They
     /// are then admitted under a SINGLE `dag.lock()` acquisition:
     /// generation bumps, supersede sweeps, waiter registration, and work
     /// admission for EVERY request happen inside that one critical
@@ -379,8 +372,8 @@ impl Scheduler {
     ///
     /// Performs the two steps that must NOT run under `dag.lock()`:
     ///
-    /// Reject requests whose submitted incarnation is no longer live.
-    /// Clone the current node without holding a shard guard across admission.
+    /// Reject requests whose submission lifetime is no longer live.
+    /// Drop the map guard before acquiring the lifecycle lock.
     /// The under-lock admission pass revalidates it before mutation.
     pub(super) fn prepare_request(&self, request: QueuedRequest) -> Option<PreparedRequest> {
         let QueuedRequest {
@@ -390,14 +383,14 @@ impl Scheduler {
             source,
             file_language,
             sender,
-            submitted_incarnation,
+            submitted_lifetime,
             request_context,
         } = request;
 
         // Preparation cannot recreate a node for a retired inbox item.
-        let node = match self.nodes.get(&file_id) {
-            Some(live) if live.incarnation_id() == submitted_incarnation => {
-                Arc::clone(live.value())
+        let prepared_lifetime = match self.nodes.get(&file_id) {
+            Some(live) if live.submission_lifetime() == submitted_lifetime => {
+                live.submission_lifetime()
             }
             _ => {
                 sender.send(CompletionState::Shutdown);
@@ -406,18 +399,16 @@ impl Scheduler {
         };
         let canonical: Arc<str> = Arc::from(file_id.as_str());
 
-        let prepared_incarnation = node.incarnation_id();
         Some(PreparedRequest {
             file_id,
             canonical,
-            node,
             target,
             priority,
             source,
             sender,
             request_context,
             requested_language: file_language,
-            prepared_incarnation,
+            prepared_lifetime,
         })
     }
 
@@ -463,14 +454,13 @@ impl Scheduler {
         let PreparedRequest {
             file_id,
             canonical,
-            node: _captured_node,
             target,
             priority,
             source,
             sender,
             request_context,
             requested_language,
-            prepared_incarnation,
+            prepared_lifetime,
         } = prepared;
 
         // Language re-home, under the caller-held DAG lock.
@@ -497,27 +487,15 @@ impl Scheduler {
         // CROSSING GATE — runs before ANY publication (no waiter
         // registration, no admission, no generation bump).
         //
-        // Removal can retire and unpublish the prepared object before
-        // this hold. Its retained Arc cannot authorize a replacement,
-        // even if the replacement has the same generation.
-        //
-        // So the prepared request must prove the node it captured is
-        // still the published one. Terminalize the sender here rather
-        // than registering a waiter that nothing can complete.
-        // Declared here and assigned ONLY from the live map. That is a
-        // CONVENTION, not enforcement: `_captured_node` remains an ordinary
-        // readable binding and the leading underscore only suppresses an
-        // unused-variable lint. Deleting the field outright is the structural
-        // fix, and that work is owned by
-        // `.claude/skills/scheduler/SKILL.md`.
+        // Removal/reset invalidates the queued lifetime. Language re-home
+        // preserves it, so later requests still reach the current object.
         let mut node: Arc<FileNode>;
         match self.nodes.get(&file_id) {
-            Some(live) if live.incarnation_id() == prepared_incarnation => {
+            Some(live) if live.submission_lifetime() == prepared_lifetime => {
                 node = Arc::clone(live.value());
             }
             Some(live) => {
-                // A different incarnation is published: this request was
-                // prepared against a node that has since been replaced.
+                // Removal/reset installed a different submission lifetime.
                 //
                 // Drop the shard READ guard BEFORE signalling. `let _ = live`
                 // does NOT drop it — a wildcard pattern neither moves nor
@@ -538,9 +516,15 @@ impl Scheduler {
         }
         if let Some(requested) = requested_language {
             if node.file_language != requested {
+                let fresh = Arc::new(
+                    node.rehome(
+                        requested,
+                        node.generation()
+                            .checked_add(1)
+                            .expect("file generation identity space exhausted"),
+                    ),
+                );
                 node.retire(dag);
-                let fresh =
-                    self.create_node_at_least(&file_id, Some(requested), node.generation() + 1);
                 let fresh_gen = fresh.generation();
                 // Publishing the replacement node and its `Absent`
                 // source version under ONE publication hold keeps a

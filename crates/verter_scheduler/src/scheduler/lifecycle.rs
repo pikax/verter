@@ -241,7 +241,7 @@ mod tests {
                 priority: Priority::Interactive,
                 file_language: None,
                 request_context: None,
-                submitted_incarnation: scheduler
+                submitted_lifetime: scheduler
                     .nodes
                     .get("/removed.vue")
                     .unwrap()
@@ -384,12 +384,16 @@ impl Scheduler {
             self.generation_floors
                 .get(file_id)
                 .map_or(min_generation, |floor| {
-                    min_generation.max(floor.saturating_add(1))
+                    min_generation.max(
+                        floor
+                            .checked_add(1)
+                            .expect("file generation identity space exhausted"),
+                    )
                 }),
         ))
     }
 
-    /// Bind queued work to the current object under the lifecycle hold.
+    /// Bind queued work to the current submission lifetime under the lifecycle hold.
     /// Zero is a refused stamp; allocated incarnation ids start at one.
     pub(super) fn stamp_request(&self, id: &str, language: Option<FileLanguage>) -> u64 {
         if language.is_none() {
@@ -398,7 +402,7 @@ impl Scheduler {
                 return 0;
             }
             if let Some(node) = self.nodes.get(id) {
-                return node.incarnation_id();
+                return node.submission_lifetime();
             }
         }
         let language = language.unwrap_or_else(|| self.source_loader.classify(id));
@@ -409,7 +413,7 @@ impl Scheduler {
         self.nodes
             .entry(id.to_owned())
             .or_insert_with(|| self.create_node(id, Some(language)))
-            .incarnation_id()
+            .submission_lifetime()
     }
 
     /// Remove a file from the scheduler.

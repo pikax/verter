@@ -559,7 +559,7 @@ impl Scheduler {
                 source,
                 file_language,
                 sender,
-                submitted_incarnation,
+                submitted_lifetime,
                 request_context,
             } => {
                 self.handle_new_request(
@@ -569,7 +569,7 @@ impl Scheduler {
                     source,
                     file_language,
                     sender,
-                    submitted_incarnation,
+                    submitted_lifetime,
                     request_context,
                 );
             }

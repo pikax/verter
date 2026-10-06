@@ -887,7 +887,7 @@ impl Scheduler {
             canonical: Arc::from(request.file_id.as_str()),
             target: request.target.clone(),
         });
-        let submitted_incarnation =
+        let submitted_lifetime =
             self.stamp_request(&request.file_id, request.file_language.clone());
         let submission = Submission::NewRequest {
             file_id: request.file_id,
@@ -896,7 +896,7 @@ impl Scheduler {
             source: request.source,
             file_language: request.file_language,
             sender: sender.clone(),
-            submitted_incarnation,
+            submitted_lifetime,
             request_context: request.request_context,
         };
         match self.send_submission(submission) {
@@ -949,7 +949,7 @@ impl Scheduler {
         let mut handles = Vec::with_capacity(requests.len());
         let mut queued = Vec::with_capacity(requests.len());
         for request in requests {
-            let submitted_incarnation =
+            let submitted_lifetime =
                 self.stamp_request(&request.file_id, request.file_language.clone());
             let (handle, sender) = completion_pair();
             // Mirror `submit_request`'s request-level target stamp so a
@@ -967,7 +967,7 @@ impl Scheduler {
                 source: request.source,
                 file_language: request.file_language,
                 sender,
-                submitted_incarnation,
+                submitted_lifetime,
                 request_context: request.request_context,
             });
             handles.push(handle);
@@ -1268,7 +1268,7 @@ impl Scheduler {
             else {
                 return;
             };
-            if node.incarnation_id() != requested_incarnation {
+            if node.submission_lifetime() != requested_incarnation {
                 return;
             }
             self.edges
@@ -1297,80 +1297,76 @@ impl Scheduler {
             )
         };
 
-        // First pass: auto-ingest deps that lack a FileNode so their
-        // Source/Analysis pipeline starts. Auto-ingest is a Scheduler
-        // concern (it owns `nodes` + the inbox), not a DAG concern.
-        // We track which deps were just auto-ingested in this call so
-        // the second-pass dead-producer filter can grace them: a
-        // freshly-ingested node has its Source request queued in the
-        // inbox and is structurally indistinguishable from a
-        // Source-failed corpse without this set (both have
-        // `current_source().is_none()` and no live DAG identity for
-        // Source/Analysis).
+        // A submitted first Source already owns a node but may still be in
+        // the inbox. Give it the same producer tracking as an auto-ingested
+        // dependency before recording any blockers for its Analysis.
         for dep_id in &blocker_dep_ids {
-            // Atomically ENSURE the dep node exists — never replace one.
-            //
-            // `contains_key` followed by an unconditional `insert` was a
-            // check-then-act: a real request creating the same file
-            // between the two had its FileNode REPLACED by this one, at
-            // the same generation and with no source snapshot. The
-            // replaced node stayed the DISPATCHED incarnation for work
-            // already in flight, so that work's completion was later
-            // validated against a different node object entirely — the
-            // live map entry — and the mismatch could not even be seen
-            // by a generation check, since both nodes sit at the same
-            // generation. The vacant entry holds the shard lock, so a
-            // concurrent creator either wins (we observe it and reuse
-            // it) or waits for us.
-            let mut created_generation: Option<u64> = None;
-            let mut submitted_incarnation = 0;
-            let dep_language = dep_languages[dep_id].clone();
-            {
+            let submission = {
                 let _dag = self.dag.lock();
+                if !self.nodes.get(file_id).is_some_and(|live| {
+                    live.incarnation_id() == incarnation && live.generation() == generation
+                }) {
+                    return;
+                }
+                let dep_node = Arc::clone(
+                    self.nodes
+                        .entry(dep_id.clone())
+                        .or_insert_with(|| {
+                            self.create_node_at_least(
+                                dep_id,
+                                Some(dep_languages[dep_id].clone()),
+                                1,
+                            )
+                        })
+                        .value(),
+                );
                 let dep_canonical: Arc<str> = Arc::from(dep_id.as_str());
-                let _ensured = self.nodes.entry(dep_id.clone()).or_insert_with(|| {
-                    let dep_node = self.create_node_at_least(dep_id, Some(dep_language), 1);
-                    let dep_gen = dep_node.generation();
-                    submitted_incarnation = dep_node.incarnation_id();
-                    // Plant the auto-ingest tracking entry BEFORE
-                    // publishing the FileNode and BEFORE sending the
-                    // NewRequest. A concurrent matrix consultation that
-                    // observes the FileNode without the tracking entry
-                    // would fall through to the dead-producer arm and
-                    // return `Resolved` for a live dep — the FileNode
-                    // is present, no live Source/Analysis DAG identity
-                    // exists yet (the NewRequest is still about to be
-                    // queued), and the tracking entry would be the
-                    // disambiguator. Planting it inside this closure
-                    // keeps that ordering: the entry lands while the
-                    // shard is still locked and the FileNode is not yet
-                    // visible to any reader.
+                if dep_node.source_admission_pending()
+                    && dep_node.current_source().is_none()
+                    && !self.auto_ingest_tracking_gates(
+                        &dep_canonical,
+                        dep_node.incarnation_id(),
+                        dep_node.generation(),
+                    )
+                {
+                    let dep_gen = if dep_node.generation() == 0 {
+                        self.source_root.publish_transition(|publication| {
+                            let generation = publication.bump_node_generation(&dep_node);
+                            publication.absent(
+                                &dep_canonical,
+                                dep_node.incarnation_id(),
+                                generation,
+                            );
+                            generation
+                        })
+                    } else {
+                        dep_node.generation()
+                    };
                     self.auto_ingested_recent.insert(
                         Arc::clone(&dep_canonical),
                         AutoIngestedRecord {
-                            incarnation: submitted_incarnation,
+                            incarnation: dep_node.incarnation_id(),
                             generation: dep_gen,
                             since: Instant::now(),
                         },
                     );
-                    created_generation = Some(dep_gen);
-                    dep_node
-                });
-            }
-            if created_generation.is_some() {
-                let _ = self.send_submission(Submission::NewRequest {
-                    file_id: dep_id.clone(),
-                    target: TargetStage::Analysis,
-                    priority: std::cmp::min(inherited_priority, Priority::Interactive),
-                    source: None,
-                    file_language: None,
-                    request_context: None,
-                    sender: {
-                        let (_, s) = completion_pair::<RequestResult>();
-                        s
-                    },
-                    submitted_incarnation,
-                });
+                    let (_, sender) = completion_pair::<RequestResult>();
+                    Some(Submission::NewRequest {
+                        file_id: dep_id.clone(),
+                        target: TargetStage::Analysis,
+                        priority: std::cmp::min(inherited_priority, Priority::Interactive),
+                        source: None,
+                        file_language: None,
+                        request_context: None,
+                        sender,
+                        submitted_lifetime: dep_node.submission_lifetime(),
+                    })
+                } else {
+                    None
+                }
+            };
+            if let Some(submission) = submission {
+                let _ = self.send_submission(submission);
             }
         }
 
@@ -1692,11 +1688,11 @@ impl Scheduler {
         };
         let canonical: Arc<str> = Arc::from(id);
         let mut dag = self.dag.lock();
-        let submitted_incarnation = node.incarnation_id();
+        let submitted_lifetime = node.incarnation_id();
         if !self
             .nodes
             .get(id)
-            .is_some_and(|live| live.incarnation_id() == submitted_incarnation)
+            .is_some_and(|live| live.incarnation_id() == submitted_lifetime)
         {
             return;
         }
@@ -1719,7 +1715,7 @@ impl Scheduler {
             priority: Priority::Background,
             source: None,
             file_language: None,
-            submitted_incarnation,
+            submitted_lifetime: node.submission_lifetime(),
             request_context: None,
             sender: {
                 let (_, sender) = completion_pair::<RequestResult>();
@@ -7081,23 +7077,8 @@ mod tests {
         );
     }
 
-    /// `register_resolved_deps` must NOT record a `DepKey` for a dead
-    /// producer — a blocker that will never resolve into a live
-    /// Analysis identity in the DAG. The dead cases include:
-    /// (a) FileNode missing (concurrent remove race),
-    /// (b) FileNode at generation 0 (no Source ever submitted),
-    /// (c) No DAG identity for the recorded `(canonical, gen)`.
-    ///
-    /// Recording the DepKey for any of these would pin the owner's
-    /// Artifact on a producer that cannot make progress.
-    ///
-    /// Discriminator: plant a `FileNode` at generation 0 directly
-    /// into `sched.nodes` so the second-pass DepKey would be at
-    /// generation 0, then call `register_resolved_deps`. With the
-    /// dead-producer filter, the dep is dropped BEFORE the registry
-    /// record, leaving the registry empty. Without the filter the
-    /// dep is recorded as `FileStage(/dead.ts, 0, Analysis)` — a key
-    /// the DAG can never resolve, pinning the Artifact forever.
+    /// A terminal Source failure must not become a live Analysis blocker
+    /// or be retried merely because exact dependencies are registered later.
     #[test]
     fn register_resolved_deps_skips_dead_producer_deps() {
         let loader = Arc::new(MemorySourceLoader::new());
@@ -7116,16 +7097,25 @@ mod tests {
         sched.drive_all();
         let a_gen = sched.try_get_source("/a.vue").unwrap().generation;
 
-        // Plant a /dead.ts node at gen=0 directly so the auto-ingest
-        // path in register_resolved_deps skips ingestion (node
-        // already in `nodes`) AND the second pass observes
-        // generation=0 — the dead-producer signature. Without the
-        // dead-producer filter, the recorded DepKey would be
-        // FileStage(/dead.ts, 0, Analysis), which no DAG submission
-        // path will ever produce.
-        let dead_node = sched.create_node("/dead.ts", None);
-        sched.nodes.insert("/dead.ts".to_string(), dead_node);
-        // Do NOT bump_generation; leave it at 0.
+        // Missing backing drives a real terminal producer, distinguishing it
+        // from a FileNode whose first Source request is still in the inbox.
+        let dead = sched.submit_request(Request {
+            file_id: "/dead.ts".into(),
+            target: TargetStage::Source,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        sched.drive_all();
+        assert!(matches!(
+            dead.try_get(),
+            Some(CompletionState::Failed(
+                crate::job::SchedulerError::FileNotFound { .. }
+            ))
+        ));
+        let dead_node = sched.nodes.get("/dead.ts").unwrap().clone();
+        assert!(!dead_node.source_admission_pending());
 
         sched.register_resolved_deps(
             "/a.vue",
@@ -7133,17 +7123,29 @@ mod tests {
             vec!["/dead.ts".to_string()],
         );
 
-        // KEY ASSERTION: no entry in the registry — the dead-producer
-        // filter dropped /dead.ts at recording time, and with no
-        // remaining deps the empty-set arm cleared any prior entry.
         let a_arc: Arc<str> = Arc::from("/a.vue");
         let after = sched.dag.lock().peek_artifact_blockers(&a_arc, a_gen);
         assert!(
-            after.is_empty(),
-            "register_resolved_deps must drop dead-producer DepKey \
-             entries before recording; the planted /dead.ts node at \
-             generation 0 has no DAG identity and would never resolve. \
-             observed: {after:?}",
+            after.deps.is_empty(),
+            "a terminal producer cannot gate Analysis: {after:?}"
+        );
+        assert_eq!(
+            after.failed.len(),
+            1,
+            "terminal failure must still reach the owner's Artifact"
+        );
+        assert!(
+            sched
+                .dag
+                .lock()
+                .token_for(&WorkNodeIdentity::FileStage {
+                    canonical: Arc::from("/dead.ts"),
+                    incarnation: dead_node.incarnation_id(),
+                    generation: dead_node.generation(),
+                    stage: FileStageKey::Source,
+                })
+                .is_none(),
+            "blocker registration must not restart the terminal producer"
         );
     }
 
@@ -9232,11 +9234,11 @@ mod tests {
     /// `prepare_request` runs outside `dag.lock()`, so a prepared request
     /// can cross a retirement boundary: `remove()` retires the object,
     /// cancels the DAG, deletes the `FileNode` and drains the shutdown
-    /// waiters, all in the gap. The captured `Arc` survives — this
-    /// request holds it — but it is DETACHED from the canonical.
+    /// waiters, all in the gap. A prepared request holds only its lifetime
+    /// witness, which cannot authorize the next lifetime at that canonical.
     ///
     /// Generations can coincide on different objects. The crossing gate
-    /// must compare the captured incarnation with the published object.
+    /// must compare the captured submission lifetime with the published node.
     ///
     /// Discriminator: without the gate the waiter is registered and
     /// either the admission succeeds against a node no dispatcher can
@@ -9273,7 +9275,7 @@ mod tests {
             source: Some(Arc::from("x")),
             file_language: None,
             sender,
-            submitted_incarnation: fixture_incarnation(&sched, "/cross.vue"),
+            submitted_lifetime: fixture_incarnation(&sched, "/cross.vue"),
             request_context: None,
         };
         let prepared = sched
@@ -9375,7 +9377,7 @@ mod tests {
             source: None,
             file_language: None,
             sender,
-            submitted_incarnation: incarnation,
+            submitted_lifetime: incarnation,
             request_context: None,
         });
         assert!(prepared.is_none());
@@ -9630,6 +9632,295 @@ mod tests {
         );
     }
 
+    #[test]
+    fn queued_language_rehome_preserves_later_source_updates() {
+        for initial_language in [FileLanguage::vue(), FileLanguage::script_ts()] {
+            let sched = Scheduler::test_new_sync(
+                SchedulerConfig::default(),
+                Arc::new(MemorySourceLoader::new()),
+            );
+            let request = |source: &'static str, language| Request {
+                file_id: "/queued.vue".into(),
+                target: TargetStage::Source,
+                priority: Priority::Interactive,
+                source: Some(Arc::from(source)),
+                file_language: Some(language),
+                request_context: None,
+            };
+            let initial = sched.submit_request(request("initial", initial_language));
+            assert!(sched.wait_or_drive(&initial).is_ready());
+            let first = sched.submit_request(request("first", FileLanguage::script_ts()));
+            let last = sched.submit_request(request("last", FileLanguage::script_ts()));
+            sched.drive_all();
+            assert!(matches!(first.try_get(), Some(CompletionState::Superseded)));
+            assert!(
+                matches!(last.try_get(), Some(CompletionState::Ready(_))),
+                "{:?}",
+                last.try_get()
+            );
+            assert_eq!(
+                sched.try_get_source("/queued.vue").unwrap().source.as_ref(),
+                "last"
+            );
+            let obsolete = sched.submit_request(request("obsolete", FileLanguage::script_ts()));
+            sched.remove("/queued.vue");
+            let replacement =
+                sched.submit_request(request("replacement", FileLanguage::script_ts()));
+            sched.drive_all();
+            assert!(matches!(
+                obsolete.try_get(),
+                Some(CompletionState::Shutdown)
+            ));
+            assert!(matches!(
+                replacement.try_get(),
+                Some(CompletionState::Ready(_))
+            ));
+            assert_eq!(
+                sched.try_get_source("/queued.vue").unwrap().source.as_ref(),
+                "replacement"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_source_dependency_analysis_precedes_owner_artifact() {
+        struct OrderProbe {
+            events: StdMutex<Vec<String>>,
+            extracted: bool,
+        }
+        impl StageExecutor for OrderProbe {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn extract_deps(
+                &self,
+                id: &str,
+                _: &SourceSnapshot,
+            ) -> crate::execution::executor::ExtractedDeps {
+                if self.extracted && id == "/owner.vue" {
+                    crate::execution::executor::ExtractedDeps {
+                        forward_deps: vec!["/dep.ts".into()],
+                        blocker_ids: vec!["/dep.ts".into()],
+                    }
+                } else {
+                    crate::execution::executor::ExtractedDeps::default()
+                }
+            }
+            fn execute_analysis(
+                &self,
+                id: &str,
+                _: &SourceSnapshot,
+                generation: u64,
+            ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
+                self.events.lock().unwrap().push(id.to_owned());
+                Ok(AnalysisSnapshot::new_empty(generation))
+            }
+            fn execute_artifact(
+                &self,
+                _: &str,
+                _: &SourceSnapshot,
+                _: &AnalysisSnapshot,
+                profile_hash: u64,
+                generation: u64,
+            ) -> Result<ArtifactSnapshot, crate::execution::executor::StageError> {
+                self.events.lock().unwrap().push("artifact".into());
+                Ok(ArtifactSnapshot {
+                    generation,
+                    profile_hash,
+                    data: Arc::new(crate::node::EmptyData),
+                })
+            }
+        }
+        for (prequeued, extracted) in [(true, false), (false, false), (true, true), (false, true)] {
+            let loader = Arc::new(MemorySourceLoader::new());
+            loader.insert("/owner.vue".into(), Arc::from("owner"));
+            loader.insert("/dep.ts".into(), Arc::from("dep"));
+            let executor = Arc::new(OrderProbe {
+                events: StdMutex::new(Vec::new()),
+                extracted,
+            });
+            let sched = Scheduler::test_new_sync_with_executor(
+                SchedulerConfig::default(),
+                loader,
+                executor.clone(),
+            );
+            let request = |id: &str, target| Request {
+                file_id: id.into(),
+                target,
+                priority: Priority::Interactive,
+                source: None,
+                file_language: None,
+                request_context: None,
+            };
+            let owner = sched.submit_request(request("/owner.vue", TargetStage::Analysis));
+            if extracted {
+                // Leave the owner's Source completion ahead of the dependency
+                // request in the inbox, while its node is already published.
+                sched.drain_inbox();
+                assert!(sched.drive_one());
+            } else {
+                assert!(sched.wait_or_drive(&owner).is_ready());
+            }
+            let dep =
+                prequeued.then(|| sched.submit_request(request("/dep.ts", TargetStage::Source)));
+            if !extracted {
+                sched.register_resolved_deps(
+                    "/owner.vue",
+                    vec!["/dep.ts".into()],
+                    vec!["/dep.ts".into()],
+                );
+            }
+            let artifact = sched.submit_request(request(
+                "/owner.vue",
+                TargetStage::Artifact { profile_hash: 7 },
+            ));
+            sched.drive_all();
+            assert!(matches!(
+                artifact.try_get(),
+                Some(CompletionState::Ready(_))
+            ));
+            if let Some(dep) = dep {
+                assert!(matches!(dep.try_get(), Some(CompletionState::Ready(_))));
+            }
+            let events = executor.events.lock().unwrap();
+            assert_eq!(
+                events.len(),
+                3,
+                "prequeued={prequeued}, extracted={extracted}: {events:?}"
+            );
+            assert!(events[..2].iter().any(|id| id == "/owner.vue"));
+            assert!(events[..2].iter().any(|id| id == "/dep.ts"));
+            assert_eq!(
+                events[2], "artifact",
+                "both Analysis producers must precede Artifact"
+            );
+        }
+    }
+
+    #[test]
+    fn dependency_registration_reset_during_backpressure_cannot_recreate_work() {
+        struct ResetJoiner {
+            scheduler: std::sync::Weak<Scheduler>,
+            calls: AtomicU64,
+        }
+        impl RequestContextLike for ResetJoiner {
+            fn request_id(&self) -> u64 {
+                42
+            }
+            fn capture_enabled(&self) -> bool {
+                false
+            }
+            fn on_dedup_joiner(&self, _: Arc<str>, _: u64, _: bool) {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                    self.scheduler.upgrade().unwrap().reset();
+                }
+            }
+            fn record_cache_event(&self, _: CacheEventKind) {}
+            fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
+                struct Guard;
+                impl TlsUninstall for Guard {
+                    fn uninstall(self: Box<Self>) {}
+                }
+                Box::new(Guard)
+            }
+        }
+        let loader = Arc::new(MemorySourceLoader::new());
+        for id in ["/owner.vue", "/dup.vue", "/dep1.ts", "/dep2.ts", "/dep3.ts"] {
+            loader.insert(id.into(), Arc::from("source"));
+        }
+        let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
+        let request = |id: &str| Request {
+            file_id: id.into(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        };
+        let owner = sched.submit_request(request("/owner.vue"));
+        assert!(sched.wait_or_drive(&owner).is_ready());
+        let mut dup = request("/dup.vue");
+        dup.request_context = Some(OpaqueRequestContext(TestContext::new(1, false)));
+        let _winner = sched.submit_request(dup);
+        sched.drain_inbox();
+        let joiner = Arc::new(ResetJoiner {
+            scheduler: Arc::downgrade(&sched),
+            calls: AtomicU64::new(0),
+        });
+        for _ in 0..sched.inbox.sender.capacity().unwrap() {
+            let (_, sender) = completion_pair::<RequestResult>();
+            assert!(sched
+                .inbox
+                .sender
+                .try_send(Submission::NewRequest {
+                    file_id: "/dup.vue".into(),
+                    target: TargetStage::Analysis,
+                    priority: Priority::Interactive,
+                    source: None,
+                    file_language: None,
+                    sender,
+                    submitted_lifetime: fixture_incarnation(&sched, "/dup.vue"),
+                    request_context: Some(OpaqueRequestContext(joiner.clone())),
+                })
+                .is_ok());
+        }
+        let deps = vec!["/dep1.ts".into(), "/dep2.ts".into(), "/dep3.ts".into()];
+        sched.register_resolved_deps("/owner.vue", deps.clone(), deps);
+        assert_eq!(
+            joiner.calls.load(Ordering::SeqCst),
+            2,
+            "reset must occur inside dependency enqueue backpressure"
+        );
+        sched.drive_all();
+        assert!(
+            sched.nodes.is_empty(),
+            "retired registration recreated nodes after reset"
+        );
+        assert!(sched.auto_ingested_recent.is_empty());
+        assert_eq!(sched.dag.lock().total_active(), 0);
+    }
+
+    #[test]
+    fn removed_max_generation_refuses_replacement_before_identity_reuse() {
+        let sched = Scheduler::test_new_sync(
+            SchedulerConfig::default(),
+            Arc::new(MemorySourceLoader::new()),
+        );
+        sched
+            .generation_floors
+            .insert("/exhausted.vue".into(), u64::MAX - 1);
+        let node = sched.create_node("/exhausted.vue", Some(FileLanguage::vue()));
+        assert_eq!(node.generation(), u64::MAX);
+        let advance = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sched
+                .source_root
+                .publish_transition(|publication| publication.bump_node_generation(&node))
+        }));
+        assert!(
+            advance.is_err(),
+            "live generation exhaustion must refuse advancement"
+        );
+        assert_eq!(
+            node.generation(),
+            u64::MAX,
+            "refused advancement must not wrap the stored generation"
+        );
+        sched.nodes.insert("/exhausted.vue".into(), node);
+        sched.remove("/exhausted.vue");
+        let allocation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sched.create_node("/exhausted.vue", Some(FileLanguage::vue()))
+        }));
+        assert!(
+            allocation.is_err(),
+            "exhausted external publication identity must not be reused"
+        );
+        assert!(!sched.has_node("/exhausted.vue"));
+        assert_eq!(
+            *sched.generation_floors.get("/exhausted.vue").unwrap(),
+            u64::MAX
+        );
+    }
+
     /// A language re-home advances a PUBLISHED file's generation, so it
     /// must run under the DAG lock and sweep the identities and waiters
     /// it retires — exactly like `invalidate()` and `close_file()`.
@@ -9669,6 +9960,7 @@ mod tests {
 
         let canonical: Arc<str> = Arc::from("/reh.vue");
         let gen_before = sched.nodes.get("/reh.vue").unwrap().generation();
+        let incarnation_before = fixture_incarnation(&sched, "/reh.vue");
         let admitted_stage = {
             let dag = sched.dag.lock();
             [FileStageKey::Source, FileStageKey::Analysis]
@@ -9676,7 +9968,7 @@ mod tests {
                 .find(|stage| {
                     dag.token_for(&WorkNodeIdentity::FileStage {
                         canonical: Arc::clone(&canonical),
-                        incarnation: fixture_incarnation(&sched, canonical.as_ref()),
+                        incarnation: incarnation_before,
                         generation: gen_before,
                         stage: *stage,
                     })
@@ -9713,7 +10005,7 @@ mod tests {
         // 1. Stale-token removal.
         let stale = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(&canonical),
-            incarnation: fixture_incarnation(&sched, canonical.as_ref()),
+            incarnation: incarnation_before,
             generation: gen_before,
             stage: admitted_stage,
         };
@@ -10253,6 +10545,7 @@ mod tests {
         loader.insert("/paused.vue".to_string(), Arc::from("<template />"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader);
 
+        let _prior_node = sched.create_node("/prior.ts", Some(FileLanguage::script_ts()));
         let initial = sched.submit_request(Request {
             file_id: "/paused.vue".to_string(),
             target: TargetStage::Source,
@@ -10315,7 +10608,7 @@ mod tests {
         );
         let analysis_identity = WorkNodeIdentity::FileStage {
             canonical,
-            incarnation: 1,
+            incarnation: node.incarnation_id(),
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -13295,133 +13588,109 @@ mod tests {
     // silent deadlock.
     // ──────────────────────────────────────────────────────────────
 
-    /// A worker running A.Analysis that submits a request for
-    /// A.Artifact{X} and waits must reach a TERMINAL state instead of
-    /// parking on its own pending completion.
-    ///
-    /// **This contract has TWO legitimate arms; both are correct.**
-    /// [`check_terminal_or_same_path`] checks `handle.try_get()` FIRST,
-    /// and re-checks it again immediately before synthesizing the
-    /// same-path failure, specifically so a genuinely-resolved handle is
-    /// never masked by the synthetic `Failed`. Which arm appears depends
-    /// only on what happens first:
-    ///
-    /// 1. the caller reaches the same-path probe while the handle is
-    ///    still pending → `Failed(StageFailed { stage: "wait_or_drive" })`
-    /// 2. the work resolves first → `Ready(Artifact { profile_hash: 7 })`
-    ///
-    /// Arm 2 is reachable HERE BY DESIGN and is not a defect. The
-    /// active-path frame is thread-local to this caller, so the
-    /// `SchedulerConfig::default()` pool — `num_cpus()` CPU workers plus
-    /// 4 I/O workers, every one of them with an EMPTY active path — is
-    /// free to run `/a.vue` Source → Analysis → Artifact to completion.
-    /// Nothing here is actually blocked on `/a.vue` Analysis; the caller
-    /// merely pushed a frame CLAIMING it is. Pinning arm 1 as the only
-    /// acceptable outcome therefore makes this test a race on pool
-    /// scheduling — it used to do exactly that, and it failed under
-    /// concurrent load having observed arm 2.
-    ///
-    /// **Do not "reconcile" this with
-    /// `wait_or_drive_inner_re_check_observes_handle_resolved_during_same_path_probe`
-    /// by making a resolved handle lose to the synthetic failure.** That
-    /// sibling test deterministically pins the opposite direction — a
-    /// handle that resolves during the same-path window MUST surface its
-    /// real terminal state — and it is the authority on arm 2. The two
-    /// tests are the two arms of ONE contract, not a contradiction.
-    ///
-    /// What this test guards is the anti-deadlock property described in
-    /// the section comment above: without the concrete
-    /// `CompletionTarget::Work` target stamping, the caller would dedup
-    /// onto the in-flight Artifact, which gates on its own Analysis, and
-    /// PARK forever. So the discriminating assertions are (a) a terminal
-    /// state ARRIVES at all, enforced by an off-thread liveness
-    /// watchdog, and (b) it is one of exactly the two legitimate shapes
-    /// — never `Superseded`, never `Shutdown`, never a differently
-    /// tagged `Failed`, never a `Ready` carrying some other target.
-    ///
-    /// The bound is a LIVENESS watchdog, NOT a latency budget: a parked
-    /// waiter never completes at all, so a generous bound separates
-    /// "parked" from "returned" perfectly while staying immune to
-    /// machine load. A tight wall-clock assertion here would only
-    /// re-introduce a load-sensitive flake — which is why the previous
-    /// `elapsed < 2s` check is gone.
+    /// The real Analysis producer waits for its own Artifact while its
+    /// Analysis snapshot is still unpublished. Only self-await rejection
+    /// can release that physical dependency cycle.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn analysis_executor_submits_same_file_artifact_reaches_a_terminal_state() {
-        use crate::caller_kind::{with_active_path, CallerKind};
-        use crate::dag::{FileStageKey, WorkNodeIdentity};
-        use crate::job::{CompletionState, SchedulerError};
+        use crate::job::SchedulerError;
 
-        let loader = Arc::new(MemorySourceLoader::new());
-        loader.insert("/a.vue".to_string(), Arc::from("a content"));
-        let sched = Arc::new(Scheduler::test_with_executor(
-            SchedulerConfig::default(),
-            loader,
-            Arc::new(crate::execution::executor::DefaultExecutor),
-        ));
-
-        // Run the waiter on its own thread so a PARK is observable as a
-        // missing message rather than hanging the whole test binary.
-        // `with_active_path` is thread-local, so the simulated Analysis
-        // frame must be pushed on the same thread that waits.
-        let (tx, rx) = std::sync::mpsc::channel();
-        let sched_for_waiter = Arc::clone(&sched);
-        let waiter = std::thread::spawn(move || {
-            let analysis_id = WorkNodeIdentity::FileStage {
-                canonical: Arc::from("/a.vue"),
-                incarnation: 1,
-                generation: 1,
-                stage: FileStageKey::Analysis,
-            };
-            let state = with_active_path(analysis_id, || {
-                let handle = sched_for_waiter.submit_request(Request {
-                    file_id: "/a.vue".to_string(),
+        struct SelfAwaitExecutor {
+            scheduler: StdMutex<std::sync::Weak<Scheduler>>,
+            entered: std::sync::mpsc::Sender<()>,
+            result: std::sync::mpsc::Sender<CompletionState<RequestResult>>,
+            release: StdMutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl StageExecutor for SelfAwaitExecutor {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn execute_analysis(
+                &self,
+                id: &str,
+                _: &SourceSnapshot,
+                generation: u64,
+            ) -> Result<AnalysisSnapshot, crate::execution::executor::StageError> {
+                let sched = self.scheduler.lock().unwrap().upgrade().unwrap();
+                self.entered.send(()).unwrap();
+                let artifact = sched.submit_request(Request {
+                    file_id: id.into(),
                     target: TargetStage::Artifact { profile_hash: 7 },
                     priority: Priority::Interactive,
-                    source: Some(Arc::from("a content")),
+                    source: None,
                     file_language: None,
                     request_context: None,
                 });
-                sched_for_waiter.wait_or_drive_with_caller(&handle, CallerKind::CpuWorker)
-            });
-            // A send failure only happens if the watchdog already failed
-            // the test and dropped the receiver.
-            let _ = tx.send(state);
-        });
-
-        // Liveness watchdog — the anti-deadlock discriminator. A parked
-        // waiter never sends, so this timeout is what converts the
-        // deadlock into a test failure.
-        let liveness_bound = std::time::Duration::from_secs(60);
-        let state = match rx.recv_timeout(liveness_bound) {
-            Ok(state) => state,
-            Err(_) => panic!(
-                "wait_or_drive reached NO terminal state within {liveness_bound:?}: the \
-                 Analysis→Artifact same-path waiter parked on its own pending completion \
-                 instead of returning. This is precisely the silent deadlock the concrete \
-                 `CompletionTarget::Work` target stamping exists to prevent.",
-            ),
-        };
-        waiter.join().expect("waiter thread panicked");
-
-        // Exactly TWO shapes are legitimate. Everything else — including
-        // `Superseded`, `Shutdown`, a `Failed` tagged with another stage,
-        // or a `Ready` for a different target — is a real failure.
-        match &state {
-            // Arm 1: same-path self-await detected while still pending.
-            CompletionState::Failed(SchedulerError::StageFailed { stage, .. })
-                if stage == "wait_or_drive" => {}
-            // Arm 2: the requested Artifact genuinely resolved first.
-            // `profile_hash` is checked so a `Ready` for the wrong target
-            // cannot satisfy this arm.
-            CompletionState::Ready(RequestResult::Artifact(snapshot))
-                if snapshot.profile_hash == 7 => {}
-            other => panic!(
-                "expected ONE of the two legitimate terminal arms — \
-                 Failed(StageFailed {{ stage: \"wait_or_drive\" }}) or \
-                 Ready(Artifact {{ profile_hash: 7 }}) — got {other:?}",
-            ),
+                let state = sched.wait_or_drive_with_caller(
+                    &artifact,
+                    crate::caller_kind::CallerKind::CpuWorker,
+                );
+                let _ = self.result.send(state);
+                let _ = self.release.lock().unwrap().recv();
+                Ok(AnalysisSnapshot::new_empty(generation))
+            }
         }
+        struct ReleaseOnDrop {
+            sched: Arc<Scheduler>,
+            release: std::sync::mpsc::Sender<()>,
+        }
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                self.sched.dag.lock().signal_all_shutdown();
+                let _ = self.release.send(());
+            }
+        }
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let executor = Arc::new(SelfAwaitExecutor {
+            scheduler: StdMutex::new(std::sync::Weak::new()),
+            entered: entered_tx,
+            result: result_tx,
+            release: StdMutex::new(release_rx),
+        });
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/a.vue".into(), Arc::from("source"));
+        let sched = Scheduler::test_with_executor(
+            SchedulerConfig {
+                cpu_threads: 2,
+                io_threads: 1,
+                dag_budget: None,
+            },
+            loader,
+            executor.clone(),
+        );
+        *executor.scheduler.lock().unwrap() = Arc::downgrade(&sched);
+        let release = ReleaseOnDrop {
+            sched: sched.clone(),
+            release: release_tx,
+        };
+        let analysis = sched.submit_request(Request {
+            file_id: "/a.vue".into(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        let watchdog = std::time::Duration::from_secs(60);
+        entered_rx
+            .recv_timeout(watchdog)
+            .expect("the real Analysis executor must enter");
+        let state = result_rx
+            .recv_timeout(watchdog)
+            .expect("self-await must release the blocked Analysis producer");
+        assert!(
+            sched.try_get_analysis("/a.vue").is_none(),
+            "producer must remain unpublished while its self-await result is checked"
+        );
+        assert!(
+            matches!(state, CompletionState::Failed(SchedulerError::StageFailed { ref stage, .. }) if stage == "wait_or_drive"),
+            "{state:?}"
+        );
+        release.release.send(()).unwrap();
+        assert!(sched.wait_or_drive(&analysis).is_ready());
     }
 
     /// A single I/O worker that calls `wait_or_drive` on an
