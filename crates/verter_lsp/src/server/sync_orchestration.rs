@@ -2501,15 +2501,16 @@ impl VerterLanguageServer {
         crate::provider_surface_store::ContentHash::of(&doc.source) == snapshot.source_hash
     }
 
-    /// Whether a captured request surface is STILL valid — the post-await
-    /// validation gate every provider-backed handler runs before mapping or
+    /// Whether a captured request surface is STILL valid — the provider-surface
+    /// bracket every provider-backed handler closes before mapping or
     /// publishing a provider response. Both halves are required:
-    /// - `captured_snapshot_still_honored`: the store's current generation for
-    ///   the path still agrees with the captured one (a mid-request re-sync
-    ///   advancing the surface, or a close retiring it, invalidates);
+    /// - `captured_surface_is_current`: the path's current surface still has
+    ///   the captured content epoch, incarnation and owner (a mid-request
+    ///   content or map change — including one that changes back — or a close
+    ///   retiring the path invalidates; an identical re-record does not);
     /// - the open document source still byte-matches the captured carrier
-    ///   source (a mid-request edit invalidates even while the surface
-    ///   generation is unchanged).
+    ///   source (a mid-request edit invalidates even while the surface is
+    ///   unchanged).
     ///
     /// `false` ⇒ the provider response was produced against a surface that no
     /// longer matches the live state; mapping it would be WRONG (not merely
@@ -2521,7 +2522,7 @@ impl VerterLanguageServer {
     ) -> bool {
         self.documents
             .provider_surfaces()
-            .captured_snapshot_still_honored(snapshot)
+            .captured_surface_is_current(snapshot)
             && self.request_surface_matches_live_source(uri, snapshot)
     }
 

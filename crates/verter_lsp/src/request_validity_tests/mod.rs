@@ -16,10 +16,13 @@
 //! - the liveness rows (`liveness`) require a coherent answer while background
 //!   work moves only state that cannot change it.
 //!
-//! The route universe is the [`Route`] enum, generated together with every
-//! route's rows by `foreground_routes!`. Each per-route property is an
-//! exhaustive `match` without a wildcard, so a route added to the enum without
-//! its row does not compile.
+//! The route universe is the production [`ForegroundRoute`] enum the request
+//! disposition settles by. `foreground_routes!` generates every route's rows
+//! together with an exhaustive `match` over that enum, and each per-route
+//! property is an exhaustive `match` without a wildcard, so a production route
+//! added without its rows does not compile.
+//!
+//! [`ForegroundRoute`]: crate::documents::ForegroundRoute
 
 use std::sync::Arc;
 
@@ -32,6 +35,7 @@ use super::server_tests::{
 };
 use super::test_support::{RequestBarrier, RequestBarriers};
 use super::{TypeProviderContext, VerterLanguageServer};
+pub(super) use crate::documents::ForegroundRoute as Route;
 use crate::type_provider::merge;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::type_provider::protocol as wire;
@@ -39,6 +43,7 @@ use crate::type_provider::protocol as wire;
 mod controls;
 mod liveness;
 mod movement;
+mod pins;
 
 const APP_PATH: &str = "src/App.vue";
 
@@ -61,11 +66,12 @@ macro_rules! foreground_routes {
             $($(#[$attr:meta])* $row:ident: $movement:ident),+ $(,)?
         }
     ),+ $(,)?) => {
-        /// Every foreground LSP route whose answer settles against a captured
-        /// document basis.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub(super) enum Route {
-            $($route),+
+        /// Every production route has rows: a route without one is a
+        /// non-exhaustive match.
+        fn every_route_has_rows(route: Route) {
+            match route {
+                $(Route::$route => {}),+
+            }
         }
 
         $(
@@ -89,94 +95,68 @@ macro_rules! foreground_routes {
 
 foreground_routes! {
     hover => Hover {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     signature_help => SignatureHelp {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     definition => Definition {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     type_definition => TypeDefinition {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     references => References {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     document_highlight => DocumentHighlight {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     prepare_rename => PrepareRename {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     rename => Rename {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     completion => Completion {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and falls back to the native-only list once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is retried as an edit race and falls back to the native-only list"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     completion_resolve => CompletionResolve {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     code_action => CodeAction {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     inlay_hint => InlayHint {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     semantic_tokens => SemanticTokens {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
 }
@@ -827,6 +807,7 @@ pub(super) async fn reference_answer(route: Route) -> String {
 /// provider dispatch, when nothing moves during the request — and reaches every
 /// barrier the schedules move state at.
 async fn assert_steady(route: Route) {
+    every_route_has_rows(route);
     let fixture = Fixture::new().await;
     let armed = route.arm(&fixture).await;
     fixture.provider.clear_calls();

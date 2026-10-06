@@ -184,9 +184,12 @@ pub(super) async fn handle_goto_definition(
     // Virtual file: route directly through TSGO (position is already in TSX coordinates)
     if let Some(tp) = server.type_provider.as_ref() {
         if let Some(vf_ctx) = server.virtual_file_context(uri) {
-            let settlement =
-                crate::documents::ForegroundSettlement::capture(&server.documents, uri);
-            let settle = |response| settlement.settle(&server.documents, uri, response);
+            let request = crate::documents::ForegroundRequest::admit(
+                &server.documents,
+                crate::documents::ForegroundRoute::Definition,
+                uri,
+            );
+            let settle = |response| request.settle(&server.documents, response).into_result();
             let tsx_path = vf_ctx.tsx_path.clone();
             let vf_li = vf_ctx.line_index.clone();
             if let Some(offset) = vf_li.position_to_offset(position) {
@@ -492,33 +495,20 @@ pub(super) async fn handle_goto_definition(
             tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
         ));
     }
-    // The provider leg settles against a basis captured after that repair. A
-    // diagnostics-generation-only move during its await (a background sync,
-    // or an importer re-armed by a dependency's settled edit) recomputes it
-    // against a fresh basis instead of answering `ContentModified`; the
-    // native result above was already accepted against such a basis and is
-    // reused. An edit, close/reopen or workspace change still fails closed.
-    let mut prepared_ctx = Some(prepared_ctx);
+    // The provider leg settles against the request admitted after that
+    // repair; the native result above was accepted against its own source
+    // capture and is carried into it.
     server
-        .settle_request_with_generation_retry(uri, || {
-            let prepared_ctx = prepared_ctx.take();
-            let verter_result = verter_result.clone();
-            async move {
-                let ctx = match prepared_ctx {
-                    Some(ctx) => ctx,
-                    None if server.type_provider.is_some() => {
-                        server.repaired_type_provider_context(uri).await
-                    }
-                    None => None,
-                };
-                definition_provider_attempt(server, uri, position, verter_result, ctx).await
-            }
-        })
+        .answer_foreground(
+            crate::documents::ForegroundRoute::Definition,
+            uri,
+            definition_provider_attempt(server, uri, position, verter_result, prepared_ctx),
+        )
         .await
 }
 
-/// The provider leg of one definition attempt; [`handle_goto_definition`]
-/// owns its settlement.
+/// The provider leg of a definition request; [`handle_goto_definition`] owns
+/// its settlement.
 async fn definition_provider_attempt(
     server: &VerterLanguageServer,
     uri: &Uri,

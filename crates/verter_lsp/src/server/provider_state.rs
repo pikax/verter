@@ -1495,10 +1495,11 @@ impl VerterLanguageServer {
     }
 
     /// Post-await validation for a virtual-file provider query: the captured
-    /// surface is still honored AND the virtual document still byte-matches
-    /// the captured provider content. `false` ⇒ the provider response was
-    /// produced against a surface that no longer matches the virtual tab —
-    /// the branch must DROP the provider contribution (fail closed).
+    /// surface is still current (content epoch, incarnation, owner) AND the
+    /// virtual document still byte-matches the captured provider content.
+    /// `false` ⇒ the provider response was produced against a surface that no
+    /// longer matches the virtual tab — the branch must DROP the provider
+    /// contribution (fail closed).
     pub(super) fn virtual_request_surface_still_valid(
         &self,
         uri: &Uri,
@@ -1506,7 +1507,7 @@ impl VerterLanguageServer {
     ) -> bool {
         self.documents
             .provider_surfaces()
-            .captured_snapshot_still_honored(&ctx.snapshot)
+            .captured_surface_is_current(&ctx.snapshot)
             && self
                 .documents
                 .get(uri)

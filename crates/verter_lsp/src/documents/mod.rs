@@ -1,5 +1,6 @@
 mod analysis;
 mod diagnostics;
+mod foreground;
 mod guarded_host;
 pub(crate) use analysis::type_expr_contains_boolean;
 pub(crate) use analysis::SemanticReady;
@@ -7,7 +8,7 @@ pub(crate) use analysis::SemanticReady;
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;
 pub(crate) use diagnostics::BackgroundPublication;
 pub(crate) use diagnostics::DiagnosticsRefresh;
-pub(crate) use diagnostics::ForegroundSettlement;
+pub(crate) use foreground::{ForegroundRequest, ForegroundRoute, Settled};
 pub use guarded_host::{HostRef, SharedHost};
 pub mod carrier_structure;
 pub mod line_index;
