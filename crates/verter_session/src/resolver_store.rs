@@ -57,12 +57,14 @@ static STORE_VIEW_COHERENT_BUILD_SWEEPS: AtomicU64 = AtomicU64::new(0);
 /// gate reads this to verify the [`StoreViewManager`] collapses a warm batch
 /// onto ~O(1) captures.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn store_view_coherent_build_sweeps() -> u64 {
     STORE_VIEW_COHERENT_BUILD_SWEEPS.load(Ordering::Relaxed)
 }
 
 /// Reset the coherent-build counter — for tests / benches that want a
 /// clean delta around a batch.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn reset_store_view_coherent_build_sweeps() {
     STORE_VIEW_COHERENT_BUILD_SWEEPS.store(0, Ordering::Relaxed);
 }
@@ -302,6 +304,7 @@ fn record_from_host_call(loc: &'static Location<'static>) {
 /// Reset the per-call-site counter table — only useful for tests / benches
 /// that want a clean delta. Production callers never invoke this; the
 /// table accumulates across the process lifetime.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn reset_from_host_call_sites() {
     from_host_site_table().clear();
 }
@@ -318,6 +321,7 @@ pub fn reset_from_host_call_sites() {
 /// helpers reflects the location back to the cache layer triggering
 /// the build.
 #[must_use]
+#[cfg(not(target_arch = "wasm32"))]
 pub fn dump_from_host_call_sites() -> Vec<(String, u64)> {
     let table = from_host_site_table();
     let mut rows: Vec<(String, u64)> = table

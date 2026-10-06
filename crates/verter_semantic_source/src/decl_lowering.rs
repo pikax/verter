@@ -685,7 +685,7 @@ impl DeclLoweringService {
     /// shard lives in the `WASM_DECL_LOWERING_SHARD` thread-local. The
     /// spawn policy is inert here — both arguments are ignored.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn new_with(_lazy: bool, _worker_count: usize) -> Self {
+    pub fn new_with(_lazy: bool, _worker_count: usize) -> Self {
         Self::new_with_account(
             _lazy,
             _worker_count,
@@ -696,7 +696,7 @@ impl DeclLoweringService {
     /// [`Self::new_with`] against an explicit retention account. The spawn
     /// policy is inert on wasm; only the account is retained.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn new_with_account(
+    pub fn new_with_account(
         _lazy: bool,
         _worker_count: usize,
         account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
