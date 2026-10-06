@@ -10,6 +10,7 @@ import {
   loadProducts,
   mandatoryCases,
   REPO_ROOT,
+  SCHEDULER_FIELD_ROUTE_WITNESSES,
   selectedCaseIds,
   validate,
 } from "./verify.mjs";
@@ -239,7 +240,7 @@ const retargetLane = (products, from, to) => {
 test("ARH2-characterization dirty twin: nested inline module is not a cross-product witness id (AC2)", () => {
   const dirty = cloneProducts();
   const retarget = (pin) => {
-    if (pin.filter !== "scheduler::tests") return;
+    if (pin.filter !== "scheduler::") return;
     const previous = pin.command;
     pin.filter = "scheduler::pool_topology";
     pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
@@ -269,9 +270,9 @@ test("ARH2-characterization dirty twin: witness is bound to its enclosing module
   const pin = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2").pins[0];
   const previous = pin.command;
   pin.witnesses = [
-    pin.witnesses.find((w) => w.test === "tombstone_rejects_pre_remove_source_submission"),
+    pin.witnesses.find((w) => w.test === "incarnation_rejects_pre_remove_source_submission"),
   ];
-  pin.filter = "scheduler::tombstone_rejects_pre_remove_source_submission";
+  pin.filter = "scheduler::incarnation_rejects_pre_remove_source_submission";
   pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
   retargetLane(dirty, previous, pin.command);
   const result = validate(dirty);
@@ -281,7 +282,7 @@ test("ARH2-characterization dirty twin: witness is bound to its enclosing module
       (e) =>
         e.caseId === "ARH2-characterization" &&
         e.code === "pin-filter-selects-nothing" &&
-        e.detail.includes("scheduler::tests::tombstone_rejects_pre_remove_source_submission"),
+        e.detail.includes("scheduler::tests::incarnation_rejects_pre_remove_source_submission"),
     ),
     JSON.stringify(result.errors),
   );
@@ -437,7 +438,7 @@ test("ARH2-characterization dirty twin: duplicated route characterization is rej
 test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer pub is rejected", () => {
   const dirty = cloneProducts();
   const route = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2");
-  route.surface.items = ["tombstones", "generation_floors", "deferred_blocker_ids", "node"];
+  route.surface.items = ["generation_floors", "deferred_blocker_ids", "node"];
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
@@ -445,6 +446,49 @@ test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer 
       (e) =>
         (e.code === "route-surface-drift" || e.code === "route-surface-not-live") &&
         e.caseId === "ARH2-characterization",
+    ),
+    JSON.stringify(result.errors),
+  );
+});
+
+test("ARH2-characterization dirty twin: dropping a required scheduler field-route witness is rejected", () => {
+  assert.deepEqual([...new Set(SCHEDULER_FIELD_ROUTE_WITNESSES.map((w) => w.concern))].sort(), [
+    "deferred-blocker replacement",
+    "generation-floor fence",
+    "incarnation rejection",
+    "removal drain",
+  ]);
+  for (const dropped of SCHEDULER_FIELD_ROUTE_WITNESSES) {
+    const dirty = cloneProducts();
+    for (const pin of dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2")
+      .pins) {
+      pin.witnesses = pin.witnesses.filter(
+        (w) => w.file !== dropped.file || w.test !== dropped.test,
+      );
+    }
+    const result = validate(dirty);
+    assert.equal(result.ok, false, `dropping ${dropped.test} must fail`);
+    assert.ok(
+      result.errors.some(
+        (e) =>
+          e.caseId === "ARH2-characterization" &&
+          e.code === "route-required-witness-missing" &&
+          e.detail.includes(`${dropped.file}::${dropped.test}`),
+      ),
+      JSON.stringify(result.errors),
+    );
+  }
+  // A required witness re-homed to a different file is not the pinned proof.
+  const dirty = cloneProducts();
+  const pin = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2").pins[0];
+  const moved = pin.witnesses.find((w) => w.test === "deferred_blockers_are_replaced_not_appended");
+  moved.file = "crates/verter_scheduler/src/scheduler/lifecycle.rs";
+  const result = validate(dirty);
+  assert.ok(
+    result.errors.some(
+      (e) =>
+        e.code === "route-required-witness-missing" &&
+        e.detail.includes("scheduler.rs::deferred_blockers_are_replaced_not_appended"),
     ),
     JSON.stringify(result.errors),
   );

@@ -145,18 +145,20 @@ pub struct PinId(pub u64);
 /// unrepresentable.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum WorkNodeIdentity {
-    /// File-staged work for a canonical file at a generation, at one
+    /// File-staged work for a canonical file incarnation and generation, at one
     /// of the [`FileStageKey`] stages.
     FileStage {
         canonical: Arc<str>,
+        incarnation: u64,
         generation: u64,
         stage: FileStageKey,
     },
-    /// Artifact work for a canonical file at a generation, parameterised
+    /// Artifact work for a canonical file incarnation and generation, parameterised
     /// by a profile hash and bound to a content hash (lets two compile
     /// requests at the same generation but different content disambiguate).
     Artifact {
         canonical: Arc<str>,
+        incarnation: u64,
         generation: u64,
         profile_hash: Hash16,
         content_hash: Hash16,
@@ -399,6 +401,7 @@ pub enum DepKey {
     /// A specific file-stage completion.
     FileStage {
         canonical: Arc<str>,
+        incarnation: u64,
         generation: u64,
         stage: FileStageKey,
     },
@@ -407,6 +410,7 @@ pub enum DepKey {
     /// is rare in current callers.
     Artifact {
         canonical: Arc<str>,
+        incarnation: u64,
         generation: u64,
         profile_hash: Hash16,
         content_hash: Hash16,
@@ -430,20 +434,24 @@ impl DepKey {
         match identity {
             WorkNodeIdentity::FileStage {
                 canonical,
+                incarnation,
                 generation,
                 stage,
             } => DepKey::FileStage {
                 canonical: Arc::clone(canonical),
+                incarnation: *incarnation,
                 generation: *generation,
                 stage: *stage,
             },
             WorkNodeIdentity::Artifact {
                 canonical,
+                incarnation,
                 generation,
                 profile_hash,
                 content_hash,
             } => DepKey::Artifact {
                 canonical: Arc::clone(canonical),
+                incarnation: *incarnation,
                 generation: *generation,
                 profile_hash: *profile_hash,
                 content_hash: *content_hash,
@@ -736,18 +744,6 @@ pub struct SchedulerDag {
     /// so [`Self::supersede_old_file_generations`] can drive off the
     /// bumped canonical's buckets alone. See [`CanonicalReverseIndex`].
     canonical_index: CanonicalReverseIndex,
-    /// Per-canonical RETIREMENT FLOOR: for canonical `C`, every identity
-    /// whose generation is `< retirement_floor[C]` is retired and can
-    /// never be admitted again.
-    ///
-    /// This is what makes "admission after retirement" structurally
-    /// impossible instead of a rule each admission site must remember.
-    /// The supersede sweep is backward-looking — it cancels what exists
-    /// NOW — so on its own it cannot stop a caller that admits a moment
-    /// later for the generation it just retired. The floor is the
-    /// forward half: [`Self::submit`], the single admission primitive,
-    /// consults it, so no caller can bypass the check.
-    retirement_floor: FxHashMap<Arc<str>, u64>,
     /// Dispatch-ready tokens, sharded by `(Priority, ResourceClass)`.
     /// Outer index is the [`Priority`] ordinal (`Critical`=0 ..
     /// `Maintenance`=3), inner index is the [`ResourceClass`] ordinal
@@ -1040,7 +1036,6 @@ impl SchedulerDag {
             highest_priority_node_visit_count: std::cell::Cell::new(0),
             terminal_dep_failures: FxHashMap::default(),
             canonical_index: CanonicalReverseIndex::default(),
-            retirement_floor: FxHashMap::default(),
             ready_lanes: Default::default(),
             credit: [0; PRIORITY_LANE_COUNT],
             next_token: 1,
@@ -1426,7 +1421,61 @@ impl SchedulerDag {
     ///   only — `cancel()` removes the `by_identity` entry on the
     ///   normal path) → reject silently by returning the existing
     ///   token without modification.
-    pub fn submit(
+    ///
+    /// File work can enter only through a live object witness. The caller
+    /// holds the lifecycle mutex, so retirement and this check are atomic.
+    pub(crate) fn submit_file(
+        &mut self,
+        node: &crate::node::FileNode,
+        identity: WorkNodeIdentity,
+        kind: WorkKind,
+        priority: Priority,
+        deps: Vec<DepKey>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
+    ) -> Option<SubmissionToken> {
+        let (canonical, incarnation, generation) = match &identity {
+            WorkNodeIdentity::FileStage {
+                canonical,
+                incarnation,
+                generation,
+                ..
+            }
+            | WorkNodeIdentity::Artifact {
+                canonical,
+                incarnation,
+                generation,
+                ..
+            } => (canonical, *incarnation, *generation),
+            WorkNodeIdentity::CacheNode { .. } => return None,
+        };
+        if canonical.as_ref() != node.canonical_id || !node.admits_work(incarnation, generation) {
+            return None;
+        }
+        Some(self.submit_unchecked(identity, kind, priority, deps, request_context))
+    }
+
+    pub(crate) fn submit_cache(
+        &mut self,
+        identity: WorkNodeIdentity,
+        priority: Priority,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
+    ) -> SubmissionToken {
+        assert!(
+            matches!(identity, WorkNodeIdentity::CacheNode { .. }),
+            "cache admission requires a cache identity"
+        );
+        self.submit_unchecked(
+            identity,
+            WorkKind::CacheNode,
+            priority,
+            Vec::new(),
+            request_context,
+        )
+    }
+
+    /// Raw identities are available only to standalone DAG fixtures.
+    #[cfg(test)]
+    pub(crate) fn submit(
         &mut self,
         identity: WorkNodeIdentity,
         kind: WorkKind,
@@ -1434,14 +1483,17 @@ impl SchedulerDag {
         deps: Vec<DepKey>,
         request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) -> Option<SubmissionToken> {
-        // STRUCTURAL GATE. A retired generation can never be admitted,
-        // whichever caller asks. This is the single admission primitive,
-        // so the check cannot be bypassed or forgotten by a new call
-        // site — which is exactly why it lives here rather than at each
-        // admission site.
-        if self.identity_is_retired(&identity) {
-            return None;
-        }
+        Some(self.submit_unchecked(identity, kind, priority, deps, request_context))
+    }
+
+    fn submit_unchecked(
+        &mut self,
+        identity: WorkNodeIdentity,
+        kind: WorkKind,
+        priority: Priority,
+        deps: Vec<DepKey>,
+        request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
+    ) -> SubmissionToken {
         // Dedup path: same identity. Three sub-cases — pre-dispatch
         // merge (priority + deps + winner-context), in-flight dedup
         // (priority + winner-context only; deps ignored because the
@@ -1458,7 +1510,7 @@ impl SchedulerDag {
                 // a cancelled tombstone is normally unreachable here.
                 // If observed, refuse to re-admit — the cancelled
                 // node has no completion path the joiner could see.
-                return Some(existing_token);
+                return existing_token;
             }
             if is_dispatched {
                 // In-flight dedup. The joiner shares the in-flight
@@ -1483,7 +1535,7 @@ impl SchedulerDag {
                 // upgrade on it cannot migrate a lane entry; the
                 // refresh is a no-op but keeps the invariant explicit.
                 self.refresh_ready_membership(existing_token);
-                return Some(existing_token);
+                return existing_token;
             }
             // Pre-dispatch merge.
             if let Some(existing) = self.nodes.get_mut(&existing_token) {
@@ -1506,7 +1558,7 @@ impl SchedulerDag {
                 // token to a higher lane, and a newly-added dep that
                 // makes the node non-ready removes it from its lane.
                 self.refresh_ready_membership(existing_token);
-                return Some(existing_token);
+                return existing_token;
             }
         }
 
@@ -1545,29 +1597,7 @@ impl SchedulerDag {
         // must enter its lane; a gated node stays out until its last
         // dep clears.
         self.refresh_ready_membership(token);
-        Some(token)
-    }
-
-    /// `true` when `identity` names a generation this canonical has
-    /// already retired. Cache nodes carry no generation and are never
-    /// retired by a file's lifecycle.
-    fn identity_is_retired(&self, identity: &WorkNodeIdentity) -> bool {
-        let (canonical, generation) = match identity {
-            WorkNodeIdentity::FileStage {
-                canonical,
-                generation,
-                ..
-            }
-            | WorkNodeIdentity::Artifact {
-                canonical,
-                generation,
-                ..
-            } => (canonical, *generation),
-            WorkNodeIdentity::CacheNode { .. } => return false,
-        };
-        self.retirement_floor
-            .get(canonical)
-            .is_some_and(|floor| generation < *floor)
+        token
     }
 
     /// Release every waiter gated on `dep_key`, returning those whose
@@ -1598,34 +1628,15 @@ impl SchedulerDag {
         stranded
     }
 
-    /// THE retirement primitive: everything below `floor` for
-    /// `canonical` becomes unreachable, in one lock-held step.
-    ///
-    /// Three rounds of review found the same defect through three
-    /// different doors — a stage completion, a pending-Artifact
-    /// admission, and `remove()` — because each door had to remember to
-    /// gate itself. This collapses them: retirement records a FORWARD
-    /// floor (so [`Self::submit`] refuses later admissions by
-    /// construction) and performs ONE fan-out covering every consumer
-    /// kind, rather than one call per waiter kind.
-    ///
-    /// Returns stranded waiter tokens for the caller to requeue after
-    /// the lock drops.
+    /// Sweep obsolete work and every consumer below this generation.
+    /// The live FileNode witness rejects later stale admissions; this sweep
+    /// keeps no per-canonical retirement history. Returns newly stranded
+    /// waiter tokens for requeue after the lifecycle hold releases.
     pub(crate) fn retire_generations_below(
         &mut self,
         canonical: &Arc<str>,
         floor: u64,
     ) -> Vec<SubmissionToken> {
-        // The floor only ever advances: a later, lower retirement must
-        // not resurrect an already-retired generation.
-        let entry = self
-            .retirement_floor
-            .entry(Arc::clone(canonical))
-            .or_insert(0);
-        if floor > *entry {
-            *entry = floor;
-        }
-
         let mut stranded = Vec::new();
 
         // 1. Stale file waiter groups → `Superseded`.
@@ -1723,11 +1734,7 @@ impl SchedulerDag {
         stranded
     }
 
-    /// Test-only `submit` that asserts the admission was accepted.
-    ///
-    /// Production callers MUST handle the `None` arm — it is the
-    /// retirement floor refusing a retired generation. Tests that are
-    /// not exercising retirement would otherwise all have to unwrap.
+    /// Admit a synthetic standalone DAG fixture without a live FileNode.
     #[cfg(test)]
     pub(crate) fn submit_expect(
         &mut self,
@@ -1737,8 +1744,7 @@ impl SchedulerDag {
         deps: Vec<DepKey>,
         request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) -> SubmissionToken {
-        self.submit(identity, kind, priority, deps, request_context)
-            .expect("test admission refused by the retirement floor")
+        self.submit_unchecked(identity, kind, priority, deps, request_context)
     }
 
     /// Look up the token currently associated with `identity`, if any.
@@ -1808,14 +1814,18 @@ impl SchedulerDag {
     pub fn dep_reaches_owner(
         &self,
         owner_canonical: &Arc<str>,
+        owner_incarnation: u64,
         owner_generation: u64,
         dep_canonical: &Arc<str>,
+        dep_incarnation: u64,
         dep_generation: u64,
     ) -> bool {
         self.dep_reaches_owner_with_metrics(
             owner_canonical,
+            owner_incarnation,
             owner_generation,
             dep_canonical,
+            dep_incarnation,
             dep_generation,
         )
         .0
@@ -1840,14 +1850,18 @@ impl SchedulerDag {
     pub(crate) fn dep_reaches_owner_with_metrics(
         &self,
         owner_canonical: &Arc<str>,
+        owner_incarnation: u64,
         owner_generation: u64,
         dep_canonical: &Arc<str>,
+        dep_incarnation: u64,
         dep_generation: u64,
     ) -> (bool, BfsMetrics) {
         let mut metrics = BfsMetrics::default();
 
         // Self-cycle: dep IS the owner.
-        if owner_canonical.as_ref() == dep_canonical.as_ref() && owner_generation == dep_generation
+        if owner_canonical.as_ref() == dep_canonical.as_ref()
+            && owner_incarnation == dep_incarnation
+            && owner_generation == dep_generation
         {
             return (true, metrics);
         }
@@ -1857,16 +1871,19 @@ impl SchedulerDag {
         // single comparison.
         let owner_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(owner_canonical),
+            incarnation: owner_incarnation,
             generation: owner_generation,
             stage: FileStageKey::Analysis,
         };
         let owner_dep = DepKey::FileStage {
             canonical: Arc::clone(owner_canonical),
+            incarnation: owner_incarnation,
             generation: owner_generation,
             stage: FileStageKey::Analysis,
         };
         let start_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(dep_canonical),
+            incarnation: dep_incarnation,
             generation: dep_generation,
             stage: FileStageKey::Analysis,
         };
@@ -1922,12 +1939,14 @@ impl SchedulerDag {
             for dep_key in node.deps_remaining.iter() {
                 if let DepKey::FileStage {
                     canonical: c,
+                    incarnation,
                     generation: g,
                     stage: FileStageKey::Analysis,
                 } = dep_key
                 {
                     let next = WorkNodeIdentity::FileStage {
                         canonical: Arc::clone(c),
+                        incarnation: *incarnation,
                         generation: *g,
                         stage: FileStageKey::Analysis,
                     };
@@ -2422,7 +2441,6 @@ impl SchedulerDag {
             let _ = node.reservation.take();
         }
         self.by_identity.clear();
-        self.retirement_floor.clear();
         self.waiters.clear();
         // Signal Shutdown on any outstanding waiters so handles don't
         // hang across reset.
@@ -2550,6 +2568,7 @@ impl SchedulerDag {
     pub fn signal_stage_complete(
         &mut self,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         completed: &TaskKind,
         result: &RequestResult,
@@ -2582,7 +2601,7 @@ impl SchedulerDag {
             completed,
             TaskKind::Load | TaskKind::Parse | TaskKind::Analysis
         ) {
-            self.clear_terminal_dep_failure_for_gen(canonical, generation);
+            self.clear_terminal_dep_failure_for_gen(canonical, incarnation, generation);
         }
     }
 
@@ -2819,7 +2838,12 @@ impl SchedulerDag {
     /// the pre-admission Artifact blocker registry. Source completion must
     /// consult all three or an auto-ingested blocker can stop at Source before
     /// its owner's Artifact node has been admitted.
-    pub fn has_analysis_demand(&self, canonical: &Arc<str>, generation: u64) -> bool {
+    pub fn has_analysis_demand(
+        &self,
+        canonical: &Arc<str>,
+        incarnation: u64,
+        generation: u64,
+    ) -> bool {
         let key = FileGenKey {
             canonical: Arc::clone(canonical),
             generation,
@@ -2838,6 +2862,7 @@ impl SchedulerDag {
 
         let dep = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };

@@ -7,6 +7,7 @@ fn canonical(s: &str) -> Arc<str> {
 fn file_stage(s: &str, gen: u64, stage: FileStageKey) -> WorkNodeIdentity {
     WorkNodeIdentity::FileStage {
         canonical: canonical(s),
+        incarnation: 1,
         generation: gen,
         stage,
     }
@@ -15,6 +16,7 @@ fn file_stage(s: &str, gen: u64, stage: FileStageKey) -> WorkNodeIdentity {
 fn artifact(s: &str, gen: u64, profile: u64) -> WorkNodeIdentity {
     WorkNodeIdentity::Artifact {
         canonical: canonical(s),
+        incarnation: 1,
         generation: gen,
         profile_hash: profile_hash_to_bytes(profile),
         content_hash: [0u8; 16],
@@ -826,21 +828,25 @@ fn dep_reaches_owner_returns_true_for_three_node_cycle() {
 
     let b_id = WorkNodeIdentity::FileStage {
         canonical: Arc::clone(&b),
+        incarnation: 1,
         generation: 1,
         stage: FileStageKey::Analysis,
     };
     let c_id = WorkNodeIdentity::FileStage {
         canonical: Arc::clone(&c),
+        incarnation: 1,
         generation: 1,
         stage: FileStageKey::Analysis,
     };
     let c_dep = DepKey::FileStage {
         canonical: Arc::clone(&c),
+        incarnation: 1,
         generation: 1,
         stage: FileStageKey::Analysis,
     };
     let a_dep = DepKey::FileStage {
         canonical: Arc::clone(&a),
+        incarnation: 1,
         generation: 1,
         stage: FileStageKey::Analysis,
     };
@@ -861,7 +867,7 @@ fn dep_reaches_owner_returns_true_for_three_node_cycle() {
         None,
     );
     assert!(
-        dag.dep_reaches_owner(&a, 1, &b, 1),
+        dag.dep_reaches_owner(&a, 1, 1, &b, 1, 1),
         "bounded BFS must report A→B→C→A as a cycle",
     );
 }
@@ -890,6 +896,7 @@ fn dep_reaches_owner_detects_cycle_past_256_hops() {
     for (i, current) in chain.iter().enumerate() {
         let current_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(current),
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -900,6 +907,7 @@ fn dep_reaches_owner_detects_cycle_past_256_hops() {
         };
         let next_dep = DepKey::FileStage {
             canonical: next_canonical,
+            incarnation: 1,
             generation: 1,
             stage: FileStageKey::Analysis,
         };
@@ -913,7 +921,7 @@ fn dep_reaches_owner_detects_cycle_past_256_hops() {
     }
 
     assert!(
-        dag.dep_reaches_owner(&a, 1, &chain[0], 1),
+        dag.dep_reaches_owner(&a, 1, 1, &chain[0], 1, 1),
         "visited-set BFS must detect cycle through {CHAIN_LEN}-node chain (a fixed 256-hop cap would miss this and admit a deadlocking dep)",
     );
 }
@@ -982,6 +990,7 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
         for node_canonical in layers[li].iter() {
             let node_id = WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(node_canonical),
+                incarnation: 1,
                 generation: 1,
                 stage: FileStageKey::Analysis,
             };
@@ -989,6 +998,7 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
                 next.iter()
                     .map(|c| DepKey::FileStage {
                         canonical: Arc::clone(c),
+                        incarnation: 1,
                         generation: 1,
                         stage: FileStageKey::Analysis,
                     })
@@ -1009,7 +1019,8 @@ fn dep_reaches_owner_frontier_bounded_on_dense_graph() {
     // Owner is not part of the graph — no cycle. Probe starts at
     // layer 0's first node; the BFS must exhaust the reachable
     // subgraph and return false.
-    let (reachable, metrics) = dag.dep_reaches_owner_with_metrics(&owner, 1, &layers[0][0], 1);
+    let (reachable, metrics) =
+        dag.dep_reaches_owner_with_metrics(&owner, 1, 1, &layers[0][0], 1, 1);
     assert!(!reachable, "no cycle exists; BFS should return false");
 
     // Primary discriminating assertions on the BFS metrics.
@@ -1186,6 +1197,7 @@ fn analysis_demand_probe_is_constant_in_blocker_registry_cardinality() {
     let demanded: Arc<str> = Arc::from("/demanded.ts");
     let demanded_dep = DepKey::FileStage {
         canonical: Arc::clone(&demanded),
+        incarnation: 1,
         generation: 1,
         stage: FileStageKey::Analysis,
     };
@@ -1197,6 +1209,7 @@ fn analysis_demand_probe_is_constant_in_blocker_registry_cardinality() {
         } else {
             DepKey::FileStage {
                 canonical: Arc::from(format!("/dep-{index}.ts")),
+                incarnation: 1,
                 generation: 1,
                 stage: FileStageKey::Analysis,
             }
@@ -1212,7 +1225,7 @@ fn analysis_demand_probe_is_constant_in_blocker_registry_cardinality() {
     }
 
     dag.test_reset_analysis_demand_probe_count();
-    assert!(dag.has_analysis_demand(&demanded, 1));
+    assert!(dag.has_analysis_demand(&demanded, 1, 1));
     assert_eq!(
         dag.test_analysis_demand_probe_count(),
         1,
@@ -1225,11 +1238,13 @@ fn blocker_demand_refcounts_follow_every_registry_lifecycle_funnel() {
     let mut dag = SchedulerDag::new();
     let shared = DepKey::FileStage {
         canonical: canonical("/shared.ts"),
+        incarnation: 1,
         generation: 1,
         stage: FileStageKey::Analysis,
     };
     let replacement = DepKey::FileStage {
         canonical: canonical("/replacement.ts"),
+        incarnation: 1,
         generation: 1,
         stage: FileStageKey::Analysis,
     };

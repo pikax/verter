@@ -104,6 +104,32 @@ const FORBIDDEN_NUMERIC_KEYS = Object.freeze([
 ]);
 // Narrowing successors whose cutover routes ARH2 must characterize first.
 const NARROWING_HEIRS = Object.freeze(["ARH3", "ARH4"]);
+// ARH1-CUT-2 stale-work protection: removal history is replaced by FileNode
+// incarnation identity, so the scheduler field route must keep pinning the
+// incarnation-rejection, removal-drain and retained generation-floor proofs
+// (plus deferred-blocker replacement) beside the narrowed fields. A pin may
+// carry more witnesses, never fewer.
+const SCHEDULER_RS = "crates/verter_scheduler/src/scheduler.rs";
+const SCHEDULER_LIFECYCLE_RS = "crates/verter_scheduler/src/scheduler/lifecycle.rs";
+export const SCHEDULER_FIELD_ROUTE_WITNESSES = Object.freeze(
+  [
+    ["incarnation rejection", SCHEDULER_RS, "incarnation_rejects_pre_remove_source_submission"],
+    [
+      "incarnation rejection",
+      SCHEDULER_LIFECYCLE_RS,
+      "delayed_source_worker_cannot_republish_a_retired_incarnation",
+    ],
+    [
+      "incarnation rejection",
+      SCHEDULER_LIFECYCLE_RS,
+      "delayed_failure_cannot_cancel_same_generation_successor_after_remove_or_reset",
+    ],
+    ["removal drain", SCHEDULER_RS, "removal_retires_the_canonical_so_late_admission_is_refused"],
+    ["removal drain", SCHEDULER_LIFECYCLE_RS, "unknown_removals_do_not_allocate_restart_history"],
+    ["generation-floor fence", SCHEDULER_RS, "reset_seeds_generation_floors_for_cleared_nodes"],
+    ["deferred-blocker replacement", SCHEDULER_RS, "deferred_blockers_are_replaced_not_appended"],
+  ].map(([concern, file, test]) => Object.freeze({ concern, file, test })),
+);
 
 export function loadProducts() {
   const products = {};
@@ -931,6 +957,21 @@ function validateCharacterization(products, predecessors, errors) {
           caseId,
           code: "route-surface-not-live",
           detail: `${item} is not a live pub field of ${schedulerRel}; the surface must be characterized before narrowing`,
+        });
+      }
+    }
+    const pinned = new Set(
+      (fieldsRoute.pins || []).flatMap((pin) =>
+        (pin.witnesses || []).map((w) => `${w.file}::${w.test}`),
+      ),
+    );
+    for (const required of SCHEDULER_FIELD_ROUTE_WITNESSES) {
+      const id = `${required.file}::${required.test}`;
+      if (!pinned.has(id)) {
+        errors.push({
+          caseId,
+          code: "route-required-witness-missing",
+          detail: `ARH1-CUT-2 ${required.concern} witness ${id} is not pinned`,
         });
       }
     }

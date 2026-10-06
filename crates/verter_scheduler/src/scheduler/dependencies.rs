@@ -74,6 +74,7 @@ pub(super) enum AnalysisDemandKind {
 /// sweep in the matrix consumer.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AutoIngestedRecord {
+    pub(crate) incarnation: u64,
     /// Generation the dep FileNode was at when the auto-ingest fired.
     /// Matched against the dep's current generation in the matrix; a
     /// mismatch means the entry is stale (the dep has advanced beyond
@@ -124,6 +125,7 @@ impl Scheduler {
     pub(super) fn filter_macro_cycle_deps(
         dag: &crate::dag::SchedulerDag,
         owner_canonical: &Arc<str>,
+        incarnation: u64,
         owner_generation: u64,
         deps: Vec<DepKey>,
     ) -> (Vec<DepKey>, Vec<DepKey>) {
@@ -132,14 +134,17 @@ impl Scheduler {
         for dep in deps {
             let drop_this = if let DepKey::FileStage {
                 canonical: dep_canonical,
+                incarnation: dep_incarnation,
                 generation: dep_generation,
                 stage: FileStageKey::Analysis,
             } = &dep
             {
                 dag.dep_reaches_owner(
                     owner_canonical,
+                    incarnation,
                     owner_generation,
                     dep_canonical,
+                    *dep_incarnation,
                     *dep_generation,
                 )
             } else {
@@ -164,7 +169,12 @@ impl Scheduler {
     /// the Source identity, that state is over — the live Source
     /// identity in `by_identity` is now the source of truth and the
     /// tracking entry would only confuse future matrix lookups.
-    pub(super) fn clear_auto_ingest_tracking(&self, canonical: &Arc<str>, generation: u64) {
+    pub(super) fn clear_auto_ingest_tracking(
+        &self,
+        canonical: &Arc<str>,
+        incarnation: u64,
+        generation: u64,
+    ) {
         // Atomic value-conditional removal: only drop the entry when
         // the live entry's generation still matches the one we are
         // clearing for. `DashMap::remove_if` evaluates the predicate
@@ -175,8 +185,9 @@ impl Scheduler {
         // later generation stays so the next driver tick's admission
         // of the newer generation's Source request finds it and
         // clears it on its own match.
-        self.auto_ingested_recent
-            .remove_if(canonical, |_k, v| v.generation == generation);
+        self.auto_ingested_recent.remove_if(canonical, |_k, v| {
+            v.incarnation == incarnation && v.generation == generation
+        });
     }
 
     /// Admit an Artifact work node with any late-discovered blocker
@@ -203,15 +214,25 @@ impl Scheduler {
     /// - Otherwise the entry stays in place so a re-admission (e.g.
     ///   a same-generation re-request for a different profile) still
     ///   picks up the unresolved blockers.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn admit_artifact_with_blockers(
         &self,
         dag: &mut SchedulerDag,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         profile_hash: u64,
         priority: Priority,
         request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     ) -> Option<crate::dag::SubmissionToken> {
+        let live = self
+            .nodes
+            .get(canonical.as_ref())
+            .map(|entry| Arc::clone(entry.value()))?;
+        if !live.admits_work(incarnation, generation) {
+            return None;
+        }
+
         let mut blocker_deps: Vec<DepKey> = Vec::new();
         // Failed-dep records to attach to the just-submitted
         // Artifact node so the pre-dispatch short-circuit in
@@ -327,11 +348,13 @@ impl Scheduler {
 
         let identity = WorkNodeIdentity::Artifact {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             profile_hash: profile_hash_to_bytes(profile_hash),
             content_hash: [0u8; 16],
         };
-        let token = dag.submit(
+        let token = dag.submit_file(
+            &live,
             identity.clone(),
             WorkKind::Artifact,
             priority,
@@ -364,9 +387,10 @@ impl Scheduler {
         match dep {
             DepKey::FileStage {
                 canonical,
+                incarnation,
                 generation,
                 stage: FileStageKey::Analysis,
-            } => self.file_stage_analysis_blocker_status(dag, canonical, *generation),
+            } => self.file_stage_analysis_blocker_status(dag, canonical, *incarnation, *generation),
             _ => BlockerStatus::Satisfied,
         }
     }
@@ -380,6 +404,7 @@ impl Scheduler {
         &self,
         dag: &mut SchedulerDag,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         priority: Priority,
         kind: AnalysisDemandKind,
@@ -389,13 +414,13 @@ impl Scheduler {
             .get(canonical.as_ref())
             .map(|entry| entry.clone())
         else {
-            return if self.auto_ingest_tracking_gates(canonical, generation) {
+            return if self.auto_ingest_tracking_gates(canonical, incarnation, generation) {
                 BlockerStatus::Gating
             } else {
                 BlockerStatus::Satisfied
             };
         };
-        if generation == 0 || node.generation() != generation {
+        if node.incarnation_id() != incarnation || node.generation() != generation {
             return BlockerStatus::Satisfied;
         }
         if node.current_analysis().is_some() {
@@ -404,6 +429,7 @@ impl Scheduler {
 
         let analysis_dep = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -415,6 +441,7 @@ impl Scheduler {
 
         let analysis_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -424,10 +451,11 @@ impl Scheduler {
 
         if node.current_integrated_source().is_some() {
             if kind == AnalysisDemandKind::DirectRequest {
-                dag.clear_terminal_dep_failure_for_gen(canonical, generation);
+                dag.clear_terminal_dep_failure_for_gen(canonical, incarnation, generation);
             }
             return if admit_work(
                 dag,
+                &node,
                 canonical,
                 generation,
                 TaskKind::Analysis,
@@ -447,11 +475,12 @@ impl Scheduler {
 
         let source_identity = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Source,
         };
         if dag.token_for(&source_identity).is_some()
-            || self.auto_ingest_tracking_gates(canonical, generation)
+            || self.auto_ingest_tracking_gates(canonical, incarnation, generation)
         {
             BlockerStatus::Gating
         } else {
@@ -510,6 +539,7 @@ impl Scheduler {
         &self,
         dag: &SchedulerDag,
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
     ) -> BlockerStatus {
         // First: consult the persistent terminal-dep-failure store.
@@ -521,6 +551,7 @@ impl Scheduler {
         // short-circuit fires.
         let analysis_dep_key = DepKey::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -536,7 +567,7 @@ impl Scheduler {
                 // either cannot make progress (Satisfied — moot) OR
                 // is in the pre-drain auto-ingest window — consult
                 // the tracking set before classifying.
-                if self.auto_ingest_tracking_gates(canonical, generation) {
+                if self.auto_ingest_tracking_gates(canonical, incarnation, generation) {
                     return BlockerStatus::Gating;
                 }
                 return BlockerStatus::Satisfied;
@@ -549,7 +580,7 @@ impl Scheduler {
             // at gen 0 is stale.
             return BlockerStatus::Satisfied;
         }
-        if node.generation() != generation {
+        if node.incarnation_id() != incarnation || node.generation() != generation {
             // Different generation — the recorded blocker is for
             // a generation that no longer exists. Stale.
             //
@@ -563,8 +594,9 @@ impl Scheduler {
             // remove_if predicate guards against concurrent
             // re-insertion at a newer generation (the value-
             // conditional removal pattern).
-            self.auto_ingested_recent
-                .remove_if(canonical, |_k, v| v.generation == generation);
+            self.auto_ingested_recent.remove_if(canonical, |_k, v| {
+                v.incarnation == incarnation && v.generation == generation
+            });
             return BlockerStatus::Satisfied;
         }
         if node.current_analysis().is_some() {
@@ -582,6 +614,7 @@ impl Scheduler {
         // for both stage identities.
         let analysis_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Analysis,
         };
@@ -592,6 +625,7 @@ impl Scheduler {
         }
         let source_id = WorkNodeIdentity::FileStage {
             canonical: Arc::clone(canonical),
+            incarnation,
             generation,
             stage: FileStageKey::Source,
         };
@@ -614,7 +648,7 @@ impl Scheduler {
         // `terminal_dep_failures` already returned None at the top
         // of this matrix — the record (if any) was cleaned up and
         // the blocker is no longer a discriminator.
-        if self.auto_ingest_tracking_gates(canonical, generation) {
+        if self.auto_ingest_tracking_gates(canonical, incarnation, generation) {
             return BlockerStatus::Gating;
         }
         BlockerStatus::Satisfied
@@ -635,7 +669,12 @@ impl Scheduler {
     /// [`Self::handle_new_request`]'s removal arm. Under normal
     /// operation the removal arm fires on the next driver tick and
     /// this branch never sees an aged entry.
-    pub(super) fn auto_ingest_tracking_gates(&self, canonical: &Arc<str>, generation: u64) -> bool {
+    pub(super) fn auto_ingest_tracking_gates(
+        &self,
+        canonical: &Arc<str>,
+        incarnation: u64,
+        generation: u64,
+    ) -> bool {
         // DashMap entries are short-lived here — the typical removal
         // path is `handle_new_request` admitting the Source DAG
         // identity, which runs synchronously after the matrix
@@ -644,10 +683,11 @@ impl Scheduler {
             Some(e) => e,
             None => return false,
         };
+        let entry_incarnation = entry.incarnation;
         let entry_gen = entry.generation;
         let entry_since = entry.since;
         drop(entry);
-        if entry_gen != generation {
+        if entry_incarnation != incarnation || entry_gen != generation {
             // Stale generation — drop the entry under a value-conditional
             // remove keyed on the generation we observed. `remove_if`
             // evaluates the predicate under the shard write lock so a
@@ -656,8 +696,9 @@ impl Scheduler {
             // entry by accident. A live auto-ingest for a different
             // gen will re-insert with the matching gen on the next
             // call.
-            self.auto_ingested_recent
-                .remove_if(canonical, |_k, v| v.generation == entry_gen);
+            self.auto_ingested_recent.remove_if(canonical, |_k, v| {
+                v.incarnation == entry_incarnation && v.generation == entry_gen
+            });
             return false;
         }
         if entry_since.elapsed() > AUTO_INGESTED_RECENT_STALE_THRESHOLD {
@@ -668,8 +709,9 @@ impl Scheduler {
             // aged entry we observed is dropped, never a fresh
             // re-insert at a later generation that happens to land
             // between the observation and the removal.
-            self.auto_ingested_recent
-                .remove_if(canonical, |_k, v| v.generation == entry_gen);
+            self.auto_ingested_recent.remove_if(canonical, |_k, v| {
+                v.incarnation == entry_incarnation && v.generation == entry_gen
+            });
             return false;
         }
         true

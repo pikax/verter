@@ -27,17 +27,17 @@ sweeps + waiter registration for every request inside one critical
 section): the pump can never observe a half-admitted batch, one batch is
 ONE wake + ONE `submit_count` bump, and a source-updating batch
 supersedes every file's old generation atomically. Both paths share one
-admission core — `prepare_request` (pre-lock: tombstone gate + node
-ensure, cloning the `FileNode` `Arc` out of the `nodes` DashMap BEFORE
-locking, the AB-BA-safe DAG-first ordering; it CREATES a missing node but
-never re-homes one, carrying the resolved language forward as
+admission core — `prepare_request` (pre-lock: queued-lifetime gate + live-node
+lookup, dropping the `nodes` DashMap guard BEFORE locking, the AB-BA-safe
+DAG-first ordering; it never creates or re-homes
+a node, carrying the resolved language forward as
 `PreparedRequest.requested_language` instead), `admit_prepared_under_lock`
 (sole place a request bumps generation, runs the supersede sweep,
 registers the waiter, admits work — including the LANGUAGE RE-HOME, which
 advances a published file's generation and therefore must be atomic with
-its sweep; it re-resolves the live `FileNode` first, because the `Arc`
-captured during preparation may already be detached by a concurrent
-re-home), and an `AdmissionPostWork`
+its sweep; it resolves the live `FileNode` and revalidates the queued
+lifetime first, since removal/reset may have invalidated it during
+preparation), and an `AdmissionPostWork`
 accumulator firing deferred dedup callbacks + clearing auto-ingest
 tracking AFTER the lock releases. `SchedulerDag::register_request`
 returns `Option<DedupJoinerEvent>` (fired post-unlock via
@@ -89,96 +89,72 @@ FALSE: the first because `pub mod dag` re-exports the module, the second
 because a leading underscore suppresses a lint and is not access control.
 Before writing "by construction", enumerate.
 
-**Retirement is structural, not per-site (READ THIS FIRST).** Three
-review rounds each found the same defect through a different door — a
-stage completion, a pending-Artifact admission, `remove()` — because each
-admission site had to remember to gate itself. It is now a property of
-the primitives instead:
+**File admission requires a live object witness.**
 
-- `SchedulerDag` keeps a per-canonical **retirement floor**. Everything
-  below the floor is retired and can never be admitted again. The floor
-  only ever advances.
-- `SchedulerDag::submit` is the ONE admission primitive (the sole
-  `by_identity` insert) and consults the floor as its first statement,
-  returning `Option<SubmissionToken>`. A retired admission is refused BY
-  CONSTRUCTION — no caller can bypass or forget it, and a new admission
-  site inherits the guarantee for free. `None` is a refusal, not an
-  error; production callers must handle it (tests use `submit_expect`).
-- `retire_generations_below(canonical, floor)` is the ONE retirement
-  primitive: it installs the forward floor AND does the backward sweep —
-  file waiter groups, admitted nodes, blocker records, terminal-failure
-  records — in a single lock-held step, so the two halves cannot drift.
-  `supersede_old_file_generations` delegates to it; `remove()` calls it
-  in the SAME hold as its cancel sweep (its floor is `last_gen + 1`,
-  which still permits a re-added file, since `create_node` starts above
-  the same recorded generation floor).
-- It performs ONE fan-out covering every consumer kind, sweeping the dep
-  index by canonical + generation. Cancelling nodes only reaches
-  consumers whose dep was actually ADMITTED, and `signal_file_failed`
-  only drains file waiter groups — so an owner gated on `dep:Analysis-G`
-  while `dep:Source-G` was still running, where no `Analysis-G` node ever
-  existed, used to park forever. Sweeping the dep index reaches it
-  regardless of which stage it named or whether that stage was admitted.
+`WorkNodeIdentity::{FileStage, Artifact}` and the corresponding `DepKey`
+variants include the process-unique `FileNode` incarnation as well as generation.
+`SchedulerDag::submit_file` accepts the actual node and checks canonical,
+incarnation, generation and its object-lifetime retirement marker under the
+lifecycle hold. Its unchecked insertion primitive is private; raw identity
+submission is test-only. Cache-node admission has a separate entry point.
+Neither queued work nor a delayed worker can reconstruct authority from a
+replacement node at the same generation.
 
-The per-site gates below are still correct and still carry their own
-tests, but they are now defence in depth rather than the only thing
-standing between a retired generation and an admission.
+Queued requests bind to a submission lifetime during submission under `dag.lock()`.
+That lifetime starts with the initial object incarnation and survives language
+re-home, so later queued source updates still reach the replacement. Removal/reset
+ends it; a new node receives a fresh lifetime. Work identities still carry the
+unique object incarnation, and retired objects cannot admit or publish work.
+`prepare_request` carries only the lifetime scalar and never creates a replacement
+for an obsolete inbox item. Fresh requests may load any readable SourceLoader
+backing after removal; scheduler removal does not permanently suppress paths.
+A missing backing file produces a terminal dependency failure.
 
-**KNOWN OPEN RESIDUAL — `remove()` is not atomic across `nodes` and the
-DAG.** Between `remove()`'s cancellation sweep and its `nodes.remove()`,
-an admission can take the DAG lock, observe the node STILL PUBLISHED at
-the same incarnation, pass the crossing gate below, bump to `G+1`, and be
-admitted — because `G+1` is exactly the retirement floor and the test is
-`<`. That identity is never cancelled; a later dequeue reserves capacity,
-finds no `FileNode`, and skips without cancelling ⇒ **a leaked admission
-permit in RELEASE builds.** In DEBUG builds the skip's `debug_assert`
-fires FIRST, so what you actually meet is a PANIC, not a leak — if you
-are debugging that assertion, this is the residual, not a new defect. The
-waiter IS woken by `signal_file_shutdown` either way, so this is a
-capacity leak / assertion panic, never a hang. It is a strict subset of a window already
-present before the surrounding fixes landed, which is why it was landed
-rather than held.
+`retire_generations_below` performs the backward sweep of file waiters, admitted
+nodes, dependency waiters, blocker records and failure records. It stores no DAG
+retirement floor. Admission's live-object check rejects later stale work,
+including gates on stages that were never admitted.
 
-Do NOT close this with another per-window gate at an admission site —
-four review rounds of evidence say that closes one instant and reveals
-the next. It closes at the lifecycle-unification cutover:
-[`.claude/skills/scheduler/SKILL.md`](../../../.claude/skills/scheduler/SKILL.md),
-debt row `SCHED-UNIFY-LIFECYCLE-ATOMICITY`, ruling
-`GB4-S0-DEFER-2026-07-26`, acceptance `SCHED-UNIFY-A1`. The generating
-condition is that `Scheduler.nodes` and `SchedulerDag` are two
-authorities with INDEPENDENT transition points; every independent
-transition point is a window.
+`remove` marks the object retired, signals Shutdown, cancels work, scrubs records,
+unpublishes the node and publishes its source-root Absent state under one DAG
+hold. Stranded-waiter wakes run after unlock. `reset` uses the same ordering for
+all members and DAG clear, excluding cooperative admission as well as the
+stopped driver. Invalidation and close revalidate the sampled object after
+acquiring the lock.
 
-Also carried there, and unseen by either review seat: the reset/clear-all
-path at `scheduler.rs:2040-2050` has the identical split-phase shape
-(`nodes.remove` outside the DAG lock, lock taken after). It may be
-self-healing via the subsequent `dag.clear()`, but the shape is the same
-and UNIFY subsumes it.
+Scheduler tombstones and DAG retirement floors have no storage. The scheduler's
+per-canonical generation floors remain an external publication fence:
+`commit_artifact`, artifact eviction and the host's base source revision currently
+carry generation without a captured node incarnation. SKR-RET-FLOORS owns their
+migration after SKR-ENGINE and the subsequent reclamation of that remaining
+history. Internal admission, dispatch,
+publication, completion and failure use full incarnation identity independently
+of that fence.
 
-**The floor is necessary but NOT sufficient — liveness is the other
-half.** `prepare_request` runs OUTSIDE `dag.lock()`, so a prepared
-request can cross a retirement boundary before it is admitted: a
-concurrent `remove()` installs the floor, cancels the DAG and deletes the
-`FileNode` in the gap, leaving the captured `Arc` DETACHED. The floor
-cannot catch that on its own — bumping a detached node lands its
-generation exactly ON the removal floor (`last_gen + 1`), which `submit`
-admits because a legitimate re-add arrives at exactly the same value.
-Generation cannot separate them; only liveness can. So
-`admit_prepared_under_lock` opens with a CROSSING GATE, before any
-publication: the live `FileNode` must exist AND its
-`incarnation_id()` must equal `PreparedRequest.prepared_incarnation`,
-otherwise the sender is terminalized (`Shutdown` when the file is gone,
-`Superseded` when a different incarnation is published) and nothing is
-registered or admitted. Registration precedes admission, so a refused
-`submit` must also terminalize: an ignored `None` leaves a waiter group
-parked on work no producer will ever run
-(`signal_file_shutdown_at`).
+**Preparation must still name a live submission lifetime at admission.**
+Preparation drops the node map guard before taking `dag.lock()`. The admission
+core revalidates `PreparedRequest.prepared_lifetime` against the published node
+before any mutation. Language re-home preserves this lifetime while allocating
+a new object incarnation; removal/reset invalidates it. A mismatch terminalizes
+the sender (`Shutdown` when absent, `Superseded` when replaced by another
+lifetime). Registration precedes work admission, so a refused `submit_file`
+must also terminalize the waiter rather than leave it parked.
 
-That is the same carried-witness rule the completion path uses, applied
-to the other direction. Both directions cross the lock boundary carrying
-captured authority state; both must revalidate against the live map
-before publishing. Treat them as one rule with two members, not two
-rules.
+A node published at submission can still lack admitted Source work. Its
+current-generation Source admission marker distinguishes this pending producer
+from a dead producer. Generation advance resets the marker so a queued reload
+also remains gating before inbox admission. Both explicit blocker registration
+and Source-completion dependency
+integration start or track that producer before recording Analysis blockers.
+The initial generation is advanced above zero before those blockers are built.
+Explicit registration revalidates its captured owner incarnation/generation
+under every dependency mutation hold, including iterations after inbox
+backpressure has executed callbacks. No host callback or inbox send runs under
+the lifecycle hold.
+
+Generation allocation/advance uses checked arithmetic. Exhaustion refuses work
+before an external publication generation can be reused, including restart from
+a retained removal floor.
 
 **Generation-advance rule (both directions).** A generation advance and
 its supersede sweep are ONE critical section under `dag.lock()`
@@ -214,10 +190,10 @@ request intentionally has no downstream identity after completion. On
 refusal it publishes and consumes NOTHING
 and calls `refuse_stale_stage_completion`, which cancels the dequeued
 identity idempotently — safe against a later generation because
-`WorkNodeIdentity::FileStage` carries the generation — signals the
+`WorkNodeIdentity::FileStage` carries incarnation and generation — signals the
 retired generation's waiter groups so a refusal can never strand a
 request (a no-op when a sweep already drained them), requeues stranded
-waiters after the lock drops, bumps `stale_completion_refusals`, and only
+waiters after the lock drops, bumps the test/`semantic-observe`-only `stale_completion_refusals`, and only
 THEN `debug_assert!`s.
 
 `StageExecutor::extract_deps` is host-specific. The session host returns only
@@ -608,8 +584,8 @@ pub struct Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) io_pool: Arc<SchedulerIoPool>,
     // ... other existing state (inbox, edges, dag, overlay, source_loader,
-    //     executor, tombstones, generation_floors, deferred_blocker_ids,
-    //     removal_epoch, shutdown, driver_handle, counters, config) ...
+    //     executor, generation_floors, deferred_blocker_ids,
+    //     shutdown, driver_handle, counters, config) ...
 }
 ```
 

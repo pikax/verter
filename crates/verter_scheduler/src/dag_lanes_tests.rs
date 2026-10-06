@@ -21,6 +21,7 @@ fn canonical(s: &str) -> Arc<str> {
 fn file_stage(s: &str, gen: u64, stage: FileStageKey) -> WorkNodeIdentity {
     WorkNodeIdentity::FileStage {
         canonical: canonical(s),
+        incarnation: 1,
         generation: gen,
         stage,
     }
@@ -29,6 +30,7 @@ fn file_stage(s: &str, gen: u64, stage: FileStageKey) -> WorkNodeIdentity {
 fn artifact(s: &str, gen: u64, profile: u64) -> WorkNodeIdentity {
     WorkNodeIdentity::Artifact {
         canonical: canonical(s),
+        incarnation: 1,
         generation: gen,
         profile_hash: profile_hash_to_bytes(profile),
         content_hash: [0u8; 16],
@@ -271,6 +273,7 @@ fn terminal_failure_fanout_makes_stranded_waiter_dispatchable() {
     let _ = dag.next_ready().expect("dep ready");
     let stranded = dag.fanout_analysis_failure_to_waiters(
         &canonical("/dep.ts"),
+        1,
         1,
         &crate::job::SchedulerError::StageFailed {
             file_id: "/dep.ts".into(),

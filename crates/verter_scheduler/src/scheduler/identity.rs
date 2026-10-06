@@ -185,13 +185,7 @@ impl Scheduler {
         }
         let aggregate = {
             let mut dag = self.dag.lock();
-            dag.submit(
-                identity.clone(),
-                WorkKind::CacheNode,
-                priority,
-                Vec::new(),
-                request_context,
-            );
+            dag.submit_cache(identity.clone(), priority, request_context);
             dag.cancellation_for(&identity)
                 .expect("fresh or deduplicated scoped cache node must own a token")
         };
@@ -247,17 +241,20 @@ impl Scheduler {
     /// The DAG identity a completing stage was dispatched under.
     pub(super) fn dispatched_identity_for(
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         task_kind: &TaskKind,
     ) -> Option<WorkNodeIdentity> {
         match task_kind {
             TaskKind::Load => Some(WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 stage: FileStageKey::Source,
             }),
             TaskKind::Analysis => Some(WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 stage: FileStageKey::Analysis,
             }),
@@ -274,6 +271,7 @@ impl Scheduler {
     /// the matching DAG node. The mapping is the inverse of [`admit_work`].
     pub(super) fn dag_identity_for_task(
         canonical: &Arc<str>,
+        incarnation: u64,
         generation: u64,
         task_kind: &TaskKind,
     ) -> WorkNodeIdentity {
@@ -281,16 +279,19 @@ impl Scheduler {
             // The live `FileStage{Source}` node maps to the `Load` label.
             TaskKind::Load => WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 stage: FileStageKey::Source,
             },
             TaskKind::Analysis => WorkNodeIdentity::FileStage {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 stage: FileStageKey::Analysis,
             },
             TaskKind::Artifact { profile_hash } => WorkNodeIdentity::Artifact {
                 canonical: Arc::clone(canonical),
+                incarnation,
                 generation,
                 profile_hash: profile_hash_to_bytes(*profile_hash),
                 content_hash: [0u8; 16],

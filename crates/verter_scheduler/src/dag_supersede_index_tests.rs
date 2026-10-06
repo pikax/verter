@@ -29,6 +29,7 @@ fn canonical(s: &str) -> Arc<str> {
 fn file_stage(s: &str, gen: u64, stage: FileStageKey) -> WorkNodeIdentity {
     WorkNodeIdentity::FileStage {
         canonical: canonical(s),
+        incarnation: 1,
         generation: gen,
         stage,
     }
@@ -37,6 +38,7 @@ fn file_stage(s: &str, gen: u64, stage: FileStageKey) -> WorkNodeIdentity {
 fn artifact(s: &str, gen: u64, profile: u64) -> WorkNodeIdentity {
     WorkNodeIdentity::Artifact {
         canonical: canonical(s),
+        incarnation: 1,
         generation: gen,
         profile_hash: profile_hash_to_bytes(profile),
         content_hash: [0u8; 16],
@@ -46,6 +48,7 @@ fn artifact(s: &str, gen: u64, profile: u64) -> WorkNodeIdentity {
 fn analysis_dep(s: &str, gen: u64) -> DepKey {
     DepKey::FileStage {
         canonical: canonical(s),
+        incarnation: 1,
         generation: gen,
         stage: FileStageKey::Analysis,
     }
@@ -438,7 +441,7 @@ fn reverse_index_matches_scan_after_removals_and_shutdown() {
         Arc::from(""),
         1,
     )));
-    dag.signal_stage_complete(&canonical("/c.vue"), 1, &TaskKind::Load, &result);
+    dag.signal_stage_complete(&canonical("/c.vue"), 1, 1, &TaskKind::Load, &result);
     // drain a blocker, scrub terminal failures + blockers for a dep.
     let _ = dag.drain_artifact_blockers(&canonical("/a.vue"), 2);
     dag.scrub_terminal_dep_failures_referencing("/b.vue");
