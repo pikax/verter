@@ -181,7 +181,7 @@ fn a_scope_with_a_basis_and_no_domain_advance_still_admits() {
 fn a_scope_with_no_basis_is_unaffected_by_a_domain_advance() {
     let host = host_with_a_file();
 
-    let (_, finalise) = install_fact_tracer(&FactTracerBasisSource::unbound(&host), || {
+    let (_, finalise) = install_fact_tracer(&FactTracerBasisSource::unbound(&*host), || {
         crate::resolver_core::resolver_context::observe_fan_out(FactVersionRef::FileWholeHash {
             canonical_id: "/proj/a.ts".to_string(),
             hash: [1_u8; 16],
@@ -428,7 +428,7 @@ fn an_unbound_scope_reads_no_store_view_either() {
         .store_view_from_host_reads
         .load(std::sync::atomic::Ordering::Relaxed);
     let (_, non_cacheable) =
-        with_cacheability_scope(&FactTracerBasisSource::unbound(&host), |probe| {
+        with_cacheability_scope(&FactTracerBasisSource::unbound(&*host), |probe| {
             assert!(
                 !host
                     .current_fact_tracer()

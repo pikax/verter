@@ -234,6 +234,17 @@ impl verter_session_query::facts::clocks::WorkspaceClocks for UnboundClocks {
     }
 }
 
+/// The owner of the state an unbound basis source reads: the process-side
+/// signature-overflow counter an unbound scope records into, and (under test
+/// support) the engine forcing record it consults.
+pub trait UnboundBasisOwner {
+    /// The counter an unbound scope's signature overflow is recorded into.
+    fn signature_overflow_at_install(&self) -> &std::sync::atomic::AtomicU64;
+    /// The engine forcing record an unbound scope consults.
+    #[cfg(any(test, feature = "test-support"))]
+    fn engine_test_knobs(&self) -> &crate::engine_test_knobs::TestKnobs;
+}
+
 impl<'h> FactTracerBasisSource<'h, UnboundClocks> {
     /// Seed a scope that has NO bound view.
     ///
@@ -243,7 +254,7 @@ impl<'h> FactTracerBasisSource<'h, UnboundClocks> {
     /// per scope is exactly the cost this seam removes, and a scope with
     /// no bound view has no view to be validated against later either.
     #[must_use]
-    pub fn unbound(host: &'h crate::VerterHost) -> Self {
+    pub fn unbound(host: &'h impl UnboundBasisOwner) -> Self {
         Self::unbound_with_clocks(host)
     }
 
@@ -316,7 +327,7 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     /// fabricated as a fallback.
     #[must_use]
     pub fn from_optional_ctx<C: crate::resolver_core::ResolverCapabilities<Clocks = W>>(
-        host: &'h crate::VerterHost,
+        host: &'h impl UnboundBasisOwner,
         ctx: Option<&'h dyn crate::resolver_core::ResolverContext<C>>,
     ) -> Self {
         match ctx {
@@ -328,16 +339,17 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     /// [`FactTracerBasisSource::unbound`] at any clock type, so an optional
     /// context's two arms share one source type.
     #[must_use]
-    fn unbound_with_clocks(host: &'h crate::VerterHost) -> Self {
+    fn unbound_with_clocks(host: &'h impl UnboundBasisOwner) -> Self {
         Self {
             authority: BasisAuthority::Unbound {
-                overflow: &host.signature_overflow_at_install,
+                overflow: host.signature_overflow_at_install(),
                 #[cfg(any(test, feature = "test-support"))]
-                non_cacheable: &host.test_force.engine.force_fact_tracer_non_cacheable_read,
+                non_cacheable: &host
+                    .engine_test_knobs()
+                    .force_fact_tracer_non_cacheable_read,
                 #[cfg(any(test, feature = "test-support"))]
                 observations: &host
-                    .test_force
-                    .engine
+                    .engine_test_knobs()
                     .force_fact_tracer_overflow_observations,
             },
             seed: verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,

@@ -748,7 +748,7 @@ fn overflow_knob_targets_the_named_scope_not_the_next_scope_entered() {
     // The silent-retarget hazard: an UNRELATED tracer scope opens first. Under an
     // order-keyed one-shot this scope consumes the count and overflows itself.
     let ((), unrelated_non_cacheable) = crate::fact_signature_helpers::with_cacheability_scope(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         |_probe| (),
     );
     assert!(

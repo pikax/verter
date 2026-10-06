@@ -1713,6 +1713,16 @@ mod resource_policy_lazy_tests {
     }
 }
 
+impl crate::fact_signature_helpers::UnboundBasisOwner for crate::VerterHost {
+    fn signature_overflow_at_install(&self) -> &std::sync::atomic::AtomicU64 {
+        &self.signature_overflow_at_install
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    fn engine_test_knobs(&self) -> &crate::engine_test_knobs::TestKnobs {
+        &self.test_force.engine
+    }
+}
+
 impl crate::VerterHost {
     pub(crate) fn engine_observers(&self) -> crate::project_semantic_dispatch::EngineObservers {
         crate::project_semantic_dispatch::EngineObservers::new(

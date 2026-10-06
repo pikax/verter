@@ -4086,7 +4086,7 @@ fn unrootable_wildcard_route_raises_enclosing_cold_compute_suppression() {
     // component-meta proof producers) installs around its cold body —
     // and read the chokepoint flag its admission gates consult.
     let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.build_named_type_export_route_entry(barrel, "Shared"),
     );
     let suppression_raised = matches!(
@@ -4139,7 +4139,7 @@ fn rooted_wildcard_route_does_not_raise_enclosing_suppression() {
     );
 
     let (entry, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.build_named_type_export_route_entry(barrel, "Shared"),
     );
     let suppression_raised = matches!(
@@ -4213,7 +4213,7 @@ fn unrooted_import_skip_raises_enclosing_cold_compute_suppression() {
     // chokepoint flag its admission gates consult.
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
     let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.owner_import_surface(owner),
     );
     let suppression_raised = matches!(
@@ -4271,7 +4271,7 @@ fn rooted_import_skip_does_not_raise_enclosing_suppression() {
 
     let before = snap(&host).owner_import_surface_unrooted_skip_refusals;
     let (surface, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
+        &crate::fact_signature_helpers::FactTracerBasisSource::unbound(&*host),
         || host.owner_import_surface(owner),
     );
     let suppression_raised = matches!(
