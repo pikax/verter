@@ -84,7 +84,7 @@ enum CallableAnchor {
 
 /// A global wrapper interface read for an apparent type
 /// ([`ProjectSemanticDispatch::global_wrapper_surface`]).
-pub(super) enum GlobalWrapper {
+pub(crate) enum GlobalWrapper {
     /// The instantiated interface's surface.
     Surface(SemanticNodeId),
     /// The project declares no such global (`noLib`): the checker's empty
@@ -105,7 +105,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// library it reads and on the program's global contributors, so a
     /// re-registration, or a declaration appearing after a miss, invalidates
     /// the read.
-    pub(super) fn global_wrapper_surface(
+    pub(crate) fn global_wrapper_surface(
         &self,
         name: &str,
         args: &[SemanticNodeId],
@@ -561,7 +561,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// currently being evaluated) and carries that canonical in the key's
     /// demand-scope witness. A rootless base with NO demand site on the
     /// stack fails closed.
-    pub(super) fn apparent_type_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
+    pub(crate) fn apparent_type_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
         let (canonical, demand_scope) = match self.callable_anchor(base) {
             CallableAnchor::NotCallable | CallableAnchor::Undecided => return None,
             CallableAnchor::Authored(canonical) => (canonical, ApparentDemandScope::Anchored),
@@ -592,7 +592,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// agree on both arms. No content/version hash enters the
     /// query-identity key (R6).
     #[must_use]
-    fn apparent_type_context_scoped(
+    pub(crate) fn apparent_type_context_scoped(
         &self,
         canonical: &str,
         demand_scope: ApparentDemandScope,
@@ -681,17 +681,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Resolve `canonical`'s owning project to the stable key the ambient
     /// registry is partitioned by.
-    pub(super) fn project_stable_key_for_canonical(
+    pub(crate) fn project_stable_key_for_canonical(
         &self,
         canonical: &str,
     ) -> Option<ProjectStableKey> {
         self.ctx.project_stable_key_for_canonical(canonical)
     }
 }
-
-#[cfg(test)]
-#[path = "apparent_type_tests.rs"]
-mod apparent_type_tests;
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Whether `key` is a `SignaturesOfType` read whose subject takes its

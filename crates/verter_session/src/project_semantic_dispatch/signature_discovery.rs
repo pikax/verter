@@ -1364,7 +1364,7 @@ const NO_VOID_FACTS: NoVoidFacts = NoVoidFacts;
 
 /// The type one shared candidate declares at one argument position.
 #[derive(Debug, Clone)]
-pub(super) enum PositionalArgument {
+pub(crate) enum PositionalArgument {
     /// The candidate declares nothing at that position and has no rest run.
     Absent,
     Type {
@@ -1383,11 +1383,11 @@ pub(super) enum PositionalArgument {
 
 /// One candidate's positional slots as read under the pinned view, before
 /// any semantics is dispatched over them.
-struct RawPositional {
-    receiver: Option<SemanticNodeId>,
+pub(crate) struct RawPositional {
+    pub(crate) receiver: Option<SemanticNodeId>,
     /// `None` when the candidate declares nothing at the position; else the
     /// declared type and whether its optionality adds `undefined`.
-    argument: Option<(SemanticNodeId, bool)>,
+    pub(crate) argument: Option<(SemanticNodeId, bool)>,
 }
 
 /// One shared candidate's positional read.
@@ -1468,7 +1468,7 @@ enum RawRestElement {
 }
 
 /// The ordered shared candidates of one subject as graph signature nodes.
-pub(super) enum SharedSignatureNodes {
+pub(crate) enum SharedSignatureNodes {
     /// Every candidate, in candidate order. Empty is a complete negative.
     Nodes(Vec<SemanticNodeId>),
     /// The subject did not settle, or a candidate has no node form.
@@ -1477,7 +1477,7 @@ pub(super) enum SharedSignatureNodes {
 
 /// Why one read over a dispatched `SignaturesOfType` value did not answer.
 #[derive(Debug, Clone, Copy)]
-enum SignatureSetReadFailure {
+pub(crate) enum SignatureSetReadFailure {
     /// The value's handles belong to a retired kernel epoch: a replacement
     /// landed between the memo read and the pin, or while the read held
     /// them. That is a miss, never an incomplete answer.
@@ -1497,7 +1497,7 @@ fn is_retired_handle(error: &DiscoveryError) -> bool {
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Dispatch the subject's shared `SignaturesOfType` read. Anything but a
     /// signature set is the reason the subject did not settle.
-    fn signature_set_value(
+    pub(crate) fn signature_set_value(
         &self,
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
@@ -1528,7 +1528,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// retired-epoch value, so it recomputes in the current epoch. The retry
     /// is bounded at one; only a second replacement inside it leaves the
     /// read unsettled.
-    fn read_signature_set<T>(
+    pub(crate) fn read_signature_set<T>(
         &self,
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
@@ -1558,7 +1558,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// (the kernel's parameter layout and binders, with the return read
     /// through `ReadSignatureResult`). No signature is chosen, merged or
     /// reordered here.
-    pub(super) fn shared_signature_nodes(
+    pub(crate) fn shared_signature_nodes(
         &self,
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
@@ -1583,7 +1583,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// [`Self::shared_signature_nodes`] over an already-dispatched first
     /// read.
-    fn shared_signature_nodes_from(
+    pub(crate) fn shared_signature_nodes_from(
         &self,
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
@@ -1726,7 +1726,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// Every candidate's positional slots at `position`, read under ONE
     /// pinned view of the set's own epoch; no semantics is dispatched while
     /// it is held.
-    fn raw_positional_reads(
+    pub(crate) fn raw_positional_reads(
         &self,
         value: &crate::signature_kernel::SignatureSetValue,
         position: usize,
@@ -2174,7 +2174,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Both buckets of the subject's shared list as signature nodes, call
     /// then construct; the reason either list did not settle otherwise.
-    pub(super) fn shared_signature_buckets(
+    pub(crate) fn shared_signature_buckets(
         &self,
         subject: SemanticNodeId,
     ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
@@ -2453,7 +2453,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// can land in.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SignaturesOfTypeBuildPoint {
+pub(crate) enum SignaturesOfTypeBuildPoint {
     /// The walk has discovered its candidates and not yet published the
     /// set: a replacement here retires what the walk interned.
     Discovered,
@@ -2469,7 +2469,7 @@ type SignaturesOfTypeBuildHook = Box<dyn Fn(SignaturesOfTypeBuildPoint)>;
 thread_local! {
     /// Test-only: runs on the building thread at each
     /// [`SignaturesOfTypeBuildPoint`].
-    static SIGNATURES_OF_TYPE_BUILD_HOOK: std::cell::RefCell<Option<SignaturesOfTypeBuildHook>> =
+    pub(crate) static SIGNATURES_OF_TYPE_BUILD_HOOK: std::cell::RefCell<Option<SignaturesOfTypeBuildHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -2498,10 +2498,6 @@ fn incomplete_output(
     );
     output
 }
-
-#[cfg(test)]
-#[path = "signature_epoch_tests.rs"]
-mod signature_epoch_tests;
 
 #[cfg(test)]
 #[path = "signature_rootless_space_tests.rs"]

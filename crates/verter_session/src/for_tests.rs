@@ -714,14 +714,72 @@ pub fn compile_scheduler_last_known_good_artifact_present_for_tests(
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod projection_bench_support {
-    pub use crate::project_semantic_dispatch::locator_view::{
-        ProjectionBenchCase, ProjectionBenchHarness,
-    };
+    use crate::project_semantic_dispatch::locator_view;
+    use crate::semantic_query::{ProjectionReductionContext, ResultCompleteness, SemanticNodeId};
+
+    pub use crate::project_semantic_dispatch::locator_view::ProjectionBenchCase;
+
+    /// The projection benchmark harness bound to a host as its resolver
+    /// context. Every operation delegates to the engine's generic harness.
+    pub struct ProjectionBenchHarness<'a>(
+        locator_view::ProjectionBenchHarness<'a, crate::resolver_core::HostCapabilities>,
+    );
+
+    impl ProjectionBenchHarness<'_> {
+        /// See the engine harness's `prepare_decl`.
+        #[must_use]
+        pub fn prepare_decl(
+            &self,
+            canonical_id: &str,
+            symbol: &str,
+        ) -> Option<ProjectionBenchCase> {
+            self.0.prepare_decl(canonical_id, symbol)
+        }
+
+        /// See the engine harness's `prepare_decl_with_resolved_names`.
+        #[must_use]
+        pub fn prepare_decl_with_resolved_names(
+            &self,
+            canonical_id: &str,
+            symbol: &str,
+            resolved_names: &[(&str, &str, &str)],
+        ) -> Option<ProjectionBenchCase> {
+            self.0
+                .prepare_decl_with_resolved_names(canonical_id, symbol, resolved_names)
+        }
+
+        /// See the engine harness's `project_fresh`.
+        pub fn project_fresh(
+            &mut self,
+            case: &ProjectionBenchCase,
+            context: ProjectionReductionContext,
+        ) -> (SemanticNodeId, ResultCompleteness) {
+            self.0.project_fresh(case, context)
+        }
+
+        /// See the engine harness's `project_cold`.
+        pub fn project_cold(
+            &mut self,
+            case: &ProjectionBenchCase,
+            context: ProjectionReductionContext,
+        ) -> (SemanticNodeId, ResultCompleteness) {
+            self.0.project_cold(case, context)
+        }
+
+        /// See the engine harness's `project_warm`.
+        pub fn project_warm(
+            &mut self,
+            case: &ProjectionBenchCase,
+            context: ProjectionReductionContext,
+        ) -> (SemanticNodeId, ResultCompleteness) {
+            self.0.project_warm(case, context)
+        }
+    }
 
     /// A projection harness bound to `host` as its resolver context.
     #[must_use]
     pub fn harness_for_host(host: &crate::VerterHost) -> ProjectionBenchHarness<'_> {
-        ProjectionBenchHarness::new(host)
+        ProjectionBenchHarness(locator_view::ProjectionBenchHarness::new(host))
     }
 }
 

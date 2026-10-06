@@ -24,7 +24,7 @@ use super::prepared::PreparedKeyHandle;
 /// the winner publishes. Joiners wait on `ready` via `wait_while`, so they
 /// do not busy-retry. Ownership is released when the cell is retired from
 /// the store's flight table after completion, abort, or panic.
-pub(super) struct FlightCell {
+pub(crate) struct FlightCell {
     pub(super) state: Mutex<InflightState>,
     pub(super) ready: Condvar,
 }
@@ -121,7 +121,7 @@ pub(super) struct InflightState {
 }
 
 impl FlightCell {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(InflightState::default()),
             ready: Condvar::new(),
@@ -246,7 +246,7 @@ impl<'a> Drop for InflightPanicGuard<'a> {
 /// the same canonical) to a small constant; in practice 0-1 retries is
 /// typical because the next call either hits a freshly-warm slot or
 /// claims the fresh in-flight as winner.
-pub(super) const MAX_INFLIGHT_RETRIES: usize = 3;
+pub(crate) const MAX_INFLIGHT_RETRIES: usize = 3;
 
 /// Store-owned admission token for an SCC member computed inline on
 /// another obligation's transaction.

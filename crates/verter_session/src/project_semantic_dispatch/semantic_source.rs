@@ -86,7 +86,7 @@ impl SourceRaiseOutcome {
 
     /// [`Self::from_read`]'s error half, for boundaries that already hold the
     /// typed error.
-    fn from_error(
+    pub(crate) fn from_error(
         err: QueryError,
         carrier: impl FnOnce(&QueryError) -> Option<SemanticNodeId>,
     ) -> Self {
@@ -1609,10 +1609,6 @@ fn demand_semantic_source_carrier<C: crate::resolver_core::ResolverCapabilities>
         .at_optional_boundary()?;
     Some(dispatch.raise_and_reduce_observation(hot.node(), context, owner_canonical))
 }
-
-#[cfg(test)]
-#[path = "semantic_source_tests.rs"]
-mod semantic_source_tests;
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     pub(crate) fn macro_type_arg_hot_ref(

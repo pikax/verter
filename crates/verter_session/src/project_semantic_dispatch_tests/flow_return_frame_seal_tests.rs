@@ -567,168 +567,89 @@ fn product_key(
     }
 }
 
-/// Owned test observations contain no execution capability and cannot affect
-/// admission. Semantic IDs are projected only after the demand has returned.
-#[derive(Debug)]
-pub(crate) struct ProductObservation {
-    products: Vec<(super::flow_solve::FlowDomain, usize, ObservedProduct)>,
-    executed: Vec<(super::flow_solve::FlowDomain, usize, bool)>,
-    iterations: Option<u32>,
-    report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
-}
+use crate::project_semantic_dispatch::flow_return::flow_admission_fault_injection::{
+    ObservedProduct, ProductObservation,
+};
 
-#[derive(Debug)]
-enum ObservedProduct {
-    Definitions(Vec<usize>),
-    Reaching(super::flow_products::ReachingTypeProduct),
-    Declared(Option<crate::semantic_query::SemanticNodeId>),
-    Narrowing(super::flow_products::NarrowingProduct),
-    Assignment(super::flow_products::DefiniteAssignmentProduct),
-}
-
-impl ProductObservation {
-    pub(super) fn capture(
-        products: &super::flow_return_products::FlowFrameProducts,
-        evidence: Option<&super::flow_products::FlowProductEvidence>,
-        report: super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
-    ) -> Self {
-        use super::flow_products::FlowProductValue;
-        use super::flow_solve::FlowDomain;
-        Self {
-            products: products
-                .state
-                .ordered_entries()
-                .map(|(key, value)| {
-                    let value = match value {
-                        FlowProductValue::ReachingValue(value) => ObservedProduct::Definitions(
-                            value
-                                .definitions()
-                                .iter()
-                                .map(|node| node.index())
-                                .collect(),
-                        ),
-                        FlowProductValue::ReachingType(value) => {
-                            ObservedProduct::Reaching(value.clone())
-                        }
-                        FlowProductValue::DeclaredType(value) => {
-                            ObservedProduct::Declared(value.declared())
-                        }
-                        FlowProductValue::Narrowing(value) => {
-                            ObservedProduct::Narrowing(value.clone())
-                        }
-                        FlowProductValue::DefiniteAssignment(value) => {
-                            ObservedProduct::Assignment(*value)
-                        }
-                    };
-                    (key.domain(), key.node().index(), value)
-                })
-                .collect(),
-            executed: products
-                .execution
-                .borrow()
-                .execution
-                .selected_sites()
-                .flat_map(|site| {
-                    [
-                        FlowDomain::ReachingValue,
-                        FlowDomain::ReachingType,
-                        FlowDomain::Narrowing,
-                        FlowDomain::DeclaredType,
-                        FlowDomain::DefiniteAssignment,
-                    ]
-                    .map(|domain| {
-                        let key = site.key(domain).unwrap();
-                        (
-                            domain,
-                            key.node().index(),
-                            evidence.is_some_and(|evidence| evidence.executed(&key)),
-                        )
-                    })
-                })
-                .collect(),
-            iterations: evidence.map(|evidence| evidence.iterations()),
-            report,
+/// Project a recorded observation onto arena-free structural text so two
+/// hosts are comparable.
+fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalProductObservation {
+    use super::flow_products::WideningMembership;
+    fn structural_type(ty: &verter_type_expr::TypeExpr) -> String {
+        use verter_type_expr::TypeExpr;
+        match ty {
+            TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
+                let mut arms: Vec<_> = arms.iter().map(structural_type).collect();
+                arms.sort();
+                format!(
+                    "{}:{arms:?}",
+                    if matches!(ty, TypeExpr::Union(_)) {
+                        "union"
+                    } else {
+                        "intersection"
+                    }
+                )
+            }
+            other => format!("{other:?}"),
         }
     }
-
-    fn canonical(self, host: &VerterHost) -> CanonicalProductObservation {
-        use super::flow_products::WideningMembership;
-        fn structural_type(ty: &verter_type_expr::TypeExpr) -> String {
-            use verter_type_expr::TypeExpr;
-            match ty {
-                TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => {
-                    let mut arms: Vec<_> = arms.iter().map(structural_type).collect();
-                    arms.sort();
-                    format!(
-                        "{}:{arms:?}",
-                        if matches!(ty, TypeExpr::Union(_)) {
-                            "union"
-                        } else {
-                            "intersection"
+    let node = |id| {
+        structural_type(&host.project_node_to_type_expr_for_test(id).expect(
+            "fixture product types must project; a missing type is not equivalent evidence",
+        ))
+    };
+    let set = |ids: &[crate::semantic_query::SemanticNodeId]| {
+        let mut values: Vec<_> = ids.iter().copied().map(node).collect();
+        values.sort();
+        values
+    };
+    let products = observation
+        .products
+        .into_iter()
+        .map(|(domain, site, value)| {
+            let value = match value {
+                ObservedProduct::Definitions(value) => format!("{value:?}"),
+                ObservedProduct::Reaching(value) => {
+                    let widening = match value.widening() {
+                        None => "none".to_string(),
+                        Some(WideningMembership::All) => "all".to_string(),
+                        Some(WideningMembership::Partial(members)) => {
+                            format!("{:?}", set(members))
                         }
+                    };
+                    format!(
+                        "{:?}/{:?}/{widening}",
+                        set(value.contributors()),
+                        value.united().map(node)
                     )
                 }
-                other => format!("{other:?}"),
-            }
-        }
-        let node = |id| {
-            structural_type(&host.project_node_to_type_expr_for_test(id).expect(
-                "fixture product types must project; a missing type is not equivalent evidence",
-            ))
-        };
-        let set = |ids: &[crate::semantic_query::SemanticNodeId]| {
-            let mut values: Vec<_> = ids.iter().copied().map(node).collect();
-            values.sort();
-            values
-        };
-        let products = self
-            .products
-            .into_iter()
-            .map(|(domain, site, value)| {
-                let value = match value {
-                    ObservedProduct::Definitions(value) => format!("{value:?}"),
-                    ObservedProduct::Reaching(value) => {
-                        let widening = match value.widening() {
-                            None => "none".to_string(),
-                            Some(WideningMembership::All) => "all".to_string(),
-                            Some(WideningMembership::Partial(members)) => {
-                                format!("{:?}", set(members))
-                            }
-                        };
-                        format!(
-                            "{:?}/{:?}/{widening}",
-                            set(value.contributors()),
-                            value.united().map(node)
-                        )
-                    }
-                    ObservedProduct::Declared(value) => format!("{:?}", value.map(node)),
-                    ObservedProduct::Narrowing(value) => {
-                        let mut facts: Vec<_> = value
-                            .facts()
-                            .iter()
-                            .map(|fact| {
-                                format!(
-                                    "{:?}/{:?}/{}",
-                                    fact.binding,
-                                    fact.path,
-                                    node(fact.narrowed_to)
-                                )
-                            })
-                            .collect();
-                        facts.sort();
-                        format!("{facts:?}")
-                    }
-                    ObservedProduct::Assignment(value) => format!("{value:?}"),
-                };
-                (domain, site, value)
-            })
-            .collect();
-        CanonicalProductObservation {
-            products,
-            executed: self.executed,
-            iterations: self.iterations,
-            report: self.report,
-        }
+                ObservedProduct::Declared(value) => format!("{:?}", value.map(node)),
+                ObservedProduct::Narrowing(value) => {
+                    let mut facts: Vec<_> = value
+                        .facts()
+                        .iter()
+                        .map(|fact| {
+                            format!(
+                                "{:?}/{:?}/{}",
+                                fact.binding,
+                                fact.path,
+                                node(fact.narrowed_to)
+                            )
+                        })
+                        .collect();
+                    facts.sort();
+                    format!("{facts:?}")
+                }
+                ObservedProduct::Assignment(value) => format!("{value:?}"),
+            };
+            (domain, site, value)
+        })
+        .collect();
+    CanonicalProductObservation {
+        products,
+        executed: observation.executed,
+        iterations: observation.iterations,
+        report: observation.report,
     }
 }
 
@@ -790,7 +711,7 @@ fn run_product(host: &Arc<VerterHost>, name: &str, demands: u32) -> ProductRun {
         cold_computes,
         observations: observations
             .into_iter()
-            .map(|observation| observation.canonical(host))
+            .map(|observation| canonical(observation, host))
             .collect(),
     }
 }

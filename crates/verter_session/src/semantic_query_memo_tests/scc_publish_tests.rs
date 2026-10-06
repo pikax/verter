@@ -211,7 +211,7 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
     let store = SemanticGraphStore::with_account(
         verter_session_query::retention::StoreAccount::new(Arc::clone(&account)),
     );
-    let root = store.stage_entry(
+    let root = store.stage_entry_for_tests(
         None,
         SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
         super::relation_memo::relation_satisfied_projection(),
@@ -220,7 +220,7 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
         &empty_signature(),
         0,
     );
-    let member = store.stage_entry(
+    let member = store.stage_entry_for_tests(
         None,
         SemanticQueryValue::Relation(store.relation_payload_for_tests(RelationOutcome::Assignable)),
         super::relation_memo::relation_satisfied_projection(),
@@ -235,7 +235,7 @@ fn scc_member_reservation_excludes_the_roots_shared_carrier() {
         .expect("the root is admitted");
     let member_unique = member.unique_retained_footprint_bytes();
     let batch = store
-        .reserve_scc_batch(&[&member])
+        .reserve_scc_batch_for_tests(&[&member])
         .expect("the member's incremental footprint is admitted");
 
     assert_eq!(

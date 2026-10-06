@@ -39,14 +39,14 @@ use crate::semantic_query::PartialReasonSet;
 /// by: a union arm scanning a union target of object types charges the
 /// alternative and its pair's worklist step (measured: 22,329 units for the
 /// 20,100 comparisons of 200 reversed arms).
-pub(super) const RELATION_UNITS_PER_COMPARISON: usize = 2;
+pub(crate) const RELATION_UNITS_PER_COMPARISON: usize = 2;
 
 /// The construction bytes one structured comparison reserves: what a pair
 /// the relation relates holds live at its peak — its frame, its memo entry
 /// and its proof (measured: 1.9 KB per pair relating 200 reversed object
 /// arms). Provisional: the per-pair footprint and this charge are sized
 /// together in the combined performance phase.
-pub(super) const RELATION_PAIR_BYTES: usize = 2_048;
+pub(crate) const RELATION_PAIR_BYTES: usize = 2_048;
 
 /// The construction bytes interning one derived node reserves: its payload
 /// record, held twice (the arena slot and the dedup index's key), a fixed
@@ -66,11 +66,11 @@ pub(crate) fn derived_node_bytes(payload_bytes: usize) -> usize {
 /// footprint shrinks.
 ///
 /// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
-pub(super) const MAX_CONNECTED_PROJECTION_WORK: usize =
+pub(crate) const MAX_CONNECTED_PROJECTION_WORK: usize =
     crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
         * RELATION_UNITS_PER_COMPARISON;
 /// Nested query-boundary cap for one connected semantic demand.
-pub(super) const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
+pub(crate) const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
 /// Construction-byte allowance for one connected semantic demand: the bytes
 /// it reserves before it builds, never refunded within the demand, so the
 /// allowance bounds what the demand holds at its peak. Provisional: sized
@@ -122,13 +122,13 @@ thread_local! {
 /// until the guard drops — the production budget's code path at a length a
 /// test can reach quickly. Test-only.
 #[cfg(test)]
-pub(super) struct TailBudgetForTests {
+pub(crate) struct TailBudgetForTests {
     previous: Option<u32>,
 }
 
 #[cfg(test)]
 impl TailBudgetForTests {
-    pub(super) fn install(limit: u32) -> Self {
+    pub(crate) fn install(limit: u32) -> Self {
         Self {
             previous: TAIL_STEPS_FOR_TESTS.with(|slot| slot.replace(Some(limit))),
         }
@@ -146,13 +146,13 @@ impl Drop for TailBudgetForTests {
 /// thread creates until the guard drops — the production budget's code
 /// path at a depth a test can reach quickly. Test-only.
 #[cfg(test)]
-pub(super) struct InstantiationBudgetForTests {
+pub(crate) struct InstantiationBudgetForTests {
     previous: Option<u32>,
 }
 
 #[cfg(test)]
 impl InstantiationBudgetForTests {
-    pub(super) fn install(limit: u32) -> Self {
+    pub(crate) fn install(limit: u32) -> Self {
         Self {
             previous: INSTANTIATION_DEPTH_FOR_TESTS.with(|slot| slot.replace(Some(limit))),
         }
@@ -489,7 +489,7 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// for the budget-exceeded carrier the dispatcher reports. Purely
     /// operational reporting — the ledger owns the numbers, so no consumer
     /// reads the counters directly.
-    pub(super) fn limit_report(&self, reasons: PartialReasonSet) -> (usize, u64, &'static str) {
+    pub(crate) fn limit_report(&self, reasons: PartialReasonSet) -> (usize, u64, &'static str) {
         if !self.active.get() {
             return (0, 0, "unknown");
         }
@@ -517,7 +517,7 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// Replace the caps. Test-only, and refused inside an active demand so one
     /// run can never observe two different caps.
     #[cfg(test)]
-    pub(super) fn set_limits_for_tests(&self, work: usize, depth: u16) {
+    pub(crate) fn set_limits_for_tests(&self, work: usize, depth: u16) {
         assert!(
             !self.active.get(),
             "test limits must be set before entering a connected demand"
@@ -529,7 +529,7 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// Replace the construction-byte allowance. Test-only, and refused inside
     /// an active demand.
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn set_byte_limit_for_tests(&self, bytes: usize) {
+    pub(crate) fn set_byte_limit_for_tests(&self, bytes: usize) {
         assert!(
             !self.active.get(),
             "test limits must be set before entering a connected demand"
@@ -540,14 +540,14 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// The construction bytes the last connected demand reserved. Test-only:
     /// kept after the demand ends, and reset when the next one enters.
     #[cfg(test)]
-    pub(super) fn bytes_used_for_tests(&self) -> usize {
+    pub(crate) fn bytes_used_for_tests(&self) -> usize {
         self.bytes_used.get()
     }
 
     /// The work units the last connected demand charged. Test-only: kept
     /// after the demand ends, and reset when the next one enters.
     #[cfg(test)]
-    pub(super) fn work_used_for_tests(&self) -> usize {
+    pub(crate) fn work_used_for_tests(&self) -> usize {
         self.work_used.get()
     }
 
@@ -689,7 +689,7 @@ impl ConnectedDemandLedger<'_> {
 /// Panic-safe lifetime of one connected semantic demand. The outermost
 /// dispatch or direct projector installs the demand; nested query and worklist
 /// entries join it without holding a `RefCell` borrow across semantic work.
-pub(super) struct ConnectedDemandGuard<'g> {
+pub(crate) struct ConnectedDemandGuard<'g> {
     ledger: &'g ConnectedDemandLedger<'g>,
     root: bool,
     entered_query_depth: bool,

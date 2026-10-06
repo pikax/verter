@@ -28,6 +28,7 @@
 //! never see the args) or if the path is discarded entirely (the un-projected
 //! root would surface instead of the member).
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_type_expr::{PrimitiveName, TypeExpr};

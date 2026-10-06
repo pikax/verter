@@ -92,7 +92,7 @@ pub(crate) mod engine_resources;
 pub(crate) mod flow_slice_driver;
 pub(crate) use engine_binding::{EngineBinding, EngineObservers, EnginePolicy};
 pub(crate) mod absorb;
-mod apparent_type;
+pub(crate) mod apparent_type;
 mod broad_runtime;
 pub(crate) mod build;
 pub(crate) mod canonical_algebra;
@@ -102,82 +102,38 @@ mod conditional_decision;
 // request cancellation signal for one connected semantic demand. The
 // dispatcher holds a ledger; it does not implement one.
 pub(crate) mod connected_demand;
-#[cfg(test)]
-mod connected_demand_tests;
 // The exclusive-cost receipts a connected demand records for each
 // computation and replays when it serves a result warm.
 pub(crate) mod cost_receipt;
-#[cfg(test)]
-mod cost_receipt_tests;
 pub(crate) mod cycle_gate;
-mod enum_type;
+pub(crate) mod enum_type;
 pub(crate) mod enumerate;
 pub(crate) mod evaluate;
-#[cfg(test)]
-mod flow_narrowing_parity_tests;
 pub(crate) mod locator_shape;
 pub(crate) mod locator_view;
-mod locator_view_worklist;
+pub(crate) mod locator_view_worklist;
 pub(crate) mod lower;
 mod module_object;
 pub(crate) mod output_materialization;
 pub(crate) mod query_error_disposition;
 mod query_frames;
 pub(crate) mod signature_discovery;
-#[cfg(test)]
-mod signature_discovery_tests;
-#[cfg(test)]
-mod signature_predicate_inference_tests;
-#[cfg(test)]
-mod signature_predicate_tests;
 pub(crate) mod signature_utility;
 // Private adjacent module: crate-wide compile-time `assert_not_impl_any!`
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
-mod call_resolve;
-#[cfg(test)]
-mod call_resolve_tests;
+pub(crate) mod call_resolve;
 pub(crate) mod dispatch_txn;
-#[cfg(test)]
-mod equality_value_narrowing_tests;
 pub(crate) mod flow_return;
-#[cfg(test)]
-mod flow_return_accessor_tests;
 pub(crate) mod flow_return_callee;
-#[cfg(test)]
-mod flow_return_class_tests;
-#[cfg(test)]
-mod flow_return_construct_tests;
-#[cfg(test)]
-pub(crate) mod flow_return_coverage_tests;
-#[cfg(test)]
-pub(crate) mod flow_return_frame_seal_tests;
-#[cfg(test)]
-mod flow_return_global_tests;
-#[cfg(test)]
-pub(crate) mod flow_return_lexical_tests;
-#[cfg(test)]
-pub(crate) mod flow_return_loop_completion_tests;
-#[cfg(test)]
-mod flow_return_null_policy_tests;
-#[cfg(test)]
-pub(crate) mod flow_return_positional_tests;
-mod flow_return_products;
-#[cfg(test)]
-pub(crate) mod flow_return_root_gate_tests;
-#[cfg(test)]
-mod flow_return_tagged_template_tests;
-#[cfg(test)]
-pub(crate) mod flow_return_tests;
-#[cfg(test)]
-mod flow_return_type_argument_default_tests;
+pub(crate) mod flow_return_products;
 mod flow_return_widening;
 // The completeness-proof layer for flow-bearing operations: production-live
 // (the flow evaluator's demand preparation installs demands from here and
 // the component close finalizes through it), and the `FlowReturnKey`
 // constructor derives its result-contract identity from this registry.
 pub(crate) mod flow_solve;
-mod inference;
+pub(crate) mod inference;
 // The product lattice of the flow authority: the per-domain dataflow
 // products and the ONE join route every merge point folds through. The
 // flow evaluator holds its whole semantic state here — the products ARE
@@ -198,24 +154,13 @@ pub(crate) mod relation_excess;
 pub(crate) mod relation_knobs;
 pub(crate) mod relation_predicates;
 pub(crate) mod relation_variance;
-mod return_equation;
-#[cfg(test)]
-mod return_equation_tests;
+pub(crate) mod return_equation;
 /// The one semantic-operand forcing boundary
 /// (`force_semantic_operand`) — the sole authority for evaluating a
 /// demand-selected
 /// [`SemanticOperand`](crate::semantic_query::operand::SemanticOperand)
 /// under the force request's complete projection-reduction context.
 pub(crate) mod semantic_operand;
-#[cfg(test)]
-mod semantic_operand_binder_tests;
-/// Unified dead-operand deep-work matrix (cross-operator table over
-/// the forcing boundary) plus the one-authority convergence proof for
-/// the builtin utility route.
-#[cfg(test)]
-mod semantic_operand_dead_work_tests;
-#[cfg(test)]
-mod semantic_operand_tests;
 pub(crate) mod semantic_source;
 mod semantic_source_compose;
 pub(crate) mod semantic_source_leaf_facts;
@@ -230,9 +175,6 @@ pub(crate) mod walk;
 /// budget is clamped against it (`walk` treats a budget at or above this
 /// cap as uncapped); a trip is a bug, not a soft-fail.
 pub const MAX_DEPTH: usize = 4096;
-
-#[cfg(test)]
-mod object_spread_projection_eval_tests;
 
 // Private leaf module sealing the `InstantiateBodySource` construction
 // witness: the unit field is private to THIS module, so the witness is
@@ -265,17 +207,18 @@ mod body_source_witness {
             Self(())
         }
 
-        /// Test-only mint so unit tests (`#[cfg(test)]`, in-crate) can call
-        /// the SAME witnessed `InstantiateContext::file_backed` / `non_file`
-        /// constructors production uses — there is no raw `*_for_tests`
-        /// context mint. Gated `#[cfg(test)]`, so it is compiled out of
-        /// every non-test build (release AND the integration-test build,
-        /// which links the lib without `cfg(test)`); the production seal
-        /// stays intact. Integration crates use
+        /// Test-support mint so test suites can call the SAME witnessed
+        /// `InstantiateContext::file_backed` / `non_file` constructors
+        /// production uses — there is no raw `*_for_tests` context mint.
+        /// Gated `any(test, feature = "test-support")`, so it is compiled out
+        /// of every production build; the production seal stays intact.
+        /// Integration crates use
         /// [`crate::for_tests::instantiate_key_for_tests`] instead.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
+        #[cfg_attr(not(test), allow(dead_code))]
+        #[doc(hidden)]
         #[must_use]
-        pub(crate) const fn mint_for_unit_tests() -> Self {
+        pub const fn mint_for_unit_tests() -> Self {
             Self(())
         }
     }
@@ -303,6 +246,17 @@ mod semantic_operand_authority {
     impl SemanticOperandAuthority {
         /// The sole production mint — dispatch-module-tree visibility.
         pub(super) const fn mint_for_forcing_boundary() -> Self {
+            Self(())
+        }
+
+        /// Test-support mint so test suites can drive the gated operand
+        /// surface directly. Compiled out of every production build, so the
+        /// forcing boundary stays the only production mint.
+        #[cfg(any(test, feature = "test-support"))]
+        #[cfg_attr(not(test), allow(dead_code))]
+        #[doc(hidden)]
+        #[must_use]
+        pub const fn mint_for_tests() -> Self {
             Self(())
         }
     }
@@ -797,11 +751,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// A budget consumer takes this instead of the dispatcher: the ledger
     /// carries the whole work/depth/cancellation contract and no semantic
     /// capability, so a consumer typed on it cannot re-enter dispatch.
-    pub(super) fn connected_demand(&self) -> &connected_demand::ConnectedDemandLedger<'a> {
+    pub(crate) fn connected_demand(&self) -> &connected_demand::ConnectedDemandLedger<'a> {
         &self.connected_demand
     }
 
-    fn enter_connected_demand(
+    pub(crate) fn enter_connected_demand(
         &self,
         query_boundary: bool,
     ) -> (
@@ -2476,7 +2430,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
-    fn execute_via_cold_build_helper(
+    pub(crate) fn execute_via_cold_build_helper(
         &self,
         key: SemanticQueryKey,
     ) -> CacheRead<QueryResult<SemanticQueryValue>> {
@@ -3543,7 +3497,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 /// rewrite observed misses the warm read; `cache_suppress` (an overflowed or
 /// fenced-serve prelude) forces the entry out of the memo.
 #[derive(Clone)]
-struct CarrierNormalizationPrelude {
+pub(crate) struct CarrierNormalizationPrelude {
     facts: Option<Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>>,
     cache_suppress: bool,
     partial_reasons: crate::semantic_query::PartialReasonSet,
@@ -3551,7 +3505,7 @@ struct CarrierNormalizationPrelude {
 
 impl CarrierNormalizationPrelude {
     /// The no-op prelude for a non-carrier subject — no facts, no suppression.
-    fn none() -> Self {
+    pub(crate) fn none() -> Self {
         Self {
             facts: None,
             cache_suppress: false,
@@ -3578,7 +3532,7 @@ impl CarrierNormalizationPrelude {
 }
 
 #[inline(never)]
-fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabilities>(
+pub(crate) fn finalise_traced_build_output<T, C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     output: crate::project_semantic_dispatch::walk::QueryBuildOutput<T>,
     finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
@@ -3827,7 +3781,7 @@ fn semantic_query_consumes_connected_work(key: &SemanticQueryKey) -> bool {
 /// repeatedly through `typeof` roots — is the same expansion-storm shape.
 /// Its child `Instantiate` / `ProjectPath` work counting alone would leave
 /// the reducer itself outside the fuse.
-fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> bool {
+pub(crate) fn semantic_query_counts_toward_projection_budget(key: &SemanticQueryKey) -> bool {
     matches!(
         key,
         SemanticQueryKey::ProjectMember { .. }
@@ -4309,7 +4263,7 @@ pub struct SessionDispatchHost<'a, C: crate::resolver_core::ResolverCapabilities
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, C> {
-    fn from_facade(dispatch: &'a ProjectSemanticDispatch<'_, C>) -> Self {
+    pub(crate) fn from_facade(dispatch: &'a ProjectSemanticDispatch<'_, C>) -> Self {
         Self {
             resources: &dispatch.binding,
             ctx: dispatch.ctx,
@@ -4375,7 +4329,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
     /// Look up a prepared-declaration projection outcome by canonical root
     /// identity, preserving a recoverable exact authored preparation failure
     /// as a typed partial carrier. Routed through `base`'s scope payload.
-    fn resolve_prepared_type_decl(
+    pub(crate) fn resolve_prepared_type_decl(
         &self,
         base: SemanticNodeId,
         root_identity: &ResolvedRootIdentity,
@@ -4401,7 +4355,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
     /// `ax_hybrid_carrier_stop_uses_demand_context_not_name_predicate` guard
     /// fails `build.rs` for using a nominal carrier predicate — and this is
     /// the seam that makes that unnecessary rather than merely inconvenient.
-    fn resolve_builtin_utility(
+    pub(crate) fn resolve_builtin_utility(
         &self,
         base: SemanticNodeId,
         name: &str,
@@ -4433,191 +4387,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
     }
 }
 
+pub(crate) mod memo;
+
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod carrier_materialize_tests;
-
-#[cfg(test)]
-mod carrier_reduction_tests;
-
-#[cfg(test)]
-mod carrier_head_resolution_tests;
-
-#[cfg(test)]
-mod closedness_evaluator_tests;
-#[cfg(test)]
-mod conditional_decision_tests;
-#[cfg(test)]
-mod constrained_infer_tests;
-#[cfg(test)]
-mod generic_source_inference_tests;
-#[cfg(test)]
-mod infer_inventory_tests;
-#[cfg(test)]
-mod inference_fixation_tests;
-#[cfg(test)]
-mod mapped_key_domain_carrier_tests;
-#[cfg(test)]
-mod reference_inference_tests;
-
-#[cfg(test)]
-mod raised_shape_tests;
-
-#[cfg(test)]
-mod broad_runtime_tests;
-
-#[cfg(test)]
-mod cycle_gate_tests;
-
-#[cfg(test)]
-mod abstract_construct_tests;
-#[cfg(test)]
-mod ambient_module_value_tests;
-#[cfg(test)]
-mod base_signature_tests;
-#[cfg(test)]
-mod callee_signature_effect_tests;
-#[cfg(test)]
-mod captured_declared_type_tests;
-#[cfg(test)]
-mod checker_probe_lane_tests;
-#[cfg(test)]
-mod class_member_return_tests;
-#[cfg(test)]
-mod class_owner_tests;
-#[cfg(test)]
-mod class_prototype_property_tests;
-#[cfg(test)]
-mod class_self_reference_tests;
-#[cfg(test)]
-mod class_value_heritage_tests;
-#[cfg(test)]
-mod closure_narrowing_tests;
-#[cfg(test)]
-mod conditional_indexed_check_tests;
-#[cfg(test)]
-mod conditional_operand_tests;
-#[cfg(test)]
-mod conditional_tail_tests;
-#[cfg(test)]
-mod const_literal_widening_tests;
-#[cfg(test)]
-mod continuation_depth_tests;
-#[cfg(test)]
-mod deep_input_tests;
-#[cfg(test)]
-mod differential_call_tests;
-#[cfg(test)]
-mod differential_class_tests;
-#[cfg(test)]
-mod differential_depth_tests;
-#[cfg(test)]
-mod differential_fishing_tests;
-#[cfg(test)]
-mod differential_flow_tests;
-#[cfg(test)]
-mod differential_global_library_tests;
-#[cfg(test)]
-mod differential_harness_tests;
-#[cfg(test)]
-mod differential_inference_tests;
-#[cfg(test)]
-mod differential_literal_tests;
-#[cfg(test)]
-mod differential_module_tests;
-#[cfg(test)]
-mod differential_narrowing_tests;
-#[cfg(test)]
-mod differential_relation_tests;
-#[cfg(test)]
-mod differential_type_operator_tests;
-#[cfg(test)]
-mod enum_literal_tests;
-#[cfg(test)]
-mod helper_depth_tests;
-#[cfg(test)]
-mod heritage_signature_tests;
-#[cfg(test)]
-mod homomorphic_mapped_tests;
-#[cfg(test)]
-mod index_signature_access_tests;
-#[cfg(test)]
-mod indexed_access_name_tests;
-#[cfg(test)]
-mod indexed_access_relation_tests;
-#[cfg(test)]
-mod inference_census_tests;
-#[cfg(test)]
-mod intersection_complexity_tests;
-#[cfg(test)]
-mod intersection_distribution_tests;
-#[cfg(test)]
-mod keyof_application_tests;
-#[cfg(test)]
-mod lib_global_tests;
-#[cfg(test)]
-mod local_declaration_tests;
-#[cfg(test)]
-mod member_accessibility_relation_tests;
-#[cfg(test)]
-mod merged_declaration_signature_tests;
-#[cfg(test)]
-mod module_object_tests;
-#[cfg(test)]
-mod module_value_surface_tests;
-#[cfg(test)]
-mod named_arm_reduction_tests;
-#[cfg(test)]
-mod namespace_member_value_tests;
-#[cfg(test)]
-mod namespace_value_tests;
-#[cfg(test)]
-mod never_callee_tests;
-#[cfg(test)]
-mod object_literal_accessor_tests;
-#[cfg(test)]
-mod object_literal_key_tests;
-#[cfg(test)]
-mod projected_terminal_surface_tests;
-#[cfg(test)]
-mod projection_stack_safety_tests;
-#[cfg(test)]
-mod relation_depth_tests;
-#[cfg(test)]
-mod relation_operand_tests;
-#[cfg(test)]
-mod relation_variance_tests;
-#[cfg(test)]
-mod relation_work_tests;
-#[cfg(test)]
-mod signature_relation_tests;
-#[cfg(test)]
-mod string_mapping_template_tests;
-#[cfg(test)]
-mod template_complexity_tests;
-#[cfg(test)]
-mod template_pattern_relation_tests;
-#[cfg(test)]
-mod this_receiver_tests;
-#[cfg(test)]
-mod truthiness_domain_tests;
-#[cfg(test)]
-mod tuple_length_and_apparent_member_tests;
-#[cfg(test)]
-mod type_syntax_depth_tests;
-#[cfg(test)]
-mod undecided_call_tests;
-#[cfg(test)]
-mod undecided_conditional_tests;
-#[cfg(test)]
-mod unique_symbol_key_tests;
-#[cfg(test)]
-mod unique_symbol_widening_tests;
-#[cfg(test)]
-mod unread_marker_relation_tests;
-#[cfg(test)]
-mod wide_union_relation_tests;
-
-pub(crate) mod memo;

@@ -101,7 +101,7 @@ fn witness_under_caps(source: &str, work: usize, depth: u16) -> (Outcome, usize)
         dispatch.set_connected_limits_for_tests(work, depth);
         let key = key_of(dispatch, PATH, "witness");
         let outcome = eval_key_on(&host, dispatch, key);
-        (outcome, dispatch.connected_demand.work_used_for_tests())
+        (outcome, dispatch.connected_demand().work_used_for_tests())
     })
 }
 
@@ -255,7 +255,7 @@ fn a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail() {
                     read.cache_suppress,
                     read.partial_reasons,
                 ),
-                dispatch.connected_demand.work_used_for_tests(),
+                dispatch.connected_demand().work_used_for_tests(),
                 candidates,
             )
         })
@@ -355,7 +355,7 @@ export function tickRoot(n: number) { return tick(n); }\n";
             with_dispatch(&host, |dispatch| {
                 let key = key_of(dispatch, PATH, name);
                 let outcome = eval_key_on(&host, dispatch, key);
-                (outcome, dispatch.connected_demand.work_used_for_tests())
+                (outcome, dispatch.connected_demand().work_used_for_tests())
             })
         })
     };
@@ -489,7 +489,7 @@ fn module_chain_work(levels: usize) -> (Outcome, usize) {
     with_dispatch(&host, |dispatch| {
         let key = key_of(dispatch, entry, "witness");
         let outcome = eval_key_on(&host, dispatch, key);
-        (outcome, dispatch.connected_demand.work_used_for_tests())
+        (outcome, dispatch.connected_demand().work_used_for_tests())
     })
 }
 
@@ -711,7 +711,7 @@ fn warm_second(source: &str, scheduled: bool) -> WarmSecond {
         let key = key_of(dispatch, PATH, "second");
         let read = dispatch
             .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
-        let work = dispatch.connected_demand.work_used_for_tests();
+        let work = dispatch.connected_demand().work_used_for_tests();
         let candidates = dispatch
             .graph()
             .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key.clone())));
@@ -850,7 +850,7 @@ fn cold_read(
     let key = key_of(dispatch, path, name);
     let read =
         dispatch.execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
-    let work = dispatch.connected_demand.work_used_for_tests();
+    let work = dispatch.connected_demand().work_used_for_tests();
     let candidates = dispatch
         .graph()
         .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));

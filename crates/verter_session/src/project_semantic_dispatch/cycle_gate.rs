@@ -72,7 +72,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// family singleflight and narrows the value domain onto
     /// [`MaterializationCycleGateOutcome`]. `pub(super)` so the family
     /// tests can drive constructed keys directly.
-    pub(super) fn classify_materialization_cycle_gate_read(
+    pub(crate) fn classify_materialization_cycle_gate_read(
         &self,
         key: SemanticQueryKey,
     ) -> CacheRead<MaterializationCycleGateOutcome> {
@@ -180,7 +180,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// hop read, a partial hop read, a missing body, a scanner fuse, a
     /// missing graph node) do not stop the walk; they demote the final
     /// outcome to `LegacyFallback` — never `Decided`.
-    pub(super) fn build_classify_materialization_cycle_gate(
+    pub(crate) fn build_classify_materialization_cycle_gate(
         &self,
         key: &MaterializationCycleGateKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::meta::MetaProject;
+use crate::output_sinks::DispatchOutputTestExt;
 use crate::resolver_core::ComponentMetaRequestHost;
 use crate::types::{HostConfig, ProjectionMode};
 use crate::VerterHost;

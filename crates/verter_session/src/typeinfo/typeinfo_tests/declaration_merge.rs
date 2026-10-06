@@ -13,6 +13,7 @@
 //! assert unrelated symbols do NOT accidentally merge.
 
 use super::support::*;
+use crate::output_sinks::DispatchOutputTestExt;
 use crate::VerterHost;
 use verter_type_expr::{FunctionExpr, TypeExpr};
 

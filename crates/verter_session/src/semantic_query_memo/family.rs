@@ -23,7 +23,7 @@ use crate::semantic_query::{
 use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 #[derive(Clone)]
-pub(super) struct MemoEntry {
+pub(crate) struct MemoEntry {
     pub(super) result: QueryResult<SemanticQueryValue>,
     /// Carrier holding the path-precise R28 fact signature for this
     /// entry — the sole cache-validity rail. Warm-hit reads validate
@@ -127,7 +127,7 @@ impl MemoEntry {
 
     /// The portion of this candidate's footprint that remains distinct
     /// when an SCC component shares its carrier and self-root list.
-    pub(super) fn unique_retained_footprint_bytes(&self) -> usize {
+    pub(crate) fn unique_retained_footprint_bytes(&self) -> usize {
         /// One observed dependency fact on the dispatch-return rail.
         const FACT_BYTES: usize = 64;
         /// One recorded materialised `(path, point)` record.
@@ -199,7 +199,7 @@ impl MemoEntry {
 /// [`SemanticQueryKey::IndexedAccess`] / [`SemanticQueryKey::ProjectPath`])
 /// use only the `single` slot.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) enum FamilyKey {
+pub(crate) enum FamilyKey {
     ResolveDecl(ResolveDeclKey),
     /// `base` is the env-bearing, content-free
     /// [`crate::semantic_query::ResolvedDeclSlotIdentity`] (R6 — carries
@@ -697,7 +697,7 @@ pub(super) enum FamilyKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct InstantiateAuthoredFamilyIdentity {
+pub(crate) struct InstantiateAuthoredFamilyIdentity {
     base: crate::semantic_query::ResolvedDeclSlotIdentity,
     args: Arc<[SemanticNodeId]>,
     authored: crate::semantic_query::operand::AuthoredOperandQueryIdentity,
@@ -748,7 +748,7 @@ fn w_instantiate_authored_family_identity(identity: &InstantiateAuthoredFamilyId
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct ObjectSpreadProjectionFamilyIdentity {
+pub(crate) struct ObjectSpreadProjectionFamilyIdentity {
     program: SemanticNodeId,
     selector: crate::semantic_query::ObjectProjectionSelector,
     resolve_env_hash: crate::semantic_query::HashValue,
@@ -1053,7 +1053,7 @@ impl FamilyKey {
     /// `Relate` family and never aliases `IndexedAccess` — without exposing the
     /// `pub(super)` taxonomy outside the crate. Also the family name the
     /// retention breakdown (`memo_entry_counts_by_family`) reports under.
-    pub(super) fn variant_label(&self) -> &'static str {
+    pub(crate) fn variant_label(&self) -> &'static str {
         match self {
             FamilyKey::ResolveDecl(_) => "ResolveDecl",
             FamilyKey::Instantiate { .. } => "Instantiate",
@@ -1116,7 +1116,7 @@ impl FamilyKey {
     /// full-`U3.CACHE_FACT_MODEL` work, deliberately NOT modelled here:
     /// cacheability never depends on memory pressure, and a new cacheable
     /// candidate is ALWAYS admitted after local eviction.
-    pub(super) fn candidate_cap(&self) -> usize {
+    pub(crate) fn candidate_cap(&self) -> usize {
         match self {
             FamilyKey::Instantiate { .. }
             | FamilyKey::InstantiateAuthored { .. }
@@ -1168,7 +1168,7 @@ impl FamilyKey {
 /// `demand` is `StructuralTransit`, keeping transit results from
 /// colliding with `Published` results on the same node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) enum ModeSlot {
+pub(crate) enum ModeSlot {
     Single,
     Identity,
     Navigate,
@@ -1227,7 +1227,7 @@ pub(super) const CANDIDATE_LIST_INLINE_CAP: usize = 4;
 /// the back ([`FamilySlots::mark_validated_freshest`]). Eviction at the
 /// family cap is invalid-first, then the front of this order — see
 /// [`FamilySlots::publish_one`] and [`select_eviction_victim`].
-pub(super) type CandidateList = smallvec::SmallVec<[MemoEntry; CANDIDATE_LIST_INLINE_CAP]>;
+pub(crate) type CandidateList = smallvec::SmallVec<[MemoEntry; CANDIDATE_LIST_INLINE_CAP]>;
 
 /// The eviction victim a publish site selected for a slot at its
 /// family cap. Computed by [`select_eviction_victim`] OUTSIDE the
@@ -1349,7 +1349,7 @@ pub(super) struct FamilyPublishOutcome {
 /// AND gated, never by enum rank (see [`FamilySlots::publish`] and
 /// [`slot_domain_siblings`]).
 #[derive(Default, Clone)]
-pub(super) struct FamilySlots {
+pub(crate) struct FamilySlots {
     single: CandidateList,
     identity: CandidateList,
     navigate: CandidateList,
@@ -1858,7 +1858,7 @@ pub struct AuditEagerKeyRow {
 /// `Skeleton`, `TransitSkeleton`, `MacroSurfaceShallow`,
 /// `VueRuntimeSurfaceShallow`, and `Single` are independent evaluations with
 /// no backfill in either direction.
-pub(super) fn slot_domain_siblings(slot: ModeSlot) -> &'static [ModeSlot] {
+pub(crate) fn slot_domain_siblings(slot: ModeSlot) -> &'static [ModeSlot] {
     match slot {
         ModeSlot::Single => &[],
         ModeSlot::Identity => &[],
@@ -1910,7 +1910,7 @@ fn mode_of_slot(slot: ModeSlot) -> Option<ProjectionMode> {
 /// (`Single`) slots use `Demand::identity()` at `path`. Shared by the
 /// warm-hit gate (`requested_point_for_key`) and the recorded-point
 /// backfill gate in [`FamilySlots::publish`].
-pub(super) fn point_for_slot(slot: ModeSlot, path: &ProjectionPath) -> Demand {
+pub(crate) fn point_for_slot(slot: ModeSlot, path: &ProjectionPath) -> Demand {
     let mut demand = match mode_of_slot(slot) {
         Some(mode) => Demand::from(mode),
         None => Demand::identity(),
@@ -1919,7 +1919,7 @@ pub(super) fn point_for_slot(slot: ModeSlot, path: &ProjectionPath) -> Demand {
     demand
 }
 
-pub(super) fn mode_to_slot(mode: ProjectionMode) -> ModeSlot {
+pub(crate) fn mode_to_slot(mode: ProjectionMode) -> ModeSlot {
     match mode {
         ProjectionMode::Identity => ModeSlot::Identity,
         ProjectionMode::Navigate => ModeSlot::Navigate,
@@ -1934,7 +1934,7 @@ pub(super) fn mode_to_slot(mode: ProjectionMode) -> ModeSlot {
 /// Identity/Navigate/Shallow/Expanded/Skeleton slots; transit contexts
 /// use the `Transit*` mirrors. The unfiltered and runtime-filtered Vue macro
 /// demands use separate shallow slots because their heritage policies differ.
-pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
+pub(crate) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
     match ctx.demand {
         ReductionDemand::Published => mode_to_slot(ctx.mode),
         ReductionDemand::StructuralTransit => match ctx.mode {
@@ -1969,7 +1969,7 @@ pub(super) fn context_to_slot(ctx: ProjectionReductionContext) -> ModeSlot {
 /// Project a [`SemanticQueryKey`] onto its `(family, slot)` pair. For
 /// mode-bearing variants the mode is stripped into the slot; for everything
 /// else the slot is `Single`.
-pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
+pub(crate) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
     match key {
         SemanticQueryKey::ResolveDecl(decl) => {
             (FamilyKey::ResolveDecl(decl.clone()), ModeSlot::Single)
@@ -2456,7 +2456,7 @@ pub(super) fn family_and_slot(key: &SemanticQueryKey) -> (FamilyKey, ModeSlot) {
 /// surface at the slot's mode" while holding only the residual-path
 /// value; carrying the residual path here keeps the recorded point and
 /// the requested point the same real point.
-pub(super) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
+pub(crate) fn requested_path_for_key(key: &SemanticQueryKey) -> ProjectionPath {
     match key {
         SemanticQueryKey::ProjectPath { path, .. } => ProjectionPath::from(Arc::clone(path)),
         SemanticQueryKey::ProjectMember { member, .. } => {
@@ -2508,7 +2508,7 @@ pub(super) fn requested_demand_override(key: &SemanticQueryKey) -> Option<Demand
 /// `validate_with_self_roots`). Used by the warm-hit gate
 /// (`cached_satisfies(entry.satisfied_projection, requested_point_for_key(key))`).
 #[cfg(any(test, feature = "test-support"))]
-pub(super) fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoint {
+pub(crate) fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoint {
     if let Some(point) = requested_demand_override(key) {
         return MaterializedPoint::new(point);
     }
@@ -2523,7 +2523,7 @@ pub(super) fn requested_point_for_key(key: &SemanticQueryKey) -> MaterializedPoi
 /// fact signature references `canonical_id`. The reverse index
 /// registers under every canonical the fact rail names, so this
 /// predicate is the fact-rail membership check the drain falls back to.
-pub(super) fn carrier_facts_reference_canonical(
+pub(crate) fn carrier_facts_reference_canonical(
     facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
     canonical_id: &str,
 ) -> bool {

@@ -71,9 +71,9 @@ fn a_union_targets_alternatives_are_connected_work() {
             "every arm of S fits an arm of T, got {related:?}"
         );
         assert!(
-            dispatch.connected_demand.work_used_for_tests() >= 820,
+            dispatch.connected_demand().work_used_for_tests() >= 820,
             "the 820 alternatives are charged, charged {}",
-            dispatch.connected_demand.work_used_for_tests()
+            dispatch.connected_demand().work_used_for_tests()
         );
     });
 }
@@ -178,7 +178,7 @@ fn a_recorded_comparison_costs_the_ledgers_mapped_units() {
                 "every arm of S fits an arm of T, got {related:?}"
             );
             let comparisons = count * (count + 1) / 2;
-            let used = dispatch.connected_demand.work_used_for_tests();
+            let used = dispatch.connected_demand().work_used_for_tests();
             assert!(
                 used <= comparisons * super::connected_demand::RELATION_UNITS_PER_COMPARISON,
                 "{comparisons} comparisons charged {used} units"
@@ -203,12 +203,12 @@ fn a_relation_past_its_byte_allowance_stops_on_the_memory_rail() {
             "the byte allowance stops the relation, got {refused:?}"
         );
         assert_eq!(
-            dispatch.connected_demand.bytes_used_for_tests(),
+            dispatch.connected_demand().bytes_used_for_tests(),
             limit,
             "the relation used up its byte allowance"
         );
         assert!(
-            dispatch.connected_demand.work_used_for_tests()
+            dispatch.connected_demand().work_used_for_tests()
                 < super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
             "the work cap did not stop it"
         );

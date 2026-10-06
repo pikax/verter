@@ -55,7 +55,7 @@ const MARKER_PARAM_INDEX: u16 = 0x8000;
 /// `markerSuperType` and `markerOtherType`): the sub-marker is constrained
 /// to the super-marker, and the other marker relates to neither.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MarkerRole {
+pub(crate) enum MarkerRole {
     Sub = 0,
     Super = 1,
     Other = 2,
@@ -601,7 +601,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// The variance marker `node` is: its declaration, parameter and role.
-    pub(super) fn variance_marker_of(
+    pub(crate) fn variance_marker_of(
         &self,
         node: SemanticNodeId,
     ) -> Option<(DeclIdentity, u16, MarkerRole)> {
@@ -759,7 +759,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// derived nodes, released with that generation (a measurement after an
 /// edit interns under the new generation, never beside a stale one), and
 /// at most six per type parameter: three markers and three instantiations.
-pub(super) fn declaration_scope(declaration: &DeclIdentity) -> NodeScopeId {
+pub(crate) fn declaration_scope(declaration: &DeclIdentity) -> NodeScopeId {
     NodeScopeId::File {
         canonical_id: Arc::clone(&declaration.canonical_id),
         owner: declaration.owner,

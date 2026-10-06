@@ -810,7 +810,7 @@ pub(crate) struct FlowReturnPendingState {
     /// The coinductive hold targets the member's evaluation met (in-flight
     /// callees and direct self-calls) — the SCC close discharges an
     /// empty-cycle member on its targets' admitted returns.
-    pub(super) holds: Vec<super::flow_return_callee::HeldCallee>,
+    pub(crate) holds: Vec<super::flow_return_callee::HeldCallee>,
     /// The member's own file roots — the published component's self-roots
     /// are the UNION of every drained member's roots, so a cross-file edit
     /// invalidates the whole component.

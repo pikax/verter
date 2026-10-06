@@ -248,7 +248,7 @@ pub(super) fn force_key_at(
     projection: SemanticOperandForceProjection,
 ) -> SemanticQueryKey {
     let SemanticOperandParts::Authored(authored) =
-        operand.parts(SemanticOperandAuthority::mint_for_forcing_boundary())
+        operand.parts(SemanticOperandAuthority::mint_for_tests())
     else {
         panic!("fixture must be authored")
     };
@@ -268,7 +268,7 @@ pub(super) fn force_key_at(
         context,
         resolve.get(),
         parse,
-        super::BodySourceWitness::mint_for_dispatch_factory(),
+        super::BodySourceWitness::mint_for_unit_tests(),
     );
     // Mirrors the production routing: an empty-path type-space DeclBody
     // force AT WHOLE-SURFACE PRECISION converges on the DECLARATION
@@ -288,17 +288,14 @@ pub(super) fn force_key_at(
                 Arc::clone(authored.substitution()),
                 instantiate_context,
                 projection,
-                SemanticOperandAuthority::mint_for_forcing_boundary(),
+                SemanticOperandAuthority::mint_for_tests(),
             )
         },
     )
 }
 
 fn with_split_env(operand: &SemanticOperand, split_env: OperandSplitEnv) -> SemanticOperand {
-    operand.with_split_env(
-        split_env,
-        SemanticOperandAuthority::mint_for_forcing_boundary(),
-    )
+    operand.with_split_env(split_env, SemanticOperandAuthority::mint_for_tests())
 }
 
 pub(super) fn assert_primitive(host: &VerterHost, node: SemanticNodeId, expected: PrimitiveKind) {
@@ -439,7 +436,7 @@ fn every_sealed_environment_axis_changes_family_identity_and_wrong_env_refuses_d
     let dispatch = ProjectSemanticDispatch::new(&host);
     let operand = mint(&dispatch, whole("Owned"));
     let SemanticOperandParts::Authored(authored) =
-        operand.parts(SemanticOperandAuthority::mint_for_forcing_boundary())
+        operand.parts(SemanticOperandAuthority::mint_for_tests())
     else {
         unreachable!()
     };
@@ -452,7 +449,7 @@ fn every_sealed_environment_axis_changes_family_identity_and_wrong_env_refuses_d
             type_env,
             lib_env,
             project,
-            SemanticOperandAuthority::mint_for_forcing_boundary(),
+            SemanticOperandAuthority::mint_for_tests(),
         ),
         OperandSplitEnv::new(
             parse,
@@ -460,7 +457,7 @@ fn every_sealed_environment_axis_changes_family_identity_and_wrong_env_refuses_d
             type_env,
             lib_env,
             project,
-            SemanticOperandAuthority::mint_for_forcing_boundary(),
+            SemanticOperandAuthority::mint_for_tests(),
         ),
         OperandSplitEnv::new(
             parse,
@@ -468,7 +465,7 @@ fn every_sealed_environment_axis_changes_family_identity_and_wrong_env_refuses_d
             TypeEnvHash::from_env_hash([9; 16]),
             lib_env,
             project,
-            SemanticOperandAuthority::mint_for_forcing_boundary(),
+            SemanticOperandAuthority::mint_for_tests(),
         ),
         OperandSplitEnv::new(
             parse,
@@ -476,7 +473,7 @@ fn every_sealed_environment_axis_changes_family_identity_and_wrong_env_refuses_d
             type_env,
             LibEnvHash::from_env_hash([9; 16]),
             project,
-            SemanticOperandAuthority::mint_for_forcing_boundary(),
+            SemanticOperandAuthority::mint_for_tests(),
         ),
         OperandSplitEnv::new(
             parse,
@@ -484,7 +481,7 @@ fn every_sealed_environment_axis_changes_family_identity_and_wrong_env_refuses_d
             type_env,
             lib_env,
             ProjectIdentityDim::from_project_identity(9),
-            SemanticOperandAuthority::mint_for_forcing_boundary(),
+            SemanticOperandAuthority::mint_for_tests(),
         ),
     ];
     let context = ProjectionReductionContext::published(ProjectionMode::Identity);
@@ -958,7 +955,7 @@ fn substituted_authored_identity_includes_its_runtime_confinement() {
         .mint_authored_semantic_operand(member_value("Box", 0), Arc::from([argument]))
         .unwrap();
     let SemanticOperandParts::Authored(authored) =
-        operand.parts(SemanticOperandAuthority::mint_for_forcing_boundary())
+        operand.parts(SemanticOperandAuthority::mint_for_tests())
     else {
         unreachable!()
     };
@@ -967,7 +964,7 @@ fn substituted_authored_identity_includes_its_runtime_confinement() {
         .expect("substituted operand must be runtime-confined");
     let other_runtime = operand.with_substitution_runtime(
         Some((store.wrapping_add(1), generation)),
-        SemanticOperandAuthority::mint_for_forcing_boundary(),
+        SemanticOperandAuthority::mint_for_tests(),
     );
     assert_ne!(operand, other_runtime);
 }
@@ -1089,7 +1086,7 @@ fn node_operand_merges_producer_roots_into_active_candidate() {
     let node = forced.node();
     let operand = dispatch.mint_node_semantic_operand(&forced).unwrap();
     let SemanticOperandParts::Node { evidence, .. } =
-        operand.parts(SemanticOperandAuthority::mint_for_forcing_boundary())
+        operand.parts(SemanticOperandAuthority::mint_for_tests())
     else {
         unreachable!()
     };
@@ -1732,7 +1729,7 @@ fn substitution_producer_roots_reach_the_forced_candidate_but_not_its_locator_ch
         .mint_node_semantic_operand(&argument_forced)
         .expect("argument operand must seal");
     let SemanticOperandParts::Node { evidence, .. } =
-        argument.parts(SemanticOperandAuthority::mint_for_forcing_boundary())
+        argument.parts(SemanticOperandAuthority::mint_for_tests())
     else {
         unreachable!()
     };

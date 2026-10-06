@@ -620,7 +620,7 @@ impl SemanticGraphStore {
     /// with no flight and no root fence. Backs the relation fixture
     /// seams, which seed a ROOT rather than drain a member.
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn publish_unfenced_candidate_for_tests(
+    pub(crate) fn publish_unfenced_candidate_for_tests(
         &self,
         ctx: Option<&dyn crate::resolver_core::fact_validation_port::FactValidation>,
         family: FamilyKey,

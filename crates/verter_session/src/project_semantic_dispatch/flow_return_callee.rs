@@ -108,7 +108,7 @@ use verter_session_query::function_program::{FunctionProgramMatch, FunctionProgr
 /// destroys an exactly-correct arm (`aye<QQ>` returning `bee(): QQ`
 /// answers `1 | QQ`, not `unknown`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ReturnOrigin {
+pub(crate) enum ReturnOrigin {
     /// Lowered where the callee's own clause was NOT in scope — its
     /// DECLARED return locator in file owner scope, or a resolved callee
     /// VALUE TYPE composed from one. A same-named resolved declaration
@@ -244,7 +244,7 @@ enum ClauseParamOutcome {
 /// Deliberately NOT `Default`: an empty clause is a STATEMENT about the
 /// callee ([`Self::non_generic`]), not something a route can fall into.
 #[derive(Debug, Clone)]
-pub(super) struct CalleeClause {
+pub(crate) struct CalleeClause {
     params: Arc<[CalleeClauseParam]>,
 }
 
@@ -408,7 +408,7 @@ impl CalleeClause {
 /// callee's return untouched — the callee's own binder, published warm —
 /// while the call-site route degrades on the identical miss.
 #[derive(Debug, Clone)]
-pub(super) struct UtilityClause {
+pub(crate) struct UtilityClause {
     /// Each declared parameter's name and lowered constraint, in
     /// declaration order.
     params: Arc<[(Arc<str>, Option<SemanticNodeId>)]>,
@@ -472,7 +472,7 @@ impl UtilityClause {
 /// this module exists to make inexpressible, and it would be warm
 /// admitted with no degradation. The two states are therefore distinct
 /// types, and only the success arm carries a [`CalleeClause`].
-pub(super) enum CalleeClauseLookup {
+pub(crate) enum CalleeClauseLookup {
     /// The callee's clause, read from an authority that answers for it.
     Clause(CalleeClause),
     /// The clause could NOT be read (the file is not served at this
@@ -491,7 +491,7 @@ pub(super) enum CalleeClauseLookup {
 /// ([`CalleeClause::non_generic`]), which is a statement about the
 /// callee, not an omission.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct CallValue(SemanticNodeId);
+pub(crate) struct CallValue(SemanticNodeId);
 
 /// The outcome of taking a resolved SIGNATURE node's call value.
 ///
@@ -499,7 +499,7 @@ pub(super) struct CallValue(SemanticNodeId);
 /// callable at all and a signature whose return position is a semantic
 /// MISS degrade differently at every call site, and collapsing them is
 /// how a failed nested demand becomes a warm contributor.
-pub(super) enum SignatureCall {
+pub(crate) enum SignatureCall {
     /// The signature's call value, instantiated.
     Value(CallValue),
     /// The node is not a signature.
@@ -790,7 +790,7 @@ pub(super) fn unmodeled_position_marker(
 /// the same rule. Carrying only the key is what let the fixed point undo
 /// the call arm's instantiation.
 #[derive(Debug, Clone)]
-pub(super) enum HeldCallee {
+pub(crate) enum HeldCallee {
     /// A hold on another served FLOW position: the target's admitted
     /// return is expressed in the CALLEE's binders, so the discharge
     /// owes the same instantiation transfer the call arm performed —

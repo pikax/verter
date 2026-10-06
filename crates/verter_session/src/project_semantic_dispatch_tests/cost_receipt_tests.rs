@@ -73,19 +73,19 @@ fn a_diamond_replays_in_linear_cost() {
     );
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
-        .connected_demand
+        .connected_demand()
         .replay_admit(top)
         .expect("21 units fit");
-    assert_eq!(dispatch.connected_demand.work_used_for_tests(), 21);
-    assert_eq!(dispatch.connected_demand.bytes_used_for_tests(), 210);
+    assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
+    assert_eq!(dispatch.connected_demand().bytes_used_for_tests(), 210);
     for receipt in &receipts {
-        assert!(dispatch.connected_demand.is_paid(receipt.identity()));
+        assert!(dispatch.connected_demand().is_paid(receipt.identity()));
     }
     dispatch
-        .connected_demand
+        .connected_demand()
         .replay_admit(top)
         .expect("a paid closure costs nothing more");
-    assert_eq!(dispatch.connected_demand.work_used_for_tests(), 21);
+    assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
 }
 
 /// A partly warm demand pays only what it has not paid, and the total is
@@ -98,15 +98,15 @@ fn a_partly_paid_diamond_charges_the_rest_once() {
     let receipts = diamond(20);
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
-        .connected_demand
+        .connected_demand()
         .replay_admit(&receipts[10])
         .expect("11 units fit");
-    assert_eq!(dispatch.connected_demand.work_used_for_tests(), 11);
+    assert_eq!(dispatch.connected_demand().work_used_for_tests(), 11);
     dispatch
-        .connected_demand
+        .connected_demand()
         .replay_admit(&receipts[20])
         .expect("10 more units fit");
-    assert_eq!(dispatch.connected_demand.work_used_for_tests(), 21);
+    assert_eq!(dispatch.connected_demand().work_used_for_tests(), 21);
 }
 
 /// Recording a diamond cold gives each receipt only its own cost: `T2`
@@ -117,7 +117,7 @@ fn a_partly_paid_diamond_charges_the_rest_once() {
 fn a_cold_diamond_records_exclusive_costs() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let ledger = &dispatch.connected_demand;
+    let ledger = &dispatch.connected_demand();
     let (top, cold_work) = {
         let (_guard, _) = dispatch.enter_connected_demand(false);
         ledger.open_cost_scope(identity("T2"));
@@ -171,18 +171,18 @@ fn a_refused_replay_charges_and_marks_nothing() {
     dispatch.set_connected_limits_for_tests(10, 24);
     let (_guard, _) = dispatch.enter_connected_demand(false);
     assert_eq!(
-        dispatch.connected_demand.replay_admit(&receipts[20]),
+        dispatch.connected_demand().replay_admit(&receipts[20]),
         Err(ReplayRefusal::Work)
     );
-    assert_eq!(dispatch.connected_demand.work_used_for_tests(), 0);
+    assert_eq!(dispatch.connected_demand().work_used_for_tests(), 0);
     assert!(receipts
         .iter()
-        .all(|receipt| !dispatch.connected_demand.is_paid(receipt.identity())));
+        .all(|receipt| !dispatch.connected_demand().is_paid(receipt.identity())));
     dispatch
-        .connected_demand
+        .connected_demand()
         .replay_admit(&receipts[9])
         .expect("ten units fit exactly");
-    assert_eq!(dispatch.connected_demand.work_used_for_tests(), 10);
+    assert_eq!(dispatch.connected_demand().work_used_for_tests(), 10);
 }
 
 /// A receipt's nesting is checked against the remaining query depth even
@@ -196,16 +196,16 @@ fn a_paid_receipt_still_answers_to_the_depth_rail() {
     dispatch.set_connected_limits_for_tests(1_000, 10);
     let (_guard, _) = dispatch.enter_connected_demand(false);
     assert_eq!(
-        dispatch.connected_demand.replay_admit(&receipts[20]),
+        dispatch.connected_demand().replay_admit(&receipts[20]),
         Err(ReplayRefusal::Depth),
         "a depth-20 receipt does not fit a depth-10 rail"
     );
     dispatch
-        .connected_demand
+        .connected_demand()
         .replay_admit(&receipts[10])
         .expect("depth 10 fits");
     assert_eq!(
-        dispatch.connected_demand.replay_admit(&receipts[20]),
+        dispatch.connected_demand().replay_admit(&receipts[20]),
         Err(ReplayRefusal::Depth),
         "paying part of the closure does not waive the depth"
     );
@@ -253,10 +253,10 @@ fn a_lattice_of_shared_results_replays_each_once() {
     );
     let (_guard, _) = dispatch.enter_connected_demand(false);
     dispatch
-        .connected_demand
+        .connected_demand()
         .replay_admit(&top)
         .expect("43 units fit");
-    assert_eq!(dispatch.connected_demand.work_used_for_tests(), 43);
+    assert_eq!(dispatch.connected_demand().work_used_for_tests(), 43);
 }
 
 /// A computation that does not complete leaves no receipt and is never
@@ -265,7 +265,7 @@ fn a_lattice_of_shared_results_replays_each_once() {
 fn an_abandoned_computation_is_never_paid() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let ledger = &dispatch.connected_demand;
+    let ledger = &dispatch.connected_demand();
     let (_guard, _) = dispatch.enter_connected_demand(false);
     ledger.open_cost_scope(identity("X"));
     ledger.charge_units(5).expect("X's own units");
@@ -305,7 +305,7 @@ fn consume(
 fn a_fresh_delivery_is_not_charged_twice() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
-    let ledger = &dispatch.connected_demand;
+    let ledger = &dispatch.connected_demand();
     let child = {
         let (_guard, _) = dispatch.enter_connected_demand(false);
         ledger.open_cost_scope(identity("P"));

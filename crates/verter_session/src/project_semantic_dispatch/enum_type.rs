@@ -920,6 +920,6 @@ thread_local! {
 /// How many initializer references this thread resolved, and pending
 /// initializers it evaluated, so far (test-only).
 #[cfg(test)]
-pub(super) fn enum_initializer_work_for_tests() -> usize {
+pub(crate) fn enum_initializer_work_for_tests() -> usize {
     ENUM_INITIALIZER_EVALUATIONS.with(std::cell::Cell::get)
 }

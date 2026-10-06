@@ -275,7 +275,7 @@ fn resolved_call_fresh_target(
     }
 }
 
-pub(super) fn resolved_call_return_type(
+pub(crate) fn resolved_call_return_type(
     result: &crate::semantic_query::ResolvedCallResult,
 ) -> SemanticNodeId {
     match result {

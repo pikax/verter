@@ -13,6 +13,7 @@
 //! provably wrong for the second of two script blocks) and PASS against the
 //! position-preserving tree.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_session_query::analysis::types::AnalyzedMacroKind;

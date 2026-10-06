@@ -183,21 +183,21 @@ impl ProjectionStamp {
 /// The scope-resolution inputs of one view projection — the same value-side
 /// inputs the reducing lowering entry receives, threaded to the shared
 /// bare-name / import-head resolvers at the demand points.
-pub(super) struct LocatorViewInputs<'a> {
-    pub(super) env: &'a FxHashMap<String, SemanticNodeId>,
-    pub(super) scope: &'a NodeScopeId,
-    pub(super) name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
-    pub(super) scope_payload: Option<&'a DeclarationScopePayload>,
-    pub(super) shadowing: &'a ScopeShadowing,
-    pub(super) authored_resolution_debt: Option<&'a super::carrier::AuthoredResolutionDebtFrame>,
+pub(crate) struct LocatorViewInputs<'a> {
+    pub(crate) env: &'a FxHashMap<String, SemanticNodeId>,
+    pub(crate) scope: &'a NodeScopeId,
+    pub(crate) name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    pub(crate) scope_payload: Option<&'a DeclarationScopePayload>,
+    pub(crate) shadowing: &'a ScopeShadowing,
+    pub(crate) authored_resolution_debt: Option<&'a super::carrier::AuthoredResolutionDebtFrame>,
     /// The value whose declared body is being projected, when the body is
     /// a value's: a `typeof` naming that value inside it is the value's
     /// own type, read by reference.
-    pub(super) self_value: Option<&'a verter_type_expr::locators::AuthoredAnchor>,
+    pub(crate) self_value: Option<&'a verter_type_expr::locators::AuthoredAnchor>,
 }
 
 /// Per-projection memo so shared sub-graphs project once per context.
-pub(super) type ViewMemo = FxHashMap<(SemanticNodeId, ProjectionReductionContext), SemanticNodeId>;
+pub(crate) type ViewMemo = FxHashMap<(SemanticNodeId, ProjectionReductionContext), SemanticNodeId>;
 
 /// Prepared input for the projection-view Criterion benchmark. This lives
 /// behind `test-support`; ordinary production builds cannot construct or see
@@ -216,19 +216,17 @@ pub struct ProjectionBenchCase {
 /// implementation: every operation delegates to
 /// [`ProjectSemanticDispatch::project_view_node_worklist`].
 #[cfg(any(test, feature = "test-support"))]
-pub struct ProjectionBenchHarness<'a> {
-    dispatch: ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>,
+pub struct ProjectionBenchHarness<'a, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: ProjectSemanticDispatch<'a, C>,
     env: FxHashMap<String, SemanticNodeId>,
     substitutions: Vec<(Arc<str>, SemanticNodeId)>,
     memo: ViewMemo,
 }
 
 #[cfg(any(test, feature = "test-support"))]
-impl<'a> ProjectionBenchHarness<'a> {
+impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'a, C> {
     #[must_use]
-    pub(crate) fn new(
-        ctx: &'a dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
-    ) -> Self {
+    pub(crate) fn new(ctx: &'a dyn crate::resolver_core::ResolverContext<C>) -> Self {
         Self {
             dispatch: ProjectSemanticDispatch::new(ctx),
             env: FxHashMap::default(),

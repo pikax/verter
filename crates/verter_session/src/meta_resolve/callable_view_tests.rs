@@ -6,6 +6,7 @@
 //! node result DIRECTLY against the shared resolver
 //! (`realize_callable_member`) — both node-domain.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use crate::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 

@@ -1054,7 +1054,7 @@ fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
 fn call_resolution_budget_exceeded_admits_nothing() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
-    dispatch.connected_demand.set_limits_for_tests(256, 24);
+    dispatch.connected_demand().set_limits_for_tests(256, 24);
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3101,7 +3101,7 @@ fn deposits_select_number(counts: &[usize]) {
             "{element_count} accepted deposits select T := number"
         );
         assert!(
-            dispatch.connected_demand.work_used_for_tests() >= element_count,
+            dispatch.connected_demand().work_used_for_tests() >= element_count,
             "the {element_count} accepted deposits are charged to the connected-work ledger"
         );
     }

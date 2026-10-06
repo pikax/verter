@@ -2121,7 +2121,7 @@ defineSlots<Slots>()
 // layer. Mirrors the dispatch-level
 // `memo_refuses_insertion_on_cache_suppress_true_via_pathological_input`.
 //
-// Scope note: the `SemanticGraphStore::memo_size_in_test` accessor
+// Scope note: the `SemanticGraphStore::memo_entry_count` accessor
 // observes host-global memo state that grows from peer dispatches
 // outside the synthesis path. The discriminating contract under
 // test is "the cache_suppress no-poison gate FIRES during the

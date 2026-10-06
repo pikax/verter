@@ -50,7 +50,7 @@ pub struct DepSignatureInterner {
 type DepSignatureWeak = std::sync::Weak<[(Arc<str>, crate::semantic_query::DepVersion)]>;
 
 #[allow(dead_code)]
-pub(super) const SWEEP_INTERVAL: u64 = 1024;
+pub(crate) const SWEEP_INTERVAL: u64 = 1024;
 
 #[allow(dead_code)]
 impl DepSignatureInterner {

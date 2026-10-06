@@ -6,6 +6,7 @@
 //! re-resolvable input carrier (never a fabricated root-sentinel shape,
 //! never a warm admission).
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc as StdArc;
 
 use super::reduce_field_value_node;

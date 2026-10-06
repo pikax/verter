@@ -316,8 +316,7 @@ pub(crate) mod flow_admission_fault_injection {
         #[cfg(test)]
         pub(crate) observe_product_execution: AtomicBool,
         #[cfg(test)]
-        pub(crate) product_executions:
-            std::sync::Mutex<Vec<super::super::flow_return_frame_seal_tests::ProductObservation>>,
+        pub(crate) product_executions: std::sync::Mutex<Vec<ProductObservation>>,
         // Reorders actual continuation inputs only; it cannot mint or suppress evidence.
         #[cfg(test)]
         pub(crate) reverse_product_predecessors: AtomicBool,
@@ -495,6 +494,94 @@ pub(crate) mod flow_admission_fault_injection {
     impl Drop for Guard<'_> {
         fn drop(&mut self) {
             self.0.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Owned test observations contain no execution capability and cannot affect
+    /// admission. Semantic IDs are projected only after the demand has returned.
+    #[cfg(test)]
+    #[derive(Debug)]
+    pub(crate) struct ProductObservation {
+        pub(crate) products: Vec<(super::super::flow_solve::FlowDomain, usize, ObservedProduct)>,
+        pub(crate) executed: Vec<(super::super::flow_solve::FlowDomain, usize, bool)>,
+        pub(crate) iterations: Option<u32>,
+        pub(crate) report: super::super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
+    }
+
+    #[cfg(test)]
+    #[derive(Debug)]
+    pub(crate) enum ObservedProduct {
+        Definitions(Vec<usize>),
+        Reaching(super::super::flow_products::ReachingTypeProduct),
+        Declared(Option<crate::semantic_query::SemanticNodeId>),
+        Narrowing(super::super::flow_products::NarrowingProduct),
+        Assignment(super::super::flow_products::DefiniteAssignmentProduct),
+    }
+
+    #[cfg(test)]
+    impl ProductObservation {
+        pub(crate) fn capture(
+            products: &super::super::flow_return_products::FlowFrameProducts,
+            evidence: Option<&super::super::flow_products::FlowProductEvidence>,
+            report: super::super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
+        ) -> Self {
+            use super::super::flow_products::FlowProductValue;
+            use super::super::flow_solve::FlowDomain;
+            Self {
+                products: products
+                    .state
+                    .ordered_entries()
+                    .map(|(key, value)| {
+                        let value = match value {
+                            FlowProductValue::ReachingValue(value) => ObservedProduct::Definitions(
+                                value
+                                    .definitions()
+                                    .iter()
+                                    .map(|node| node.index())
+                                    .collect(),
+                            ),
+                            FlowProductValue::ReachingType(value) => {
+                                ObservedProduct::Reaching(value.clone())
+                            }
+                            FlowProductValue::DeclaredType(value) => {
+                                ObservedProduct::Declared(value.declared())
+                            }
+                            FlowProductValue::Narrowing(value) => {
+                                ObservedProduct::Narrowing(value.clone())
+                            }
+                            FlowProductValue::DefiniteAssignment(value) => {
+                                ObservedProduct::Assignment(*value)
+                            }
+                        };
+                        (key.domain(), key.node().index(), value)
+                    })
+                    .collect(),
+                executed: products
+                    .execution
+                    .borrow()
+                    .execution
+                    .selected_sites()
+                    .flat_map(|site| {
+                        [
+                            FlowDomain::ReachingValue,
+                            FlowDomain::ReachingType,
+                            FlowDomain::Narrowing,
+                            FlowDomain::DeclaredType,
+                            FlowDomain::DefiniteAssignment,
+                        ]
+                        .map(|domain| {
+                            let key = site.key(domain).unwrap();
+                            (
+                                domain,
+                                key.node().index(),
+                                evidence.is_some_and(|evidence| evidence.executed(&key)),
+                            )
+                        })
+                    })
+                    .collect(),
+                iterations: evidence.map(|evidence| evidence.iterations()),
+                report,
+            }
         }
     }
 }
@@ -687,7 +774,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The `null` / `undefined` algebra of the project owning `canonical`
     /// — the policy a value typed in that file is joined under.
-    pub(super) fn nullability_for(
+    pub(crate) fn nullability_for(
         &self,
         canonical: &str,
     ) -> verter_session_query::flow::policy::NullabilityPolicy {
@@ -2100,7 +2187,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         false
     }
 
-    pub(super) fn flow_return_member_projection(
+    pub(crate) fn flow_return_member_projection(
         &self,
         callee_arg: SemanticNodeId,
         segment: &crate::semantic_query::PathSegment,
@@ -3028,7 +3115,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The closure runs `nullability` — the `null` / `undefined` algebra of
     /// the key being sealed — so a top proven canonical under the other
     /// algebra is re-closed rather than skipped.
-    pub(super) fn close_flow_result_pre_seal(
+    pub(crate) fn close_flow_result_pre_seal(
         &self,
         result: FlowReturnResult,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
@@ -3436,7 +3523,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// its clause would discharge untransferred.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)] // exercised by the return-equation close tests
-    pub(super) fn flow_frame_close_for_tests(
+    pub(crate) fn flow_frame_close_for_tests(
         &self,
         idx: usize,
         outcome: FlowReturnPendingOutcome,
@@ -3450,7 +3537,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// staged member finalizes against at the component close.
     #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)] // exercised by the return-equation close tests
-    pub(super) fn flow_frame_close_with_evidence_for_tests(
+    pub(crate) fn flow_frame_close_with_evidence_for_tests(
         &self,
         idx: usize,
         outcome: FlowReturnPendingOutcome,
@@ -3662,7 +3749,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// set on the frame. A refusal at any step installs nothing: the
     /// evaluation still runs (values are the evaluator's), but no proof
     /// can mint and the close finalizes unproven (`ReturnOnly`).
-    pub(super) fn prepare_flow_return_demand(&self, key: &FlowReturnKey, frame_idx: usize) {
+    pub(crate) fn prepare_flow_return_demand(&self, key: &FlowReturnKey, frame_idx: usize) {
         use super::flow_solve::{
             build_flow_demand_plan_from_execution, prepare_flow_execution, FlowDemandRequest,
             FlowResourcePolicy,
@@ -3852,7 +3939,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The open frame's installed demand carrier for `key`, when this
     /// frame was prepared.
-    pub(super) fn flow_demand_carrier_of(&self, key: &FlowReturnKey) -> Option<FlowDemandCarrier> {
+    pub(crate) fn flow_demand_carrier_of(&self, key: &FlowReturnKey) -> Option<FlowDemandCarrier> {
         let txn = self.dispatch_txn.borrow();
         let idx = txn
             .reentry()
@@ -4085,7 +4172,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
                 knobs.product_executions.lock().unwrap().push(
-                    super::flow_return_frame_seal_tests::ProductObservation::capture(
+                    flow_admission_fault_injection::ProductObservation::capture(
                         witness.products,
                         witness.product_evidence,
                         report.clone(),
@@ -4106,7 +4193,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// Returns `None` when the frame carries no installed demand (the
     /// demand could not be planned): unproven, never warm.
-    pub(super) fn finalize_flow_demand(
+    pub(crate) fn finalize_flow_demand(
         &self,
         carrier: Option<&FlowDemandCarrier>,
         discharge: Option<&super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
@@ -6583,7 +6670,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// Unions and intersections are read through, however they nest, from a
     /// work list; one that contains itself is left open.
-    pub(super) fn may_be_below_a_primitive(&self, node: SemanticNodeId) -> bool {
+    pub(crate) fn may_be_below_a_primitive(&self, node: SemanticNodeId) -> bool {
         use crate::graph_walk::Verdict;
         crate::graph_walk::classify(node, |node| {
             let resolved = self.resolved_reduction_view(node);
@@ -8453,7 +8540,7 @@ thread_local! {
     /// the guard nothing extra. A warm demand asks nothing, so the counter
     /// does not move at all on a warm re-demand. Test-only observation;
     /// no behavior depends on it.
-    pub(super) static INSTANCEOF_HERITAGE_READS: std::cell::Cell<usize> =
+    pub(crate) static INSTANCEOF_HERITAGE_READS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
 }
 
@@ -8771,7 +8858,7 @@ mod correlation;
 mod destructure;
 
 #[path = "flow_return_schedule.rs"]
-pub(super) mod schedule;
+pub(crate) mod schedule;
 
 use super::build::{AugmentationContributions, ClassAncestryReading, NormalizedTupleShape};
 use super::call_resolve::*;
@@ -10859,7 +10946,7 @@ thread_local! {
 /// How many nodes this thread's object-literal recursion checks walked so
 /// far (test-only).
 #[cfg(test)]
-pub(super) fn receiver_walk_visits_for_tests() -> usize {
+pub(crate) fn receiver_walk_visits_for_tests() -> usize {
     RECEIVER_WALK_VISITS.with(std::cell::Cell::get)
 }
 
@@ -10999,7 +11086,7 @@ impl Clone for NarrowingSnapshot {
 /// nothing about that edge, so an establishment-only ledger would hand a
 /// union-of-facts guard a fact its own disjunct had killed.
 #[derive(Debug, Clone)]
-enum NarrowingLedgerEntry {
+pub(crate) enum NarrowingLedgerEntry {
     /// `subject` narrowed to `node`; `root` is the resolved product
     /// subject the fact is filed under, which is what a kill names.
     Established {
@@ -11035,7 +11122,7 @@ enum NarrowingLedgerEntry {
 ///   edge does not prove a fact it invalidated — while leaving facts the
 ///   window never established alone, since those belong to whichever
 ///   outstanding mark still holds them.
-fn standing_narrowings(
+pub(crate) fn standing_narrowings(
     window: &[NarrowingLedgerEntry],
 ) -> Vec<(
     verter_session_query::flow::slice::SliceNarrowSubject,
@@ -27174,140 +27261,6 @@ mod plan_refusal_class_tests {
             flow_partial_reason_class(&FlowPartialReason::DegradedValue, None),
             PartialReasonSet::FLOW_RETURN_UNVERIFIED,
         );
-    }
-}
-
-#[cfg(test)]
-mod narrowing_ledger_tests {
-    use super::*;
-
-    fn param(ordinal: u32) -> FlowProductSubject {
-        let allocator = oxc_allocator::Allocator::default();
-        let parsed = crate::parse::Parser::new(
-            &allocator,
-            "function f(p0: unknown, p1: unknown) {}",
-            oxc_span::SourceType::ts(),
-        )
-        .parse();
-        let oxc_ast::ast::Statement::FunctionDeclaration(function) = &parsed.program.body[0] else {
-            panic!("function fixture");
-        };
-        let source = verter_semantic::analysis::flow::FunctionBodySource::from_function(function)
-            .expect("body");
-        let skeleton = verter_semantic::analysis::flow::build_function_body_skeleton(
-            &source,
-            parsed.program.source_text,
-        );
-        let name = skeleton
-            .name_id(&format!("p{ordinal}"))
-            .expect("parameter name");
-        let binding = skeleton
-            .bindings_named(name)
-            .next()
-            .expect("parameter binding");
-        FlowProductSubject::Local(binding)
-    }
-
-    fn authored(
-        ordinal: u32,
-        path: &[&str],
-    ) -> verter_session_query::flow::slice::SliceNarrowSubject {
-        verter_session_query::flow::slice::SliceNarrowSubject {
-            root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
-                name: Arc::from(format!("p{ordinal}")),
-                binding: param(ordinal),
-            },
-            path: Arc::from(
-                path.iter()
-                    .map(|segment| Arc::from(*segment))
-                    .collect::<Vec<Arc<str>>>()
-                    .into_boxed_slice(),
-            ),
-        }
-    }
-
-    fn established(ordinal: u32, path: &[&str], node: u64) -> NarrowingLedgerEntry {
-        NarrowingLedgerEntry::Established {
-            root: param(ordinal),
-            subject: authored(ordinal, path),
-            node: SemanticNodeId(node),
-        }
-    }
-
-    /// A window whose only movement RE-WRITES the value the position
-    /// already held still reports that fact. The union-of-facts guard
-    /// asks a disjunct "what did your edge prove", and an edge that
-    /// re-establishes a fact proved it; an overlay diff cannot see the
-    /// write at all, so the disjunct would drop out of `narrowed_in_all`
-    /// and the guard would publish a narrower type than any edge proves.
-    ///
-    /// Mutation: skipping an establishment whose node equals the value
-    /// the position already held (the overlay-diff reading) empties the
-    /// reported window and fails this.
-    #[test]
-    fn a_re_established_fact_is_reported_as_the_windows_contribution() {
-        let window = [established(0, &["v"], 7)];
-        assert_eq!(
-            standing_narrowings(&window),
-            vec![(authored(0, &["v"]), SemanticNodeId(7))],
-        );
-    }
-
-    /// Write ORDER is the report's order, and a position written twice
-    /// reports both writes: the union guard's per-disjunct fold keeps the
-    /// LAST write for a position, so collapsing the pair here (or
-    /// reporting them reversed) would hand it the wrong alternative.
-    #[test]
-    fn a_position_written_twice_reports_both_writes_in_order() {
-        let window = [
-            established(0, &["v"], 7),
-            established(1, &[], 9),
-            established(0, &["v"], 8),
-        ];
-        assert_eq!(
-            standing_narrowings(&window),
-            vec![
-                (authored(0, &["v"]), SemanticNodeId(7)),
-                (authored(1, &[]), SemanticNodeId(9)),
-                (authored(0, &["v"]), SemanticNodeId(8)),
-            ],
-        );
-    }
-
-    /// A kill inside the window RETRACTS every fact the window
-    /// established under that root — a write to the binding invalidates
-    /// the facts about the value it replaced, and an edge does not prove
-    /// a fact it invalidated. Facts under OTHER roots survive, and a
-    /// later establishment under the killed root stands again.
-    ///
-    /// Mutation: dropping the retraction (treating a kill as no
-    /// movement) reports the invalidated `v` fact and fails this.
-    #[test]
-    fn a_kill_retracts_only_the_facts_its_own_root_established() {
-        let window = [
-            established(0, &["v"], 7),
-            established(1, &[], 9),
-            NarrowingLedgerEntry::Cleared { root: param(0) },
-            established(0, &["w"], 11),
-        ];
-        assert_eq!(
-            standing_narrowings(&window),
-            vec![
-                (authored(1, &[]), SemanticNodeId(9)),
-                (authored(0, &["w"]), SemanticNodeId(11)),
-            ],
-        );
-    }
-
-    /// A kill reports nothing about facts the window never established:
-    /// those belong to whichever outstanding mark still holds them, and
-    /// a window that claimed them would let one disjunct inherit an
-    /// enclosing scope's facts as its own contribution.
-    #[test]
-    fn a_kill_alone_reports_an_empty_contribution() {
-        let window = [NarrowingLedgerEntry::Cleared { root: param(0) }];
-        assert!(standing_narrowings(&window).is_empty());
-        assert!(standing_narrowings(&[]).is_empty());
     }
 }
 

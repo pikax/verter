@@ -151,7 +151,7 @@ fn assert_retained_walk_is_complete(data: &SemanticNodeData) {
     }
 }
 
-pub(super) const NUM_SHARDS: usize = 16;
+pub(crate) const NUM_SHARDS: usize = 16;
 pub(super) const SHARD_MASK: u64 = (NUM_SHARDS as u64) - 1;
 
 /// One entry in a fingerprint bucket: the shared payload `Arc` (the SAME
@@ -477,11 +477,11 @@ fn payload_binds_canonical(data: &SemanticNodeData, canonical_id: &str) -> bool 
 /// fingerprint once in [`NodeArena::intern_with_fingerprint`] and derives
 /// the shard from it directly, never re-walking the payload here.
 #[cfg(test)]
-pub(super) fn shard_index_for(data: &SemanticNodeData, scope: &NodeScopeId) -> usize {
+pub(crate) fn shard_index_for(data: &SemanticNodeData, scope: &NodeScopeId) -> usize {
     (structural_fingerprint(data, scope) & SHARD_MASK) as usize
 }
 
-pub(super) struct NodeArena {
+pub(crate) struct NodeArena {
     /// Global dense storage for node data + sidecar. `RwLock` so readers
     /// (`get`, `scope`) are concurrent and writers (intern-miss) briefly
     /// serialize to push a fresh slot.

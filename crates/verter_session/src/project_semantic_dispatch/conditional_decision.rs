@@ -298,7 +298,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// `resolve_conditional` dispatch handoff in . Bare-infer
     /// bindings (`T extends infer X`) are handled by the shortcut below;
     /// nested-infer in complex patterns defers to the relation engine.
-    pub(super) fn build_conditional(
+    pub(crate) fn build_conditional(
         &self,
         check: SemanticNodeId,
         extends: SemanticNodeId,

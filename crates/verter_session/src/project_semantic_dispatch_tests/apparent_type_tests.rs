@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use super::ProjectSemanticDispatch;
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     ApparentDemandScope, FunctionParam, PrimitiveKind, ProjectionMode, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SignatureKind, SignatureReturnCarrier,
@@ -226,7 +226,7 @@ fn apparent_under_demand_scope(
     base: SemanticNodeId,
     demand_canonical: &str,
 ) -> Option<SemanticNodeId> {
-    let _scope = super::super::LexicalDemandScopeGuard::push(
+    let _scope = crate::project_semantic_dispatch::LexicalDemandScopeGuard::push(
         &dispatch.lexical_demand_scope,
         Arc::from(demand_canonical),
     );
@@ -329,7 +329,7 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
         mode: ProjectionMode::Navigate,
     };
     let member_read = {
-        let _scope = super::super::LexicalDemandScopeGuard::push(
+        let _scope = crate::project_semantic_dispatch::LexicalDemandScopeGuard::push(
             &dispatch.lexical_demand_scope,
             Arc::from("/a/main.ts"),
         );
@@ -453,7 +453,7 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     // published candidate does.
     let read = |canonical: &str, member: &str| {
         with_fresh_dispatch(&host, |dispatch| {
-            let _scope = super::super::LexicalDemandScopeGuard::push(
+            let _scope = crate::project_semantic_dispatch::LexicalDemandScopeGuard::push(
                 &dispatch.lexical_demand_scope,
                 Arc::from(canonical),
             );
@@ -473,7 +473,9 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     let surface_of = |canonical: &str| {
         with_fresh_dispatch(&host, |dispatch| {
             match dispatch.global_wrapper_surface("String", &[], canonical) {
-                super::GlobalWrapper::Surface(surface) => surface,
+                crate::project_semantic_dispatch::apparent_type::GlobalWrapper::Surface(
+                    surface,
+                ) => surface,
                 _ => panic!("{canonical}'s project declares String"),
             }
         })
@@ -555,7 +557,7 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
         ),
     };
     let (read, miss) = with_fresh_dispatch(&host, |dispatch| {
-        let _scope = super::super::LexicalDemandScopeGuard::push(
+        let _scope = crate::project_semantic_dispatch::LexicalDemandScopeGuard::push(
             &dispatch.lexical_demand_scope,
             Arc::from("/ws/main.ts"),
         );
@@ -623,7 +625,8 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
             context: dispatch.flow_return_context_for(FLOW),
             demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
             input: crate::semantic_query::FlowInputContext::empty(),
-            result_contract: super::super::flow_solve::flow_return_result_contract_id(),
+            result_contract:
+                crate::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
         };
         let with_dispatch = |f: &dyn Fn(
             &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,

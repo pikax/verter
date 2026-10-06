@@ -27,7 +27,7 @@ pub(super) fn assignable(bindings: &[InferBinding]) -> RelationResult {
     }
 }
 
-pub(super) fn is_deferred(data: &SemanticNodeData) -> bool {
+pub(crate) fn is_deferred(data: &SemanticNodeData) -> bool {
     matches!(
         data,
         SemanticNodeData::KeyOf { .. }
@@ -114,7 +114,7 @@ pub(super) fn literals_equal(a: &LiteralValue, b: &LiteralValue) -> bool {
     }
 }
 
-pub(super) fn result_and(a: RelationResult, b: RelationResult) -> RelationResult {
+pub(crate) fn result_and(a: RelationResult, b: RelationResult) -> RelationResult {
     match (a, b) {
         (RelationResult::NotAssignable, _) | (_, RelationResult::NotAssignable) => {
             RelationResult::NotAssignable
@@ -226,7 +226,7 @@ pub(super) fn index_domains_overlap(
     }
 }
 
-pub(super) fn index_signature_applies_to_property(
+pub(crate) fn index_signature_applies_to_property(
     graph: &SemanticGraphStore,
     key_type: SemanticNodeId,
     property_key: &crate::semantic_query::PropertyKey,

@@ -408,7 +408,7 @@ impl AuditBuilder {
                     // counters into the component-meta payload. The
                     // host-global counters (process-wide
                     // `SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS` and the
-                    // `SemanticGraphStore::memo_size_in_test` delta)
+                    // `SemanticGraphStore::memo_entry_count` delta)
                     // remain the canonical signals; the per-request
                     // mirrors here let attribution tests assert
                     // "synthesis-attributable count == 0 for this

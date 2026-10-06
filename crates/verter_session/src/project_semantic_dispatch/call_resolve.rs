@@ -29,7 +29,7 @@ use crate::semantic_query::{
 /// Whether a fresh-literal deposit's binder occurs at the top level of a
 /// binder-bearing structure ([`ProjectSemanticDispatch::deposit_binder_reach`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BinderReach {
+pub(crate) enum BinderReach {
     /// The structure is the binder, or has it as a constituent.
     Present,
     /// Every constituent the structure reaches was read, and none is the
@@ -222,7 +222,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// session or argument relation. This keeps root/inline classification in
     /// the generic obligation transaction: a root ResolveCall owns the stack
     /// root, and every relation it starts is necessarily inline beneath it.
-    pub(super) fn resolve_call_frame_open(&self, key: &ResolveCallKey) -> usize {
+    pub(crate) fn resolve_call_frame_open(&self, key: &ResolveCallKey) -> usize {
         let wants_inline_flight = !self.dispatch_txn.borrow().obligations.decides_root();
         let inline_flight = wants_inline_flight
             .then(|| self.graph().begin_inline_resolve_call_flight(key))
@@ -244,7 +244,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// component-level proof: a truncated member walk must refuse the root
     /// even when the root's own walk finished.
     #[cfg(test)]
-    pub(super) fn close_mutual_call_component_for_tests(
+    pub(crate) fn close_mutual_call_component_for_tests(
         &self,
         root_key: ResolveCallKey,
         member_key: ResolveCallKey,
@@ -3227,7 +3227,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         CandidateVerdict::Mismatch
     }
 
-    pub(super) fn abandon_session(&self, session_id: SessionId) {
+    pub(crate) fn abandon_session(&self, session_id: SessionId) {
         if let Some(session) = self
             .dispatch_txn
             .borrow_mut()
@@ -3336,7 +3336,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// [`Self::deposit_at_top_level`], for the tests beside this module.
     #[cfg(test)]
-    pub(super) fn deposit_at_top_level_for_tests(
+    pub(crate) fn deposit_at_top_level_for_tests(
         &self,
         structure: SemanticNodeId,
         param: SemanticNodeId,
@@ -4131,7 +4131,7 @@ fn tuple_suffix_target(
 }
 
 /// Union `source`'s self-roots into `target`, one root per canonical.
-pub(super) fn union_self_roots(
+pub(crate) fn union_self_roots(
     target: &mut Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     source: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
 ) {

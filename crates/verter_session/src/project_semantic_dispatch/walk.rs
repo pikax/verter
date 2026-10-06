@@ -1005,7 +1005,7 @@ pub(super) fn is_canonical_index_digits(key: &str) -> bool {
     }
 }
 
-pub(super) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabilities> {
+pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabilities> {
     dispatch: &'a ProjectSemanticDispatch<'b, C>,
     /// The walker carries the full [`ProjectionReductionContext`]
     /// from its constructing caller — the `mode` field is preserved
@@ -9263,7 +9263,7 @@ pub(super) fn value_may_contribute_call_signatures(
 /// (`None`) surface — a union with an unreadable / non-Object arm has no
 /// common Object members. Returns `None` only when the arm vector is empty
 /// (defensive).
-pub(super) fn merge_union_surfaces(
+pub(crate) fn merge_union_surfaces(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
@@ -9489,7 +9489,7 @@ fn aggregate_union_members(
 /// common-member rule, a non-Object (`None`) arm does NOT collapse the
 /// whole surface — the Object arms still contribute their members (a
 /// `{ a } | string` macro surface publishes `a`, optional).
-pub(super) fn merge_union_surfaces_for_macro(
+pub(crate) fn merge_union_surfaces_for_macro(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
@@ -9860,7 +9860,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// non-nullish primitive (`object` included), an object, array, tuple
     /// or template-literal type, a signature, an interface or class
     /// reference, or an intersection with such an arm, at any nesting.
-    pub(super) fn provably_non_nullish(&self, node: SemanticNodeId) -> bool {
+    pub(crate) fn provably_non_nullish(&self, node: SemanticNodeId) -> bool {
         use crate::graph_walk::Verdict;
         crate::graph_walk::classify(node, |node| {
             let Some(data) = self.graph().node_data(node) else {

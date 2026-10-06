@@ -352,7 +352,7 @@ impl SemanticGraphStore {
     /// is never in the release's dead set. The publish paths refuse it and
     /// the close sweep drops it. One relaxed load until the first release.
     #[inline]
-    pub(super) fn family_names_released_node(&self, family: &FamilyKey) -> bool {
+    pub(crate) fn family_names_released_node(&self, family: &FamilyKey) -> bool {
         if !self.released_any.load(Ordering::Relaxed) {
             return false;
         }

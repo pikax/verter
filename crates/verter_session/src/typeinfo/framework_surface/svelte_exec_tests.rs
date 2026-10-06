@@ -2,6 +2,7 @@
 //! executor and its tests remain independently readable.
 
 use super::*;
+use crate::output_sinks::DispatchOutputTestExt;
 use crate::resolver_core::request_ports::IndexedInputs;
 use crate::VerterHost;
 use verter_compiler::svelte::parser::parse_svelte;

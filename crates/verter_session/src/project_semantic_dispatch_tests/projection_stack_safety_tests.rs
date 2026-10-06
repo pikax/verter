@@ -1,3 +1,4 @@
+use crate::output_sinks::DispatchOutputTestExt;
 use std::process::Command;
 use std::sync::Arc;
 

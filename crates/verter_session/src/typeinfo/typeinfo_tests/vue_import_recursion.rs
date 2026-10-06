@@ -35,6 +35,7 @@
 //! same-file self-cycle), and read an imported component's `$props` through
 //! the keyed query.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_type_expr::{PrimitiveName, TypeExpr};

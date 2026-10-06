@@ -9,6 +9,7 @@
 //! structural / userland), and the intentional nullable-slot drop. Split out
 //! to keep each test module a readable size.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_session_query::analysis::types::AnalyzedMacroKind;

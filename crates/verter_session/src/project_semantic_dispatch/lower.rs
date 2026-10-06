@@ -868,7 +868,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     #[cfg(test)]
-    pub(super) fn lower_script_setup_type_params_for_tests(
+    pub(crate) fn lower_script_setup_type_params_for_tests(
         &self,
         canonical: &str,
     ) -> Vec<SemanticNodeId> {

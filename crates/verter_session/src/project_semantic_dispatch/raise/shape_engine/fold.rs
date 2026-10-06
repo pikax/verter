@@ -23,7 +23,7 @@ use crate::semantic_query::{
 };
 
 /// A folded tuple element awaiting algebra construction.
-pub(super) struct FoldedTupleElement<O> {
+pub(crate) struct FoldedTupleElement<O> {
     pub(super) label: Option<String>,
     pub(super) ty: O,
     pub(super) optional: bool,
@@ -31,7 +31,7 @@ pub(super) struct FoldedTupleElement<O> {
 }
 
 /// A folded function shape awaiting algebra construction.
-pub(super) struct FoldedFunction<O> {
+pub(crate) struct FoldedFunction<O> {
     pub(super) parameters: Vec<FoldedFunctionParam<O>>,
     pub(super) return_type: Option<O>,
     pub(super) type_parameters: Vec<FoldedTypeParam<O>>,
@@ -83,7 +83,7 @@ pub(super) struct FoldedTypeParam<O> {
 /// (a present-but-unraisable child fails the whole composite) with typed
 /// surface-member carrier-arg fallbacks — re-housed so the materialization and
 /// the node-domain facts/key share ONE traversal.
-pub(super) fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
+pub(crate) fn fold_node<A: RaisedShapeAlgebra, C: crate::resolver_core::ResolverCapabilities>(
     alg: &mut A,
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,

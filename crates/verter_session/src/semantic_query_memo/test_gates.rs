@@ -294,7 +294,7 @@ static VALIDATE_RUNNING_PROBE: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + S
 /// production path (no probe armed).
 #[cfg(any(test, feature = "test-support"))]
 #[inline]
-pub(super) fn validate_running_probe() {
+pub(crate) fn validate_running_probe() {
     let probe = VALIDATE_RUNNING_PROBE.lock().clone();
     if let Some(probe) = probe {
         probe();

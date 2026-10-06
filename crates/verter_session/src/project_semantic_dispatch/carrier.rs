@@ -93,7 +93,7 @@ pub(crate) struct CarrierResolverContext<'a> {
 ///
 /// `finish` must be called on every non-panicking exit. The drop assertion makes
 /// that discipline structural while allowing unwind cleanup to remain inert.
-pub(super) struct AuthoredResolutionDebtFrame {
+pub(crate) struct AuthoredResolutionDebtFrame {
     canonical_id: Arc<str>,
     owner: verter_type_expr::TopLevelOwnerId,
     outstanding: Cell<bool>,
@@ -511,7 +511,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// keeps miss / recursive behaviour uniform across both callers). The active
     /// instantiate stack stays dispatcher state (`&self.is_instantiate_active`),
     /// never copied into the context.
-    pub(super) fn resolve_bare_ref_head(
+    pub(crate) fn resolve_bare_ref_head(
         &self,
         ctx: &CarrierResolverContext<'_>,
         name: &Arc<str>,
@@ -577,7 +577,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `getGlobalRecordSymbol()` returning `undefined` gives the checker,
     /// which then performs no narrow at all. The caller keeps its typed
     /// gap and never fabricates one.
-    pub(super) fn lower_lib_global(
+    pub(crate) fn lower_lib_global(
         &self,
         scope_canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,

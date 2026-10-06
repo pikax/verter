@@ -1,6 +1,7 @@
 //! @ai-generated - Shared host setup and assertions for synthetic
 //! component-shaped typeinfo tests.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::collections::BTreeMap;
 
 pub(super) use std::sync::Arc;

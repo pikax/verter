@@ -249,7 +249,7 @@ impl Drop for InFlightStatsGuard<'_> {
 /// `Instant::now()` read per acquisition (constant-time) and the
 /// Drop is a single `Instant::elapsed()` plus the no-op
 /// `with_active_capture` hook when no token is bound.
-pub(super) struct EntriesLockGuard<'a, T> {
+pub(crate) struct EntriesLockGuard<'a, T> {
     pub(super) guard: Option<parking_lot::MutexGuard<'a, T>>,
     // Timing fields feed the capture-token entries-mutex hook only;
     // gated to match the instrumentation module (absent in release).

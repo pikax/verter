@@ -59,7 +59,7 @@ use crate::semantic_query::{
 };
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    pub(super) fn substitute_semantic_type_param(
+    pub(crate) fn substitute_semantic_type_param(
         &self,
         node: SemanticNodeId,
         parameter_node: SemanticNodeId,
@@ -1867,7 +1867,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// This is deliberately a separate predicate from
     /// [`Self::subtree_references_node`], whose unrestricted
     /// reference-reachability semantics its other callers depend on.
-    pub(super) fn extends_pattern_declares_infer(
+    pub(crate) fn extends_pattern_declares_infer(
         &self,
         pattern: SemanticNodeId,
         binder: SemanticNodeId,
@@ -2036,7 +2036,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Infer reachability mirrors substitution exactly: only `Infer` /
     /// `InferRef` nodes carrying the target declaration's opaque binder count.
     /// Display names never participate.
-    pub(super) fn subtree_references_node(
+    pub(crate) fn subtree_references_node(
         &self,
         root: SemanticNodeId,
         target: SemanticNodeId,

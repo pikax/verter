@@ -218,6 +218,69 @@ impl<C: crate::session_attachment::SessionCapabilities> OutputProjector
     }
 }
 
+/// Test-only materialization shortcuts over a session-attached dispatcher.
+/// Each mints the [`TestOutputCap`] internally and unwraps the carrier, so a
+/// test never holds the capability or the carrier itself.
+#[cfg(test)]
+pub(crate) trait DispatchOutputTestExt {
+    /// Shell-raise the node behind a `HotTypeRef` handle; a miss raises the
+    /// `<materialize miss>` compatibility projection.
+    fn materialize_type_expr(
+        &self,
+        handle: crate::semantic_query::HotTypeRef,
+    ) -> verter_type_expr::TypeExpr;
+
+    /// Plain shell-raise returning the unwrapped `TypeExpr`.
+    fn materialize_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::TypeExpr>;
+
+    /// Reduce-then-raise returning the unwrapped `TypeExpr`.
+    fn materialize_reduced_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> verter_type_expr::TypeExpr;
+}
+
+#[cfg(test)]
+impl<C: crate::session_attachment::SessionCapabilities> DispatchOutputTestExt
+    for ProjectSemanticDispatch<'_, C>
+{
+    fn materialize_type_expr(
+        &self,
+        handle: crate::semantic_query::HotTypeRef,
+    ) -> verter_type_expr::TypeExpr {
+        let cap = TestOutputCap::new(self);
+        cap.materialize_output_type_expr(handle.node())
+            .map(|carrier| carrier.into_type_expr(cap.authority()))
+            .unwrap_or(verter_type_expr::TypeExpr::Unknown(
+                verter_type_expr::UnknownValue::compatibility_projection("<materialize miss>"),
+            ))
+    }
+
+    fn materialize_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_expr::TypeExpr> {
+        let cap = TestOutputCap::new(self);
+        cap.materialize_output_type_expr(node)
+            .map(|carrier| carrier.into_type_expr(cap.authority()))
+    }
+
+    fn materialize_reduced_output_type_expr_for_test(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> verter_type_expr::TypeExpr {
+        let cap = TestOutputCap::new(self);
+        cap.materialize_reduced_output_type_expr(node, context)
+            .type_expr_for_test()
+            .clone()
+    }
+}
+
 // Owner-seal witness (every profile): a representative non-sink crate type —
 // the graph node id this reverse boundary materializes FROM — must never be a
 // sink.

@@ -13,6 +13,7 @@
 //! `TypeExpr` shape, so a materialiser that dropped a carrier to `Unknown`
 //! (or lost ctor-ness / the synthetic `value_node` provenance) would fail.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_type_expr::{PrimitiveName, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr};

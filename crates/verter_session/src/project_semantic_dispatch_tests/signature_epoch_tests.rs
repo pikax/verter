@@ -11,9 +11,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 
-use super::super::call_resolve_tests::{occurrence, signature};
-use super::super::ProjectSemanticDispatch;
-use super::{SharedSignatureNodes, SignaturesOfTypeBuildPoint, SIGNATURES_OF_TYPE_BUILD_HOOK};
+use super::call_resolve_tests::{occurrence, signature};
+use crate::project_semantic_dispatch::signature_discovery::{
+    SharedSignatureNodes, SignaturesOfTypeBuildPoint, SIGNATURES_OF_TYPE_BUILD_HOOK,
+};
+use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     FunctionParam, NodeScopeId, PrimitiveKind, QueryResult, SemanticContextId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryValue, SignatureKind,

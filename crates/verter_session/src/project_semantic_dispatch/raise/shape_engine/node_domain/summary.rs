@@ -68,7 +68,7 @@ pub(super) fn intrinsic_operator() -> RaisedShapeSummary {
 /// degradation reaches the fold ONLY as a typed [`QueryError`] through
 /// [`opaque_sentinel`], never as a spelling, so an unknown leaf can never be
 /// a sentinel (even one spelled identically to a legacy sentinel).
-pub(super) fn unknown(_value: &verter_type_expr::UnknownValue) -> RaisedShapeSummary {
+pub(crate) fn unknown(_value: &verter_type_expr::UnknownValue) -> RaisedShapeSummary {
     materialized_expanded_leaf()
 }
 
@@ -84,7 +84,7 @@ pub(super) fn unknown(_value: &verter_type_expr::UnknownValue) -> RaisedShapeSum
 /// text-bearing `Other("semanticObjectSurface")` payload is inert and tags
 /// `Other`, exactly like any genuine [`unknown`] leaf, which never tags).
 /// `expanded_surface` is always `true`, exactly as `unknown` passes.
-pub(super) fn opaque_sentinel(err: &crate::semantic_query::QueryError) -> RaisedShapeSummary {
+pub(crate) fn opaque_sentinel(err: &crate::semantic_query::QueryError) -> RaisedShapeSummary {
     use crate::project_semantic_dispatch::raise_sentinel::{
         query_error_is_object_surface_sentinel, query_error_is_semantic_miss_sentinel,
         query_error_is_unmaterialized_sentinel,

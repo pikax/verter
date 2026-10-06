@@ -24,6 +24,7 @@
 //! (not re-pinned here with a heavy direct unit test); this file's direct
 //! coverage is the artifact/sink parity plus the `defineModel` demand round-trip.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};

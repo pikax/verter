@@ -37,6 +37,7 @@
 //! the fact values (so an always-true / always-false classifier could not pass
 //! the suite).
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_type_expr::{PrimitiveName, TypeExpr};

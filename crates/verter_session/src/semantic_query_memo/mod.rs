@@ -46,36 +46,32 @@ use crate::semantic_query::{
     CacheRead, DepSignature, NodeScopeId, OriginEdge, OriginEdgeKind, QueryError, QueryResult,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SemanticQueryValueTag,
 };
-#[cfg(test)]
-use crate::semantic_query::{PathSegment, ProjectionMode, SemanticGraphStats};
 
-mod arena;
-mod derivation;
-mod family;
+pub(crate) mod arena;
+pub(crate) mod derivation;
+pub(crate) mod family;
 mod family_intern;
 mod family_retention;
 mod flow_return_memo;
 mod hash_cons_memos;
-mod inflight;
+pub(crate) mod inflight;
 mod intern_table;
-mod interner;
-mod member_index;
-mod nodes;
+pub(crate) mod interner;
+pub(crate) mod member_index;
+pub(crate) mod nodes;
 pub(crate) use nodes::AliasChainEnd;
 mod observability;
 mod origin_edges;
-mod prepared;
-mod relation_memo;
-mod release;
+pub(crate) mod prepared;
+pub(crate) mod relation_memo;
+pub(crate) mod release;
 mod resolve_call_memo;
 mod retention;
 mod reverse_index;
-mod scc_publish;
-#[cfg(test)]
-mod scc_publish_tests;
+pub(crate) mod scc_publish;
 mod signature_epoch;
 mod union_views;
-mod unresolved_reach;
+pub(crate) mod unresolved_reach;
 
 pub(crate) use arena::UNALLOCATABLE_ID_FLOOR;
 pub(crate) use inflight::InlineMemberFlight;
@@ -88,17 +84,17 @@ pub(crate) use scc_publish::{
 };
 pub(crate) use verter_execution::tasks::ExecutionTask;
 
-mod producer;
-mod stats;
-mod tasks;
+pub(crate) mod producer;
+pub(crate) mod stats;
+pub(crate) mod tasks;
 // `SemanticGraphStore`'s `#[doc(hidden)]` `*_for_tests` publish / probe
 // helpers live in a sibling continuation-impl file so the hot-path memo
 // logic here stays under the Tier-2 module-size budget.
-mod store_test_support;
+pub(crate) mod store_test_support;
 #[cfg(any(test, feature = "test-support"))]
 pub use store_test_support::BatchExpandError;
 #[cfg(any(test, feature = "test-support"))]
-mod test_gates;
+pub(crate) mod test_gates;
 mod trait_impls;
 // Test-only observability surface for `SemanticGraphStore` (in-flight
 // abort driver, joiner-admission strong-count + condvar-pairing probes,
@@ -107,7 +103,7 @@ mod trait_impls;
 // release: its only consumers are tests and the `for_tests` shims, both of
 // which build with `debug_assertions` (test profile) or `cfg(test)`.
 #[cfg(any(test, feature = "test-support"))]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub use test_support::{
@@ -117,19 +113,12 @@ pub use test_support::{
 #[allow(unused_imports)]
 pub use interner::DepSignatureInterner;
 #[cfg(test)]
-use interner::SWEEP_INTERVAL;
-#[cfg(test)]
 pub use member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX;
-
-#[cfg(test)]
-mod object_spread_projection_tests;
 
 use crate::semantic_query::demand::{
     cached_satisfies, MaterializedPoint, MaterializedSet, ProjectionPath,
 };
 use arena::NodeArena;
-#[cfg(test)]
-use arena::{shard_index_for, NUM_SHARDS};
 use derivation::DerivationStore;
 pub use family::AuditEagerKeyRow;
 use family::{
@@ -141,8 +130,6 @@ use family::{
 #[cfg(any(test, feature = "test-support"))]
 use family::requested_point_for_key;
 use inflight::FlightCell;
-#[cfg(test)]
-use inflight::MAX_INFLIGHT_RETRIES;
 use prepared::PreparedKeyHandle;
 use stats::{AtomicSemanticGraphStats, EntriesLockGuard};
 use tasks::TaskRegistry;
@@ -779,7 +766,7 @@ impl SemanticOperandEvidence {
 /// OVERFLOWED carrier, which keeps its (partial) evidence so the force
 /// maps the overflow flag to the typed `SignatureOverflow` refusal
 /// instead of the blander incomplete one.
-fn semantic_operand_evidence(
+pub(crate) fn semantic_operand_evidence(
     read_set: &verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: &[Arc<str>],
     dep_signature: &DepSignature,
@@ -806,7 +793,7 @@ fn semantic_operand_evidence(
     })
 }
 
-enum WarmPublishOutcome {
+pub(crate) enum WarmPublishOutcome {
     Published(PublishedMemoCandidate),
     Skipped,
     Aborted,
@@ -1004,18 +991,6 @@ impl SemanticGraphStore {
         f: impl FnOnce(&mut crate::semantic_query::stable_key::KeyClasses) -> R,
     ) -> R {
         f(&mut self.key_classes.lock())
-    }
-
-    /// Test-only accessor returning the memo's populated-slot count
-    /// for a given host. Used by the slot-binding regression
-    /// `cache_suppress_true_skips_memo_insertion` to inspect memo
-    /// growth before and after a synthesis call. Equivalent to
-    /// `host.project_type_store().semantic_graph().memo_entry_count()`.
-    #[cfg(test)]
-    pub fn memo_size_in_test(host: &crate::VerterHost) -> usize {
-        host.project_type_store()
-            .semantic_graph()
-            .memo_entry_count()
     }
 
     /// Test-only — number of distinct `FamilyKey`s currently resident in
@@ -2783,7 +2758,7 @@ pub(crate) fn semantic_graph_read_set_signature(
 // Internal helpers
 // ──────────────────────────────────────────────────────────────────────────
 
-fn empty_signature() -> DepSignature {
+pub(crate) fn empty_signature() -> DepSignature {
     Arc::from(Vec::new().into_boxed_slice())
 }
 
@@ -2838,10 +2813,4 @@ fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
 }
 
 #[cfg(test)]
-mod cancellation_tests;
-#[cfg(test)]
-mod producer_tests;
-#[cfg(test)]
-mod tasks_tests;
-#[cfg(test)]
-pub(crate) mod tests;
+mod tests;

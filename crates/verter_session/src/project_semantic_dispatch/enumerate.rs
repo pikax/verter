@@ -883,7 +883,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// (a non-public member of an `Object` base is refuted; a present
     /// member of a cross-file `DeclRef` base is INCONCLUSIVE because the
     /// `MemberPresence` fact carries no visibility).
-    pub(super) fn base_member_admission_non_emitting(
+    pub(crate) fn base_member_admission_non_emitting(
         &self,
         base: SemanticNodeId,
         needle: &PropertyKey,

@@ -70,7 +70,7 @@ fn keyed_output(
 fn claim<'s>(
     store: &'s SemanticGraphStore,
     host: &VerterHost,
-    task: &super::tasks::ExecutionTask,
+    task: &verter_execution::tasks::ExecutionTask,
 ) -> (Claim<'s>, super::producer::ClaimAttempt) {
     let mut capture = ReadCapture::default();
     let Ok(mut attempt) = store.begin_query_claim(host, key(), &mut capture) else {
@@ -89,8 +89,8 @@ fn claim<'s>(
 fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_chooses() {
     let (host, hash) = keyed_host();
     let store = SemanticGraphStore::new();
-    let first = store.task_registry.register_task();
-    let second = store.task_registry.register_task();
+    let first = store.task_registry_for_tests().register_task();
+    let second = store.task_registry_for_tests().register_task();
 
     let (claimed, _first_attempt) = claim(&store, &host, &first);
     let Claim::Produce(lease) = claimed else {
@@ -147,7 +147,7 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
 fn a_retired_flight_does_not_hide_its_open_producer_from_its_task() {
     let (host, _hash) = keyed_host();
     let store = SemanticGraphStore::new();
-    let task = store.task_registry.register_task();
+    let task = store.task_registry_for_tests().register_task();
     let (claimed, _attempt) = claim(&store, &host, &task);
     let Claim::Produce(lease) = claimed else {
         panic!("the first claim of a cold key produces it");
@@ -201,7 +201,7 @@ fn a_member_flight_outliving_its_entry_is_waited_on_not_refused_as_a_cycle() {
     let flight = {
         let _entry = store.enter_execution();
         store
-            .begin_inline_member_flight(key())
+            .begin_inline_member_flight_for_tests(key())
             .expect("a cold key's member flight opens")
     };
     std::thread::scope(|scope| {

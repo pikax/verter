@@ -1699,7 +1699,7 @@ fn reduce_authored_intersection(
 /// for any other node and for a shell the canonical intersection keeps as
 /// written (`QA & QB`). The shell itself stays the authored display form;
 /// a consumer that DECIDES on the type reads this.
-pub(super) fn reduced_authored_intersection(
+pub(crate) fn reduced_authored_intersection(
     graph: &SemanticGraphStore,
     node: SemanticNodeId,
     nullability: NullabilityPolicy,
@@ -2157,7 +2157,7 @@ fn intersect_unions_of_primitive_types(
 
 /// [`constituent_count`], for the tests beside this module.
 #[cfg(test)]
-pub(super) fn constituent_count_for_tests(
+pub(crate) fn constituent_count_for_tests(
     graph: &SemanticGraphStore,
     nodes: &[SemanticNodeId],
 ) -> usize {

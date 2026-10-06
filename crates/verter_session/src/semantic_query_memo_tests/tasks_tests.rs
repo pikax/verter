@@ -9,10 +9,10 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
 
-use super::tasks::{TaskRegistry, WaitCycle};
 use super::*;
 use crate::semantic_query::{ResolveDeclKey, ScopeId};
 use crate::{HostConfig, VerterHost};
+use verter_execution::tasks::{TaskRegistry, WaitCycle};
 use verter_type_expr::TopLevelOwnerId;
 
 fn ctx_host() -> VerterHost {
@@ -152,7 +152,7 @@ fn panic_and_cancel_style_early_return_clean_wait_registrations() {
     assert_eq!(graph.wait_count_for_tests(), 0);
     assert_eq!(graph.active_task_count_for_tests(), 1);
 
-    fn cancelled_early(graph: &TaskRegistry, target: super::tasks::TaskId) {
+    fn cancelled_early(graph: &TaskRegistry, target: verter_execution::tasks::TaskId) {
         let waiter = graph.register_task();
         let _wait = graph
             .register_wait(waiter.id(), target)

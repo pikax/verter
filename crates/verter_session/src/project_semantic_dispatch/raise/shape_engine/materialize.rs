@@ -1011,9 +1011,7 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
 /// unraisable. (Named `fold_to_type_expr`, NOT `materialize_type_expr`, so it
 /// does not collide with the `#[cfg(test)]` `materialize_type_expr(HotTypeRef)`
 /// boundary the G-A guard pins to exactly one definition.)
-pub(in crate::project_semantic_dispatch) fn fold_to_type_expr<
-    C: crate::resolver_core::ResolverCapabilities,
->(
+pub(crate) fn fold_to_type_expr<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,

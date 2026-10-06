@@ -817,7 +817,7 @@ fn a_joiner_of_an_inline_member_flight_aborted_under_cancellation_retries_cold()
     let flight = {
         let _guard = RequestContextGuard::install(Arc::clone(&owner_context));
         store
-            .begin_inline_member_flight(query.clone())
+            .begin_inline_member_flight_for_tests(query.clone())
             .expect("the inline member claims the family flight")
     };
 

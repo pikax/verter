@@ -132,7 +132,7 @@ pub(super) enum ShallowRelation {
 /// Which in-scope inference position a pattern-side `Infer` occupies —
 /// drives the candidate's priority rung and combination variance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum InferPosition {
+pub(crate) enum InferPosition {
     /// Covariant pattern position (object property, tuple/array element,
     /// bare) — the `Argument` rung.
     Covariant,
@@ -360,7 +360,7 @@ pub(super) type DischargedMember = (
 /// A relation-domain view over a drained tagged pending member: the SCC
 /// close's verdict algebra operates on this shape; the tagged
 /// `PendingObligation` storage lives in the generic ledger.
-pub(super) struct DrainedRelationMember {
+pub(crate) struct DrainedRelationMember {
     pub(super) key: RelateMemoKey,
     pub(super) occurrence: InferenceOccurrence,
     pub(super) verdict: PendingVerdict,
@@ -376,40 +376,40 @@ pub(super) struct DrainedRelationMember {
 /// coinductive hold decided by the seed check); the close fails the whole
 /// tagged component on a `NoValue` outcome, and admits an evaluated member
 /// ONLY through its own finalizer proof.
-pub(super) struct DrainedFlowReturnMember {
-    pub(super) key: crate::semantic_query::FlowReturnKey,
-    pub(super) outcome: super::dispatch_txn::FlowReturnPendingOutcome,
+pub(crate) struct DrainedFlowReturnMember {
+    pub(crate) key: crate::semantic_query::FlowReturnKey,
+    pub(crate) outcome: super::dispatch_txn::FlowReturnPendingOutcome,
     /// The refusal recorded when this member's own demand could not be
     /// planned — the batch reports it so the root classifies by the
     /// cause that actually refused, not by its own clean preparation.
-    pub(super) plan_refusal: Option<super::dispatch_txn::flow_obligation_state::FlowPlanRefusal>,
-    pub(super) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
+    pub(crate) plan_refusal: Option<super::dispatch_txn::flow_obligation_state::FlowPlanRefusal>,
+    pub(crate) inline_flight: Option<crate::semantic_query_memo::InlineMemberFlight>,
     /// The coinductive hold targets the member's evaluation met — the SCC
     /// close discharges an empty-cycle member on its targets' admitted
     /// returns.
-    pub(super) holds: Vec<super::flow_return_callee::HeldCallee>,
+    pub(crate) holds: Vec<super::flow_return_callee::HeldCallee>,
     /// The member's own file roots (unioned into the published component's
     /// self-roots).
-    pub(super) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
     /// The materialised point set the member's compute ACTUALLY produced
     /// (§3.4) — carried to the fenced member publish.
-    pub(super) materialized: crate::semantic_query::demand::MaterializedSet,
+    pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
     /// Whether the member's own contributors were all FRESH literals —
     /// the post-convergence literal-widening input.
-    pub(super) fresh_seed: bool,
+    pub(crate) fresh_seed: bool,
     /// The member's own installed demand carrier (handle + plan +
     /// provenance), when its demand was prepared. The member finalizes
     /// against EXACTLY this demand at the close.
-    pub(super) flow_demand: Option<super::dispatch_txn::flow_obligation_state::FlowDemandCarrier>,
+    pub(crate) flow_demand: Option<super::dispatch_txn::flow_obligation_state::FlowDemandCarrier>,
     /// The member's typed discharge report, produced once by its
     /// evaluation and applied centrally at the close.
-    pub(super) discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
+    pub(crate) discharge: Option<super::dispatch_txn::flow_obligation_state::FlowDischargeReport>,
     /// The member's OWN evaluation provenance, carried through the
     /// deferral: finalization triangulates it against the carrier (a
     /// same-store, same-generation FOREIGN demand's evidence is refused)
     /// rather than reconstructing it from the carrier — that comparison
     /// would be tautological.
-    pub(super) provenance: super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance,
+    pub(crate) provenance: super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance,
 }
 
 type DrainedCallResult = (
@@ -454,12 +454,12 @@ thread_local! {
 }
 
 /// The relation-root outcome of [`ProjectSemanticDispatch::relation_discharge_and_route`].
-pub(super) struct RelationDischargeOutcome {
+pub(crate) struct RelationDischargeOutcome {
     /// The machinery relation root's family payload (its build output).
-    pub(super) self_publish: Option<RelationPayload>,
+    pub(crate) self_publish: Option<RelationPayload>,
     /// The caller-return step of an inline relation SCC root (or of a
     /// session-delta root, which never publishes).
-    pub(super) self_step: Option<RelationStep>,
+    pub(crate) self_step: Option<RelationStep>,
     /// One or more DRAINED flow members finalized UNPROVEN, so the whole
     /// member batch was refused (the torn-component rule). The mixed
     /// equation already consumed those members' evaluated values, so the
@@ -467,14 +467,14 @@ pub(super) struct RelationDischargeOutcome {
     /// `self_publish` / `self_step` as ReturnOnly — the verdict still
     /// flows to the caller, and nothing warms around an unproven
     /// flow-derived value.
-    pub(super) flow_batch_unproven: bool,
+    pub(crate) flow_batch_unproven: bool,
     /// The union of the partiality classes the refused members' recorded
     /// causes belong to — empty when the batch is proven, or when the
     /// refusal carried no cause. The root unions this into its own
     /// class: its consumers must see a member's budget edge or torn view
     /// as the faulting class it is, not as the contained unverified
     /// class the root's own clean preparation would report.
-    pub(super) flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet,
+    pub(crate) flow_batch_partial_reasons: crate::semantic_query::PartialReasonSet,
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -2418,7 +2418,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `execute_relate_with_occurrence`; this policy controls only the cold
     /// build after that read misses.
     #[cfg(test)]
-    pub(super) fn relate_root_uses_family_singleflight(key: &RelateMemoKey) -> bool {
+    pub(crate) fn relate_root_uses_family_singleflight(key: &RelateMemoKey) -> bool {
         key.inference_context.is_none()
     }
 
@@ -3109,7 +3109,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the WHOLE member batch — the torn-component rule — while the
     /// root's own admission is unaffected.
     #[allow(clippy::type_complexity)]
-    pub(super) fn relation_discharge_and_route(
+    pub(crate) fn relation_discharge_and_route(
         &self,
         machinery_root: bool,
         root_relation: Option<(
@@ -3729,7 +3729,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Release one claimed inline member flight, in any domain. `None`
     /// means the member was never deferred and has no flight to release.
-    pub(super) fn abort_inline_flight(&self, flight: Option<&InlineMemberFlight>) {
+    pub(crate) fn abort_inline_flight(&self, flight: Option<&InlineMemberFlight>) {
         if let Some(flight) = flight {
             self.graph().abort_inline_member_flight(flight);
         }
@@ -4017,7 +4017,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    pub(super) fn relation_abort_completed_members(&self) {
+    pub(crate) fn relation_abort_completed_members(&self) {
         let (members, flow_members, call_members) = {
             let mut txn = self.dispatch_txn.borrow_mut();
             txn.flow.closed_values.clear();
@@ -4097,7 +4097,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     #[cfg(test)]
-    pub(super) fn scc_publication_roots_for_tests(
+    pub(crate) fn scc_publication_roots_for_tests(
         &self,
         root_key: &RelateMemoKey,
         member_keys: &[RelateMemoKey],
@@ -4106,7 +4106,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     #[cfg(test)]
-    pub(super) fn publish_staged_scc_member_for_tests(
+    pub(crate) fn publish_staged_scc_member_for_tests(
         &self,
         root_key: RelateMemoKey,
         member_key: RelateMemoKey,
@@ -4180,7 +4180,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Upgrade a plain relation key with the target pattern's immutable
     /// session-setup fingerprint. Session opening consumes the same setup
     /// value, so there is no second projection to drift.
-    pub(super) fn relation_key_with_inference(&self, mut key: RelateMemoKey) -> RelateMemoKey {
+    pub(crate) fn relation_key_with_inference(&self, mut key: RelateMemoKey) -> RelateMemoKey {
         self.upgrade_relation_key_with_inference(&mut key);
         key
     }
@@ -9428,7 +9428,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// resolved — a carrier read the connected ledger refuses included, so a
     /// chain that grows without end stops on the ledger's trip — or when the
     /// chain returns to a node it passed.
-    pub(super) fn settle_through_carriers(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+    pub(crate) fn settle_through_carriers(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         let mut current = node;
         let mut passed = FxHashSet::default();
         loop {
@@ -14959,17 +14959,21 @@ pub(crate) mod reverse_ownership_tests {
         })
     }
 
-    fn require_relation_result_signature<
+    /// Compile-time witness over every capability family: this private
+    /// function item is nameable only from the relation authority's own
+    /// module tree, and its sole output is the closed reducer lattice rather
+    /// than a standalone binding map.
+    #[expect(dead_code, reason = "type-checked signature witness; never called")]
+    fn reverse_mapped_pass_returns_relation_result<
         'dispatch,
         C: crate::resolver_core::ResolverCapabilities,
-    >(
-        _pass: fn(
+    >() {
+        let _pass: fn(
             &ProjectSemanticDispatch<'dispatch, C>,
             SemanticNodeId,
             &ReverseHomomorphicSpec,
             &mut Vec<InferBinding>,
-        ) -> RelationResult,
-    ) {
+        ) -> RelationResult = ProjectSemanticDispatch::<'dispatch, C>::relate_reverse_homomorphic;
     }
 
     fn classify_relation_result_exhaustively(result: RelationResult) {
@@ -14982,12 +14986,8 @@ pub(crate) mod reverse_ownership_tests {
 
     #[test]
     pub(crate) fn reverse_mapped_inference_is_relation_owned_in_session() {
-        // This private function item is nameable only from the relation
-        // authority's own module tree, and its sole output is the closed
-        // reducer lattice rather than a standalone binding map.
-        require_relation_result_signature(
-            ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relate_reverse_homomorphic,
-        );
+        // The signature half is the compile-time
+        // `reverse_mapped_pass_returns_relation_result` witness above.
         classify_relation_result_exhaustively(RelationResult::Unknown);
 
         let active_param = SemanticNodeId(304);

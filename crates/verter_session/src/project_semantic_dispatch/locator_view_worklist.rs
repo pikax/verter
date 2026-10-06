@@ -43,9 +43,9 @@ use crate::semantic_query::{
 };
 
 #[must_use]
-pub(super) struct ProjectedViewOutcome {
-    pub(super) node: SemanticNodeId,
-    pub(super) completeness: ResultCompleteness,
+pub(crate) struct ProjectedViewOutcome {
+    pub(crate) node: SemanticNodeId,
+    pub(crate) completeness: ResultCompleteness,
 }
 
 impl ProjectedViewOutcome {
@@ -458,7 +458,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn project_view_node_worklist(
+    pub(crate) fn project_view_node_worklist(
         &self,
         root: SemanticNodeId,
         root_context: ProjectionReductionContext,

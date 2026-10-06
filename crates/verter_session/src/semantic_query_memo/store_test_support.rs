@@ -481,3 +481,138 @@ impl SemanticGraphStore {
             .unwrap_or_default()
     }
 }
+
+/// Test-support entries into the store's private admission steps. Each one
+/// delegates to the production step unchanged, so a suite drives exactly the
+/// path production admission runs; none is compiled into a production build.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
+impl SemanticGraphStore {
+    /// The production single-candidate warm publish.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn warm_publish_one_for_tests<C: crate::resolver_core::ResolverCapabilities>(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        prepared: &PreparedKeyHandle,
+        result: &QueryResult<SemanticQueryValue>,
+        walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+        read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
+        dispatch_dep_signature: &DepSignature,
+        self_root_canonicals: &Arc<[Arc<str>]>,
+        satisfied_projection: &MaterializedSet,
+        inflight: &Arc<FlightCell>,
+    ) -> WarmPublishOutcome {
+        self.warm_publish_one(
+            ctx,
+            prepared,
+            result,
+            walker_diagnostics,
+            read_set_signature,
+            dispatch_dep_signature,
+            self_root_canonicals,
+            satisfied_projection,
+            inflight,
+        )
+    }
+
+    /// The production narrower-key backfill publish.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn warm_publish_one_if_absent_for_tests<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        &self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        key: SemanticQueryKey,
+        result: QueryResult<SemanticNodeId>,
+        read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
+        dispatch_dep_signature: DepSignature,
+        self_root_canonicals: Arc<[Arc<str>]>,
+        satisfied_projection: MaterializedSet,
+        parent_inflight: &Arc<FlightCell>,
+        admission_already_linearized: bool,
+    ) -> bool {
+        self.warm_publish_one_if_absent(
+            ctx,
+            key,
+            result,
+            read_set_signature,
+            dispatch_dep_signature,
+            self_root_canonicals,
+            satisfied_projection,
+            parent_inflight,
+            admission_already_linearized,
+        )
+    }
+
+    /// Stage one SCC batch candidate exactly as the batched publish does.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stage_entry_for_tests(
+        &self,
+        retention_charge: Option<Arc<verter_session_query::retention::RetentionCharge>>,
+        value: SemanticQueryValue,
+        satisfied_projection: MaterializedSet,
+        carrier: &verter_session_query::facts::fact_cache::ReadSetSignature,
+        self_root_canonicals: &Arc<[Arc<str>]>,
+        dispatch_dep_signature: &DepSignature,
+        validated_at_generation: u64,
+    ) -> MemoEntry {
+        self.stage_entry(
+            retention_charge,
+            value,
+            satisfied_projection,
+            carrier,
+            self_root_canonicals,
+            dispatch_dep_signature,
+            validated_at_generation,
+        )
+    }
+
+    /// Reserve the aggregate charge for a staged SCC batch.
+    #[doc(hidden)]
+    pub(crate) fn reserve_scc_batch_for_tests(
+        &self,
+        members: &[&MemoEntry],
+    ) -> Result<
+        verter_session_query::retention::RetentionCharge,
+        verter_session_query::retention::RetentionRefusal,
+    > {
+        self.reserve_scc_batch(members)
+    }
+
+    /// Claim an inline member's family flight exactly as the relation
+    /// drain does.
+    #[doc(hidden)]
+    pub(crate) fn begin_inline_member_flight_for_tests(
+        &self,
+        key: SemanticQueryKey,
+    ) -> Option<InlineMemberFlight> {
+        self.begin_inline_member_flight(key)
+    }
+
+    /// Whether the entries lock is currently held.
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn entries_lock_is_held_for_tests(&self) -> bool {
+        self.entries.try_lock().is_none()
+    }
+
+    /// The store's execution-task registry.
+    #[doc(hidden)]
+    #[must_use]
+    pub(crate) fn task_registry_for_tests(&self) -> &TaskRegistry {
+        &self.task_registry
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
+impl FlightCell {
+    /// Mark this flight aborted, as an invalidation racing its winner does.
+    #[doc(hidden)]
+    pub(crate) fn mark_aborted_for_tests(&self) {
+        self.state.lock().aborted = true;
+    }
+}

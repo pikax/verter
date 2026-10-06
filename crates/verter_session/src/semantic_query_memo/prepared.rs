@@ -66,13 +66,13 @@ struct PreparedQueryIdentity {
 /// `Arc` refcount bump — the in-flight table entry, the recursion
 /// stack frame, and the panic guard all share ONE prepared bundle.
 #[derive(Clone)]
-pub(super) struct PreparedKeyHandle(Arc<PreparedQueryIdentity>);
+pub(crate) struct PreparedKeyHandle(Arc<PreparedQueryIdentity>);
 
 impl PreparedKeyHandle {
     /// Project `key` onto its full prepared identity — ONE
     /// `family_and_slot` walk, ONE requested-point build, ONE key
     /// hash. The key is moved in, never cloned.
-    pub(super) fn prepare(key: SemanticQueryKey) -> Self {
+    pub(crate) fn prepare(key: SemanticQueryKey) -> Self {
         let (family, slot) = family_and_slot(&key);
         let requested_path = requested_path_for_key(&key);
         // Same formula as `family::requested_point_for_key`, reusing
@@ -94,15 +94,15 @@ impl PreparedKeyHandle {
         }))
     }
 
-    pub(super) fn key(&self) -> &SemanticQueryKey {
+    pub(crate) fn key(&self) -> &SemanticQueryKey {
         &self.0.key
     }
 
-    pub(super) fn family(&self) -> &FamilyKey {
+    pub(crate) fn family(&self) -> &FamilyKey {
         &self.0.family
     }
 
-    pub(super) fn slot(&self) -> ModeSlot {
+    pub(crate) fn slot(&self) -> ModeSlot {
         self.0.slot
     }
 
@@ -110,7 +110,7 @@ impl PreparedKeyHandle {
         &self.0.requested_path
     }
 
-    pub(super) fn requested_point(&self) -> &MaterializedPoint {
+    pub(crate) fn requested_point(&self) -> &MaterializedPoint {
         &self.0.requested_point
     }
 }

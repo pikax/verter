@@ -30,8 +30,8 @@ use verter_type_expr::locators::{
 };
 use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
-use super::SourceRaiseContext;
 use crate::locator_identity::{SessionDemandIdentity, SessionDemandOwner, SessionDemandRoute};
+use crate::project_semantic_dispatch::semantic_source::SourceRaiseContext;
 use crate::project_semantic_dispatch::ProjectSemanticDispatch;
 use crate::semantic_query::{
     ProjectionMode, ProjectionReductionContext, QueryResult, SemanticNodeData,

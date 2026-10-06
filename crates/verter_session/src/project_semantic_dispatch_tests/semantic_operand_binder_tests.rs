@@ -533,7 +533,7 @@ fn binder_frame_visibility_separates_constraint_default_and_body_positions() {
         binders.push(OperandBinderIdentity::for_locator(&selected));
         let operand = mint(&dispatch, selected);
         let SemanticOperandParts::Authored(authored) =
-            operand.parts(SemanticOperandAuthority::mint_for_forcing_boundary())
+            operand.parts(SemanticOperandAuthority::mint_for_tests())
         else {
             unreachable!()
         };

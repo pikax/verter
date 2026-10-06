@@ -79,7 +79,7 @@ use crate::semantic_query::{DepSignature, OriginEdge, OriginEdgeKind, SemanticNo
 /// Total cap on the number of distinct `(result, kind)` edge buckets the
 /// derivation store retains. A long-lived session that edits many owners
 /// caps here before FIFO eviction reclaims the oldest buckets.
-pub(super) const DERIVATION_EDGE_BUCKET_CAP: usize = 4096;
+pub(crate) const DERIVATION_EDGE_BUCKET_CAP: usize = 4096;
 
 /// Cap on the number of [`OriginEdge`]s a single `(result, kind)` bucket
 /// retains. Multiple derivations of the same structural result for the
@@ -93,7 +93,7 @@ pub(super) const DERIVATION_EDGE_BUCKET_CAP: usize = 4096;
 /// normalize, alias-resolve}` derivation fan-in of one result with
 /// generous headroom; an evicted edge loses only best-effort provenance
 /// (origin edges are not an invalidation source — see the module docs).
-pub(super) const DERIVATION_EDGES_PER_BUCKET_CAP: usize = 64;
+pub(crate) const DERIVATION_EDGES_PER_BUCKET_CAP: usize = 64;
 
 /// Sibling edge store for the derivation/origin layer. Co-owned by
 /// [`super::SemanticGraphStore`] but conceptually a separate graph: edges

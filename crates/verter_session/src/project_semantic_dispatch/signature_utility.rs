@@ -123,7 +123,7 @@ impl SignatureUtility {
 }
 
 /// The ordered authored signatures of one kind a settled subject carries.
-pub(super) enum AuthoredSignatures {
+pub(crate) enum AuthoredSignatures {
     /// Every candidate is one authored signature node, in candidate order.
     Nodes(Vec<SemanticNodeId>),
     /// The subject did not settle, or a candidate is a composite with no
@@ -196,7 +196,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// and the composed node of a composite one (a mixin construct
     /// intersection's candidate has no authored node of its own; its
     /// result is the intersection the kernel composed).
-    pub(super) fn utility_inference_signature(
+    pub(crate) fn utility_inference_signature(
         &self,
         subject: SemanticNodeId,
         kind: SignatureKind,
@@ -238,7 +238,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// canonical union. `None` is the utility's unanswerable shell (the
     /// caller publishes the typed miss) — one unanswerable arm leaves the
     /// whole union unanswered, never a partial union.
-    pub(super) fn resolve_signature_utility(
+    pub(crate) fn resolve_signature_utility(
         &self,
         utility: SignatureUtility,
         subject: SemanticNodeId,

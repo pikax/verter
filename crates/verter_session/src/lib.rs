@@ -371,6 +371,8 @@ pub mod platform_services;
 #[cfg(test)]
 mod project_global_cache_tests;
 pub(crate) mod project_semantic_dispatch;
+#[cfg(test)]
+mod project_semantic_dispatch_tests;
 pub mod project_type_store;
 #[cfg(test)]
 mod project_type_store_tests;
@@ -395,6 +397,8 @@ pub mod semantic_capability;
 pub(crate) mod semantic_execution;
 pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
+#[cfg(test)]
+mod semantic_query_memo_tests;
 /// The one PROCESS-wide aggregate retention account: public so the LSP
 /// provider-surface store charges THIS one, not a second per-crate ceiling.
 #[cfg(test)]

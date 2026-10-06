@@ -46,16 +46,15 @@ use crate::semantic_query::{QueryError, SemanticNodeId};
 mod conversions;
 mod fold;
 mod materialize;
-mod node_domain;
+pub(crate) mod node_domain;
 mod publication;
 
 pub(crate) use conversions::semantic_primitive_to_primitive_name;
+pub(crate) use fold::fold_node;
 #[cfg(test)]
 pub(crate) use fold::folded_nodes_for_tests;
-use fold::{fold_node, FoldedFunction, FoldedTupleElement};
-pub(in crate::project_semantic_dispatch) use materialize::{
-    fold_to_type_expr, DegradedLeaf, MaterializedTypeExpr,
-};
+use fold::{FoldedFunction, FoldedTupleElement};
+pub(crate) use materialize::{fold_to_type_expr, DegradedLeaf, MaterializedTypeExpr};
 pub(in crate::project_semantic_dispatch) use node_domain::node_is_unknown_materializing_failure;
 use node_domain::{type_expr_to_key, RaisedFactsAlg, RaisedShapeAlg};
 pub(in crate::project_semantic_dispatch) use publication::project_node_publication_score;
@@ -74,7 +73,7 @@ pub(in crate::project_semantic_dispatch) use publication::type_expr_publication_
 /// structural equality of the raised shape, with the id acting as the prehash
 /// fast-path. Two keys are comparable ONLY when minted by the SAME interner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(in crate::project_semantic_dispatch) struct RaisedShapeKey(u32);
+pub(crate) struct RaisedShapeKey(u32);
 
 /// Closed shallow member-value vocabulary projected directly from a node's
 /// normalized raised shape, without allocating a `TypeExpr`.
@@ -417,15 +416,15 @@ pub(crate) struct RaisedShapeFacts {
     /// `true` for every node the fold produces a value for — i.e.
     /// `raise(node).is_some()`. A `Some(result)` always has
     /// `can_shell_raise == true`.
-    can_shell_raise: bool,
+    pub(crate) can_shell_raise: bool,
     /// `dispatch_route_expr_is_materialized(raise(node))`: the structural AND
     /// over all value-bearing children, classified on typed `QueryError`
     /// variants only (a genuine `UnknownValue` is always materialized).
-    materialized: bool,
+    pub(crate) materialized: bool,
     /// `type_expr_is_expanded_surface(raise(node))`: `false` only when the
     /// raised root (recursing through `Union`/`Intersection`) is an open
     /// deferred shell (`KeyOf`/`IndexedAccess`/`Mapped`/`TypeOf`/`Conditional`).
-    expanded_surface: bool,
+    pub(crate) expanded_surface: bool,
 }
 
 impl RaisedShapeFacts {
@@ -507,7 +506,7 @@ impl RaisedNodeShapeFacts {
 /// ever checks these same three classes, so the tag is exactly as
 /// discriminating (see the per-arm tag-placement rules in [`node_domain`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::project_semantic_dispatch) enum FactShapeTag {
+pub(crate) enum FactShapeTag {
     /// The folded value is a CALL `Signature` shape.
     Function,
     /// The folded value is a CONSTRUCT `Signature` shape.
@@ -535,7 +534,7 @@ pub(in crate::project_semantic_dispatch) enum FactShapeTag {
 /// `node_pred(node) == type_expr_pred(raise(node))` BY CONSTRUCTION, with no
 /// second arm-collapse walk and no `TypeExpr` materialised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::project_semantic_dispatch) enum RaisedRootKind {
+pub(crate) enum RaisedRootKind {
     /// Raises to `TypeExpr::Object` — an `Object` / representable empty object,
     /// and the `MergedDecl` carrier that folds through the object constructors.
     Object,
@@ -572,9 +571,9 @@ pub(in crate::project_semantic_dispatch) enum RaisedRootKind {
 /// values through that one layer, so the two can never drift (parity is
 /// structural, not test-enforced).
 #[derive(Debug, Clone, Copy)]
-pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
-    pub(in crate::project_semantic_dispatch) facts: RaisedShapeFacts,
-    pub(in crate::project_semantic_dispatch) tag: FactShapeTag,
+pub(crate) struct RaisedShapeSummary {
+    pub(crate) facts: RaisedShapeFacts,
+    pub(crate) tag: FactShapeTag,
     /// `true` when this node's OWN raised term is an unmaterialised sentinel
     /// (`Unknown { raw }` / `Opaque(QueryError)` whose raw reads unmaterialised)
     /// — the node-domain equivalent of `type_expr_root_is_unmaterialized_sentinel`
@@ -584,7 +583,7 @@ pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
     /// `root_unmaterialized_sentinel == false` (the root is the object, not a
     /// sentinel). Carried on the summary (not `RaisedShapeFacts`) because only the
     /// ROOT node's value is read, through [`project_node_root_sentinel`].
-    pub(in crate::project_semantic_dispatch) root_unmaterialized_sentinel: bool,
+    pub(crate) root_unmaterialized_sentinel: bool,
     /// `true` when this node's OWN raised root term is EXACTLY the
     /// [`SEMANTIC_MISS`](crate::resolver_core::component_meta_query_engine::SEMANTIC_MISS)
     /// sentinel — strictly NARROWER than [`Self::root_unmaterialized_sentinel`]
@@ -599,14 +598,14 @@ pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
     /// ([`project_node_root_is_published_operator`]) consumes to suppress EXACTLY
     /// the carrier the `TypeExpr` predicate does (the miss spelling alone, NOT the
     /// broad sentinel set).
-    pub(in crate::project_semantic_dispatch) root_semantic_miss_sentinel: bool,
+    pub(crate) root_semantic_miss_sentinel: bool,
     /// The NORMALIZED raised-ROOT term class — see [`RaisedRootKind`]. Set by the
     /// per-arm [`summary`](node_domain) constructors and carried up so the
     /// [`project_node_root_is_published_operator`] / [`project_node_root_is_typeof`]
     /// / [`project_node_root_is_object_surface`] / [`project_node_root_is_indexed_access`]
     /// classifiers answer off the POST-NORMALIZED root, matching the `TypeExpr`
     /// predicate on `raise(node)` by construction.
-    pub(in crate::project_semantic_dispatch) root_kind: RaisedRootKind,
+    pub(crate) root_kind: RaisedRootKind,
 }
 
 /// The NARROW root-only projection result — the FOUR root fields the root-only
@@ -617,8 +616,8 @@ pub(in crate::project_semantic_dispatch) struct RaisedShapeSummary {
 /// this type strips them and exposes ONLY the fields whose values MATCH THE FULL
 /// FOLD's by construction (`root_kind` / `tag` / the two root sentinel flags).
 #[derive(Debug, Clone, Copy)]
-pub(in crate::project_semantic_dispatch) struct RootOnlySummary {
-    pub(in crate::project_semantic_dispatch) root_kind: RaisedRootKind,
+pub(crate) struct RootOnlySummary {
+    pub(crate) root_kind: RaisedRootKind,
     pub(in crate::project_semantic_dispatch) tag: FactShapeTag,
     pub(in crate::project_semantic_dispatch) root_unmaterialized_sentinel: bool,
     pub(in crate::project_semantic_dispatch) root_semantic_miss_sentinel: bool,
@@ -715,7 +714,7 @@ impl NodeShapeEq {
 /// only constructs a node `Out` from already-folded children + leaf data. The two compound arms that must INSPECT a folded child
 /// (the Intersection drop rules) use [`Self::is_object_surface_sentinel`] /
 /// [`Self::is_empty_object`].
-trait RaisedShapeAlgebra {
+pub(crate) trait RaisedShapeAlgebra {
     /// The folded value of a node.
     type Out;
     /// The algebra's function-signature representation: `Arc<FunctionExpr>` for

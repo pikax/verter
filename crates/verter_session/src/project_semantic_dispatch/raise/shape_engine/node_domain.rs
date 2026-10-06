@@ -38,7 +38,7 @@ use crate::semantic_query::{IndexKey, QueryError, SemanticNodeData, SemanticNode
 // two algebras. The functions take ONLY the child facts they fold (never a key
 // or interner), exactly mirroring the historical inline `RaisedShapeAlg` arms.
 // ===========================================================================
-mod summary;
+pub(crate) mod summary;
 
 // ===========================================================================
 // Algebra 2 — `RaisedShapeAlg` (Out = RaisedShapeResult).
@@ -599,17 +599,17 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
 // ===========================================================================
 
 /// Stateless facts-only algebra — no interner.
-pub(super) struct RaisedFactsAlg;
+pub(crate) struct RaisedFactsAlg;
 
 /// The facts-only function representation: only the folded `materialized` fact
 /// (the facts-only path never needs the `RaisedFunction` structure).
 #[derive(Clone, Copy)]
-pub(super) struct FactsFunction {
+pub(crate) struct FactsFunction {
     materialized: bool,
 }
 
 /// A facts-only object member: only the `materialized` fact it contributes.
-pub(super) struct FactsMember {
+pub(crate) struct FactsMember {
     materialized: bool,
 }
 
@@ -1622,7 +1622,7 @@ fn signature_raises_to_function<C: crate::resolver_core::ResolverCapabilities>(
 /// `Some` — the projection is the strictly more lenient / safe side, so it never
 /// panics where the full fold would. Root fields pinned equal to the full fold's
 /// by the parity test.
-pub(super) fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
+pub(crate) fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     active: &mut FxHashSet<SemanticNodeId>,

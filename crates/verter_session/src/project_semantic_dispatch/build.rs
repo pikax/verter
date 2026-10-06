@@ -30,7 +30,7 @@ use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 /// that exceeds it has NOT established its root set and the result it
 /// roots is refused warm — the cap bounds the work, it never truncates the
 /// proof silently.
-pub(super) const SELF_ROOT_WALK_CAP: usize = 4096;
+pub(crate) const SELF_ROOT_WALK_CAP: usize = 4096;
 
 /// Whether a value's type is the object literal it is initialized with —
 /// no authored annotation, no `unique symbol`, no evaluated initializer
@@ -115,7 +115,7 @@ pub(super) enum AugmentationContribution {
 /// ordered augmenter contributor nodes, one [`AugmentationContributorRoot`]
 /// per contributing augmenter, and whether any contributor's source-env
 /// identity was unobservable (torn state ⇒ no warm admission).
-pub(super) struct AugmentationContributions {
+pub(crate) struct AugmentationContributions {
     pub(super) contributor_nodes: Vec<SemanticNodeId>,
     contributor_roots: Vec<AugmentationContributorRoot>,
     pub(super) source_env_unobservable: bool,
@@ -392,7 +392,7 @@ fn literal_value_template_text(value: &LiteralValue) -> String {
 // that OWNS the `IndexKey::Number` payload (`CanonicalIndexInt`,
 // private field, blessed constructors only). Re-exported here because
 // the dispatch submodules are its main consumers.
-pub(super) use crate::semantic_query::index_key::{
+pub(crate) use crate::semantic_query::index_key::{
     integer_convention_index_key, js_number_to_string,
 };
 
@@ -448,7 +448,7 @@ pub(crate) fn encode_projection_reduction_context_bits_for_tests(
 // because the thread-local persists across tests in the same process.
 #[cfg(test)]
 thread_local! {
-    pub(super) static PREFIX_PEEK_HITS: std::cell::RefCell<u32> = const { std::cell::RefCell::new(0) };
+    pub(crate) static PREFIX_PEEK_HITS: std::cell::RefCell<u32> = const { std::cell::RefCell::new(0) };
 }
 
 /// What [`ProjectSemanticDispatch::infer_scan`] finds under a node: its
@@ -483,7 +483,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// its scope sidecar — captured when the node was interned. This
     /// helper never re-reads current content; it only projects the
     /// already-observed identity each input node carries.
-    pub(super) fn observed_self_roots_from_nodes(
+    pub(crate) fn observed_self_roots_from_nodes(
         &self,
         nodes: impl IntoIterator<Item = SemanticNodeId>,
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
@@ -1988,7 +1988,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// bare literal — a return, a mutable binding, an object or array
     /// member, a call argument. The path resolves as a `typeof` reference to
     /// it does: a namespace member, an import, a global.
-    pub(super) fn value_read_widens(
+    pub(crate) fn value_read_widens(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
@@ -3429,7 +3429,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     #[cfg(test)]
-    pub(super) fn lower_class_heritage_args_for_tests(
+    pub(crate) fn lower_class_heritage_args_for_tests(
         &self,
         canonical: &str,
         symbol: &str,
@@ -3451,7 +3451,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     #[cfg(test)]
-    pub(super) fn lower_class_heritage_args_via_body_locator_for_tests(
+    pub(crate) fn lower_class_heritage_args_via_body_locator_for_tests(
         &self,
         canonical: &str,
         symbol: &str,
@@ -4007,7 +4007,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// itself.
     /// [`Self::is_valid_base_type`], for the tests beside this module.
     #[cfg(test)]
-    pub(super) fn is_valid_base_type_for_tests(&self, node: SemanticNodeId) -> bool {
+    pub(crate) fn is_valid_base_type_for_tests(&self, node: SemanticNodeId) -> bool {
         self.is_valid_base_type(node)
     }
 
@@ -8140,7 +8140,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
     }
 
-    pub(super) fn backfill_member_index_surface(
+    pub(crate) fn backfill_member_index_surface(
         &self,
         result: SemanticNodeId,
         prepared: &PreparedTypeDecl,
@@ -9834,7 +9834,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///   with the clause bound (so a resolved same-named declaration is
     ///   a foreign symbol). See
     ///   [`ClauseSpelling`](crate::semantic_query::ClauseSpelling).
-    pub(super) fn instantiate_clause_params_at_call<'n>(
+    pub(crate) fn instantiate_clause_params_at_call<'n>(
         &self,
         params: impl IntoIterator<Item = (&'n str, Option<SemanticNodeId>)>,
         extracted: SemanticNodeId,
@@ -10210,7 +10210,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `name` is the parameter being substituted, not a shadow. The
     /// file-scoped name-keyed `TypeParam` identity itself is unchanged —
     /// this stops CROSS-BINDER rewrites within one extraction only.
-    fn collect_type_param_nodes_by_name(
+    pub(crate) fn collect_type_param_nodes_by_name(
         &self,
         root: SemanticNodeId,
         name: &str,
@@ -10485,7 +10485,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// A rest element whose value is open / unresolved (a generic, a
     /// carrier, anything not a settled tuple/array) is preserved
     /// verbatim — normalization never forces materialisation.
-    pub(super) fn normalize_tuple_spread(
+    pub(crate) fn normalize_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
@@ -10869,7 +10869,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// key type that contains itself is not finite.
     /// [`Self::finite_index_keys`], for the tests beside this module.
     #[cfg(test)]
-    pub(super) fn finite_index_keys_for_tests(
+    pub(crate) fn finite_index_keys_for_tests(
         &self,
         index: SemanticNodeId,
     ) -> Option<Vec<crate::semantic_query::IndexKey>> {
@@ -11930,7 +11930,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// contained positional class (a member-local flow-return marker) into
     /// a request-class fault no consumer lane contains. The fast path over
     /// an already-resolved `Object` node is always complete (empty set).
-    pub(super) fn source_members_for_published_projection(
+    pub(crate) fn source_members_for_published_projection(
         &self,
         source: SemanticNodeId,
         caller_context: crate::semantic_query::ProjectionReductionContext,
@@ -12028,7 +12028,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// positive member evidence plus the completeness flag: `false` only
     /// for a single closed alternative (the exact complete domain),
     /// `true` for open / multi-alternative formulas (positive-only).
-    pub(super) fn spread_program_members_for_published_projection(
+    pub(crate) fn spread_program_members_for_published_projection(
         &self,
         program: SemanticNodeId,
         caller_context: crate::semantic_query::ProjectionReductionContext,
@@ -12541,7 +12541,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// [`crate::semantic_query::MapperKind::classify_value_expr`]);
     /// `build_mapped_type` matches on `mapper.kind` directly rather
     /// than re-classifying the runtime AST shape.
-    pub(super) fn build_mapped_type(
+    pub(crate) fn build_mapped_type(
         &self,
         source: SemanticNodeId,
         mapper: &crate::semantic_query::MapperKey,
@@ -13943,7 +13943,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Guards the infer-routing: an `Infer` anywhere outside the in-scope
     /// direct positions keeps the conditional deferred rather than
     /// leaking an unbound placeholder into the selected branch.
-    pub(super) fn subtree_contains_infer(&self, root: SemanticNodeId) -> bool {
+    pub(crate) fn subtree_contains_infer(&self, root: SemanticNodeId) -> bool {
         !self.infer_scan(root, false).infers.is_empty()
     }
 
@@ -14094,7 +14094,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Edges landing on a shared `Global` primitive are accepted growth:
     /// the derivation store deduplicates identical edges, and each edge is
     /// a true "some normalization folded these contributors here" fact.
-    pub(super) fn build_reduce_union(
+    pub(crate) fn build_reduce_union(
         &self,
         members: &Arc<[SemanticNodeId]>,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
@@ -14111,7 +14111,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// [`Self::build_reduce_union`]; the algebra additionally applies
     /// the intersection lattice laws and the PROVEN-disjoint scalar
     /// collapse (`string & number = never`). Operand order is preserved.
-    pub(super) fn build_reduce_intersection(
+    pub(crate) fn build_reduce_intersection(
         &self,
         input: crate::semantic_query::IntersectionInputRef,
         _purpose: crate::semantic_query::IntersectionPurpose,
@@ -14510,7 +14510,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// substituted — the inverse polarity of a "does it look like Promise"
     /// gate, which would default to passthrough for anything it did not
     /// recognise and silently publish the wrong type.
-    pub(super) fn settled_non_thenable(&self, node: SemanticNodeId) -> bool {
+    pub(crate) fn settled_non_thenable(&self, node: SemanticNodeId) -> bool {
         match self.graph().node_data(node).as_deref() {
             // Nullish passes through — the lib conditional's first clause.
             Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
@@ -14917,7 +14917,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `Instantiate` family — `None` for any other node or when the family
     /// produces no value. The carrier may come back unchanged (a carrier-stop
     /// or a deferred application); callers compare payloads.
-    pub(super) fn declaration_carrier_body(
+    pub(crate) fn declaration_carrier_body(
         &self,
         carrier: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
@@ -16786,7 +16786,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// [`NullabilityPolicy::Erased`](verter_session_query::flow::policy::NullabilityPolicy::Erased)
     /// the result carries no `null` / `undefined` member beside any other
     /// member, and its canonical stamp records the erased algebra.
-    pub(super) fn intern_normalized_union(
+    pub(crate) fn intern_normalized_union(
         &self,
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
@@ -16929,7 +16929,7 @@ fn find_longest_warm_prefix<C: crate::resolver_core::ResolverCapabilities>(
 /// warm-hit gate (requests there are always at the full path); they record
 /// the honest materialisation per §3.4 and NEVER inflate a prefix hop to
 /// the terminal mode it never expanded.
-pub(super) fn path_walk_materialized_set(
+pub(crate) fn path_walk_materialized_set(
     path: &Arc<[PathSegment]>,
     terminal_mode: ProjectionMode,
     start_index: usize,
@@ -17116,7 +17116,7 @@ pub(super) enum GlobalSpace {
 /// (possibly spliced) element list that interns as a `Tuple`, or the array
 /// node a sole rest-of-array tuple collapses to (`[...E[]]` ≡ `E[]`).
 #[derive(Debug, Clone)]
-pub(super) enum NormalizedTupleShape {
+pub(crate) enum NormalizedTupleShape {
     Tuple(Vec<crate::semantic_query::TupleElement>),
     Array(SemanticNodeId),
 }
@@ -17146,119 +17146,6 @@ pub(super) fn mapped_produced_key_inherits_declaration_site(
     source_key: &PropertyKey,
 ) -> bool {
     produced_key == source_key
-}
-
-#[cfg(test)]
-mod carrier_type_param_descent_tests {
-    //! Carrier-arg descent for the type-parameter binder collector.
-    //!
-    //! `collect_type_param_nodes_by_name` walks a signature's structural
-    //! children to find every `TypeParam` binder node named `name` that the
-    //! substitute engine would rewrite. A `BareRef` / `TypeOf` / `ImportType`
-    //! carrier applies its `type_args` at the reference site; a binder occurrence
-    //! inside those args is a position the substitute engine reaches, so the
-    //! collector must descend `SemanticNodeData::carrier_type_args` (args-only,
-    //! no head resolution) — otherwise a `<T>`-bearing carrier arg leaves `T`
-    //! unspecialised at instantiation time.
-
-    use std::sync::Arc;
-
-    use crate::project_semantic_dispatch::ProjectSemanticDispatch;
-    use crate::semantic_query::{
-        DeclIdentity, NodeScopeId, ScopeId, SemanticNodeData, SemanticNodeId, ValueRootKey,
-    };
-    use crate::types::HostConfig;
-    use crate::VerterHost;
-
-    fn carrier_wrapping(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-        arg: SemanticNodeId,
-        kind: u8,
-    ) -> SemanticNodeId {
-        let args: Arc<[SemanticNodeId]> = Arc::from(vec![arg].into_boxed_slice());
-        match kind {
-            0 => graph.intern_node(SemanticNodeData::new_bare_ref(
-                Arc::from("Foo"),
-                NodeScopeId::Global,
-                args,
-            )),
-            1 => graph.intern_node(SemanticNodeData::new_typeof(
-                ValueRootKey {
-                    scope: ScopeId {
-                        canonical_id: Arc::from("/v.ts"),
-                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        local_scope: None,
-                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        ),
-                    },
-                    name: Arc::from("factory"),
-                },
-                Arc::from(Vec::new().into_boxed_slice()),
-                args,
-            )),
-            _ => graph.intern_node(SemanticNodeData::new_import_type(
-                Arc::from("./m"),
-                Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
-                args,
-                false,
-            )),
-        }
-    }
-
-    // ── D4 — collect_type_param_nodes_by_name descends carrier args ─────────
-    //
-    // A `TypeParam` named `X` inside a carrier's `type_args` is a binder
-    // occurrence the substitute engine reaches; the collector must return it.
-    // NEGATIVE: with the unchanged `_ => {}` arm the carrier is a leaf and the
-    // binder node is missed (the returned set would not contain it).
-    #[test]
-    fn collect_type_param_nodes_descends_carrier_args() {
-        let host = VerterHost::new_standalone(HostConfig::default());
-        let dispatch = ProjectSemanticDispatch::new(&host);
-        let graph = Arc::clone(host.project_type_store().semantic_graph());
-
-        let binder = graph.intern_node(SemanticNodeData::TypeParam {
-            decl: DeclIdentity::synthetic("X"),
-            param_index: 0,
-            constraint: None,
-            default: None,
-            display_name: Arc::from("X"),
-        });
-
-        for kind in 0u8..3 {
-            let carrier = carrier_wrapping(&graph, binder, kind);
-            let found = dispatch.collect_type_param_nodes_by_name(
-                carrier,
-                "X",
-                false,
-                crate::semantic_query::ClauseSpelling::Bound,
-            );
-            assert!(
-                found.contains(&binder),
-                "a `TypeParam` named X inside a carrier's type_args (kind {kind}) must be \
-                 collected; got {found:?} for carrier {:?}",
-                graph.node_data(carrier).as_deref()
-            );
-        }
-
-        // NEGATIVE control: searching for a DIFFERENT name does NOT collect the
-        // X binder (proving the descent honours the name, not a blanket collect).
-        for kind in 0u8..3 {
-            let carrier = carrier_wrapping(&graph, binder, kind);
-            let found = dispatch.collect_type_param_nodes_by_name(
-                carrier,
-                "Y",
-                false,
-                crate::semantic_query::ClauseSpelling::Bound,
-            );
-            assert!(
-                !found.contains(&binder),
-                "searching name Y must NOT collect the X binder reached through a carrier arg \
-                 (kind {kind})"
-            );
-        }
-    }
 }
 
 /// Which awaited relation a shared structural arm re-enters.
@@ -17642,6 +17529,6 @@ std::thread_local! {
 /// The key comparisons the finite index-key sets made on this thread, so
 /// far (test-only).
 #[cfg(test)]
-pub(super) fn index_key_probes_for_tests() -> usize {
+pub(crate) fn index_key_probes_for_tests() -> usize {
     INDEX_KEY_PROBES.with(std::cell::Cell::get)
 }

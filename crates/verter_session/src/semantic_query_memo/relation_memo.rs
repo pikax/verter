@@ -33,7 +33,7 @@ pub(crate) type RelationPublishedCarrier = PublishedMemoCandidate;
 /// [`ModeSlot::Single`] identity point at the empty path, so the family
 /// materialisation gates treat relation entries exactly like any other
 /// modeless family's (the gate never blocks a modeless hit).
-pub(super) fn relation_satisfied_projection() -> MaterializedSet {
+pub(crate) fn relation_satisfied_projection() -> MaterializedSet {
     MaterializedSet::single(MaterializedPoint::new(family::point_for_slot(
         ModeSlot::Single,
         &ProjectionPath::empty(),

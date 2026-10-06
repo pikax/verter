@@ -178,7 +178,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Seal a published runtime node to this graph and generation.
     /// `pub(super)`: the forcing authority lives in this module tree, and
     /// no consumer outside it can mint an operand.
-    pub(super) fn mint_node_semantic_operand(
+    pub(crate) fn mint_node_semantic_operand(
         &self,
         forced: &ForcedSemanticOperand,
     ) -> Result<SemanticOperand, SemanticOperandMintError> {
@@ -204,7 +204,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// as its substitution. Callers cannot supply scope, binder, environment,
     /// store, or generation axes independently. `pub(super)`: minting is
     /// confined to the forcing authority's module tree.
-    pub(super) fn mint_authored_semantic_operand(
+    pub(crate) fn mint_authored_semantic_operand(
         &self,
         locator: AuthoredBodyLocator,
         substitution: Arc<[SemanticOperand]>,
@@ -1130,7 +1130,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )))
     }
 
-    pub(super) fn force_semantic_operand(
+    pub(crate) fn force_semantic_operand(
         &self,
         operand: &SemanticOperand,
         request: SemanticOperandForceRequest,

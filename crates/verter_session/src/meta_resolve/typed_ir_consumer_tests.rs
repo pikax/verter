@@ -8,6 +8,7 @@
 //! engineered to FAIL if a future change reintroduces a text-mode
 //! reparse or a materialised-`TypeExpr` publication in these positions.
 
+use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
 use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticTypeSource};

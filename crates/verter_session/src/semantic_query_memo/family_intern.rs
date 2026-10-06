@@ -30,14 +30,14 @@ const SWEEP_INTERVAL: u64 = 1024;
 /// Interned `RelateMemoKey` handle. Copy of the intern id plus a cheap
 /// `Arc` so `Deref` needs no table lookup on the read path.
 #[derive(Clone)]
-pub(super) struct InternedRelateKey {
+pub(crate) struct InternedRelateKey {
     id: u32,
     inner: Arc<RelateMemoKey>,
 }
 
 /// Interned `ResolveCallKey` handle.
 #[derive(Clone)]
-pub(super) struct InternedResolveCallKey {
+pub(crate) struct InternedResolveCallKey {
     id: u32,
     inner: Arc<ResolveCallKey>,
 }
