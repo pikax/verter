@@ -122,14 +122,20 @@ all members and DAG clear, excluding cooperative admission as well as the
 stopped driver. Invalidation and close revalidate the sampled object after
 acquiring the lock.
 
-Scheduler tombstones and DAG retirement floors have no storage. The scheduler's
-per-canonical generation floors remain an external publication fence:
-`commit_artifact`, artifact eviction and the host's base source revision currently
-carry generation without a captured node incarnation. SKR-RET-FLOORS owns their
-migration after SKR-ENGINE and the subsequent reclamation of that remaining
-history. Internal admission, dispatch,
-publication, completion and failure use full incarnation identity independently
-of that fence.
+Scheduler tombstones and DAG retirement floors have no storage. External
+artifact publication is fenced by a scheduler-minted `SourceWitness` (canonical,
+node incarnation, generation), handed out only with a source snapshot by
+`try_get_witnessed_source`. `commit_artifact(witness, profile, data)` publishes
+only into the live, unretired node object the witness was captured from at the
+witnessed generation; `remove_artifact_not_newer_than(witness, profile)` evicts
+only from that object and only artifacts no newer than the witnessed
+generation. `try_get_source_for_witness` gives the host's block-content
+publication fence the same answer. A witness from a removed, reset or re-homed
+node is rejected even when its successor serves the same content at the same
+generation. The per-canonical generation floors remain only for the host's base
+source revision uniqueness until that history is reclaimed. Internal admission,
+dispatch, publication, completion and failure use full incarnation identity
+independently of the floors.
 
 **Preparation must still name a live submission lifetime at admission.**
 Preparation drops the node map guard before taking `dag.lock()`. The admission

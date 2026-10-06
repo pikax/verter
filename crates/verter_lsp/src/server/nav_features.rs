@@ -642,7 +642,17 @@ pub(super) async fn handle_completion(
     let mut generation_recomputations = 0;
     while edit_races < 2 {
         let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, &uri);
+        #[cfg(test)]
+        server
+            .request_barriers
+            .reach(super::test_support::RequestBarrier::Capture)
+            .await;
         let response = handle_completion_attempt(server, &params, false).await?;
+        #[cfg(test)]
+        server
+            .request_barriers
+            .reach(super::test_support::RequestBarrier::Settlement)
+            .await;
         if settlement.is_current(&server.documents, &uri) {
             return Ok(response);
         }
