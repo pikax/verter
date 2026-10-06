@@ -258,7 +258,7 @@ fn deep_finite_structural_validation_completes_on_2_mib_stack() {
     let status = Command::new(exe)
         .arg("--exact")
         .arg(
-            "project_semantic_dispatch::projection_stack_safety_tests::deep_finite_structural_validation_completes_on_2_mib_stack",
+            "project_semantic_dispatch_tests::projection_stack_safety_tests::deep_finite_structural_validation_completes_on_2_mib_stack",
         )
         .arg("--nocapture")
         .env(CHILD_MARKER, "structural-validation")
@@ -283,7 +283,7 @@ fn authored_200_deep_tuple_projects_complete_on_2_mib_stack() {
     let status = Command::new(exe)
         .arg("--exact")
         .arg(
-            "project_semantic_dispatch::projection_stack_safety_tests::authored_200_deep_tuple_projects_complete_on_2_mib_stack",
+            "project_semantic_dispatch_tests::projection_stack_safety_tests::authored_200_deep_tuple_projects_complete_on_2_mib_stack",
         )
         .arg("--nocapture")
         .env(CHILD_MARKER, "tuple")
@@ -308,7 +308,7 @@ fn authored_200_deep_closed_conditionals_project_complete_on_2_mib_stack() {
     let status = Command::new(exe)
         .arg("--exact")
         .arg(
-            "project_semantic_dispatch::projection_stack_safety_tests::authored_200_deep_closed_conditionals_project_complete_on_2_mib_stack",
+            "project_semantic_dispatch_tests::projection_stack_safety_tests::authored_200_deep_closed_conditionals_project_complete_on_2_mib_stack",
         )
         .arg("--nocapture")
         .env(CHILD_MARKER, "conditional")

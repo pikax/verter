@@ -902,22 +902,6 @@ pub(crate) fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVer
         .collect()
 }
 
-/// Read the current value of `host`'s per-host
-/// [`crate::VerterHost::signature_overflow_at_install`] counter.
-///
-/// Exposed for integration tests that verify overflow telemetry —
-/// reached through the `for_tests::read_signature_overflow_at_install`
-/// re-export in `lib.rs` (see
-/// `tests/cases/g_fact/fact_read_set_finalise_overflow.rs`). The `for_tests`
-/// shim is gated `cfg(any(test, feature = "test-support"))`; this accessor
-/// matches so it is not a dead symbol in release.
-#[cfg(any(test, feature = "test-support"))]
-#[inline]
-pub(crate) fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
-    host.signature_overflow_at_install
-        .load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// Walk every `FactVersionRef` in `signature` against the current
 /// resolver-store view; return `false` on the first mismatch.
 ///
@@ -933,9 +917,9 @@ pub(crate) fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u6
 /// `AppConfigNoOverrideProofDb::peek` plus the substrate test suite, so
 /// it is gated to match (no dead surface in release).
 #[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 #[inline]
 #[track_caller]
-#[cfg(test)]
 pub(crate) fn validate_fact_signature(
     ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
     signature: &[FactVersionRef],
@@ -1129,7 +1113,8 @@ fn observed_self_root_fact(canonical_id: &str, observed_hash: Hash16) -> FactVer
 /// this helper to characterise the observed-hash self-root prepend for
 /// member-keyed scopes, matching the `fact_signature_for_canonical_surface`
 /// precedent.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn fact_signature_for_canonical_member<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn ResolverContext<C>,
     canonical_id: &str,
@@ -1302,7 +1287,8 @@ pub(crate) fn fact_signature_for_exported_type<C: crate::resolver_core::Resolver
 /// Returns [`SignatureAdmission::NonCacheable`] with
 /// [`NonAdmissionReason::UnresolvedProvenance`] when the observed
 /// version's parse-fact registry cannot be recovered.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn fact_signature_for_canonical_surface<
     C: crate::resolver_core::ResolverCapabilities,
 >(
@@ -1668,60 +1654,6 @@ impl ReadSetSignatureExt for ReadSetSignature {
     }
 }
 
-/// A REAL resolve-domain resolution witness fact, minted by driving one
-/// genuine Engine resolution of an unresolvable specifier.
-///
-/// Test fixtures that need "a fact of the import-route rooting kind" use
-/// this rather than constructing one: [`ResolutionFactRef`]'s fields are
-/// crate-private to `verter_workspace` precisely so no consumer can forge
-/// a witness the sealed transaction never admitted. Minting a real one
-/// keeps the fixture honest — the fact carries a live fact key and the
-/// version the world actually published.
-///
-/// Panics if the resolution refuses or carries no resolution fact: either
-/// would make every downstream assertion vacuous.
-#[cfg(test)]
-#[must_use]
-pub(crate) fn resolution_witness_fact_for_tests() -> FactVersionRef {
-    use crate::types::FileLanguage;
-    use crate::{HostConfig, UpsertRequest, VerterHost};
-
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let _ = host
-        .upsert(UpsertRequest {
-            canonical_id: None,
-            input_id: "/witness_fixture/main.ts".to_string(),
-            source: std::sync::Arc::from("import { x } from './absent'\nexport { x }\n"),
-            file_language: FileLanguage::script_ts(),
-            aliases: Vec::new(),
-        })
-        .expect("witness fixture upsert must succeed");
-
-    let publication = host.resolve_for_persistent_state(
-        "/witness_fixture/main.ts",
-        "./absent",
-        verter_session_query::resolution::ResolutionContext {
-            phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
-            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
-        },
-    );
-    let verter_workspace::ResolutionPublication::Admitted(admitted) = publication else {
-        panic!("witness fixture resolution must be admitted");
-    };
-    admitted
-        .signature()
-        .facts
-        .iter()
-        .find(|fact| {
-            matches!(
-                fact,
-                FactVersionRef::ResolveImports(inner) if inner.resolution_fact().is_some()
-            )
-        })
-        .expect("an admitted resolution must carry at least one resolution-currency fact")
-        .clone()
-}
-
 /// Build the fact signature for a `MaterializeMemoDb` entry.
 ///
 /// A `MaterializeMemoDb` entry caches the materialised form of a type
@@ -1906,7 +1838,3 @@ pub(crate) fn merge_dep_signature_into_local_fence(
 #[cfg(test)]
 #[path = "fact_signature_helpers_tests.rs"]
 mod fact_signature_helpers_tests;
-
-#[cfg(test)]
-#[path = "mutation_stability_tests.rs"]
-mod mutation_stability_tests;

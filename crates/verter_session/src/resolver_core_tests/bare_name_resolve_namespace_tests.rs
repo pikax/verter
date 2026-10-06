@@ -1,5 +1,5 @@
 //! Isolation tests for the content-free namespace-sibling resolver hook
-//! ([`super::resolve_namespace_sibling_in_scope`]).
+//! ([`crate::resolver_core::bare_name_resolve::resolve_namespace_sibling_in_scope`]).
 //!
 //! Each builds a SYNTHETIC [`ShallowFileState`] from source and drives the
 //! hook with a [`LocalScopePayload::Namespace`] scope descriptor, asserting it
@@ -8,11 +8,11 @@
 //! three origin cases mirror the eager `add_namespace_sibling_resolutions`
 //! rules exactly; the hook is exercised WITHOUT changing that eager path.
 
-use std::sync::Arc;
-
-use super::resolve_namespace_sibling_in_scope;
+use crate::resolver_core::bare_name_resolve::resolve_namespace_sibling_in_scope;
 use crate::resolver_core::ShallowFileState;
-use crate::semantic_query::{LocalScopeOrigin, LocalScopePayload};
+use crate::semantic_query::LocalScopeOrigin;
+use crate::semantic_query::LocalScopePayload;
+use std::sync::Arc;
 
 fn state_from(source: &str) -> Arc<ShallowFileState> {
     ShallowFileState::service_backed_for_test(source)

@@ -31,9 +31,9 @@ impl SemanticGraphStore {
     /// Resolve a test batch through validated warm reads without admitting
     /// cold work. Missing or stale entries retain the typed per-key error.
     #[cfg(test)]
-    pub(crate) fn execute_cooperative_batch(
+    pub(crate) fn execute_cooperative_batch<C: crate::resolver_core::ResolverCapabilities>(
         &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<crate::resolver_core::HostCapabilities>,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
         keys: &[crate::semantic_query::SemanticQueryKey],
     ) -> Vec<Result<SemanticNodeId, BatchExpandError>> {
         keys.iter()

@@ -491,7 +491,7 @@ fn a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread() {
     let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
         .args([
             "--exact",
-            "project_semantic_dispatch::continuation_depth_tests::a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread",
+            "project_semantic_dispatch_tests::continuation_depth_tests::a_process_of_its_own_evaluates_deep_chains_on_a_one_mebibyte_thread",
             "--nocapture",
             "--test-threads=1",
         ])

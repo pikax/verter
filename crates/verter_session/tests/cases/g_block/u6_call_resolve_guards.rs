@@ -594,7 +594,7 @@ fn signature_ref_is_occurrence_aware() {
 //
 // - `FlowReturnFailure`'s typed `CallResolution` arm and the real failing
 //   call that surfaces it:
-//   `crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs`
+//   `crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tests.rs`
 //   (`flow_return_failure_taxonomy_is_exhaustive_and_carries_call_resolution`
 //   plus the `verdict_*` rows).
 // - The single `FlowIrExpr::Call` convergence: every call shape lowered

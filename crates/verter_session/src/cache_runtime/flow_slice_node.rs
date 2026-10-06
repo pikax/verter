@@ -69,10 +69,6 @@ use super::admission::CacheEntry;
 use super::node::QueryFlightKey;
 use super::singleflight::InflightTable;
 
-#[cfg(test)]
-#[path = "flow_slice_node_tests.rs"]
-pub(crate) mod tests;
-
 // ── Keys ──────────────────────────────────────────────────────────────
 
 /// The demand identity of one slice: the demanded return-projection

@@ -123,6 +123,8 @@ mod unrootable_route_admission_tests;
 // tests/cases/g_misc0/invalidation_perf.rs — InvalidationByCanonical impl on ImportedRegistryDb is exercised by the §12.A12 perf gate.
 pub(crate) mod bounded_query_retention;
 pub(crate) mod cache_runtime;
+#[cfg(test)]
+mod cache_runtime_tests;
 pub(crate) mod compile_cache_mode;
 pub(crate) mod compile_fact_emission;
 #[cfg(test)]
@@ -193,12 +195,16 @@ pub(crate) mod host_source_demand;
 #[cfg(test)]
 mod materialized_structure_equivalence_tests;
 #[cfg(test)]
+mod mutation_stability_tests;
+#[cfg(test)]
 mod value_symbol_depth_equivalence_tests;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
 // implementation detail. The only externally-needed type is
 // `ReadSetSignature` — the return type of the public inspector
 // `compile_slot_fact_dep_signature` — selectively re-exported below.
 pub(crate) mod fact_signature_helpers;
+#[cfg(test)]
+mod fact_signature_helpers_host_tests;
 pub(crate) mod fact_tracing;
 pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 #[cfg(test)]
@@ -385,6 +391,8 @@ pub mod request_footprint;
 pub mod request_observers;
 pub(crate) mod request_route_memo;
 pub mod resolver_core;
+#[cfg(test)]
+mod resolver_core_tests;
 mod resolver_store;
 #[cfg(test)]
 mod resolver_store_tests;
@@ -399,6 +407,8 @@ pub mod semantic_query;
 pub(crate) mod semantic_query_memo;
 #[cfg(test)]
 mod semantic_query_memo_tests;
+#[cfg(test)]
+mod semantic_query_tests;
 /// The one PROCESS-wide aggregate retention account: public so the LSP
 /// provider-surface store charges THIS one, not a second per-crate ceiling.
 #[cfg(test)]
@@ -417,6 +427,8 @@ mod store_view_manager_tests;
 mod store_view_non_current_contract_tests;
 mod store_view_roots;
 pub(crate) mod structural_carrier_producer;
+#[cfg(test)]
+mod structural_carrier_producer_tests;
 pub(crate) mod template_convert;
 /// Test-only re-exports for integration tests in `tests/`.
 ///

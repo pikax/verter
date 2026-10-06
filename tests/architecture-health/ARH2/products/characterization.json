@@ -115,15 +115,15 @@
           "filter": "flow_return_tests",
           "witnesses": [
             {
-              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs",
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tests.rs",
               "test": "flow_return_symbolic_call_resolves_complete"
             },
             {
-              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs",
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tests.rs",
               "test": "flow_return_this_call_reads_the_receiver_member"
             },
             {
-              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_tests.rs",
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_tests.rs",
               "test": "flow_return_empty_cycle_is_return_only_and_never_never"
             }
           ]
@@ -134,11 +134,11 @@
           "filter": "flow_return_coverage_tests",
           "witnesses": [
             {
-              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_coverage_tests.rs",
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs",
               "test": "vue_script_setup_functions_serve_under_the_instance_owner_only"
             },
             {
-              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_coverage_tests.rs",
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs",
               "test": "svelte_script_functions_serve_under_the_instance_owner_not_the_module_owner"
             }
           ]
@@ -165,11 +165,11 @@
           "filter": "cycle_gate_tests",
           "witnesses": [
             {
-              "file": "crates/verter_session/src/project_semantic_dispatch/cycle_gate_tests.rs",
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/cycle_gate_tests.rs",
               "test": "cycle_gate_decided_continue_on_productive_tree_recursion"
             },
             {
-              "file": "crates/verter_session/src/project_semantic_dispatch/cycle_gate_tests.rs",
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/cycle_gate_tests.rs",
               "test": "cycle_gate_decided_stop_on_generic_mutual_recursion"
             }
           ]
@@ -276,7 +276,7 @@
           "filter": "flow_return_frame_seal_tests",
           "witnesses": [
             {
-              "file": "crates/verter_session/src/project_semantic_dispatch/flow_return_frame_seal_tests.rs",
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_frame_seal_tests.rs",
               "test": "flow_product_budget_boundary_is_exact_and_never_warm"
             }
           ]
@@ -487,11 +487,11 @@
         "concern": "cancellation",
         "evidence": [
           {
-            "file": "crates/verter_session/src/semantic_query_memo/cancellation_tests.rs",
+            "file": "crates/verter_session/src/semantic_query_memo_tests/cancellation_tests.rs",
             "test": "cancelled_joiner_detaches_without_aborting_live_winner"
           },
           {
-            "file": "crates/verter_session/src/semantic_query_memo/tasks_tests.rs",
+            "file": "crates/verter_session/src/semantic_query_memo_tests/tasks_tests.rs",
             "test": "two_task_wait_cycle_is_detected_before_parking"
           }
         ],

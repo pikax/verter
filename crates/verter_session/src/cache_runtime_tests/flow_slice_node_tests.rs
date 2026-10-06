@@ -4,30 +4,39 @@
 //! non-admission, warm-hit identity, content-version keying, and the
 //! empty-fact-rail pin (no slice identity in `ReadSetSignature.facts`).
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
-use verter_language::FileLanguage;
-
-use verter_semantic::analysis::flow::{build_indexed_function_body_skeleton, FunctionBodySource};
-use verter_semantic::analysis::function_program::build_function_program_index;
-use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
-use verter_session_query::facts::SymbolSpace;
-use verter_session_query::flow::flow_ir::{FlowExprShape, FlowObjectEntry, FlowObjectKey};
-use verter_session_query::flow::peeker::{FlowSliceBudget, FlowSliceBudgetAxis};
-use verter_session_query::flow::skeleton::FunctionBodySkeleton;
-use verter_session_query::function_program::{FunctionDeclarationRef, FunctionProgramKey};
-use verter_type_expr::facts::FunctionPartIdentity;
-use verter_type_expr::TopLevelOwnerId;
-
-use super::*;
-use crate::project_semantic_dispatch::flow_slice_driver::{
-    FlowBodySkeletonSource, FlowSliceDriver,
-};
+use crate::cache_runtime::flow_slice_node::*;
+use crate::project_semantic_dispatch::flow_slice_driver::FlowBodySkeletonSource;
+use crate::project_semantic_dispatch::flow_slice_driver::FlowSliceDriver;
 use crate::resolver_core::ResolverContext;
 use crate::semantic_query::SemanticQueryApi as _;
 use crate::types::HostConfig;
 use crate::VerterHost;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use verter_language::FileLanguage;
+use verter_semantic::analysis::flow::build_indexed_function_body_skeleton;
+use verter_semantic::analysis::flow::FunctionBodySource;
+use verter_semantic::analysis::function_program::build_function_program_index;
+use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
+use verter_session_query::facts::SymbolSpace;
 use verter_session_query::flow::binding::FlowBindingMapError;
+use verter_session_query::flow::bundle::FlowGraphBundle;
+use verter_session_query::flow::bundle::FlowSliceFunctionKey;
+use verter_session_query::flow::bundle::KeyedFunctionStructure;
+use verter_session_query::flow::flow_ir::FlowExprShape;
+use verter_session_query::flow::flow_ir::FlowObjectEntry;
+use verter_session_query::flow::flow_ir::FlowObjectKey;
+use verter_session_query::flow::hashing::FlowSliceHash;
+use verter_session_query::flow::peeker::FlowSliceBudget;
+use verter_session_query::flow::peeker::FlowSliceBudgetAxis;
+use verter_session_query::flow::skeleton::FunctionBodySkeleton;
+use verter_session_query::flow::skeleton::PreparedFunctionBodySkeleton;
+use verter_session_query::function_program::FunctionDeclarationRef;
+use verter_session_query::function_program::FunctionProgramKey;
+use verter_type_expr::facts::FunctionPartIdentity;
+use verter_type_expr::TopLevelOwnerId;
 
 fn prepared_of(source: &str) -> PreparedFunctionBodySkeleton {
     let allocator = oxc_allocator::Allocator::default();
@@ -688,11 +697,11 @@ fn invalid_binding_correspondence_never_publishes_or_caches_absence() {
     for _ in 0..2 {
         assert!(rig.driver(&rig.host).lookup_hash(demand.clone()).is_none());
         assert!(rig.stores.graphs.peek(&key).is_none());
-        assert!(rig.stores.hash_node.published_entry(&demand).is_none());
+        assert!(rig.stores.hash_node().published_entry(&demand).is_none());
     }
     assert_eq!(rig.stores.graphs.build_count(), 0);
     assert_eq!(rig.source.build_calls(), 3, "invalid builds remain cold");
-    assert_eq!(rig.stores.lowered_node.entry_count(), 0);
+    assert_eq!(rig.stores.lowered_node().entry_count(), 0);
 
     rig.source.invalid_bindings.store(false, Ordering::SeqCst);
     assert!(rig.driver(&rig.host).lookup_hash(demand).is_some());
@@ -714,20 +723,12 @@ fn invalid_binding_correspondence_never_publishes_or_caches_absence() {
 #[test]
 fn flow_slice_stores_peek_skeleton_for_mirrors_the_graph_store_peek() {
     let key = function_key("/peek-store.ts", "myType", 2, MYTYPE_FIXTURE);
-    let graphs = Arc::new(FunctionFlowGraphStore::new());
     let source = Arc::new(FixtureSkeletonSource::new(vec![(
         key.clone(),
         MYTYPE_FIXTURE,
     )]));
-    let budget: FlowSliceBudgetCell =
-        Arc::new(parking_lot::RwLock::new(FlowSliceBudget::default()));
-    let stores = FlowSliceStores {
-        graphs: Arc::clone(&graphs),
-        hash_node: Arc::new(FlowSliceHashNode::new(Arc::clone(&budget))),
-        lowered_node: FlowSliceLoweredBodyNode::new(),
-        demand_plans: std::sync::atomic::AtomicU64::new(0),
-        budget,
-    };
+    // A fresh store: its own graph store under the armed default budget.
+    let stores = FlowSliceStores::new();
 
     // Discriminates: a `peek_skeleton_for` that fell through to
     // `skeleton_for`'s blocking build would defeat the whole point of a
@@ -859,8 +860,8 @@ pub(crate) fn hash_then_lower_round_trip_serves_lowered_slice_ir() {
     ));
     assert!(ir.slots.iter().all(|slot| slot.name.as_ref() != "a"));
 
-    assert_eq!(rig.stores.hash_node.entry_count(), 1);
-    assert_eq!(rig.stores.lowered_node.entry_count(), 1);
+    assert_eq!(rig.stores.hash_node().entry_count(), 1);
+    assert_eq!(rig.stores.lowered_node().entry_count(), 1);
 }
 
 /// Share-vs-split check 4 (`function_flow_graph_built_once_per_function_skeleton`),
@@ -925,8 +926,8 @@ pub(crate) fn two_demands_one_function_flow_graph_build() {
         1,
         "the FunctionFlowGraph is built once; every further demand re-plans only"
     );
-    assert_eq!(rig.stores.hash_node.entry_count(), 2);
-    assert_eq!(rig.stores.lowered_node.entry_count(), 2);
+    assert_eq!(rig.stores.hash_node().entry_count(), 2);
+    assert_eq!(rig.stores.lowered_node().entry_count(), 2);
 }
 
 /// Budget non-admission at every layer this substrate owns: the planner
@@ -958,13 +959,13 @@ fn budget_exceeded_admits_nothing_at_any_layer() {
         assert_eq!(exceeded.limit, 1);
 
         assert_eq!(
-            rig.stores.hash_node.entry_count(),
+            rig.stores.hash_node().entry_count(),
             0,
             "ReturnOnly never publishes a hash entry"
         );
-        assert!(rig.stores.hash_node.published_entry(&key).is_none());
+        assert!(rig.stores.hash_node().published_entry(&key).is_none());
         assert_eq!(
-            rig.stores.lowered_node.entry_count(),
+            rig.stores.lowered_node().entry_count(),
             0,
             "no slice hash exists, so the lowered store is unaddressable and empty"
         );
@@ -990,7 +991,7 @@ fn warm_hash_hit_reuses_planned_value_without_recompute() {
         "the warm hit serves the published slice identity, not a recompute"
     );
     assert_eq!(rig.source.build_calls(), 1);
-    assert_eq!(rig.stores.hash_node.entry_count(), 1);
+    assert_eq!(rig.stores.hash_node().entry_count(), 1);
 }
 
 /// Content-version keying: two keys differing only in
@@ -1051,7 +1052,7 @@ pub(crate) fn distinct_content_versions_key_distinct_artifacts() {
         2,
         "one graph per content version"
     );
-    assert_eq!(rig.stores.lowered_node.entry_count(), 2);
+    assert_eq!(rig.stores.lowered_node().entry_count(), 2);
 }
 
 /// The published entries carry an EMPTY fact rail: these are
@@ -1071,7 +1072,7 @@ fn published_entries_carry_empty_fact_rail() {
     let _ = rig.driver(ctx).lookup_hash(key.clone()).expect("hash");
     let entry = rig
         .stores
-        .hash_node
+        .hash_node()
         .published_entry(&key)
         .expect("published");
     assert!(

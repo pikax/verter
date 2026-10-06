@@ -27,7 +27,7 @@ pub(crate) mod lookup_publish;
 pub(crate) mod node;
 pub(crate) mod singleflight;
 pub(crate) mod singleflight_publish;
-mod world_snapshot;
+pub(crate) mod world_snapshot;
 
 // `pub(crate)` re-exports so other modules inside `verter_session`
 // can reach `WorldSnapshot` and its `*Dims` companions through one

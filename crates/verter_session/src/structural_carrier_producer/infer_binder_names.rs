@@ -15,14 +15,14 @@ pub(super) use crate::semantic_query::infer_binder_names::{
 
 /// One lexical frame of type-parameter and conditional-`infer` bindings.
 #[derive(Debug, Default, Clone)]
-pub(super) struct BinderScope {
+pub(crate) struct BinderScope {
     names: FxHashMap<Arc<str>, SemanticNodeId>,
     infer_declarations: FxHashMap<Arc<str>, SemanticNodeId>,
 }
 
 impl BinderScope {
     /// Bind a syntactic type-parameter name to its interned binder node.
-    pub(super) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
+    pub(crate) fn bind(&mut self, name: Arc<str>, node: SemanticNodeId) {
         self.names.insert(name, node);
     }
 
@@ -42,7 +42,7 @@ impl BinderScope {
 
 /// Syntactic binder and provenance inputs to structural lowering.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct StructuralLowerContext<'a> {
+pub(crate) struct StructuralLowerContext<'a> {
     pub(super) binders: &'a [BinderScope],
     pub(super) merge_role: MergeRoleStamp,
     pub(super) macro_own_body: MacroOwnBodyStamp,
@@ -53,7 +53,7 @@ pub(super) struct StructuralLowerContext<'a> {
 
 impl<'a> StructuralLowerContext<'a> {
     /// Construct a root context with neutral provenance.
-    pub(super) fn new(binders: &'a [BinderScope]) -> Self {
+    pub(crate) fn new(binders: &'a [BinderScope]) -> Self {
         Self {
             binders,
             merge_role: MergeRoleStamp::NEUTRAL,
@@ -94,7 +94,7 @@ impl<'a> StructuralLowerContext<'a> {
     }
 
     #[cfg(test)]
-    pub(super) fn with_merge_role(mut self, merge_role: MergeRoleStamp) -> Self {
+    pub(crate) fn with_merge_role(mut self, merge_role: MergeRoleStamp) -> Self {
         self.merge_role = merge_role;
         self
     }

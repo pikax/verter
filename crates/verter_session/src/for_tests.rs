@@ -159,7 +159,8 @@ pub fn dep_signature_to_fact_signature_for_tests(
 /// an overflow forced on one host never bumps the counter another host's
 /// delta assertion reads.
 pub fn read_signature_overflow_at_install(host: &crate::VerterHost) -> u64 {
-    crate::fact_signature_helpers::read_signature_overflow_at_install(host)
+    host.signature_overflow_at_install
+        .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Arm the per-host relation-memo fact-injection knob and return an RAII
@@ -1298,3 +1299,58 @@ pub use crate::resolver_core::request_ports::{
     Cancellation, ExecutionSubmission, ExpressionSourceSelection, HostAttachmentPort,
     IndexedInputs, OwnedLowering, RouteLookup,
 };
+
+/// A REAL resolve-domain resolution witness fact, minted by driving one
+/// genuine Engine resolution of an unresolvable specifier.
+///
+/// Test fixtures that need "a fact of the import-route rooting kind" use
+/// this rather than constructing one: [`ResolutionFactRef`]'s fields are
+/// crate-private to `verter_workspace` precisely so no consumer can forge
+/// a witness the sealed transaction never admitted. Minting a real one
+/// keeps the fixture honest — the fact carries a live fact key and the
+/// version the world actually published.
+///
+/// Panics if the resolution refuses or carries no resolution fact: either
+/// would make every downstream assertion vacuous.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn resolution_witness_fact_for_tests(
+) -> verter_session_query::facts::fact_cache::FactVersionRef {
+    use crate::types::FileLanguage;
+    use crate::{HostConfig, UpsertRequest, VerterHost};
+
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/witness_fixture/main.ts".to_string(),
+            source: std::sync::Arc::from("import { x } from './absent'\nexport { x }\n"),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("witness fixture upsert must succeed");
+
+    let publication = host.resolve_for_persistent_state(
+        "/witness_fixture/main.ts",
+        "./absent",
+        verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
+        },
+    );
+    let verter_workspace::ResolutionPublication::Admitted(admitted) = publication else {
+        panic!("witness fixture resolution must be admitted");
+    };
+    admitted
+        .signature()
+        .facts
+        .iter()
+        .find(|fact| {
+            matches!(
+                fact,
+                verter_session_query::facts::fact_cache::FactVersionRef::ResolveImports(inner) if inner.resolution_fact().is_some()
+            )
+        })
+        .expect("an admitted resolution must carry at least one resolution-currency fact")
+        .clone()
+}

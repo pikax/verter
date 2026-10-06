@@ -310,7 +310,7 @@ test("ARH2-characterization dirty twin: witness without a test attribute is reje
 });
 
 const COVERAGE_WITNESS =
-  "crates/verter_session/src/project_semantic_dispatch/flow_return_coverage_tests.rs";
+  "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs";
 const COVERAGE_FN = "vue_script_setup_functions_serve_under_the_instance_owner_only";
 
 function withReadOverlay(rel, mutate, run) {

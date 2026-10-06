@@ -37,7 +37,7 @@ fn import_route_fact() -> FactVersionRef {
     // The import-route rooting rail is a REAL resolve-domain resolution
     // witness (a forged one is impossible by design — `ResolutionFactRef`'s
     // fields are sealed to `verter_workspace`).
-    crate::fact_signature_helpers::resolution_witness_fact_for_tests()
+    crate::for_tests::resolution_witness_fact_for_tests()
 }
 
 fn negative_resolved_import_fact() -> FactVersionRef {
