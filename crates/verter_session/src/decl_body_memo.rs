@@ -723,6 +723,13 @@ impl DeclBodyMemo {
 
     /// The canonical id this memo's snapshot lowers (anchors route-fact
     /// recipe locators).
+    /// The lowering service this memo demands bodies through (`None` for a
+    /// seeded memo).
+    #[cfg(test)]
+    pub(crate) fn lowering_service_for_test(&self) -> Option<&Arc<DeclLoweringService>> {
+        self.service.as_ref()
+    }
+
     pub(crate) fn snapshot_identity(&self) -> verter_session_query::source::snapshot::SnapshotKey {
         self.key.clone()
     }
@@ -1261,25 +1268,19 @@ impl DeclBodyMemo {
         self.function_index.function_program_index()
     }
 
-    /// The OWNED slice content of one demanded flow evaluation: the
-    /// slice-gated expression content of `entry`'s body, lowered through
-    /// the same lease-only retained-snapshot run every other body product
-    /// uses (pure job, owned output, no host re-entry). NOT memoized:
-    /// content is per-demand (the selection is demand identity) and the
-    /// family memo's warm hit already prevents same-demand recomputation.
-    /// Returns `None` on a locator miss (a typed miss, never a panic) or
-    /// on a seeded memo / broken lease pin.
+    /// The flow-slice function key of a fixture memo's `entry`: the key a
+    /// bound flow graph over this memo's retained structure is minted under.
     #[cfg(test)]
-    pub(crate) fn flow_bound_graph_for_tests(
+    pub(crate) fn flow_slice_function_key_for_tests(
         &self,
         entry: &verter_session_query::function_program::FunctionProgramEntry,
-    ) -> verter_session_query::flow::bundle::BoundFlowGraph {
+    ) -> verter_session_query::flow::bundle::FlowSliceFunctionKey {
         let file_language =
             verter_language::FileLanguage::script(verter_language::ScriptSourceType::Ts);
         let (_, parse_key) =
             verter_language::default_parse_identity_for(&self.eval_source, &file_language)
                 .expect("fixture parse identity");
-        let key = verter_session_query::flow::bundle::FlowSliceFunctionKey {
+        verter_session_query::flow::bundle::FlowSliceFunctionKey {
             canonical_id: Arc::clone(&self.key.canonical),
             function: entry.key().clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash(),
@@ -1289,14 +1290,7 @@ impl DeclBodyMemo {
             file_language,
             build_toolchain_fingerprint:
                 verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
-        };
-        let prepared = self
-            .function_flow_structure(entry)
-            .value
-            .expect("fixture binding authority")
-            .expect("fixture retained structure");
-        crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
-            .mint_bound_flow_graph(key, prepared)
+        }
     }
 
     /// Lower the selected slice content of `entry`. `policy` is the
@@ -3254,10 +3248,6 @@ pub(crate) fn lowered_value_decl_for_synthesised_default(
         &UnresolvedLens,
     )
 }
-
-#[cfg(test)]
-#[path = "decl_body_memo_tests.rs"]
-mod decl_body_memo_tests;
 
 /// Collect the dependency-name records of AUGMENTATION-scoped inner
 /// declarations (`declare global { … }` / `declare module "spec" { … }`),

@@ -27,6 +27,23 @@ pub(crate) fn consume_walked_read<T>(read: WalkedRead<T>) -> T {
     read.value
 }
 
+/// The bound flow graph of a fixture memo's `entry`, minted the way the
+/// flow-slice store mints one over the memo's retained flow structure.
+#[cfg(test)]
+pub(crate) fn flow_bound_graph_for_tests(
+    memo: &crate::decl_body_memo::DeclBodyMemo,
+    entry: &verter_session_query::function_program::FunctionProgramEntry,
+) -> verter_session_query::flow::bundle::BoundFlowGraph {
+    let key = memo.flow_slice_function_key_for_tests(entry);
+    let prepared = memo
+        .function_flow_structure(entry)
+        .value
+        .expect("fixture binding authority")
+        .expect("fixture retained structure");
+    crate::cache_runtime::flow_slice_node::FunctionFlowGraphStore::new()
+        .mint_bound_flow_graph(key, prepared)
+}
+
 /// The expression-source capability the host's request contexts hand the
 /// engine: one source's demands, with each refused program walk applied to
 /// the running request as it is served.

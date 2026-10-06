@@ -76,7 +76,7 @@ mod tests {
             .unwrap()
             .entry();
 
-        let bound = memo.flow_bound_graph_for_tests(entry);
+        let bound = crate::host_source_demand::flow_bound_graph_for_tests(memo, entry);
         let bundle = bound.bundle();
         let request = FlowDemandRequest {
             ancestry: crate::project_semantic_dispatch::flow_solve::FlowInputAncestry::default(),

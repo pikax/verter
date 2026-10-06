@@ -10,12 +10,19 @@ use verter_session_query::source::deref::LocatorBodyDerefError;
 use std::sync::Arc;
 use verter_session_query::function_program::{FunctionProgramDiscovery, FunctionProgramIndex};
 
-use super::*;
+use crate::decl_body_memo::*;
+use crate::decl_lowering::DeclLoweringCounters;
+use verter_parser::utils::oxc::script::raw_surface::SymbolSpace;
+use verter_session_query::declarations::{AugmentationScopeKind, TypeDeclKind, ValueDeclKind};
+use verter_session_query::source::demand::DemandOutcome;
+use verter_session_query::source::snapshot::SnapshotKey;
+use verter_type_expr::facts::ValueAnnotationClass;
 use verter_type_expr::locators::{
     AugmentationBodyLocator, AuthoredAnchor, AuthoredAugmentationScope, AuthoredBodyLocator,
     LocatorSymbolSpace, TypeBodyPathStep, TypeBodySlot, TypeParamBoundPosition,
     TypeParamVisibility,
 };
+use verter_type_expr::TypeExpr;
 
 // The lazily lowered TYPE-declaration memo record is fact+locator content
 // free: authored bodies and header-parameter BOUNDS are re-borrowed
@@ -1337,10 +1344,9 @@ fn broken_lease_body_demand_fails_closed_return_only_without_caching() {
     // worker-side retained snapshot is released — every subsequent demand
     // lease-misses.
     let service = memo
-        .service
-        .as_ref()
+        .lowering_service_for_test()
         .expect("a production memo has a service");
-    service.release_retained_snapshot_for_test(&memo.key);
+    service.release_retained_snapshot_for_test(&memo.snapshot_identity());
 
     // 1. Per-symbol body demand (`lower_demanded`): ReturnOnly — a CLEAN None
     //    (no panic), and NO body-less warm entry is admitted for `Var1`.
@@ -2387,14 +2393,14 @@ fn function_program_index_builds_once_and_covers_every_function_position() {
         Arc::ptr_eq(&first, &second),
         "the index builds once per file artifact"
     );
-    let owners = Arc::clone(&memo.owner_table);
-    let canonical = Arc::clone(&memo.key.canonical);
-    let parse_env_hash = memo.key.parse_env_hash;
+    let owners = Arc::clone(memo.owner_table());
+    let key = memo.snapshot_identity();
+    let canonical = Arc::clone(&key.canonical);
+    let parse_env_hash = key.parse_env_hash;
     let retained = memo
-        .service
-        .as_ref()
+        .lowering_service_for_test()
         .unwrap()
-        .run_leased(&memo.key, move |parsed| {
+        .run_leased(&key, move |parsed| {
             parsed
                 .unwrap()
                 .function_program_index(&owners, canonical, &parse_env_hash, &Default::default())
@@ -2494,9 +2500,10 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
         .map(|matched| matched.entry().clone())
         .collect();
     assert_eq!(children.len(), 65);
-    let service = memo.service.as_ref().unwrap();
+    let service = memo.lowering_service_for_test().unwrap();
+    let key = memo.snapshot_identity();
     service
-        .run_leased(&memo.key, |_| take_nested_callable_walk_visits_for_tests())
+        .run_leased(&key, |_| take_nested_callable_walk_visits_for_tests())
         .unwrap();
     let parse_count = parses(&provenance);
     for child in &children {
@@ -2506,7 +2513,7 @@ fn retained_nested_function_demands_do_not_rediscover_sibling_bodies() {
         }
     }
     let visits = service
-        .run_leased(&memo.key, |_| take_nested_callable_walk_visits_for_tests())
+        .run_leased(&key, |_| take_nested_callable_walk_visits_for_tests())
         .unwrap();
     assert_eq!(
         visits, 0,

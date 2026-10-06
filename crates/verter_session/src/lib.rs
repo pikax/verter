@@ -184,6 +184,8 @@ mod cross_file_augmentation_merge_equivalence_tests;
 #[cfg(test)]
 mod decl_body_dispatch_equivalence_tests;
 pub(crate) mod decl_body_memo;
+#[cfg(test)]
+mod decl_body_memo_tests;
 pub(crate) mod decl_lowering;
 pub mod fact_emission;
 pub mod flow_return_audit;

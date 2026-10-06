@@ -80,7 +80,7 @@ fn selection_for(
     FlowSliceSelection,
     verter_session_query::flow::bundle::BoundFlowGraph,
 ) {
-    let bound = memo.flow_bound_graph_for_tests(matched.entry());
+    let bound = crate::host_source_demand::flow_bound_graph_for_tests(memo, matched.entry());
     let skeleton = &bound.bundle().skeleton();
     let graph = &bound.bundle().graph();
     let demand = SliceDemand::for_return_projection(skeleton, path);
@@ -6119,7 +6119,7 @@ fn selected_assignment_site_rejects_conflicting_duplicate_span_addresses() {
     let memo = memo_for(source);
     let index = memo.function_program_index().value;
     let entry = entry_of(&index, "f");
-    let bound = memo.flow_bound_graph_for_tests(entry.entry());
+    let bound = crate::host_source_demand::flow_bound_graph_for_tests(&memo, entry.entry());
     let skeleton = &bound.bundle().skeleton();
     let graph = &bound.bundle().graph();
     let demand = SliceDemand::for_return_projection(skeleton, &[]);
