@@ -200,10 +200,10 @@ pub(super) async fn handle_hover(
     let _timer = server
         .statistics
         .timer("hover", Some(uri.as_str().to_string()));
-    // The whole response settles against the request admitted after the
+    // The whole response settles against the request admitted before the
     // route's current-file repair, computed once.
     server
-        .answer_foreground(
+        .answer_repaired_foreground(
             crate::documents::ForegroundRoute::Hover,
             uri,
             handle_hover_attempt(server, &params),
@@ -619,43 +619,45 @@ pub(super) async fn handle_completion(
     params: CompletionParams,
 ) -> Result<Option<CompletionResponse>> {
     let uri = params.text_document_position.text_document.uri.clone();
-    if uri.as_str().starts_with("verter-virtual://") {
-        return handle_completion_attempt(server, &params, false).await;
-    }
-
-    // Provider work can suspend while a newer document instance or edit commits.
-    // Each admission pins the document revision (open incarnation and edit
-    // generation as well as the client version, so a close/reopen that reuses
-    // the version still supersedes the suspended response), the project
-    // authority and the provider surface. An answer whose admitted inputs moved
-    // is re-admitted against the new revision, at most twice; the final
-    // native-only attempt then keeps the commit fence through native
-    // calculation, so it returns the coherent post-fence snapshot. Background
-    // work that moves no admitted input — a diagnostics-generation advance, an
-    // identical surface re-record, an equivalent root publication — settles the
-    // first answer.
-    for _ in 0..2 {
-        let request = server
-            .admit_foreground(crate::documents::ForegroundRoute::Completion, &uri)
+    // D1 (open+edit+completion race): tower-lsp runs the did_open notification and
+    // a completion request concurrently, so a completion can arrive BEFORE the
+    // document is registered. Wait for the registration event (bounded 300ms)
+    // rather than polling — the request resumes the instant the open lands, not
+    // at a poll-step boundary — and only then admit, so the admitted revision
+    // is the one the client sent the request against. Each request stays
+    // independent: an unrelated concurrent open cannot cancel a valid request
+    // into an empty response.
+    if !uri.as_str().starts_with("verter-virtual://") && server.documents.get(&uri).is_none() {
+        server
+            .documents
+            .registration
+            .wait_until(std::time::Duration::from_millis(300), || {
+                server.documents.get(&uri).is_some()
+            })
             .await;
-        let response = handle_completion_attempt(server, &params, false).await?;
-        match server.settle_foreground(&request, response).await {
-            crate::documents::Settled::Answer(response) => return Ok(response),
-            crate::documents::Settled::ContentModified => tracing::debug!(
-                "completion: re-admitting {} after its admitted inputs moved",
-                uri.as_str()
-            ),
-        }
     }
-    #[cfg(test)]
-    server.maybe_pause_completion_before_final_native().await;
-    handle_completion_attempt(server, &params, true).await
+    // Provider work can suspend while a newer document instance or edit commits.
+    // The one admission pins the document revision (open incarnation and edit
+    // generation as well as the client version, so a close/reopen that reuses
+    // the version still supersedes the suspended response) and the project
+    // authority; every provider surface and imported contract the answer is
+    // read from joins it. An answer whose admitted inputs moved answers
+    // `ContentModified`: the cursor names a position in the admitted revision
+    // and is never reinterpreted against a later one. Background work that
+    // moves no admitted input — a diagnostics-generation advance, an identical
+    // surface re-record, an equivalent root publication — settles the answer.
+    server
+        .answer_foreground(
+            crate::documents::ForegroundRoute::Completion,
+            &uri,
+            handle_completion_attempt(server, &params),
+        )
+        .await
 }
 
 async fn handle_completion_attempt(
     server: &VerterLanguageServer,
     params: &CompletionParams,
-    native_only: bool,
 ) -> Result<Option<CompletionResponse>> {
     let _hg = HandlerGuard::new("completion");
     let uri = &params.text_document_position.text_document.uri;
@@ -681,7 +683,7 @@ async fn handle_completion_attempt(
     // fence through every synchronous native snapshot read below; otherwise a
     // new edit can land between releasing the mutex and reading source/analysis.
     // The fence is released before any provider await.
-    let mut edit_fence = server.did_change_mutex.lock().await;
+    let edit_fence = server.did_change_mutex.lock().await;
     // NOTE: completion starts NO sync work here. The eager did_change carrier
     // refresh keeps the current-file surface fresh per keystroke, and the
     // import-dependency closure is background-published (capture-only readiness
@@ -748,31 +750,6 @@ async fn handle_completion_attempt(
         }
     }
 
-    // D1 (open+edit+completion race): tower-lsp runs the did_open notification and
-    // a completion request concurrently, so a completion can arrive BEFORE the
-    // document is registered. Wait for the registration event (bounded 300ms)
-    // rather than polling — the request resumes the instant the open lands, not
-    // at a poll-step boundary. Each request stays independent: an unrelated
-    // concurrent open cannot cancel a valid request into an empty response.
-    if server.documents.get(uri).is_none() {
-        drop(edit_fence);
-        server
-            .documents
-            .registration
-            .wait_until(std::time::Duration::from_millis(300), || {
-                server.documents.get(uri).is_some()
-            })
-            .await;
-        edit_fence = server.did_change_mutex.lock().await;
-    }
-
-    let final_request = native_only.then(|| {
-        crate::documents::ForegroundRequest::admit(
-            &server.documents,
-            crate::documents::ForegroundRoute::Completion,
-            uri,
-        )
-    });
     let completion_ssr_context = {
         let canonical_id = server.documents.get_canonical_id(uri);
         canonical_id
@@ -902,26 +879,12 @@ async fn handle_completion_attempt(
         })
     };
     let native_snapshot = capture_native_snapshot();
-    // Normal attempts release the typing fence before cold child/meta work and
-    // validate identity after provider awaits. The bounded final native-only
-    // attempt deliberately retains the fence through its native calculation, so
-    // it returns one coherent, current snapshot instead of panicking or failing
-    // open under sustained churn. Its only provider await is the bounded
-    // style `v-bind(|)` detail enrichment. The fence stops edits and
-    // membership changes, not background settlement; settlement that moves no
-    // admitted input does not supersede the fenced answer (see below).
-    let native_edit_fence = if native_only {
-        Some(edit_fence)
-    } else {
-        drop(edit_fence);
-        #[cfg(test)]
-        server.maybe_pause_completion_after_snapshot().await;
-        None
-    };
+    // Release the typing fence before cold child/meta work and provider
+    // awaits; an edit after this point is a revision change of the admitted
+    // request and answers `ContentModified` at settlement.
+    drop(edit_fence);
     #[cfg(test)]
-    if native_only {
-        server.maybe_pause_final_completion_after_snapshot().await;
-    }
+    server.maybe_pause_completion_after_snapshot().await;
 
     // Answers the native completion together with whether it recognized an
     // authored component whose child contract is not cached yet.
@@ -1145,22 +1108,13 @@ async fn handle_completion_attempt(
     // its own. A cold native contract cache must not turn that provider-only
     // probe into a synthetic empty response; normal product requests retain
     // the cache-only fail-closed behavior above.
-    if native_only || (recognized_authored_component_contract_miss && !provider_only) {
-        let response = verter_items.map(|items| {
+    if recognized_authored_component_contract_miss && !provider_only {
+        return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
                 is_incomplete: verter_is_incomplete,
                 items,
             })
-        });
-        // The commit fence pins the document, so only the project authority
-        // can move the final admission; background settlement that moves no
-        // admitted input leaves the fenced native answer standing.
-        let settled = match final_request.as_ref() {
-            Some(request) => request.settle(&server.documents, response).into_result(),
-            None => Ok(response),
-        };
-        drop(native_edit_fence);
-        return settled;
+        }));
     }
 
     // Compute the cursor's source context once — template attribute, template
@@ -1219,7 +1173,6 @@ async fn handle_completion_attempt(
     // not a slot name. Serve Verter's list alone rather than merging junk into
     // a closed, server-owned surface.
     if matches!(source_ctx, CompletionSourceContext::TemplateFrameworkSlot) {
-        drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
                 is_incomplete: verter_is_incomplete,
@@ -1603,9 +1556,28 @@ pub(super) async fn handle_completion_resolve(
                             return Ok(item);
                         };
 
+                        // Capture the surface the provider path serves BEFORE the
+                        // query: the provider answers against it, so its
+                        // enrichment and edits are accepted only while it is
+                        // still current, and any returned edit is translated
+                        // through it — never through a later replacement.
+                        let captured =
+                            super::nav_features_completion_resolve::capture_resolve_surface(
+                                server,
+                                provider_path,
+                            );
                         if let Ok(Some(resolve_result)) =
                             tp.resolve_completion(provider_path, resolve_data).await
                         {
+                            if let Some((carrier_uri, snapshot)) = captured.as_ref() {
+                                if !server
+                                    .provider_request_surface_still_valid(carrier_uri, snapshot)
+                                {
+                                    return Err(tower_lsp_server::jsonrpc::Error::new(
+                                        tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                                    ));
+                                }
+                            }
                             // Lazy `completionItem/resolve` enrichment: fold the
                             // provider's resolved detail (signature) and
                             // documentation onto the item when it returned them.
@@ -1666,6 +1638,7 @@ pub(super) async fn handle_completion_resolve(
                                 let resolved = resolve_provider_auto_import_edits(
                                     server,
                                     provider_path,
+                                    captured.as_ref().map(|(_, snapshot)| &**snapshot),
                                     &provider_edits,
                                 )
                                 .map_err(|reason| {

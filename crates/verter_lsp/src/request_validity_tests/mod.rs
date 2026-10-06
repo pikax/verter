@@ -57,6 +57,7 @@ const HOVER_TEXT: &str = "const msg: \"hello\"";
 const SIGNATURE_LABEL: &str = "greet(name: string): string";
 const COMPLETION_LABEL: &str = "messageFromProvider";
 const RESOLVED_DETAIL: &str = "resolved by the provider";
+const RESOLVED_IMPORT: &str = "import { messageFromProvider } from './provider'\n";
 const CODE_ACTION_TITLE: &str = "Replace the greeting";
 const INLAY_LABEL: &str = ": string";
 
@@ -295,27 +296,6 @@ impl Route {
         }
     }
 
-    /// Whether the route captures the provider surface it maps through before
-    /// it queries. Completion resolve queries by provider path alone and maps
-    /// any returned edit through the surface current when the answer arrives.
-    pub(super) fn maps_through_a_surface_captured_before_the_query(self) -> bool {
-        match self {
-            Route::CompletionResolve => false,
-            Route::Hover
-            | Route::SignatureHelp
-            | Route::Definition
-            | Route::TypeDefinition
-            | Route::References
-            | Route::DocumentHighlight
-            | Route::PrepareRename
-            | Route::Rename
-            | Route::Completion
-            | Route::CodeAction
-            | Route::InlayHint
-            | Route::SemanticTokens => true,
-        }
-    }
-
     /// Whether `call` is this route's provider query.
     fn dispatched_by(self, call: &MockCall) -> bool {
         match self {
@@ -484,11 +464,20 @@ impl Route {
                     label: COMPLETION_LABEL.to_string(),
                     data: serde_json::json!({ "exportName": COMPLETION_LABEL }),
                 };
+                // The provider's import edit is addressed in the surface the
+                // resolve queried, so the edit can only be placed through that
+                // surface's map.
+                let (import_at, _) = fixture.tsx_span(&ctx, "const msg");
                 provider.set_resolve_completion(
                     &path,
                     key,
                     Some(wire::CompletionResolveResult {
                         detail: Some(RESOLVED_DETAIL.to_string()),
+                        additional_text_edits: vec![wire::ResolvedTextEdit {
+                            start: import_at,
+                            end: import_at,
+                            new_text: RESOLVED_IMPORT.to_string(),
+                        }],
                         ..Default::default()
                     }),
                 );
@@ -688,7 +677,7 @@ impl Route {
                     .expect("completion resolve is armed with an item");
                 server.completion_resolve(item).await.map(|item| {
                     (item.detail.as_deref() == Some(RESOLVED_DETAIL))
-                        .then(|| format!("{:?}", item.detail))
+                        .then(|| format!("{:?} {:?}", item.detail, item.additional_text_edits))
                 })
             }
             Route::CodeAction => server
@@ -838,6 +827,12 @@ async fn assert_steady(route: Route) {
         answer.contains(&canonical_answer),
         "{route:?}: the provider location maps onto the authored literal: {answer}"
     );
+    if route == Route::CompletionResolve {
+        assert!(
+            answer.contains("messageFromProvider } from"),
+            "the resolve places the provider's import edit: {answer}"
+        );
+    }
     if route == Route::Rename {
         assert_eq!(
             answer,

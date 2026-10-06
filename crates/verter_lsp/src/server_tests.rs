@@ -5306,6 +5306,89 @@ async fn goto_definition_component_event_name_reaches_child_define_emits() {
     drop(service);
 }
 
+/// A definition answered natively from an imported child — no provider leg —
+/// settles through the same admission as every other definition: an edit of
+/// the requested document or a workspace replacement after admission answers
+/// `ContentModified`, never a location computed under the moved inputs.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_cross_file_definition_settles_through_its_admission() {
+    let child_source = "<script setup lang=\"ts\">\nconst emit = defineEmits<{ custom: [payload: string] }>()\n</script>\n";
+    let parent_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\nfunction handleCustom(payload: string) {}\n</script>\n<template>\n  <MyComp @custom=\"handleCustom\" />\n</template>\n";
+    for movement in ["edit", "workspace"] {
+        let (_temp, service, drain_handle, _provider, workspace_id) =
+            make_definition_test_server(&[
+                ("src/MyComp.vue", "vue", child_source),
+                ("src/App.vue", "vue", parent_source),
+            ])
+            .await;
+        let app_uri = workspace_uri(&workspace_id, "src/App.vue");
+        let child_uri = workspace_uri(&workspace_id, "src/MyComp.vue");
+        let server = service.inner();
+        let position = find_document_position(server, &app_uri, "@custom=\"handleCustom\"", 1);
+        let unmoved = definition_locations(
+            server
+                .goto_definition(goto_definition_params(&app_uri, position))
+                .await
+                .expect("an unmoved definition succeeds")
+                .expect("the child event resolves natively"),
+        );
+        assert!(
+            unmoved.iter().any(|location| location.uri == child_uri),
+            "{movement}: the unmoved definition reaches the child: {unmoved:?}"
+        );
+
+        let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let server = server.clone();
+            let moved = Arc::clone(&moved);
+            let app_uri = app_uri.clone();
+            let workspace_id = workspace_id.clone();
+            let edited = format!("{parent_source}<!-- edited -->\n");
+            let next_version = server
+                .documents
+                .get(&app_uri)
+                .expect("the carrier is open")
+                .version
+                + 1;
+            server.request_barriers().clear();
+            server.request_barriers().arm(
+                super::test_support::RequestBarrier::Capture,
+                Arc::new(move |arrival| {
+                    if arrival == 0 {
+                        if movement == "edit" {
+                            let _ = server.documents.did_change(&app_uri, next_version, &edited);
+                        } else {
+                            let tsconfig = format!("{workspace_id}/tsconfig.json");
+                            install_test_resolver_for_root(
+                                &server,
+                                &workspace_id,
+                                Some(tsconfig.as_str()),
+                            );
+                        }
+                        moved.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    Box::pin(async {})
+                }),
+            );
+        }
+        let raced = server
+            .goto_definition(goto_definition_params(&app_uri, position))
+            .await;
+        assert!(
+            moved.load(std::sync::atomic::Ordering::SeqCst),
+            "{movement}: the native definition passes through its admission"
+        );
+        assert!(
+            matches!(&raced, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+            "{movement}: a native definition whose inputs moved after admission answers \
+             ContentModified: {raced:?}"
+        );
+
+        drain_handle.abort();
+        drop(service);
+    }
+}
+
 #[tokio::test]
 async fn dotted_component_auto_import_edit_is_valid_end_to_end() {
     // DISCRIMINATING END-TO-END: drive the REAL synthesis path rather than
@@ -6986,7 +7069,8 @@ fn unrelated_edit_commit_and_completion_do_not_wait_for_blocked_provider_update(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn completion_recomputes_native_props_when_document_version_advances_during_provider_await() {
+async fn completion_answers_content_modified_when_the_document_advances_during_the_provider_query()
+{
     let old_child =
         "<script setup lang=\"ts\">\ndefineProps<{ staleV1Prop: string }>()\n</script>\n";
     let new_child =
@@ -7038,22 +7122,36 @@ async fn completion_recomputes_native_props_when_document_version_advances_durin
         query_release.notify_one();
     };
     let (completion_result, ()) = futures_util::future::join(completion, edit).await;
-    let labels = completion_labels(completion_result.expect("completion request succeeds"));
     assert!(
-        labels.contains(&"current-v2-prop".to_string()),
-        "completion must recompute against current v2 native analysis: {labels:?}"
+        matches!(&completion_result, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "an edit committed during the provider query answers ContentModified, never v1 props \n         or v2 props for the v1 cursor: {completion_result:?}"
+    );
+    let v2_cursor = v2_source.find("<NewChild ").unwrap() + "<NewChild ".len();
+    let v2_position = LineIndex::new_utf16(v2_source)
+        .offset_to_position(v2_cursor as u32)
+        .expect("completion position");
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&app_uri, v2_position, None))
+            .await
+            .expect("a completion admitted against v2 succeeds"),
     );
     assert!(
-        !labels.contains(&"stale-v1-prop".to_string()),
-        "completion must never return stale v1 native props after v2 commits: {labels:?}"
+        labels.contains(&"current-v2-prop".to_string())
+            && !labels.contains(&"stale-v1-prop".to_string()),
+        "a new request answers v2 native analysis: {labels:?}"
     );
 
     drain_handle.abort();
     drop(service);
 }
 
+/// A completion's cursor names a position in the revision it was admitted
+/// against. An edit that commits while the request computes answers
+/// `ContentModified` — the cursor is never reinterpreted against the later
+/// revision — and a new request against the edited revision answers it.
 #[tokio::test(flavor = "multi_thread")]
-async fn completion_final_native_retry_waits_for_commit_fence_and_returns_current_state() {
+async fn completion_answers_content_modified_after_an_edit_and_a_new_request_answers_the_edit() {
     let child = |prop: &str| {
         format!("<script setup lang=\"ts\">defineProps<{{ {prop}: string }}>()</script>")
     };
@@ -7064,20 +7162,14 @@ async fn completion_final_native_retry_waits_for_commit_fence_and_returns_curren
     };
     let v1 = source("V1Child");
     let v2 = source("V2Child");
-    let v3 = source("V3Child");
-    let v4 = source("V4Child");
-    let warm_source = "<script setup lang=\"ts\">\nimport V1 from './V1Child.vue'\nimport V2 from './V2Child.vue'\nimport V3 from './V3Child.vue'\nimport V4 from './V4Child.vue'\n</script>\n<template><V1 /><V2 /><V3 /><V4 /></template>\n";
+    let warm_source = "<script setup lang=\"ts\">\nimport V1 from './V1Child.vue'\nimport V2 from './V2Child.vue'\n</script>\n<template><V1 /><V2 /></template>\n";
     let v1_child = child("vOneProp");
     let v2_child = child("vTwoProp");
-    let v3_child = child("vThreeProp");
-    let v4_child = child("vFourProp");
     let (_temp, service, drain_handle, _provider, workspace_id) =
         make_definition_test_server_with_kind(
             &[
                 ("src/V1Child.vue", "vue", &v1_child),
                 ("src/V2Child.vue", "vue", &v2_child),
-                ("src/V3Child.vue", "vue", &v3_child),
-                ("src/V4Child.vue", "vue", &v4_child),
                 ("src/App.vue", "vue", &v1),
                 ("src/Warm.vue", "vue", warm_source),
             ],
@@ -7091,121 +7183,49 @@ async fn completion_final_native_retry_waits_for_commit_fence_and_returns_curren
         server,
         &warm_uri,
         &workspace_id,
-        &[
-            "src/V1Child.vue",
-            "src/V2Child.vue",
-            "src/V3Child.vue",
-            "src/V4Child.vue",
-        ],
+        &["src/V1Child.vue", "src/V2Child.vue"],
     )
     .await;
-    let (first_arrived, first_release) = server.pause_next_completion_after_snapshot();
-    let (second_arrived, second_release) = server.pause_next_completion_after_snapshot();
-    let (final_arrived, final_release) = server.pause_completion_before_final_native();
+    let (arrived, release) = server.pause_next_completion_after_snapshot();
     let cursor = v1.find("<Child ").unwrap() + "<Child ".len();
     let position = LineIndex::new_utf16(&v1)
         .offset_to_position(cursor as u32)
         .expect("completion position");
 
     let completion = server.completion(completion_params(&app_uri, position, None));
-    let advance = async {
-        first_arrived.notified().await;
+    let edit = async {
+        arrived.notified().await;
         assert!(server.documents.did_change(&app_uri, 2, &v2).changed);
         settle_child_contracts(server, &app_uri, &workspace_id, &["src/V2Child.vue"]).await;
-        first_release.notify_one();
-
-        second_arrived.notified().await;
-        assert!(server.documents.did_change(&app_uri, 3, &v3).changed);
-        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V3Child.vue"]).await;
-        second_release.notify_one();
-
-        final_arrived.notified().await;
-        let final_fence = server.did_change_mutex.lock().await;
-        final_release.notify_one();
-        tokio::task::yield_now().await;
-        assert!(server.documents.did_change(&app_uri, 4, &v4).changed);
-        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V4Child.vue"]).await;
-        drop(final_fence);
+        release.notify_one();
     };
-    let (completion_result, ()) = futures_util::future::join(completion, advance).await;
-    let labels = completion_labels(completion_result.expect("completion must not panic"));
+    let (raced, ()) = futures_util::future::join(completion, edit).await;
     assert!(
-        labels.contains(&"v-four-prop".to_string()),
-        "the final coherent native retry must answer v4: {labels:?}"
+        matches!(&raced, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "a completion whose document was edited after admission answers ContentModified: {raced:?}"
     );
-    for stale in ["v-one-prop", "v-two-prop", "v-three-prop"] {
-        assert!(
-            !labels.contains(&stale.to_string()),
-            "the final retry must exclude stale `{stale}`: {labels:?}"
-        );
-    }
+
+    let current = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("a completion admitted against the edited revision succeeds"),
+    );
+    assert!(
+        current.contains(&"v-two-prop".to_string()) && !current.contains(&"v-one-prop".to_string()),
+        "a new request answers the edited revision: {current:?}"
+    );
 
     drain_handle.abort();
     drop(service);
 }
 
-/// The final native completion holds the document commit fence, so only
-/// background settlement and the project authority can move under it. A
-/// diagnostics-generation move leaves the fenced answer standing; a workspace
-/// replacement answers `ContentModified` instead of an answer computed against
-/// the superseded workspace.
+/// A close and reopen that reuses the client version is a new document
+/// incarnation: a completion admitted before the close answers
+/// `ContentModified` rather than an answer for the reopened document, and a
+/// new request after the reopen answers the reopened document.
 #[tokio::test(flavor = "multi_thread")]
-async fn final_native_completion_survives_generation_moves_and_fails_closed_on_workspace_replacement(
-) {
-    let source =
-        "<script setup lang=\"ts\">const count = 1</script><template>{{ count }}</template>";
-    let canonical = "/workspace/App.vue";
-    for change in ["generation", "workspace"] {
-        let service = make_hover_test_service(Arc::new(MockTypeProvider::new()));
-        let server = service.inner();
-        install_test_resolver(server);
-        let uri = open_test_vue(server, canonical, source);
-        let position = LineIndex::new_utf16(source)
-            .offset_to_position(source.find("count }}").unwrap() as u32)
-            .expect("completion position");
-        let (first_arrived, first_release) = server.pause_next_completion_after_snapshot();
-        let (second_arrived, second_release) = server.pause_next_completion_after_snapshot();
-        let (final_arrived, final_release) = server.pause_final_completion_after_snapshot();
-
-        let completion = server.completion(completion_params(&uri, position, None));
-        let drive = async {
-            // Two edit races spend the provider attempts and reach the final
-            // native attempt.
-            first_arrived.notified().await;
-            server.documents.did_change(&uri, 2, source);
-            first_release.notify_one();
-            second_arrived.notified().await;
-            server.documents.did_change(&uri, 3, source);
-            second_release.notify_one();
-
-            final_arrived.notified().await;
-            if change == "workspace" {
-                install_test_resolver(server);
-            } else {
-                server
-                    .documents
-                    .host()
-                    .bump_diagnostics_generation(canonical);
-            }
-            final_release.notify_one();
-        };
-        let (response, ()) = futures_util::future::join(completion, drive).await;
-        match change {
-            "generation" => assert!(
-                completion_labels(response.expect("a generation move is no content change"))
-                    .contains(&"count".to_string()),
-                "{change}: the fenced native answer is delivered"
-            ),
-            _ => assert!(
-                matches!(&response, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
-                "{change}: {response:?}"
-            ),
-        }
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
+async fn completion_answers_content_modified_across_a_reused_version_reopen() {
     let child = |prop: &str| {
         format!("<script setup lang=\"ts\">defineProps<{{ {prop}: string }}>()</script>")
     };
@@ -7214,23 +7234,17 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
             "<script setup lang=\"ts\">\nimport Child from './{child_name}.vue'\n</script>\n<template><Child  /></template>\n"
         )
     };
-    let v1 = source("V1Child");
-    let v2 = source("V2Child");
-    let v3 = source("V3Child");
+    let before = source("BeforeChild");
     let reopened = source("ReChild");
-    let warm_source = "<script setup lang=\"ts\">\nimport V1 from './V1Child.vue'\nimport V2 from './V2Child.vue'\nimport V3 from './V3Child.vue'\nimport Re from './ReChild.vue'\n</script>\n<template><V1 /><V2 /><V3 /><Re /></template>\n";
-    let v1_child = child("vOneProp");
-    let v2_child = child("vTwoProp");
-    let v3_child = child("beforeCloseProp");
+    let warm_source = "<script setup lang=\"ts\">\nimport Before from './BeforeChild.vue'\nimport Re from './ReChild.vue'\n</script>\n<template><Before /><Re /></template>\n";
+    let before_child = child("beforeCloseProp");
     let reopened_child = child("reopenedProp");
-    let (_temp, service, drain_handle, provider, workspace_id) =
+    let (_temp, service, drain_handle, _provider, workspace_id) =
         make_definition_test_server_with_kind(
             &[
-                ("src/V1Child.vue", "vue", &v1_child),
-                ("src/V2Child.vue", "vue", &v2_child),
-                ("src/V3Child.vue", "vue", &v3_child),
+                ("src/BeforeChild.vue", "vue", &before_child),
                 ("src/ReChild.vue", "vue", &reopened_child),
-                ("src/App.vue", "vue", &v1),
+                ("src/App.vue", "vue", &before),
                 ("src/Warm.vue", "vue", warm_source),
             ],
             crate::TypeProviderKind::Tsgo,
@@ -7243,123 +7257,63 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
         server,
         &warm_uri,
         &workspace_id,
-        &[
-            "src/V1Child.vue",
-            "src/V2Child.vue",
-            "src/V3Child.vue",
-            "src/ReChild.vue",
-        ],
+        &["src/BeforeChild.vue", "src/ReChild.vue"],
     )
     .await;
-    server.ensure_current_file_synced(&app_uri).await;
-    let ide_path = server
-        .active_ide_path_for_uri(&app_uri)
-        .expect("provider path");
-    let (close_arrived, close_release) = provider.block_close_file(&ide_path);
-    let (first_arrived, first_release) = server.pause_next_completion_after_snapshot();
-    let (second_arrived, second_release) = server.pause_next_completion_after_snapshot();
-    let (final_snapshot_arrived, final_snapshot_release) =
-        server.pause_final_completion_after_snapshot();
-    let cursor = v1.find("<Child ").unwrap() + "<Child ".len();
-    let position = LineIndex::new_utf16(&v1)
+    let version = server
+        .documents
+        .get(&app_uri)
+        .expect("the carrier is open")
+        .version;
+    let (arrived, release) = server.pause_next_completion_after_snapshot();
+    let cursor = before.find("<Child ").unwrap() + "<Child ".len();
+    let position = LineIndex::new_utf16(&before)
         .offset_to_position(cursor as u32)
         .expect("completion position");
 
     let completion = server.completion(completion_params(&app_uri, position, None));
-    let replace_document = async {
-        first_arrived.notified().await;
-        assert!(server.documents.did_change(&app_uri, 2, &v2).changed);
-        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V2Child.vue"]).await;
-        first_release.notify_one();
-
-        second_arrived.notified().await;
-        assert!(server.documents.did_change(&app_uri, 3, &v3).changed);
-        settle_child_contracts(server, &app_uri, &workspace_id, &["src/V3Child.vue"]).await;
-        second_release.notify_one();
-
-        final_snapshot_arrived.notified().await;
-        let close = super::lifecycle::handle_did_close(
+    let reopen = async {
+        arrived.notified().await;
+        super::lifecycle::handle_did_close(
             server,
             DidCloseTextDocumentParams {
                 text_document: TextDocumentIdentifier {
                     uri: app_uri.clone(),
                 },
             },
-        );
-        let prove_serialized = async {
-            close_arrived.notified().await;
-            close_release.notify_one();
-            let raced_membership =
-                tokio::time::timeout(std::time::Duration::from_millis(250), async {
-                    loop {
-                        if server
-                            .documents
-                            .get(&app_uri)
-                            .is_none_or(|document| document.source.as_ref() != v3)
-                        {
-                            break;
-                        }
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await;
-            assert!(
-                raced_membership.is_err(),
-                "close membership must wait for the final native completion fence"
-            );
-            // Background settlement keeps running while the fence is held: the
-            // sync coordinator re-arms this open importer once its imported
-            // child's publication settles, advancing only the diagnostics
-            // generation. Land that move inside the fenced calculation so the
-            // final answer must survive it rather than depend on its timing.
-            server
-                .documents
-                .host()
-                .bump_diagnostics_generation(&crate::documents::uri_to_canonical_id(&app_uri));
-            final_snapshot_release.notify_one();
-        };
-        futures_util::future::join(close, prove_serialized).await;
-
+        )
+        .await;
         super::lifecycle::handle_did_open(
             server,
             DidOpenTextDocumentParams {
                 text_document: TextDocumentItem {
                     uri: app_uri.clone(),
                     language_id: "vue".to_string(),
-                    version: 3,
+                    version,
                     text: reopened.clone(),
                 },
             },
         )
         .await;
         settle_child_contracts(server, &app_uri, &workspace_id, &["src/ReChild.vue"]).await;
+        release.notify_one();
     };
-    let (completion_result, ()) = futures_util::future::join(completion, replace_document).await;
-    let before_close_labels =
-        completion_labels(completion_result.expect("coherent final completion succeeds"));
+    let (raced, ()) = futures_util::future::join(completion, reopen).await;
     assert!(
-        before_close_labels.contains(&"before-close-prop".to_string()),
-        "the fenced response must match the still-current pre-close identity: {before_close_labels:?}"
-    );
-    assert!(
-        !before_close_labels.contains(&"v-one-prop".to_string())
-            && !before_close_labels.contains(&"v-two-prop".to_string()),
-        "the final retry must not regress to an earlier invalidated identity: {before_close_labels:?}"
+        matches!(&raced, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "a completion admitted before a reused-version reopen answers ContentModified: {raced:?}"
     );
 
-    let current_labels = completion_labels(
+    let current = completion_labels(
         server
             .completion(completion_params(&app_uri, position, None))
             .await
-            .expect("reopened completion succeeds"),
+            .expect("a completion admitted against the reopened document succeeds"),
     );
     assert!(
-        current_labels.contains(&"reopened-prop".to_string()),
-        "completion after reused-version reopen must answer current props: {current_labels:?}"
-    );
-    assert!(
-        !current_labels.contains(&"before-close-prop".to_string()),
-        "completion after reopen must exclude the retired document identity: {current_labels:?}"
+        current.contains(&"reopened-prop".to_string())
+            && !current.contains(&"before-close-prop".to_string()),
+        "a new request after the reopen answers the reopened document: {current:?}"
     );
 
     drain_handle.abort();
@@ -7367,7 +7321,8 @@ async fn final_native_completion_serializes_same_uri_close_reopen_membership() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn completion_retries_when_same_uri_reopens_with_reused_document_version() {
+async fn completion_answers_content_modified_when_a_reused_version_reopen_lands_during_the_provider_query(
+) {
     let old_child = "<script setup lang=\"ts\">defineProps<{ oldOpenProp: string }>()</script>";
     let new_child = "<script setup lang=\"ts\">defineProps<{ newOpenProp: string }>()</script>";
     let old_source = "<script setup lang=\"ts\">\nimport Child from './OldChild.vue'\n</script>\n<template><Child  /></template>\n";
@@ -7418,14 +7373,20 @@ async fn completion_retries_when_same_uri_reopens_with_reused_document_version()
         query_release.notify_one();
     };
     let (completion_result, ()) = futures_util::future::join(completion, reopen).await;
-    let labels = completion_labels(completion_result.expect("completion succeeds"));
     assert!(
-        labels.contains(&"new-open-prop".to_string()),
-        "reused v1 must answer the reopened document identity: {labels:?}"
+        matches!(&completion_result, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "a reused-version reopen during the provider query answers ContentModified, never the \n         reopened document's props for the closed document's cursor: {completion_result:?}"
+    );
+    let labels = completion_labels(
+        server
+            .completion(completion_params(&app_uri, position, None))
+            .await
+            .expect("a completion admitted against the reopened document succeeds"),
     );
     assert!(
-        !labels.contains(&"old-open-prop".to_string()),
-        "reused v1 must not validate the closed document identity: {labels:?}"
+        labels.contains(&"new-open-prop".to_string())
+            && !labels.contains(&"old-open-prop".to_string()),
+        "a new request answers the reopened document identity: {labels:?}"
     );
 
     drain_handle.abort();
@@ -12766,6 +12727,80 @@ async fn goto_type_definition_delegates_to_provider() {
 
     drain_handle.abort();
     drop(service);
+}
+
+/// A hover answered from an imported child's contract carries that child's
+/// source revision as dependency evidence: when the child is edited before the
+/// answer settles — the requested document unchanged — the answer built from
+/// the superseded contract answers `ContentModified`, and a new request answers
+/// from the edited child.
+#[tokio::test(flavor = "multi_thread")]
+async fn child_contract_hover_rejects_an_answer_whose_child_moved_before_settlement() {
+    let provider = Arc::new(MockTypeProvider::new());
+    let type_provider: Arc<dyn TypeProvider> = provider.clone();
+    let service = make_hover_test_service(type_provider);
+    let server = service.inner();
+    install_test_resolver(server);
+
+    let child_source = "<script setup lang=\"ts\">\ndefineProps<{ beforeProp: string }>()\n</script>\n<template><div /></template>\n";
+    let edited_child = "<script setup lang=\"ts\">\ndefineProps<{ afterProp: string }>()\n</script>\n<template><div /></template>\n";
+    let app_source = "<script setup lang=\"ts\">\nimport MyComp from './MyComp.vue'\n</script>\n\n<template>\n  <MyComp before-prop=\"literal\" />\n</template>\n";
+    let child_uri = open_test_vue(server, "/workspace/src/MyComp.vue", child_source);
+    let app_uri = open_test_vue(server, "/workspace/src/App.vue", app_source);
+    let position = Position {
+        line: 5,
+        character: 3,
+    };
+    let unmoved = hover_text(
+        server
+            .hover(hover_params(&app_uri, position))
+            .await
+            .expect("an unmoved hover succeeds"),
+    );
+    assert!(
+        unmoved.contains("beforeProp"),
+        "the child contract answers the hover: {unmoved}"
+    );
+
+    let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let server = server.clone();
+        let moved = Arc::clone(&moved);
+        server.request_barriers().clear();
+        server.request_barriers().arm(
+            super::test_support::RequestBarrier::Settlement,
+            Arc::new(move |arrival| {
+                if arrival == 0 {
+                    assert!(
+                        server
+                            .documents
+                            .did_change(&child_uri, 2, edited_child)
+                            .changed
+                    );
+                    moved.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Box::pin(async {})
+            }),
+        );
+    }
+    let raced = server.hover(hover_params(&app_uri, position)).await;
+    assert!(moved.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(
+        matches!(&raced, Err(error) if error.code == tower_lsp_server::jsonrpc::ErrorCode::ContentModified),
+        "a hover read from a child edited before settlement answers ContentModified: {raced:?}"
+    );
+
+    server.request_barriers().clear();
+    let current = hover_text(
+        server
+            .hover(hover_params(&app_uri, position))
+            .await
+            .expect("a new hover succeeds"),
+    );
+    assert!(
+        current.contains("afterProp") && !current.contains("beforeProp"),
+        "a new request answers from the edited child: {current}"
+    );
 }
 
 #[tokio::test]
@@ -24304,6 +24339,12 @@ async fn self_file_auto_import_resolve_fails_closed_with_no_edits() {
     let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
         server,
         "/workspace/store.svelte.ts",
+        super::nav_features_completion_resolve::capture_resolve_surface(
+            server,
+            "/workspace/store.svelte.ts",
+        )
+        .as_ref()
+        .map(|(_, snapshot)| &**snapshot),
         &provider_edits,
     );
     assert_eq!(
@@ -24423,6 +24464,9 @@ async fn missing_ide_context_for_real_carrier_fails_resolve_not_drops_edits() {
     let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
         server,
         tsx_path,
+        super::nav_features_completion_resolve::capture_resolve_surface(server, tsx_path)
+            .as_ref()
+            .map(|(_, snapshot)| &**snapshot),
         &provider_edits,
     );
     assert!(
@@ -24521,6 +24565,9 @@ async fn non_vue_carrier_auto_import_resolve_fails_closed_no_script_setup_synthe
     let resolved = super::nav_features_completion_resolve::resolve_provider_auto_import_edits(
         server,
         tsx_path,
+        super::nav_features_completion_resolve::capture_resolve_surface(server, tsx_path)
+            .as_ref()
+            .map(|(_, snapshot)| &**snapshot),
         &provider_edits,
     );
     // Negative assertion FIRST, so it stays load-bearing: whatever the resolve

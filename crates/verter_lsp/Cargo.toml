@@ -23,6 +23,8 @@ hotpath = ["verter_session/hotpath", "verter_diagnostics/hotpath"]
 # dependent enables it, but an explicit opt-in (`--all-features`, or a future
 # dependent declaring `features = ["test-support"]`) does compile it.
 test-support = []
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md).
+semantic-observe = ["verter_session/semantic-observe"]
 
 [dependencies]
 verter_resolution = { workspace = true }

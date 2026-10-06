@@ -590,10 +590,6 @@ pub struct ServerCore {
     #[cfg(test)]
     completion_snapshot_pauses:
         parking_lot::Mutex<std::collections::VecDeque<CompletionSnapshotPause>>,
-    #[cfg(test)]
-    completion_before_final_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
-    #[cfg(test)]
-    completion_final_snapshot_pause: parking_lot::Mutex<Option<CompletionSnapshotPause>>,
     /// Named points inside a foreground request at which a test moves state.
     #[cfg(test)]
     request_barriers: Arc<test_support::RequestBarriers>,
@@ -693,12 +689,12 @@ impl VerterLanguageServer {
     }
 
     /// Admit one foreground request: capture its document revision and
-    /// project authority, once.
+    /// project authority, once, before any of its computation reads them.
     pub(super) async fn admit_foreground(
         &self,
         route: crate::documents::ForegroundRoute,
         uri: &Uri,
-    ) -> crate::documents::ForegroundRequest {
+    ) -> Arc<crate::documents::ForegroundRequest> {
         let request = crate::documents::ForegroundRequest::admit(&self.documents, route, uri);
         #[cfg(test)]
         self.request_barriers
@@ -724,22 +720,50 @@ impl VerterLanguageServer {
     /// against that admission, and settle it. Background work that moves no
     /// admitted input — a diagnostics-generation advance, an identical surface
     /// re-record, an equivalent root publication — neither recomputes the
-    /// answer nor costs it; an edit, close/reopen or project-authority
-    /// replacement answers `ContentModified`.
-    pub(super) async fn answer_foreground<T, F>(
-        &self,
+    /// answer nor costs it; an edit, close/reopen, project-authority
+    /// replacement or a change to a provider surface the answer was decoded
+    /// through answers `ContentModified`.
+    pub(super) fn answer_foreground<'a, T, F>(
+        &'a self,
         route: crate::documents::ForegroundRoute,
-        uri: &Uri,
+        uri: &'a Uri,
         compute: F,
-    ) -> Result<Option<T>>
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
     where
-        F: std::future::Future<Output = Result<Option<T>>>,
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
     {
-        let request = self.admit_foreground(route, uri).await;
-        let response = compute.await?;
-        self.settle_foreground(&request, response)
-            .await
-            .into_result()
+        // Route computations are large state machines: move each to the heap
+        // once, at entry, so no enclosing future or poll frame holds it inline.
+        let compute = Box::pin(compute);
+        async move {
+            let request = self.admit_foreground(route, uri).await;
+            let response = request.compute(compute).await?;
+            self.settle_foreground(&request, response)
+                .await
+                .into_result()
+        }
+    }
+
+    /// [`Self::answer_foreground`] for request-answering routes that repair the
+    /// current file's provider surface first. The repair runs inside the
+    /// admitted request, so an edit that commits while it runs is a revision
+    /// change of that request, never the revision the request answers.
+    pub(super) fn answer_repaired_foreground<'a, T, F>(
+        &'a self,
+        route: crate::documents::ForegroundRoute,
+        uri: &'a Uri,
+        compute: F,
+    ) -> impl std::future::Future<Output = Result<Option<T>>> + 'a
+    where
+        F: std::future::Future<Output = Result<Option<T>>> + 'a,
+        T: 'a,
+    {
+        let compute = Box::pin(compute);
+        self.answer_foreground(route, uri, async move {
+            self.prepare_foreground(uri).await?;
+            compute.await
+        })
     }
 
     /// Select this request's production deadline from the configured budget
@@ -778,50 +802,6 @@ impl VerterLanguageServer {
     #[cfg(test)]
     async fn maybe_pause_completion_after_snapshot(&self) {
         let pause = self.completion_snapshot_pauses.lock().pop_front();
-        if let Some(pause) = pause {
-            pause.arrived.notify_one();
-            pause.release.notified().await;
-        }
-    }
-
-    #[cfg(test)]
-    fn pause_completion_before_final_native(
-        &self,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let arrived = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        *self.completion_before_final_pause.lock() = Some(CompletionSnapshotPause {
-            arrived: Arc::clone(&arrived),
-            release: Arc::clone(&release),
-        });
-        (arrived, release)
-    }
-
-    #[cfg(test)]
-    async fn maybe_pause_completion_before_final_native(&self) {
-        let pause = self.completion_before_final_pause.lock().take();
-        if let Some(pause) = pause {
-            pause.arrived.notify_one();
-            pause.release.notified().await;
-        }
-    }
-
-    #[cfg(test)]
-    fn pause_final_completion_after_snapshot(
-        &self,
-    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-        let arrived = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        *self.completion_final_snapshot_pause.lock() = Some(CompletionSnapshotPause {
-            arrived: Arc::clone(&arrived),
-            release: Arc::clone(&release),
-        });
-        (arrived, release)
-    }
-
-    #[cfg(test)]
-    async fn maybe_pause_final_completion_after_snapshot(&self) {
-        let pause = self.completion_final_snapshot_pause.lock().take();
         if let Some(pause) = pause {
             pause.arrived.notify_one();
             pause.release.notified().await;
@@ -1235,10 +1215,6 @@ impl VerterLanguageServer {
             #[cfg(test)]
             completion_snapshot_pauses: parking_lot::Mutex::new(std::collections::VecDeque::new()),
             #[cfg(test)]
-            completion_before_final_pause: parking_lot::Mutex::new(None),
-            #[cfg(test)]
-            completion_final_snapshot_pause: parking_lot::Mutex::new(None),
-            #[cfg(test)]
             request_barriers: Arc::default(),
             workspace_scanner: Arc::new(tokio::sync::Mutex::new(None)),
             init_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1603,7 +1579,12 @@ impl LanguageServer for VerterLanguageServer {
                 return Err(content_modified());
             }
             // A resolve always answers an item, so it always settles a `Some`.
-            let resolved = nav_features::handle_completion_resolve(self, item.clone()).await?;
+            let resolved = request
+                .compute(Box::pin(nav_features::handle_completion_resolve(
+                    self,
+                    item.clone(),
+                )))
+                .await?;
             let resolved = self
                 .settle_foreground(&request, Some(resolved))
                 .await
@@ -1632,8 +1613,7 @@ impl LanguageServer for VerterLanguageServer {
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             async {
-                self.prepare_foreground(&uri).await?;
-                self.answer_foreground(
+                self.answer_repaired_foreground(
                     crate::documents::ForegroundRoute::TypeDefinition,
                     &uri,
                     nav_features_navigation::handle_goto_type_definition(self, params),
@@ -1656,8 +1636,7 @@ impl LanguageServer for VerterLanguageServer {
         crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             async {
-                self.prepare_foreground(&uri).await?;
-                self.answer_foreground(
+                self.answer_repaired_foreground(
                     crate::documents::ForegroundRoute::PrepareRename,
                     &uri,
                     rename_prepare::handle_prepare_rename(self, params),
@@ -1708,8 +1687,7 @@ impl LanguageServer for VerterLanguageServer {
             .uri
             .clone();
         crate::audit_harness::run_with_deadline(self.request_deadline(|b| b.code_action), async {
-            self.prepare_foreground(&uri).await?;
-            self.answer_foreground(
+            self.answer_repaired_foreground(
                 crate::documents::ForegroundRoute::SignatureHelp,
                 &uri,
                 aux_features::handle_signature_help(self, params),

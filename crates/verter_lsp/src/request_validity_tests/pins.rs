@@ -112,3 +112,105 @@ async fn cancellation_before_provider_dispatch_releases_request_pins() {
 async fn cancellation_after_the_provider_holds_the_query_releases_request_pins() {
     assert_cancellation_releases_pins(Route::Rename, RequestBarrier::ProviderDispatch).await;
 }
+
+/// A request whose current-file repair has handed its provider write to the
+/// engine is cancelled before the engine acknowledges the write. The request's
+/// pins are released at once; the write is not abandoned with the request but
+/// settles when the engine acknowledges it, so the next repair finds it applied
+/// instead of writing again; and a later request neither waits on the cancelled
+/// one nor answers from an unknown provider state.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancellation_after_an_engine_write_releases_pins_and_the_write_still_settles() {
+    use crate::type_provider::mock::MockCall;
+    use crate::type_provider::traits::TypeProvider;
+    use verter_type_runtime::traits::AppliedContent;
+
+    let route = Route::Hover;
+    let reference = reference_answer(route).await;
+    let fixture = Fixture::new().await;
+    let armed = route.arm(&fixture).await;
+    let handles = Handles::of(&fixture);
+    let server = fixture.server();
+    let ide_path = server
+        .active_ide_path_for_uri(&fixture.uri)
+        .expect("the carrier has a provider path");
+    let writes_of = |content: &str| {
+        fixture
+            .provider
+            .calls()
+            .iter()
+            .filter(|call| {
+                matches!(call, MockCall::UpdateFile { path, content: written }
+                    if *path == ide_path && written.contains(content))
+            })
+            .count()
+    };
+
+    // A client edit the provider has not received: the next request's repair
+    // writes it.
+    handles.edit(2, &super::movement::edited_app());
+    fixture.provider.clear_calls();
+    fixture.barriers.clear();
+    let before = pin_counts(&handles);
+    let (write_reached_engine, acknowledge_write) = fixture.provider.block_update_file(&ide_path);
+
+    let during = {
+        let ask = route.ask(&fixture, &armed);
+        tokio::pin!(ask);
+        tokio::select! {
+            outcome = &mut ask => panic!("the request must suspend on its engine write, got {outcome:?}"),
+            () = write_reached_engine.notified() => {}
+        }
+        pin_counts(&handles)
+    };
+    assert!(
+        during.1 > before.1 && during.2 > before.2,
+        "the request suspended on its engine write pins its admitted inputs \
+         (before {before:?}, during {during:?})"
+    );
+    // The in-flight write holds its own capture until it settles; the request's
+    // admission pin is released with the request.
+    let cancelled = pin_counts(&handles);
+    assert!(
+        cancelled.2 < during.2,
+        "cancellation releases the request's published-root pin while the write is in flight \
+         (during {during:?}, after cancellation {cancelled:?})"
+    );
+
+    // The engine acknowledges the write the cancelled request issued; its
+    // settlement completes without the request, so the next repair finds the
+    // edit applied and writes nothing.
+    acknowledge_write.notify_one();
+    server.ensure_current_file_synced(&fixture.uri).await;
+    assert!(
+        matches!(
+            fixture.provider.applied_content(&ide_path),
+            AppliedContent::Applied(applied) if applied.contains("hello there")
+        ),
+        "the cancelled request's write settled as applied"
+    );
+    assert_eq!(
+        writes_of("hello there"),
+        1,
+        "the cancelled request's write was settled, not abandoned and written again"
+    );
+    // The settled write records a surface over the edited source, which the
+    // store now retains; the published root, which only requests and their
+    // in-flight writes hold, is back to its unpinned count.
+    assert_eq!(
+        pin_counts(&handles).2,
+        before.2,
+        "nothing the cancelled request or its write held outlives the write's settlement"
+    );
+
+    // A later request neither waits on the cancelled one nor answers from an
+    // unknown provider state: restoring the original text answers the unmoved
+    // reference through one dispatch.
+    handles.edit(3, super::APP);
+    fixture.provider.clear_calls();
+    assert_eq!(
+        route.ask(&fixture, &armed).await,
+        Outcome::Answered(reference)
+    );
+    assert_eq!(fixture.dispatches(route), 1);
+}

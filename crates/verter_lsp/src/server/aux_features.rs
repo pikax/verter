@@ -361,7 +361,7 @@ pub(super) async fn handle_code_action(
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
     server
-        .answer_foreground(
+        .answer_repaired_foreground(
             crate::documents::ForegroundRoute::CodeAction,
             &params.text_document.uri,
             handle_code_action_attempt(server, &params),
@@ -772,10 +772,7 @@ pub(super) async fn handle_code_action_with_audit(
         verter_audit::payloads::tags::LspMethodTag::CodeAction,
         target_identity,
         None,
-        async move {
-            server.prepare_foreground(&uri).await?;
-            handle_code_action(server, params).await
-        },
+        async move { handle_code_action(server, params).await },
         |payload, value| {
             let count = value.as_ref().map(Vec::len).unwrap_or(0);
             payload.response_size_bytes =

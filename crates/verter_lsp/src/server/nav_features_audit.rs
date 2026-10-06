@@ -68,10 +68,7 @@ pub(super) async fn handle_hover_with_audit(
             verter_audit::payloads::tags::LspMethodTag::Hover,
             target_identity,
             Some(position),
-            async move {
-                server.prepare_foreground(&uri).await?;
-                handle_hover(server, params).await
-            },
+            async move { handle_hover(server, params).await },
             |payload, value| {
                 payload.response_size_bytes = hover_response_size(value.as_ref());
             },
@@ -202,9 +199,8 @@ pub(super) async fn handle_references_with_audit(
             target_identity,
             Some(position),
             async move {
-                server.prepare_foreground(&uri).await?;
                 server
-                    .answer_foreground(
+                    .answer_repaired_foreground(
                         crate::documents::ForegroundRoute::References,
                         &uri,
                         handle_references(server, params),
@@ -247,9 +243,8 @@ pub(super) async fn handle_rename_with_audit(
             target_identity,
             Some(position),
             async move {
-                server.prepare_foreground(&uri).await?;
                 server
-                    .answer_foreground(
+                    .answer_repaired_foreground(
                         crate::documents::ForegroundRoute::Rename,
                         &uri,
                         handle_rename(server, params),

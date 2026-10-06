@@ -170,25 +170,22 @@ impl Control {
             }
             (Control::ProviderRestart, Outcome::Empty) => !route.recovers_a_lost_delivery(),
             (Control::ProviderRestart, _) => false,
-            // The surface ends byte- and map-identical to where it began, so the
-            // unmoved answer is coherent whenever it arrives.
+            // The surface ends byte- and map-identical to where it began, but it
+            // was a different surface in between: only a request that captured
+            // its surface after the round trip — moved at admission, before any
+            // surface is captured — may answer. Moved while the provider held
+            // the query, after the decode or at settlement, the bracket the
+            // request keeps until settlement refuses the answer.
             (Control::ProviderSurfaceAbaDuringRequest, Outcome::Answered(answer)) => {
-                unmoved(answer)
+                unmoved(answer) && barrier == RequestBarrier::Capture
             }
-            // The map changed while the provider held the query: an answer
-            // mapped through the map captured before the query may not survive;
-            // one re-asked after the change may. Before the surface lookup, once
-            // the reply was already mapped, or on a route that maps through the
-            // surface current when the answer arrives, the answer went through
-            // the map that was current.
+            // The map changed: an answer decoded through the map captured before
+            // the change may not survive, whether the change landed while the
+            // provider held the query, after the decode or at settlement. Only an
+            // answer re-asked after the change, or captured after a change at
+            // admission, went through the map that is current.
             (Control::MapOnlyChange, Outcome::Answered(answer)) => {
-                unmoved(answer)
-                    && (fresh
-                        || !route.maps_through_a_surface_captured_before_the_query()
-                        || matches!(
-                            barrier,
-                            RequestBarrier::Capture | RequestBarrier::Settlement
-                        ))
+                unmoved(answer) && (fresh || barrier == RequestBarrier::Capture)
             }
             // The document or its workspace changed: only an answer computed
             // entirely after the change describes the current revision, and when

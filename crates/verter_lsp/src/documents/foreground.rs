@@ -5,10 +5,12 @@
 //! Three questions are kept apart:
 //! - coherence: the answer was computed against one admitted revision of the
 //!   requested document and one project authority, and every provider answer
-//!   inside it was mapped through a provider surface whose content epoch,
-//!   incarnation and owner held from its capture to the answer's decode (the
-//!   provider-surface bracket each route closes before it maps a provider
-//!   answer; a failed bracket drops that provider contribution);
+//!   inside it was decoded through a provider surface whose content epoch,
+//!   incarnation and owner epoch held from its capture to the answer's decode
+//!   (a failed decode bracket drops that provider contribution) and still hold
+//!   at settlement (the request keeps every surface it decoded through), and
+//!   every imported source a native contribution was read from is still at
+//!   the host revision it was read at;
 //! - applicability: the admitted revision and authority still describe what
 //!   the client holds when the answer is delivered — the disposition below;
 //! - publication freshness: whether background diagnostics are current. That
@@ -16,11 +18,14 @@
 //!   foreground one, so a diagnostics-generation move cannot cost a request its
 //!   answer.
 
+use std::future::Future;
 use std::sync::Arc;
 
 use tower_lsp_server::ls_types::Uri;
 
 use super::{DocumentRegistry, DocumentSnapshotIdentity};
+use crate::provider_surface_store::ProviderSurfaceSnapshot;
+use verter_session::carrier_publication_store::HostSourceRevisionToken;
 
 /// Every foreground LSP route whose answer is settled against a request
 /// snapshot.
@@ -42,6 +47,7 @@ pub(crate) enum ForegroundRoute {
 }
 
 /// The contract a route's answer carries to the client.
+#[cfg(feature = "semantic-observe")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ResponseClass {
     /// Describes the admitted revision (hover, signature help, inlay hints,
@@ -56,6 +62,7 @@ pub(crate) enum ResponseClass {
     Edit,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl ForegroundRoute {
     pub(crate) const fn class(self) -> ResponseClass {
         match self {
@@ -81,6 +88,12 @@ enum Superseded {
     Revision,
     /// The project authority the document was answered under was replaced.
     Authority,
+    /// A provider surface an answer was decoded through changed content, map,
+    /// incarnation or owner — possibly changing back — before settlement.
+    ProviderSurface,
+    /// An imported source a native contribution was read from was re-registered
+    /// before settlement.
+    Dependency,
 }
 
 /// How a computed answer settles.
@@ -102,10 +115,20 @@ impl<T> Settled<T> {
     }
 }
 
+tokio::task_local! {
+    /// The foreground request the current task computes an answer for. Set
+    /// only while [`ForegroundRequest::compute`] polls the request's
+    /// computation, so a surface decoded anywhere on that computation's path
+    /// joins the request's settlement bracket, and work outside a foreground
+    /// request (diagnostics publication, background sync) records nothing.
+    static ACTIVE_REQUEST: Arc<ForegroundRequest>;
+}
+
 /// One foreground request's admitted inputs. Every field is an `Arc` or a
 /// copy, so a warm admission allocates nothing beyond the URI clone, and the
 /// pins are released when the request ends, however it ends.
 pub(crate) struct ForegroundRequest {
+    #[cfg(feature = "semantic-observe")]
     route: ForegroundRoute,
     uri: Uri,
     /// Open incarnation, edit generation, client version and source bytes of
@@ -113,17 +136,38 @@ pub(crate) struct ForegroundRequest {
     document: Option<DocumentSnapshotIdentity>,
     /// The published workspace root the request was answered under.
     authority: Option<Arc<verter_workspace::PublishedRoot>>,
+    /// Every provider surface a provider answer of this request was decoded
+    /// through, in decode order. Each stays bracketed until settlement, so two
+    /// contributions decoded through different epochs of one surface cannot
+    /// both settle, and a surface that moves after its decode supersedes the
+    /// answer built from it.
+    decoded_surfaces: parking_lot::Mutex<Vec<Arc<ProviderSurfaceSnapshot>>>,
+    /// The host source revision of every imported source a native
+    /// contribution of this request was read from — the explicit dependency
+    /// evidence that ties native child-contract enrichment to one basis with the
+    /// provider answer it is delivered beside. Two reads of one source at
+    /// different revisions cannot both settle.
+    dependencies: parking_lot::Mutex<Vec<(Box<str>, HostSourceRevisionToken)>>,
 }
 
 impl ForegroundRequest {
     /// Admit a request for `uri` on `route`.
-    pub(crate) fn admit(documents: &DocumentRegistry, route: ForegroundRoute, uri: &Uri) -> Self {
-        Self {
+    pub(crate) fn admit(
+        documents: &DocumentRegistry,
+        route: ForegroundRoute,
+        uri: &Uri,
+    ) -> Arc<Self> {
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = route;
+        Arc::new(Self {
+            #[cfg(feature = "semantic-observe")]
             route,
             uri: uri.clone(),
             document: documents.snapshot_identity(uri),
             authority: documents.host().workspace_read().published_root(),
-        }
+            decoded_surfaces: parking_lot::Mutex::new(Vec::new()),
+            dependencies: parking_lot::Mutex::new(Vec::new()),
+        })
     }
 
     /// Whether the requested document was open at admission.
@@ -131,21 +175,57 @@ impl ForegroundRequest {
         self.document.is_some()
     }
 
-    /// The single disposition of a computed answer. An empty answer claims
-    /// nothing and is delivered as is. Otherwise the answer is delivered
-    /// exactly when the requested revision and its project authority are still
-    /// the admitted ones; the diagnostics generation is never consulted.
+    /// Poll `computation` as this request's computation: every provider
+    /// surface it decodes an answer through joins this request's settlement
+    /// bracket.
+    pub(crate) fn compute<F: Future>(
+        self: &Arc<Self>,
+        computation: F,
+    ) -> impl Future<Output = F::Output> {
+        ACTIVE_REQUEST.scope(Arc::clone(self), computation)
+    }
+
+    /// Record that the current task's foreground request decoded a provider
+    /// answer through `snapshot`, after that decode's own bracket held. A no-op
+    /// outside a foreground request.
+    pub(crate) fn bracket_decoded_surface(snapshot: &Arc<ProviderSurfaceSnapshot>) {
+        let _ = ACTIVE_REQUEST.try_with(|request| {
+            let mut surfaces = request.decoded_surfaces.lock();
+            if !surfaces.iter().any(|known| Arc::ptr_eq(known, snapshot)) {
+                surfaces.push(Arc::clone(snapshot));
+            }
+        });
+    }
+
+    /// Record that the current task's foreground request read a native
+    /// contribution from the imported source `canonical_id` at host revision
+    /// `revision`. A no-op outside a foreground request.
+    pub(crate) fn bracket_dependency(canonical_id: &str, revision: HostSourceRevisionToken) {
+        let _ = ACTIVE_REQUEST.try_with(|request| {
+            let mut dependencies = request.dependencies.lock();
+            if !dependencies
+                .iter()
+                .any(|(known, at)| **known == *canonical_id && *at == revision)
+            {
+                dependencies.push((Box::from(canonical_id), revision));
+            }
+        });
+    }
+
+    /// The single disposition of a computed answer. The answer — an empty one
+    /// included — is delivered exactly when the requested revision, its project
+    /// authority, every provider surface an answer was decoded through and every
+    /// imported source a native contribution was read from are still the
+    /// admitted ones; the diagnostics generation is never consulted.
     pub(crate) fn settle<T>(
         &self,
         documents: &DocumentRegistry,
         response: Option<T>,
     ) -> Settled<T> {
-        let Some(response) = response else {
-            return Settled::Answer(None);
-        };
         match self.superseded(documents) {
-            None => Settled::Answer(Some(response)),
+            None => Settled::Answer(response),
             Some(superseded) => {
+                #[cfg(feature = "semantic-observe")]
                 tracing::debug!(
                     uri = self.uri.as_str(),
                     route = ?self.route,
@@ -153,6 +233,8 @@ impl ForegroundRequest {
                     ?superseded,
                     "foreground answer superseded"
                 );
+                #[cfg(not(feature = "semantic-observe"))]
+                let _ = superseded;
                 Settled::ContentModified
             }
         }
@@ -170,15 +252,41 @@ impl ForegroundRequest {
             self.authority.as_ref(),
             documents.host().workspace_read().published_root().as_ref(),
         );
-        (!authority_is_current).then_some(Superseded::Authority)
+        if !authority_is_current {
+            return Some(Superseded::Authority);
+        }
+        let surfaces = documents.provider_surfaces();
+        let surfaces_are_current = self
+            .decoded_surfaces
+            .lock()
+            .iter()
+            .all(|surface| surfaces.captured_surface_is_current(surface));
+        if !surfaces_are_current {
+            return Some(Superseded::ProviderSurface);
+        }
+        let host = documents.host();
+        let dependencies_are_current =
+            self.dependencies
+                .lock()
+                .iter()
+                .all(|(canonical_id, revision)| {
+                    host.registered_source_revision_token(canonical_id) == Some(*revision)
+                });
+        (!dependencies_are_current).then_some(Superseded::Dependency)
     }
 }
 
-/// Whether `current` is the admitted project authority or an equivalent
-/// republication of it: the same workspace snapshot with the same ownership
-/// readiness and project environment tables. Only the consumer extension — the
-/// LSP views derived from that snapshot — may differ. A replaced snapshot is a
-/// different authority even when it repeats the scalar generation.
+/// Whether `current` is the admitted project authority or a republication of
+/// the same workspace snapshot `Arc` with the same ownership readiness and
+/// project environment tables, differing only in the consumer extension (the
+/// LSP views derived from that snapshot).
+///
+/// Snapshot identity, not snapshot content, is the authority: a publication
+/// that mints a new `WorkspaceSnapshot` — which is what every project-graph,
+/// resolver and background-initialisation publication does — replaces the
+/// authority even when its content and scalar generation repeat the admitted
+/// one, because nothing proves a rebuilt snapshot resolves the same way. Such
+/// a publication answers `ContentModified` conservatively.
 fn authority_is_equivalent(
     admitted: Option<&Arc<verter_workspace::PublishedRoot>>,
     current: Option<&Arc<verter_workspace::PublishedRoot>>,

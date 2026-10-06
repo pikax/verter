@@ -1499,19 +1499,25 @@ impl VerterLanguageServer {
     /// virtual document still byte-matches the captured provider content.
     /// `false` ⇒ the provider response was produced against a surface that no
     /// longer matches the virtual tab — the branch must DROP the provider
-    /// contribution (fail closed).
+    /// contribution (fail closed). `true` keeps the surface bracketed until the
+    /// enclosing foreground request settles.
     pub(super) fn virtual_request_surface_still_valid(
         &self,
         uri: &Uri,
         ctx: &VirtualFileContext,
     ) -> bool {
-        self.documents
+        let valid = self
+            .documents
             .provider_surfaces()
             .captured_surface_is_current(&ctx.snapshot)
             && self
                 .documents
                 .get(uri)
-                .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content)
+                .is_some_and(|doc| *doc.source == *ctx.snapshot.provider_content);
+        if valid {
+            crate::documents::ForegroundRequest::bracket_decoded_surface(&ctx.snapshot);
+        }
+        valid
     }
 }
 

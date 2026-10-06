@@ -206,6 +206,16 @@ impl VerterLanguageServer {
             .get_analysis(child_canonical_id)
             .or_else(|| self.ensure_component_ready(child_canonical_id))?;
         let child_source = self.documents.host().get_source(child_canonical_id)?;
+        if let Some(child_revision) = self
+            .documents
+            .host()
+            .registered_source_revision_token(child_canonical_id)
+        {
+            crate::documents::ForegroundRequest::bracket_dependency(
+                child_canonical_id,
+                child_revision,
+            );
+        }
         let child_line_index = LineIndex::new(&child_source, self.documents.encoding());
         let child_uri = crate::uri::path_to_file_uri(child_canonical_id)?;
 
@@ -1105,10 +1115,14 @@ impl VerterLanguageServer {
             .get_analysis(&child_canonical_id)
             .or_else(|| self.ensure_component_ready(&child_canonical_id))?;
 
-        let (child_structure, _) = self
+        let (child_structure, child_revision) = self
             .documents
             .host()
             .registered_file_structure_snapshot(&child_canonical_id)?;
+        crate::documents::ForegroundRequest::bracket_dependency(
+            &child_canonical_id,
+            child_revision,
+        );
         let child_source = std::sync::Arc::clone(child_structure.source().source_arc());
         let child_uri = crate::uri::path_to_file_uri(&child_canonical_id)?;
         let blocks = project_carrier_blocks(&child_structure);
