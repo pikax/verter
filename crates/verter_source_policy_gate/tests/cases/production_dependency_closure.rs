@@ -1,6 +1,6 @@
 //! Architecture guard: the PRODUCTION dependency closure of the layered
-//! engine, source, query-boundary, resolution, wire-protocol and audit crates
-//! never reaches a crate above or beside its layer.
+//! engine, source, query-boundary, execution, resolution, wire-protocol and
+//! audit crates never reaches a crate above or beside its layer.
 //!
 //! The closure is computed by Cargo itself, never by reading manifests or
 //! source text: `cargo metadata --format-version 1 --all-features` resolves
@@ -143,11 +143,34 @@ const RULES: &[ClosureRule] = &[
     },
     ClosureRule {
         root: "verter_session_query",
-        forbidden: &[RESOLUTION, SEMANTIC, PARSER, OXC],
+        forbidden: &[RESOLUTION, TYPE_ENGINE, SEMANTIC, PARSER, OXC],
+    },
+    ClosureRule {
+        root: "verter_execution",
+        forbidden: &[
+            SCHEDULER,
+            WORKSPACE,
+            TYPE_ENGINE,
+            SEMANTIC_SOURCE,
+            SEMANTIC,
+            SESSION,
+            RESOLUTION,
+            PARSER,
+            OXC,
+        ],
     },
     ClosureRule {
         root: "verter_resolution",
-        forbidden: &[SEMANTIC, PARSER, OXC, SESSION, WORKSPACE, SCHEDULER],
+        forbidden: &[
+            TYPE_ENGINE,
+            SEMANTIC_SOURCE,
+            SEMANTIC,
+            PARSER,
+            OXC,
+            SESSION,
+            WORKSPACE,
+            SCHEDULER,
+        ],
     },
     ClosureRule {
         root: "verter_protocol",
@@ -414,6 +437,11 @@ fn session_query_production_closure_stays_resolution_semantic_and_syntax_free() 
 }
 
 #[test]
+fn execution_production_closure_stays_scheduler_engine_and_host_free() {
+    assert_live_rule("verter_execution");
+}
+
+#[test]
 fn resolution_production_closure_stays_syntax_semantic_and_host_free() {
     assert_live_rule("verter_resolution");
 }
@@ -438,11 +466,13 @@ fn semantic_source_production_closure_stays_engine_host_and_provider_free() {
     assert_live_rule("verter_semantic_source");
 }
 
-/// The exact workspace crates each extracted layer's production closure
-/// reaches. The forbidden lists above catch the known-dangerous crates; this
-/// list catches everything else, so a new same-layer dependency of the type
-/// engine or the source layer is a reviewed edit here, never an automatic pass.
-/// External packages are not listed: they are reviewed through the manifests.
+/// The exact workspace crates each layered crate's production closure
+/// reaches: its internal-crate allowlist. The forbidden lists above catch the
+/// known-dangerous crates; this list catches everything else, so a new
+/// same-layer dependency of the type engine, the source layer, the query
+/// boundary, the execution primitives or module resolution is a reviewed edit
+/// here, never an automatic pass. External packages are not listed: they are
+/// reviewed through the manifests.
 const EXACT_WORKSPACE_CLOSURES: &[(&str, &[&str])] = &[
     (
         "verter_type_engine",
@@ -490,7 +520,55 @@ const EXACT_WORKSPACE_CLOSURES: &[(&str, &[&str])] = &[
             "verter_type_expr_oxc",
         ],
     ),
+    (
+        "verter_session_query",
+        &[
+            "verter_analysis_inputs",
+            "verter_analyzer_mint",
+            "verter_audit",
+            "verter_debug_assert",
+            "verter_ecma",
+            "verter_identity",
+            "verter_language",
+            "verter_macro_dto",
+            "verter_no_storedspan",
+            "verter_no_storedspan_derive",
+            "verter_no_typeexpr",
+            "verter_no_typeexpr_derive",
+            "verter_span",
+            "verter_type_expr",
+        ],
+    ),
+    ("verter_execution", &["verter_debug_assert"]),
+    (
+        "verter_resolution",
+        &[
+            "verter_analysis_inputs",
+            "verter_analyzer_mint",
+            "verter_audit",
+            "verter_debug_assert",
+            "verter_ecma",
+            "verter_identity",
+            "verter_language",
+            "verter_macro_dto",
+            "verter_no_storedspan",
+            "verter_no_storedspan_derive",
+            "verter_no_typeexpr",
+            "verter_no_typeexpr_derive",
+            "verter_session_query",
+            "verter_span",
+            "verter_type_expr",
+        ],
+    ),
 ];
+
+fn exact_closure(root: &str) -> &'static [&'static str] {
+    EXACT_WORKSPACE_CLOSURES
+        .iter()
+        .find(|(listed, _)| *listed == root)
+        .map(|(_, closure)| *closure)
+        .unwrap_or_else(|| panic!("no exact workspace closure for `{root}`"))
+}
 
 #[test]
 fn extracted_layers_reach_exactly_their_listed_workspace_crates() {
@@ -510,6 +588,127 @@ fn extracted_layers_reach_exactly_their_listed_workspace_crates() {
             "
 "
         )
+    );
+}
+
+/// One unlisted workspace edge per allowlisted root. Each target is a real
+/// workspace crate outside that root's allowlist that no rule above forbids
+/// for it, except the resolution-to-engine edge: both crates share a layer
+/// in the layer matrix, and neither the engine nor the source closure reaches
+/// resolution, so only resolution's own allowlist and rule reject it.
+const PLANTED_UNLISTED: &[(&str, &str)] = &[
+    ("verter_type_engine", "verter_css_syntax"),
+    ("verter_semantic_source", "verter_diagnostics"),
+    ("verter_session_query", "verter_execution"),
+    ("verter_execution", "verter_span"),
+    ("verter_resolution", "verter_type_engine"),
+];
+
+/// A fixture where `root` reaches exactly its allowlist (each listed crate a
+/// direct normal or build dependency), plus the `extra` edges.
+fn allowlisted_fixture(root: &'static str, extra: &[Edge]) -> ProductionGraph {
+    let listed = exact_closure(root);
+    let mut crates = vec![root];
+    crates.extend(listed.iter().copied());
+    for &(from, to, _) in extra {
+        for name in [from, to] {
+            if !crates.contains(&name) {
+                crates.push(name);
+            }
+        }
+    }
+    let mut edges: Vec<Edge> = listed
+        .iter()
+        .enumerate()
+        .map(|(i, &to)| {
+            let kind = if i % 2 == 0 {
+                Kind::Normal
+            } else {
+                Kind::Build
+            };
+            (root, to, kind)
+        })
+        .collect();
+    edges.extend_from_slice(extra);
+    fixture_graph(&crates, &edges)
+}
+
+#[test]
+fn planted_unlisted_workspace_edge_is_rejected_for_every_allowlisted_root() {
+    let mut failures = Vec::new();
+    for &(root, listed) in EXACT_WORKSPACE_CLOSURES {
+        let planted: Vec<&'static str> = PLANTED_UNLISTED
+            .iter()
+            .filter(|(planted_root, _)| *planted_root == root)
+            .map(|&(_, to)| to)
+            .collect();
+        if planted.is_empty() {
+            failures.push(format!(
+                "`{root}` has an allowlist but no planted unlisted edge"
+            ));
+        }
+        let control = allowlisted_fixture(root, &[]);
+        match control.exact_closure_drift(root, listed) {
+            Ok(drift) if drift.is_empty() => {}
+            other => failures.push(format!("`{root}` control fixture drifted: {other:?}")),
+        }
+        for to in planted {
+            let graph = allowlisted_fixture(root, &[(root, to, Kind::Normal)]);
+            let expected = vec![format!(
+                "`{root}` reaches workspace crate `{to}`, which its exact closure does not list"
+            )];
+            match graph.exact_closure_drift(root, listed) {
+                Ok(drift) if drift == expected => {}
+                other => failures.push(format!("{root} -> {to}: {other:?}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn planted_unlisted_targets_are_real_workspace_crates_outside_the_allowlist() {
+    let graph = live_graph();
+    let members: BTreeSet<&str> = graph
+        .workspace_members
+        .iter()
+        .map(|id| graph.name(id))
+        .collect();
+    for &(root, to) in PLANTED_UNLISTED {
+        assert!(
+            members.contains(to),
+            "planted target `{to}` is not a workspace crate"
+        );
+        assert!(
+            !exact_closure(root).contains(&to),
+            "planted target `{to}` is already on `{root}`'s allowlist"
+        );
+    }
+}
+
+#[test]
+fn transitive_unlisted_edge_through_an_allowlisted_crate_is_rejected() {
+    let graph = allowlisted_fixture(
+        "verter_execution",
+        &[("verter_debug_assert", "verter_identity", Kind::Build)],
+    );
+    assert_eq!(
+        graph.exact_closure_drift("verter_execution", exact_closure("verter_execution")),
+        Ok(vec![
+            "`verter_execution` reaches workspace crate `verter_identity`, which its exact closure does not list".to_owned()
+        ])
+    );
+}
+
+#[test]
+fn exact_closure_ignores_dev_only_workspace_edges() {
+    let graph = allowlisted_fixture(
+        "verter_resolution",
+        &[("verter_resolution", "verter_type_engine", Kind::Dev)],
+    );
+    assert_eq!(
+        graph.exact_closure_drift("verter_resolution", exact_closure("verter_resolution")),
+        Ok(Vec::new())
     );
 }
 
@@ -673,6 +872,18 @@ const PLANTED_DIRECT: &[(&str, &str)] = &[
     ("verter_session_query", "verter_semantic"),
     ("verter_session_query", "verter_parser"),
     ("verter_session_query", "oxc_allocator"),
+    ("verter_session_query", "verter_type_engine"),
+    ("verter_execution", "verter_scheduler"),
+    ("verter_execution", "verter_workspace"),
+    ("verter_execution", "verter_type_engine"),
+    ("verter_execution", "verter_semantic_source"),
+    ("verter_execution", "verter_semantic"),
+    ("verter_execution", "verter_session"),
+    ("verter_execution", "verter_resolution"),
+    ("verter_execution", "verter_parser"),
+    ("verter_execution", "oxc_span"),
+    ("verter_resolution", "verter_type_engine"),
+    ("verter_resolution", "verter_semantic_source"),
     ("verter_resolution", "verter_semantic"),
     ("verter_resolution", "verter_parser"),
     ("verter_resolution", "oxc_span"),
@@ -822,6 +1033,7 @@ fn clean_layered_fixture_passes_every_rule() {
             "verter_type_engine",
             "verter_semantic_source",
             "verter_session_query",
+            "verter_execution",
             "verter_resolution",
             "verter_identity",
             "verter_parser",
@@ -831,6 +1043,7 @@ fn clean_layered_fixture_passes_every_rule() {
         ],
         &[
             ("verter_type_engine", "verter_session_query", Kind::Normal),
+            ("verter_type_engine", "verter_execution", Kind::Normal),
             ("verter_type_engine", "verter_identity", Kind::Build),
             ("verter_semantic_source", "verter_parser", Kind::Normal),
             ("verter_semantic_source", "verter_semantic", Kind::Normal),
