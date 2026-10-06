@@ -147,6 +147,11 @@ function probeArmSummary(arm, invs, ctx) {
   return out;
 }
 
+const CLI_ENGINE_PEAK_METRICS = new Map([
+  ["windows-job-object", "job-peak-commit-charge"],
+  ["macos-phys-footprint", "sampled-tree-phys-footprint-sum"],
+]);
+
 function cliArmSummary(invs, limits) {
   const budgetBytes = limits.budgetBytes;
   const measured = invs.filter((i) => !i.warmup);
@@ -159,7 +164,15 @@ function cliArmSummary(invs, limits) {
   ];
   const completed = measured.filter((i) => invocationEnd(i, limits).kind === "exited");
   const measuredParsed = completed.map((i) => parseCli(i.cliStdout ?? ""));
-  const overBudget = completed.filter(
+  // Cgroup peaks include cache and kernel charges; they are containment telemetry,
+  // not the CLI engine's memory. Only known backend/metric pairs are attributable.
+  const memory = completed.filter(
+    (i) =>
+      CLI_ENGINE_PEAK_METRICS.has(i.supervisor?.backend) &&
+      CLI_ENGINE_PEAK_METRICS.get(i.supervisor?.backend) === i.supervisor?.peakMetric &&
+      ["hard", "sampled"].includes(i.supervisor?.containment),
+  );
+  const overBudget = memory.filter(
     (i) => typeof i.supervisor?.peakBytes === "number" && i.supervisor.peakBytes > budgetBytes,
   ).length;
   const killed = invs.filter((i) =>
@@ -185,8 +198,12 @@ function cliArmSummary(invs, limits) {
         .filter((i) => invocationEnd(i, limits).kind === "killed" && !i.skipped)
         .map((i) => i.supervisor?.wallMs),
     ),
-    peakBytes: stats(completed.map((i) => i.supervisor?.peakBytes)),
-    peakMetric: completed[0]?.supervisor?.peakMetric ?? null,
+    peakBytes: stats(memory.map((i) => i.supervisor?.peakBytes)),
+    peakMetric: memory[0]?.supervisor?.peakMetric ?? null,
+    memoryUnavailable:
+      memory.length === completed.length
+        ? null
+        : "supervisor accounting is not attributable to the engine",
     cpuMs: stats(
       completed.map((i) => (i.supervisor?.cpuUserMs ?? NaN) + (i.supervisor?.cpuKernelMs ?? NaN)),
     ),

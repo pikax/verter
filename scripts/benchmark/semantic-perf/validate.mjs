@@ -34,7 +34,6 @@ import {
   probeRecordProblems,
   runLimits,
   supervisorDeadlineMs,
-  compactCliStdout,
   warmRepeatsFor,
 } from "./analyze.mjs";
 import { ROOT, sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
@@ -78,6 +77,7 @@ function stable(value) {
  * summarised against; `scenarios` the catalog it ran.
  */
 const finite = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0;
+const sha256Digest = (x) => typeof x === "string" && /^[a-f0-9]{64}$/.test(x);
 
 export function validateRun(run, expected, scenarios, { requireAllMatched = false } = {}) {
   const failures = [];
@@ -188,8 +188,8 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   }
   // Environment receipts: complete and consistent with the tuning option.
   if (
-    typeof meta.environment?.runtime?.valuesSha256 !== "string" ||
-    typeof meta.build?.environment?.valuesSha256 !== "string" ||
+    !sha256Digest(meta.environment?.runtime?.valuesSha256) ||
+    !sha256Digest(meta.build?.environment?.valuesSha256) ||
     meta.environment?.inherited !== Boolean(meta.options?.allowTuning)
   ) {
     fail("tuning: the environment receipts are incomplete or disagree with --allow-tuning");
@@ -344,6 +344,19 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       (!finite(inv.spawnedAtMs) || (inv.phase != null && !Array.isArray(inv.phaseHistory)))
     )
       fail(`${id}: no spawn time or phase history (the evidence for a deadline)`);
+    const arm = ARMS[inv.arm];
+    if (arm?.kind === "cli") {
+      const dir = meta.scenarios?.[`${inv.scenario}/${inv.setting}`]?.dir;
+      const command = [
+        ts.exe,
+        "-p",
+        join(dir ?? "", "cli", "tsconfig.json"),
+        "--extendedDiagnostics",
+        ...(inv.arm === "tsc-cli-1" ? ["--singleThreaded"] : []),
+      ];
+      if (stable(inv.command) !== stable(command))
+        fail(`${id}: CLI command does not match the verified executable, project and thread mode`);
+    }
     const end = invocationEnd(inv, runLimits(opts));
     const expectedExit = ["killed", "observe-killed", "unattributed-kill"].includes(end.kind)
       ? sup.killedBy === "timeout"
@@ -360,7 +373,6 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
       fail(`${id}: failed child: ${end.detail}`);
       continue;
     }
-    const arm = ARMS[inv.arm];
     if (end.kind === "killed" || end.kind === "unattributed-kill") continue;
     if (end.kind === "observe-killed") {
       // The demand was measured and recorded before the kill: its record
@@ -516,7 +528,7 @@ export function rawFileProblems(run) {
       let raw = null;
       try {
         const sup = JSON.parse(readFileSync(inv.supervisorOut, "utf8"));
-        raw = compactCliStdout(readFileSync(sup.stdoutPath, "utf8"));
+        raw = readFileSync(sup.stdoutPath, "utf8");
       } catch {
         raw = null;
       }

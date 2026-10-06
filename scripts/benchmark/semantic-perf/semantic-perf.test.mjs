@@ -10,12 +10,12 @@
 //   node --test scripts/benchmark/semantic-perf/semantic-perf.test.mjs
 
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { classifyVerterAnswer, compactProbeRecord, verdict } from "./analyze.mjs";
+import { classifyVerterAnswer, compactProbeRecord, parseCli, verdict } from "./analyze.mjs";
 import { canonicalDigest, canonicalType } from "./canonical.mjs";
 import { MEASURING_SUFFIX, parseMeasurement } from "./measure-expected.mjs";
 import { sha256Text, toolchainPin } from "./provenance.mjs";
@@ -26,8 +26,16 @@ import {
   scheduleBalanceProblems,
   tuningEnvironment,
   ROOT,
+  TIER_DEFAULTS,
 } from "./run.mjs";
-import { allScenarios, cliSource, moduleText, SETTINGS, tsconfigText } from "./scenarios.mjs";
+import {
+  allScenarios,
+  cliSource,
+  moduleText,
+  scenariosForTier,
+  SETTINGS,
+  tsconfigText,
+} from "./scenarios.mjs";
 import { summarize, timerResolution } from "./summary.mjs";
 import { resolveSupervisor } from "./supervisor.mjs";
 import { rawFileProblems, validateRun } from "./validate.mjs";
@@ -702,7 +710,10 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
     env: { CARGO_INCREMENTAL: "0", RUSTC: "/rust/rustc", RUSTUP_TOOLCHAIN: PIN },
     toolchainPin: PIN,
     rustc: `rustc ${PIN}\nrelease: ${PIN}\nhost: x86_64-pc-windows-msvc`,
-    environment: { names: ["CARGO_INCREMENTAL", "PATH", "RUSTC"], valuesSha256: "b" },
+    environment: {
+      names: ["CARGO_INCREMENTAL", "PATH", "RUSTC"],
+      valuesSha256: sha256Text("build environment"),
+    },
     packages: Object.fromEntries(
       PACKAGES.map((p) => [
         p,
@@ -718,7 +729,7 @@ function syntheticRun({ verterText = "1", tscText = "1" } = {}) {
       host: { arch: "x64" },
       tuning: {},
       environment: {
-        runtime: { names: ["PATH", "SystemRoot"], valuesSha256: "e" },
+        runtime: { names: ["PATH", "SystemRoot"], valuesSha256: sha256Text("runtime environment") },
         inherited: false,
       },
       tree: { head: "h", diffSha256: "d", untrackedSha256: "u" },
@@ -1374,4 +1385,222 @@ test("the timer resolution is calibrated: a coarse clock by its quantum, a fine 
   for (const inv of none.invocations.filter((i) => i.arm === "tsc-api"))
     delete inv.probe.calibration;
   assert.equal(timerResolution(none).clock, "uncalibrated");
+});
+
+test("finalized infer declarations credit equivalent conditional union answers", () => {
+  const single = "T extends [infer X] ? X : never";
+  const union = `(${single}) | (T extends [infer Y] ? Y : never)`;
+  assert.equal(canonicalType(union), canonicalType(single));
+  const measured = interpretMeasurement({ printed: `[(${union})]`, codes: [] });
+  assert.equal(classifyVerterAnswer(ANSWER(single), { reference: measured }).class, "matched");
+  assert.equal(classifyVerterAnswer(ANSWER(union), { reference: REF(single) }).class, "matched");
+  assert.notEqual(canonicalType(union), canonicalType("T extends [infer X] ? [X] : never"));
+  assert.throws(
+    () => canonicalType("T extends [infer X] | [infer Y] ? [X, Y] : never"),
+    /ambiguous/,
+  );
+});
+
+function cliFixture(arm = "tsc-cli") {
+  const run = syntheticRun();
+  run.meta.options.arms = [arm];
+  const plan = schedule(["synthetic/strict"], [arm], 2, 1);
+  run.meta.plan = plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`);
+  run.invocations = plan.map((p, index) => ({
+    index,
+    scenario: "synthetic",
+    setting: "strict",
+    arm,
+    rep: p.rep,
+    warmup: p.warmup,
+    command: [
+      run.meta.typescript.exe,
+      "-p",
+      "/x/synthetic/strict/cli/tsconfig.json",
+      "--extendedDiagnostics",
+      ...(arm === "tsc-cli-1" ? ["--singleThreaded"] : []),
+    ],
+    supervisor: supervisorRecord({
+      backend: "windows-job-object",
+      peakMetric: "job-peak-commit-charge",
+    }),
+    supervisorExit: 0,
+    cliStdout: "Check time: 1.00s\nTotal time: 1.00s\n",
+  }));
+  return resummarize(run);
+}
+
+test("CLI provenance binds the executable, project and thread mode even for killed children", () => {
+  for (const arm of ["tsc-cli", "tsc-cli-1"]) {
+    assert.deepEqual(validate(cliFixture(arm)).failures, []);
+    for (const command of [
+      ["/other/tsc", "-p", "/x/synthetic/strict/cli/tsconfig.json", "--extendedDiagnostics"],
+      ["/tsc/tsc", "-p", "/other/tsconfig.json", "--extendedDiagnostics"],
+      [
+        "/tsc/tsc",
+        "-p",
+        "/x/synthetic/strict/cli/tsconfig.json",
+        "--extendedDiagnostics",
+        ...(arm === "tsc-cli" ? ["--singleThreaded"] : []),
+      ],
+    ]) {
+      const run = cliFixture(arm);
+      run.invocations[0].command = command;
+      failsWith(run, /CLI command/);
+      run.invocations[0].supervisor = supervisorRecord({
+        killedBy: "memory",
+        exitCode: null,
+        backend: "linux-cgroup-v2",
+      });
+      run.invocations[0].supervisorExit = 137;
+      failsWith(resummarize(run), /CLI command/);
+    }
+  }
+});
+
+test("CLI engine memory refuses cgroup and unknown accounting without losing answers", () => {
+  const own = cliFixture();
+  assert.equal(own.summary.cells[0].arms["tsc-cli"].peakBytes.n, 2);
+  for (const overrides of [
+    { backend: "linux-cgroup-v2", peakMetric: "cgroup-memory.peak" },
+    { backend: "windows-job-object", peakMetric: "cgroup-memory.peak" },
+    { backend: "unknown" },
+  ]) {
+    const run = cliFixture();
+    for (const inv of run.invocations)
+      Object.assign(inv.supervisor, overrides, { peakBytes: 1e12 });
+    resummarize(run);
+    assert.deepEqual(validate(run).failures, []);
+    const cell = run.summary.cells[0].arms["tsc-cli"];
+    assert.equal(cell.peakBytes, null);
+    assert.equal(cell.peakMetric, null);
+    assert.equal(cell.status, "completed");
+    assert.equal(cell.memoryUnavailable, "supervisor accounting is not attributable to the engine");
+  }
+});
+
+test("CLI diagnostics beyond one MiB survive storage and raw verification", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-cli-full-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const text =
+    "padding\n".repeat(80000) +
+    "scenario.ts(1,1): error TS2589: deep\n" +
+    "padding\n".repeat(80000) +
+    "Check time: 1.00s\nTotal time: 1.00s\n";
+  const run = cliFixture();
+  const inv = run.invocations[0];
+  inv.supervisorOut = join(dir, "cli.sup.json");
+  inv.supervisor.stdoutPath = join(dir, "stdout.log");
+  inv.cliStdout = text;
+  writeFileSync(inv.supervisorOut, JSON.stringify(inv.supervisor));
+  writeFileSync(inv.supervisor.stdoutPath, text);
+  run.invocations = [inv];
+  assert.deepEqual(rawFileProblems(run), []);
+  assert.deepEqual(parseCli(inv.cliStdout).codes, [2589]);
+  writeFileSync(inv.supervisor.stdoutPath, text.replace("TS2589", "TS2590"));
+  assert.ok(rawFileProblems(run).some((p) => /whole-program stdout/.test(p)));
+});
+
+test("environment receipts require SHA-256 digests in tuned and constructed runs", () => {
+  for (const allowTuning of [false, true]) {
+    for (const path of ["runtime", "build"]) {
+      for (const bad of [
+        "",
+        "x".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        ["a".repeat(64)],
+        null,
+      ]) {
+        const run = syntheticRun();
+        run.meta.options.allowTuning = allowTuning;
+        run.meta.environment.inherited = allowTuning;
+        const receipt =
+          path === "runtime" ? run.meta.environment.runtime : run.meta.build.environment;
+        receipt.valuesSha256 = bad;
+        failsWith(run, /environment receipts/);
+      }
+    }
+  }
+});
+
+test("the real quick catalog and invocation manifest validate and reject a missing cell", () => {
+  const scenarios = scenariosForTier("quick");
+  assert.ok(scenarios.length > 0);
+  const run = syntheticRun();
+  Object.assign(run.meta.options, TIER_DEFAULTS.quick);
+  run.meta.options.only = [];
+  const keys = scenarios.map((s) => `${s.id}/strict`);
+  const plan = schedule(
+    keys,
+    run.meta.options.arms,
+    run.meta.options.repeat,
+    run.meta.options.warmup,
+  );
+  run.meta.plan = plan.map((p) => `${p.key}|${p.arm}|${p.warmup ? "w" : "r"}${p.rep}`);
+  const expected = structuredClone(EXPECTED);
+  expected.scenarios = {};
+  run.meta.scenarios = {};
+  for (const s of scenarios) {
+    const dir = `/quick/${s.id}/strict`;
+    run.meta.scenarios[`${s.id}/strict`] = {
+      id: s.id,
+      setting: "strict",
+      dir,
+      inputs: {
+        ...INPUTS,
+        "scenario.ts": sha256Text(s.source),
+        "cli/scenario.ts": sha256Text(cliSource(s)),
+      },
+    };
+    expected.scenarios[s.id] = {
+      sourceSha256: sha256Text(s.source),
+      settings: {
+        strict: {
+          ...RAW_ONE,
+          receipt: { ...RAW_ONE.receipt, sourceSha256: sha256Text(s.source + MEASURING_SUFFIX) },
+        },
+      },
+    };
+  }
+  run.invocations = plan.map((p, index) => {
+    const [scenario, setting] = p.key.split("/");
+    const warm = !p.warmup && p.rep === 0;
+    const probe = p.arm === "tsc-api" ? tscProbe("1") : verterProbe("1", p.arm);
+    probe.probes[0].warm = warm
+      ? Array.from({ length: run.meta.options.warmRepeats }, () =>
+          structuredClone(probe.probes[0].warm[0]),
+        )
+      : [];
+    if (p.arm === "tsc-api")
+      probe.rootFiles = [
+        join(run.meta.scenarios[p.key].dir, "lib.bench.d.ts"),
+        join(run.meta.scenarios[p.key].dir, "scenario.ts"),
+      ];
+    const fixture = syntheticRun().invocations.find(
+      (i) => i.arm === (p.arm === "tsc-api" ? "tsc-api" : "verter"),
+    );
+    return {
+      ...fixture,
+      supervisor: supervisorRecord({
+        timeoutMs: run.meta.options.timeoutMs + run.meta.options.startupAllowanceMs,
+      }),
+      index,
+      scenario,
+      setting,
+      arm: p.arm,
+      rep: p.rep,
+      warmup: p.warmup,
+      probe,
+      command: [
+        p.arm === "verter-counted" ? "/bin/counted" : p.arm === "tsc-api" ? "node" : "/bin/probe",
+      ],
+    };
+  });
+  run.summary = summarize(run, expected, scenarios);
+  assert.deepEqual(validateRun(run, expected, scenarios).failures, []);
+  delete run.meta.scenarios[keys[0]];
+  assert.ok(
+    validateRun(run, expected, scenarios).failures.some((f) => /recorded scenarios/.test(f)),
+  );
 });
