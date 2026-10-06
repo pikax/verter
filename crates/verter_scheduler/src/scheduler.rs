@@ -1075,6 +1075,32 @@ impl Scheduler {
         self.nodes.get(id)?.current_source()
     }
 
+    /// Get the current source snapshot together with the
+    /// [`SourceWitness`](crate::node::SourceWitness) of the node object it
+    /// was read from. External publishers ([`Self::commit_artifact`],
+    /// [`Self::remove_artifact_not_newer_than`]) are fenced on that witness.
+    pub fn try_get_witnessed_source(&self, id: &str) -> Option<crate::node::WitnessedSource> {
+        let node = self.nodes.get(id)?;
+        let snapshot = node.current_source()?;
+        let witness = crate::node::SourceWitness::capture(&node, &snapshot);
+        Some(crate::node::WitnessedSource { snapshot, witness })
+    }
+
+    /// Get the current source snapshot of the node object `witness` was
+    /// captured from. `None` once that node was retired or replaced (removal,
+    /// reset, language re-home), even when its successor serves the same
+    /// content at the same generation, or when it has no current source.
+    pub fn try_get_source_for_witness(
+        &self,
+        witness: &crate::node::SourceWitness,
+    ) -> Option<Arc<SourceSnapshot>> {
+        let node = self.nodes.get(witness.canonical())?;
+        if !node.carries_witness(witness) {
+            return None;
+        }
+        node.current_source()
+    }
+
     /// Capture an immutable, LEASED root of the scheduler's source
     /// world.
     ///
@@ -1519,7 +1545,19 @@ impl Scheduler {
     /// reservation (if the internal worker had already reserved one)
     /// and removes the identity from `by_identity` / `nodes` so the
     /// dispatch loop's `next_ready` will not re-dispatch it.
-    pub fn commit_artifact(&self, file_id: &str, profile_hash: u64, snapshot: ArtifactSnapshot) {
+    ///
+    /// The artifact is published at `witness`'s generation, and only into
+    /// the node object `witness` was captured from: a witness whose node was
+    /// retired (removal, reset, language re-home) is rejected even when a
+    /// successor serves the same content at the same generation. Returns
+    /// whether the artifact was published.
+    pub fn commit_artifact(
+        &self,
+        witness: &crate::node::SourceWitness,
+        profile_hash: u64,
+        data: Arc<dyn crate::node::SnapshotData>,
+    ) -> bool {
+        let file_id = witness.canonical();
         // Snapshot the FileNode `Arc` and drop the nodes-shard
         // `Ref` BEFORE acquiring `dag.lock()`. Holding a DashMap
         // Ref across `dag.lock` forms a latent AB-BA ordering with
@@ -1532,21 +1570,25 @@ impl Scheduler {
         // the per-profile `artifacts` DashMap insert below).
         let node = match self.nodes.get(file_id) {
             Some(r) => Arc::clone(&r),
-            None => return,
+            None => return false,
         };
-        let incarnation = node.incarnation_id();
-        let generation = snapshot.generation;
-        // Full coherence check: node generation, Source, AND Analysis
-        // must all match. Without this, an external compile can publish
-        // an artifact before the scheduler's own pipeline has committed
-        // the prerequisite stages.
-        if node.generation() != generation {
-            return;
+        let incarnation = witness.incarnation();
+        let generation = witness.generation();
+        // Full coherence check: witnessed node object, node generation,
+        // Source, AND Analysis must all match. Without this, an external
+        // compile can publish an artifact before the scheduler's own
+        // pipeline has committed the prerequisite stages.
+        if !node.admits_work(incarnation, generation) {
+            return false;
         }
         if node.current_source().is_none() || node.current_analysis().is_none() {
-            return;
+            return false;
         }
-        let snap = Arc::new(snapshot);
+        let snap = Arc::new(ArtifactSnapshot {
+            generation,
+            profile_hash,
+            data,
+        });
         let canonical: Arc<str> = Arc::from(file_id);
         let artifact_id = WorkNodeIdentity::Artifact {
             canonical: Arc::clone(&canonical),
@@ -1563,10 +1605,12 @@ impl Scheduler {
         // so an external commit that lands during a worker's
         // executor run is preserved.
         let mut guard = self.dag.lock();
-        if !self.nodes.get(file_id).is_some_and(|live| {
-            live.incarnation_id() == incarnation && live.generation() == generation
-        }) {
-            return;
+        if !self
+            .nodes
+            .get(file_id)
+            .is_some_and(|live| live.admits_work(incarnation, generation))
+        {
+            return false;
         }
         node.artifacts.insert(profile_hash, Arc::clone(&snap));
         let result = RequestResult::Artifact(snap);
@@ -1606,47 +1650,59 @@ impl Scheduler {
         {
             guard.clear_artifact_blockers(&canonical, generation);
         }
+        true
     }
 
-    /// Evict the artifact snapshot for `(file_id, profile_hash)` only
-    /// when the stored snapshot is no newer than `max_generation`.
+    /// Evict the artifact snapshot for `(witness.canonical(), profile_hash)`
+    /// only when it belongs to the witnessed node object and is no newer
+    /// than the witnessed generation.
     ///
     /// Called by the host when a compile path refuses cache admission
     /// (e.g. an overflowed fact signature) and any prior artifact for
     /// the same `(canonical, profile)` produced at or before the
-    /// caller's start-of-compile generation must not remain observable
+    /// caller's start-of-compile source must not remain observable
     /// via `try_get_artifact`. The symmetric counterpart to
     /// [`commit_artifact`](Self::commit_artifact): commit publishes the
-    /// snapshot, this evicts it under the generation gate.
+    /// snapshot, this evicts it under the same witness.
     ///
     /// Generation gate. The slow refused compile that started at
     /// generation `N` may reach this call AFTER a fresh successful
     /// compile at generation `N+k` has landed a newer artifact via
     /// `commit_artifact`. Unconditionally removing would clobber the
-    /// newer artifact (since `commit_artifact` rejects stale publishes
-    /// via the node generation check, the inverse asymmetry would be a
-    /// silent data race). The caller passes its captured compile-start
-    /// generation as `max_generation`; the eviction proceeds only when
-    /// the stored snapshot's `generation <= max_generation`.
+    /// newer artifact, so the eviction proceeds only when the stored
+    /// snapshot's `generation <= witness.generation()`.
     ///
-    /// No-op when the node or the per-profile slot is absent, OR when
-    /// the stored snapshot is newer than `max_generation`. Does NOT
-    /// touch generation, source, or analysis state — only the
-    /// `(profile_hash → snapshot)` entry on the artifact map.
-    pub fn remove_artifact_if_not_newer_than(
+    /// Incarnation gate. A witness whose node object was retired (removal,
+    /// reset, language re-home) evicts nothing, even when a successor holds
+    /// an artifact at the same generation for the same content: that
+    /// artifact was never produced from the witnessed source.
+    ///
+    /// Returns whether an artifact was evicted. Does NOT touch generation,
+    /// source, or analysis state — only the `(profile_hash → snapshot)`
+    /// entry on the artifact map.
+    pub fn remove_artifact_not_newer_than(
         &self,
-        file_id: &str,
+        witness: &crate::node::SourceWitness,
         profile_hash: u64,
-        max_generation: u64,
-    ) {
-        if let Some(node) = self.nodes.get(file_id) {
-            // Race-free remove-if: `DashMap::remove_if` runs the
-            // predicate under the per-shard lock so a concurrent
-            // `commit_artifact` cannot land a newer snapshot between
-            // the read and the remove.
-            node.artifacts
-                .remove_if(&profile_hash, |_, snap| snap.generation <= max_generation);
+    ) -> bool {
+        // Removal and reset retire and unpublish a node under the DAG lock,
+        // so the witness check and the eviction cannot straddle a
+        // retirement. The node `Ref` is taken after the lock (DAG-first).
+        let _lifecycle = self.dag.lock();
+        let Some(node) = self.nodes.get(witness.canonical()) else {
+            return false;
+        };
+        if !node.carries_witness(witness) {
+            return false;
         }
+        let max_generation = witness.generation();
+        // Race-free remove-if: `DashMap::remove_if` runs the predicate
+        // under the per-shard lock so a concurrent internal artifact
+        // publication cannot land a newer snapshot between the read and
+        // the remove.
+        node.artifacts
+            .remove_if(&profile_hash, |_, snap| snap.generation <= max_generation)
+            .is_some()
     }
 
     /// Get the shared overlay map.
@@ -2134,6 +2190,13 @@ mod tests {
             .nodes
             .get(id)
             .map_or(0, |node| node.incarnation_id())
+    }
+
+    fn source_witness(scheduler: &Scheduler, id: &str) -> crate::node::SourceWitness {
+        scheduler
+            .try_get_witnessed_source(id)
+            .expect("fixture invariant: current source is committed")
+            .witness
     }
 
     use super::*;
@@ -3315,12 +3378,9 @@ mod tests {
         // BEFORE the internal worker reaches execute_artifact_stage.
         // The committed snapshot carries distinguishing data we will
         // assert is not overwritten by the internal worker.
-        let committed = ArtifactSnapshot {
-            generation: 1,
-            profile_hash: 42,
-            data: Arc::new(crate::node::EmptyData),
-        };
-        sched.commit_artifact("/a.vue", 42, committed);
+        let witness = source_witness(&sched, "/a.vue");
+        assert_eq!(witness.generation(), 1);
+        assert!(sched.commit_artifact(&witness, 42, Arc::new(crate::node::EmptyData)));
 
         // DISCRIMINATOR 1: the Artifact DAG identity is now terminal
         // — removed from `by_identity` and `nodes`. Without
@@ -4929,15 +4989,9 @@ mod tests {
         };
 
         // Commit an artifact at the correct generation
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
+        let start_witness = source_witness(&sched, "/a.vue");
+        assert_eq!(start_witness.generation(), gen);
+        assert!(sched.commit_artifact(&start_witness, 42, Arc::new(crate::node::EmptyData)));
 
         // Should be readable
         assert!(
@@ -4945,16 +4999,19 @@ mod tests {
             "artifact committed at correct generation should be readable"
         );
 
-        // Commit at wrong generation should be dropped
-        sched.commit_artifact(
-            "/a.vue",
-            99,
-            crate::node::ArtifactSnapshot {
-                generation: gen + 100, // wrong generation
-                profile_hash: 99,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
+        // A compile that started before the next edit finishes after it:
+        // its start-of-compile witness is stale and must be dropped.
+        sched.submit_request(Request {
+            file_id: "/a.vue".to_string(),
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            source: Some(Arc::from("a v2")),
+            file_language: None,
+            request_context: None,
+        });
+        sched.drive_all();
+        assert!(source_witness(&sched, "/a.vue").generation() > gen);
+        assert!(!sched.commit_artifact(&start_witness, 99, Arc::new(crate::node::EmptyData)));
 
         assert!(
             sched.try_get_artifact("/a.vue", 99).is_none(),
@@ -5050,7 +5107,7 @@ mod tests {
             request_context: None,
         });
         sched.drive_one(); // processes the Source job only
-        let gen = sched.try_get_source("/a.vue").unwrap().generation;
+        let witness = source_witness(&sched, "/a.vue");
 
         // Verify Analysis is NOT yet committed
         assert!(
@@ -5059,15 +5116,7 @@ mod tests {
         );
 
         // Attempt to commit artifact WITHOUT Analysis
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
+        assert!(!sched.commit_artifact(&witness, 42, Arc::new(crate::node::EmptyData)));
 
         // Should NOT be readable — Analysis not committed yet
         assert!(
@@ -5149,17 +5198,11 @@ mod tests {
             "precondition: Source not yet committed"
         );
 
-        let gen = sched.nodes.get("/a.vue").map(|n| n.generation()).unwrap();
-
-        // Attempt to commit artifact
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
+        // No source has been handed out, so no publication witness exists:
+        // a host cannot commit against a generation it never read.
+        assert!(
+            sched.try_get_witnessed_source("/a.vue").is_none(),
+            "no witness may be minted before Source commits"
         );
 
         // Must be rejected — Source not committed
@@ -5819,21 +5862,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("Artifact worker must enter the gated executor");
 
-        // Look up the live generation for the file (Source + Analysis
-        // have already committed by the time the Artifact worker
-        // reached the gate).
-        let generation = sched.nodes.get("/a.vue").expect("node exists").generation();
+        // Capture the live source witness (Source + Analysis have
+        // already committed by the time the Artifact worker reached
+        // the gate).
+        let witness = source_witness(&sched, "/a.vue");
 
         // External commit lands while the worker is parked.
-        sched.commit_artifact(
-            "/a.vue",
-            17,
-            ArtifactSnapshot {
-                generation,
-                profile_hash: 17,
-                data: Arc::new(SentinelData { tag: EXTERNAL_TAG }),
-            },
-        );
+        assert!(sched.commit_artifact(&witness, 17, Arc::new(SentinelData { tag: EXTERNAL_TAG })));
 
         // Release the worker. Without the insert-if-absent re-check
         // it would overwrite the externally-committed snapshot with
@@ -6589,31 +6624,23 @@ mod tests {
         }
     }
 
-    /// Discriminator: `remove_artifact_if_not_newer_than(file, profile,
-    /// N)` MUST NOT clobber an artifact whose stored generation is
-    /// strictly greater than `N`.
+    /// Discriminator: `remove_artifact_not_newer_than(witness, profile)`
+    /// MUST NOT clobber an artifact whose stored generation is strictly
+    /// greater than the witnessed generation `N`.
     ///
     /// Race scenario: a slow compile started at generation `N` reaches
     /// its refusal arm AFTER a faster compile at `N+k` (k > 0) has
-    /// already committed a fresh artifact. The slow compile's
-    /// captured start-generation is `N`; passing `max_generation = N`
-    /// to this eviction MUST observe the stored `generation = N+k > N`
-    /// and skip the remove. The newer artifact at `N+k` survives;
-    /// `try_get_artifact` continues to serve it.
-    ///
-    /// The symmetric `commit_artifact` already rejects publishes whose
-    /// generation does not match the node's current generation; this
-    /// eviction is the inverse asymmetry: a slow refused compile must
-    /// not delete a newer winner.
+    /// already committed a fresh artifact. The slow compile's captured
+    /// start witness names `N`; the eviction MUST observe the stored
+    /// `generation = N+k > N` and skip the remove. The newer artifact at
+    /// `N+k` survives; `try_get_artifact` continues to serve it.
     ///
     /// Discriminating property: an unconditional
     /// `node.artifacts.remove(&profile_hash)` would delete the newer
     /// artifact and `try_get_artifact` would return `None` after the
-    /// call. The generation-aware `remove_if(..., snap.generation <=
-    /// max_generation)` preserves the newer artifact and
-    /// `try_get_artifact` returns the same `Arc` it returned before.
+    /// call.
     #[test]
-    fn remove_artifact_if_not_newer_than_preserves_newer_generation_artifact() {
+    fn remove_artifact_not_newer_than_preserves_newer_generation_artifact() {
         let loader = Arc::new(MemorySourceLoader::new());
         loader.insert("/a.vue".to_string(), Arc::from("a v1"));
         let sched = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
@@ -6637,21 +6664,9 @@ mod tests {
         // Commit a successful artifact at generation N. This is the
         // "slow compile's view" — the artifact it expects to evict if
         // its refusal arm runs.
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen_n,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
-        assert!(
-            sched.try_get_artifact("/a.vue", 42).is_some(),
-            "fixture invariant: an artifact must be committed at gen N \
-             so the race scenario is reproducible — without it the \
-             newer-artifact survival assertion is vacuous."
-        );
+        let witness_n = source_witness(&sched, "/a.vue");
+        assert_eq!(witness_n.generation(), gen_n);
+        assert!(sched.commit_artifact(&witness_n, 42, Arc::new(crate::node::EmptyData)));
 
         // Advance to generation N+1 (k = 1, sufficient for the
         // discriminator). A re-upsert is the natural generation bump.
@@ -6664,7 +6679,8 @@ mod tests {
             request_context: None,
         });
         sched.drive_all();
-        let gen_n_plus_k = sched.try_get_source("/a.vue").unwrap().generation;
+        let witness_n_plus_k = source_witness(&sched, "/a.vue");
+        let gen_n_plus_k = witness_n_plus_k.generation();
         assert!(
             gen_n_plus_k > gen_n,
             "fixture invariant: the second upsert must bump the node \
@@ -6675,54 +6691,28 @@ mod tests {
         // The "fast successful compile at N+k" commits a fresh artifact
         // at the bumped generation. This is the artifact the slow
         // refused compile must NOT clobber.
-        sched.commit_artifact(
-            "/a.vue",
-            42,
-            crate::node::ArtifactSnapshot {
-                generation: gen_n_plus_k,
-                profile_hash: 42,
-                data: Arc::new(crate::node::EmptyData),
-            },
-        );
-        assert!(
-            sched.try_get_artifact("/a.vue", 42).is_some(),
-            "fixture invariant: the fresh artifact at gen N+k must be \
-             committed — without it the race scenario does not run."
-        );
+        assert!(sched.commit_artifact(&witness_n_plus_k, 42, Arc::new(crate::node::EmptyData)));
 
         // The slow refused compile reaches its eviction arm carrying
-        // its captured START generation (gen_n). The eviction MUST be
-        // gated on `stored_generation <= max_generation`. Since the
-        // stored snapshot is at gen_n_plus_k > gen_n, the remove must
-        // be a no-op.
-        sched.remove_artifact_if_not_newer_than("/a.vue", 42, gen_n);
+        // its captured START witness (gen_n). Since the stored snapshot
+        // is at gen_n_plus_k > gen_n, the remove must be a no-op.
+        assert!(!sched.remove_artifact_not_newer_than(&witness_n, 42));
 
         // KEY DISCRIMINATOR: the newer artifact at gen N+k MUST
-        // survive. An unconditional remove would clobber it and this
-        // assertion would fail.
+        // survive. An unconditional remove would clobber it.
         assert!(
             sched.try_get_artifact("/a.vue", 42).is_some(),
-            "DISCRIMINATOR: a slow refused compile at gen N MUST NOT \
-             clobber a fresher artifact at gen N+k. An unconditional \
-             `remove_artifact(file, profile)` would delete the newer \
-             artifact; the generation-gated \
-             `remove_artifact_if_not_newer_than(file, profile, N)` \
-             observes `stored_generation = N+k > N` and skips the \
-             remove. (gen_n = {gen_n}, gen_n_plus_k = {gen_n_plus_k})"
+            "a slow refused compile at gen N must not clobber a fresher \
+             artifact at gen N+k (gen_n = {gen_n}, gen_n_plus_k = {gen_n_plus_k})"
         );
 
-        // Symmetric positive case: a same-or-older max_generation MUST
-        // actually evict. Otherwise the new method would never remove
-        // anything — masking the legitimate refused-compile-cleanup
-        // path. Pass the CURRENT stored generation (N+k); the eviction
-        // should proceed.
-        sched.remove_artifact_if_not_newer_than("/a.vue", 42, gen_n_plus_k);
+        // Symmetric positive case: the current witness MUST evict.
+        // Otherwise the method would never remove anything — masking the
+        // legitimate refused-compile-cleanup path.
+        assert!(sched.remove_artifact_not_newer_than(&witness_n_plus_k, 42));
         assert!(
             sched.try_get_artifact("/a.vue", 42).is_none(),
-            "carrier invariant: `remove_artifact_if_not_newer_than` \
-             with `max_generation >= stored.generation` MUST evict \
-             the snapshot — the eviction is the normal-case behavior \
-             on the host's compile-refusal arm."
+            "a current witness must evict the snapshot it is not older than"
         );
     }
 
@@ -6911,12 +6901,9 @@ mod tests {
         // the StageComplete submission that the worker would have
         // emitted. `handle_stage_complete` runs the post-completion
         // cleanup that must clear the registry.
-        let snap = ArtifactSnapshot {
-            generation: a_gen,
-            profile_hash: 7,
-            data: Arc::new(crate::node::EmptyData),
-        };
-        sched.commit_artifact("/a.vue", 7, snap);
+        let witness = source_witness(&sched, "/a.vue");
+        assert_eq!(witness.generation(), a_gen);
+        assert!(sched.commit_artifact(&witness, 7, Arc::new(crate::node::EmptyData)));
         let a_incarnation = sched.nodes.get("/a.vue").unwrap().incarnation_id();
         sched.handle_stage_complete(
             "/a.vue",
@@ -7002,12 +6989,9 @@ mod tests {
         // External commit_artifact terminalizes the only profile at
         // this `(owner, generation)`. With no other pending profile,
         // the cleanup mirror of handle_stage_complete must fire.
-        let snap = ArtifactSnapshot {
-            generation: a_gen,
-            profile_hash: 7,
-            data: Arc::new(crate::node::EmptyData),
-        };
-        sched.commit_artifact("/a.vue", 7, snap);
+        let witness = source_witness(&sched, "/a.vue");
+        assert_eq!(witness.generation(), a_gen);
+        assert!(sched.commit_artifact(&witness, 7, Arc::new(crate::node::EmptyData)));
 
         // KEY ASSERTION: registry entry for (/a.vue, a_gen) is empty.
         // Without the external-commit cleanup the path did not touch
@@ -8574,17 +8558,10 @@ mod tests {
         // Thread A: commit_artifact in a tight loop. Path:
         // `dag.lock()` → `node.artifacts.insert(...)`. dag-lock →
         // shard-write ordering.
+        let witness = source_witness(&sched_a, "/race.vue");
         let t_commit = thread::spawn(move || {
             while !stop_a.load(Ordering::Acquire) {
-                sched_a.commit_artifact(
-                    "/race.vue",
-                    42,
-                    ArtifactSnapshot {
-                        generation: 5,
-                        profile_hash: 42,
-                        data: Arc::new(crate::node::EmptyData),
-                    },
-                );
+                sched_a.commit_artifact(&witness, 42, Arc::new(crate::node::EmptyData));
             }
         });
 
@@ -10263,15 +10240,13 @@ mod tests {
                     0 => sched_lifecycle.invalidate(&id),
                     1 => sched_lifecycle.close_file(&id),
                     _ => {
-                        let snap = ArtifactSnapshot {
-                            generation: sched_lifecycle
-                                .try_get_source(&id)
-                                .map(|s| s.generation)
-                                .unwrap_or(1),
-                            profile_hash: 42,
-                            data: Arc::new(crate::node::EmptyData),
-                        };
-                        sched_lifecycle.commit_artifact(&id, 42, snap);
+                        if let Some(source) = sched_lifecycle.try_get_witnessed_source(&id) {
+                            sched_lifecycle.commit_artifact(
+                                &source.witness,
+                                42,
+                                Arc::new(crate::node::EmptyData),
+                            );
+                        }
                     }
                 }
                 tick = tick.wrapping_add(1);

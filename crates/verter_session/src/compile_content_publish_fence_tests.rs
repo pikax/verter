@@ -656,3 +656,97 @@ fn the_diagnostics_fence_declines_a_moved_revision_and_accepts_the_live_one() {
         "the accepted write must be readable",
     );
 }
+
+/// A delete/re-add of the SAME content landing between compute and publish
+/// must decline every publication of the raced compile: the session slot,
+/// the stored diagnostics and the scheduler artifact.
+///
+/// The successor node serves byte-identical source, so a fence that compares
+/// only the content hash accepts the raced output as current. The compile was
+/// computed from the retired node incarnation, though, and the source witness
+/// captured with its snapshot names that incarnation.
+///
+/// Discrimination: with a hash-only owner check the raced compile published
+/// its session slot into the re-added canonical, so the next request warm-hit
+/// it. With the witness fence the next request is cold, and only that request
+/// publishes.
+#[test]
+fn same_content_delete_and_readd_between_compute_and_publish_declines_publication() {
+    let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    publish_graph(
+        &workspace,
+        vec![("@n/*".to_string(), vec!["./src/*".to_string()])],
+    );
+    let host = host_over(Arc::clone(&workspace));
+    upsert(&host, FACT_FREE);
+    let retired = host
+        .scheduler()
+        .try_get_witnessed_source(CANONICAL)
+        .expect("the upserted canonical has a live source")
+        .witness;
+
+    {
+        let hook_host = Arc::downgrade(&host);
+        let fired = std::sync::atomic::AtomicBool::new(false);
+        *host.compile_publish_seam_hook.lock() = Some(Arc::new(move || {
+            if !fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let host = hook_host.upgrade().expect("host outlives its compile");
+                host.remove(CANONICAL).expect("the canonical is tracked");
+                upsert(&host, FACT_FREE);
+            }
+        }));
+    }
+
+    let profile = CompileProfile::default();
+    assert_eq!(profile.requested_mode, CompileCacheMode::Session);
+    let profile_hash = crate::hash::compile_profile_hash(&profile);
+    let raced = compile(&host, &profile);
+    *host.compile_publish_seam_hook.lock() = None;
+
+    let successor = host
+        .scheduler()
+        .try_get_witnessed_source(CANONICAL)
+        .expect("the re-added canonical has a live source");
+    assert_ne!(
+        successor.witness.incarnation(),
+        retired.incarnation(),
+        "the re-add must publish a new node incarnation — the pin is otherwise vacuous",
+    );
+    assert!(host
+        .scheduler()
+        .try_get_source_for_witness(&retired)
+        .is_none());
+    assert_eq!(raced.actual_mode, CompileCacheMode::Session);
+    assert!(!raced.cache_hit, "first compile must be cold");
+    assert!(
+        !raced.code.is_empty(),
+        "the declined publish must still serve the freshly compiled output",
+    );
+    assert_eq!(
+        stored_diagnostics(&host, &profile),
+        None,
+        "the retired compile must not store diagnostics on its successor",
+    );
+    assert!(
+        host.scheduler()
+            .try_get_last_known_good(CANONICAL, profile_hash)
+            .is_none(),
+        "the retired compile must not commit a scheduler artifact on its successor",
+    );
+
+    // Negative control: the successor's own compile is cold, publishes, and
+    // the one after warm-hits it.
+    let republished = compile(&host, &profile);
+    assert!(
+        !republished.cache_hit,
+        "the retired compile must not have published a session slot",
+    );
+    assert!(host
+        .scheduler()
+        .try_get_artifact(CANONICAL, profile_hash)
+        .is_some());
+    assert_eq!(stored_diagnostics(&host, &profile), Some(0));
+    let warm = compile(&host, &profile);
+    assert!(warm.cache_hit, "the successor's entry must serve warm");
+    assert_eq!(warm.code, republished.code);
+}

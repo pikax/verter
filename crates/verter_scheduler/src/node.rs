@@ -131,6 +131,54 @@ impl SourceSnapshot {
     }
 }
 
+/// Scheduler-captured identity of the [`FileNode`] object and generation a
+/// [`SourceSnapshot`] was handed out from.
+///
+/// Minted only by [`crate::scheduler::Scheduler::try_get_witnessed_source`],
+/// so a holder cannot forge one. A generation alone cannot fence external
+/// publication: a delete/re-add or reset publishes a fresh node object that
+/// may reach the same generation with the same content. The incarnation
+/// names the node object itself and is never reused, so a witness whose node
+/// was retired can never authorize publication or cleanup on its successor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceWitness {
+    canonical: Arc<str>,
+    incarnation: u64,
+    generation: u64,
+}
+
+impl SourceWitness {
+    pub(crate) fn capture(node: &FileNode, snapshot: &SourceSnapshot) -> Self {
+        Self {
+            canonical: Arc::from(node.canonical_id.as_str()),
+            incarnation: node.incarnation_id(),
+            generation: snapshot.generation,
+        }
+    }
+
+    /// Canonical file the witnessed snapshot belongs to.
+    pub fn canonical(&self) -> &str {
+        &self.canonical
+    }
+
+    /// Process-unique incarnation of the node the snapshot was read from.
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    /// Generation of the witnessed snapshot.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// A source snapshot together with the witness of where it was read from.
+#[derive(Clone, Debug)]
+pub struct WitnessedSource {
+    pub snapshot: Arc<SourceSnapshot>,
+    pub witness: SourceWitness,
+}
+
 /// Immutable analysis snapshot — committed after Analysis stage.
 pub struct AnalysisSnapshot {
     /// Generation this snapshot was produced at.
@@ -337,6 +385,14 @@ impl FileNode {
         !self.retired.load(Ordering::Acquire)
             && self.incarnation_id == incarnation
             && self.generation() == generation
+    }
+
+    /// Whether `witness` was captured from this live, unretired node object.
+    /// The generation is not compared: callers apply their own generation rule.
+    pub(crate) fn carries_witness(&self, witness: &SourceWitness) -> bool {
+        !self.retired.load(Ordering::Acquire)
+            && self.incarnation_id == witness.incarnation
+            && *self.canonical_id == *witness.canonical
     }
 
     /// Current generation (acquire ordering for cross-thread visibility).
