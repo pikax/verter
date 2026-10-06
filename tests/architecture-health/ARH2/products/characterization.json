@@ -207,19 +207,19 @@
       "pins": [
         {
           "behavior": "the memo table interns stable identities: interning returns unique stable ids, dedups structural values across contexts, and resolve-decl memo keys discriminate the top-level owner",
-          "command": "cargo nextest run -p verter_session semantic_query_memo::tests",
-          "filter": "semantic_query_memo::tests",
+          "command": "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
+          "filter": "semantic_query_memo_tests::tests",
           "witnesses": [
             {
-              "file": "crates/verter_session/src/semantic_query_memo/tests.rs",
+              "file": "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
               "test": "interning_returns_unique_stable_ids"
             },
             {
-              "file": "crates/verter_session/src/semantic_query_memo/tests.rs",
+              "file": "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
               "test": "intern_dedups_structural_values_across_contexts"
             },
             {
-              "file": "crates/verter_session/src/semantic_query_memo/tests.rs",
+              "file": "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
               "test": "resolve_decl_memo_key_discriminates_top_level_owner"
             }
           ]
@@ -448,11 +448,11 @@
       "pins": [
         {
           "behavior": "the envelope surface's identity behavior the narrowing must preserve: intern identity discriminates the top-level owner",
-          "command": "cargo nextest run -p verter_session semantic_query_memo::tests",
-          "filter": "semantic_query_memo::tests",
+          "command": "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
+          "filter": "semantic_query_memo_tests::tests",
           "witnesses": [
             {
-              "file": "crates/verter_session/src/semantic_query_memo/tests.rs",
+              "file": "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
               "test": "intern_identity_discriminates_top_level_owner"
             }
           ]

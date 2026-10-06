@@ -27,7 +27,7 @@
         "cargo nextest run -p verter_session flow_return_frame_seal_tests",
         "cargo nextest run -p verter_session cycle_gate_tests",
         "cargo nextest run -p verter_session dispatch_txn_tests",
-        "cargo nextest run -p verter_session semantic_query_memo::tests",
+        "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
         "cargo nextest run -p verter_session stable_key_tests",
         "cargo nextest run -p verter_session flow_slice_content_tests"
       ],
@@ -65,7 +65,7 @@
         "cargo nextest run -p verter_session flow_return_frame_seal_tests",
         "cargo nextest run -p verter_session cycle_gate_tests",
         "cargo nextest run -p verter_session dispatch_txn_tests",
-        "cargo nextest run -p verter_session semantic_query_memo::tests",
+        "cargo nextest run -p verter_session semantic_query_memo_tests::tests",
         "cargo nextest run -p verter_session stable_key_tests",
         "cargo nextest run -p verter_session flow_slice_content_tests"
       ],
