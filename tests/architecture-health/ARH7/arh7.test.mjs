@@ -153,14 +153,14 @@ test("ARH7-ratification dirty twin: invented case is rejected", () => {
   assert.ok(selectedCaseIds(result).includes("ARH7-ratification"));
 });
 
-test("ARH7-ratification dirty twin: candidate pin drift is rejected", () => {
+test("ARH7-ratification dirty twin: an invented product schema is rejected", () => {
   const dirty = cloneProducts();
-  dirty["activation-cutover"].candidate = "not-a-commit";
+  dirty["activation-cutover"].schema = "InventedActivationCutover";
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(
     result.errors.some(
-      (e) => e.caseId === "ARH7-ratification" && e.code === "candidate-basis-drift",
+      (e) => e.caseId === "ARH7-ratification" && e.code === "product-schema-drift",
     ),
     JSON.stringify(result.errors),
   );

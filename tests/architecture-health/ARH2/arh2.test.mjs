@@ -204,7 +204,7 @@ const retargetLane = (products, from, to) => {
 test("ARH2-characterization dirty twin: nested inline module is not a cross-product witness id (AC2)", () => {
   const dirty = cloneProducts();
   const retarget = (pin) => {
-    if (pin.filter !== "scheduler::tests") return;
+    if (pin.filter !== "scheduler::") return;
     const previous = pin.command;
     pin.filter = "scheduler::pool_topology";
     pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
@@ -234,9 +234,9 @@ test("ARH2-characterization dirty twin: witness is bound to its enclosing module
   const pin = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2").pins[0];
   const previous = pin.command;
   pin.witnesses = [
-    pin.witnesses.find((w) => w.test === "tombstone_rejects_pre_remove_source_submission"),
+    pin.witnesses.find((w) => w.test === "incarnation_rejects_pre_remove_source_submission"),
   ];
-  pin.filter = "scheduler::tombstone_rejects_pre_remove_source_submission";
+  pin.filter = "scheduler::incarnation_rejects_pre_remove_source_submission";
   pin.command = `cargo nextest run -p verter_scheduler ${pin.filter}`;
   retargetLane(dirty, previous, pin.command);
   const result = validate(dirty);
@@ -246,7 +246,7 @@ test("ARH2-characterization dirty twin: witness is bound to its enclosing module
       (e) =>
         e.caseId === "ARH2-characterization" &&
         e.code === "pin-filter-selects-nothing" &&
-        e.detail.includes("scheduler::tests::tombstone_rejects_pre_remove_source_submission"),
+        e.detail.includes("scheduler::tests::incarnation_rejects_pre_remove_source_submission"),
     ),
     JSON.stringify(result.errors),
   );
@@ -402,7 +402,7 @@ test("ARH2-characterization dirty twin: duplicated route characterization is rej
 test("ARH2-characterization dirty twin: pre-narrowing surface that is no longer pub is rejected", () => {
   const dirty = cloneProducts();
   const route = dirty["characterization"].routes.find((r) => r.cutoverRow === "ARH1-CUT-2");
-  route.surface.items = ["tombstones", "generation_floors", "deferred_blocker_ids", "node"];
+  route.surface.items = ["generation_floors", "deferred_blocker_ids", "node"];
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(

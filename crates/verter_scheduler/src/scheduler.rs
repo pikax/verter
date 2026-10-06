@@ -1297,7 +1297,7 @@ impl Scheduler {
             )
         };
 
-        // A submitted first Source already owns a node but may still be in
+        // A queued Source or reload already owns a node but may still be in
         // the inbox. Give it the same producer tracking as an auto-ingested
         // dependency before recording any blockers for its Analysis.
         for dep_id in &blocker_dep_ids {
@@ -9731,7 +9731,14 @@ mod tests {
                 })
             }
         }
-        for (prequeued, extracted) in [(true, false), (false, false), (true, true), (false, true)] {
+        for (prequeued, extracted, reload) in [
+            (true, false, false),
+            (false, false, false),
+            (true, true, false),
+            (false, true, false),
+            (true, false, true),
+            (true, true, true),
+        ] {
             let loader = Arc::new(MemorySourceLoader::new());
             loader.insert("/owner.vue".into(), Arc::from("owner"));
             loader.insert("/dep.ts".into(), Arc::from("dep"));
@@ -9752,6 +9759,11 @@ mod tests {
                 file_language: None,
                 request_context: None,
             };
+            if reload {
+                let initial = sched.submit_request(request("/dep.ts", TargetStage::Analysis));
+                assert!(sched.wait_or_drive(&initial).is_ready());
+                executor.events.lock().unwrap().clear();
+            }
             let owner = sched.submit_request(request("/owner.vue", TargetStage::Analysis));
             if extracted {
                 // Leave the owner's Source completion ahead of the dependency
@@ -9761,8 +9773,12 @@ mod tests {
             } else {
                 assert!(sched.wait_or_drive(&owner).is_ready());
             }
-            let dep =
-                prequeued.then(|| sched.submit_request(request("/dep.ts", TargetStage::Source)));
+            let dep = if reload {
+                sched.close_file("/dep.ts");
+                None
+            } else {
+                prequeued.then(|| sched.submit_request(request("/dep.ts", TargetStage::Source)))
+            };
             if !extracted {
                 sched.register_resolved_deps(
                     "/owner.vue",
@@ -9786,7 +9802,7 @@ mod tests {
             assert_eq!(
                 events.len(),
                 3,
-                "prequeued={prequeued}, extracted={extracted}: {events:?}"
+                "prequeued={prequeued}, extracted={extracted}, reload={reload}: {events:?}"
             );
             assert!(events[..2].iter().any(|id| id == "/owner.vue"));
             assert!(events[..2].iter().any(|id| id == "/dep.ts"));

@@ -258,7 +258,7 @@ pub struct FileNode {
     incarnation_id: u64,
     /// Submission lifetime survives language re-home and ends on removal/reset.
     submission_lifetime: u64,
-    /// Distinguishes a queued first Source from a terminal producer.
+    /// Distinguishes a queued Source at the current generation from a terminal producer.
     source_admitted: AtomicBool,
     /// Object-lifetime admission fence. Retired objects held by delayed work
     /// cannot authorize any new DAG admission, even at a reused generation.
@@ -352,6 +352,7 @@ impl FileNode {
     pub(crate) fn bump_generation(&self, proof: &crate::source_root::SourcePublication) -> u64 {
         self.source_integration_ready
             .store(false, Ordering::Release);
+        self.source_admitted.store(false, Ordering::Release);
         self.generation.advance(proof)
     }
 

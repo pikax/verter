@@ -125,8 +125,9 @@ acquiring the lock.
 Scheduler tombstones and DAG retirement floors have no storage. The scheduler's
 per-canonical generation floors remain an external publication fence:
 `commit_artifact`, artifact eviction and the host's base source revision currently
-carry generation without a captured node incarnation. Their migration must
-precede reclamation of that remaining history. Internal admission, dispatch,
+carry generation without a captured node incarnation. SKR-RET-FLOORS owns their
+migration after SKR-ENGINE and the subsequent reclamation of that remaining
+history. Internal admission, dispatch,
 publication, completion and failure use full incarnation identity independently
 of that fence.
 
@@ -140,8 +141,10 @@ lifetime). Registration precedes work admission, so a refused `submit_file`
 must also terminalize the waiter rather than leave it parked.
 
 A node published at submission can still lack admitted Source work. Its
-first-source admission marker distinguishes this pending producer from a dead
-producer. Both explicit blocker registration and Source-completion dependency
+current-generation Source admission marker distinguishes this pending producer
+from a dead producer. Generation advance resets the marker so a queued reload
+also remains gating before inbox admission. Both explicit blocker registration
+and Source-completion dependency
 integration start or track that producer before recording Analysis blockers.
 The initial generation is advanced above zero before those blockers are built.
 Explicit registration revalidates its captured owner incarnation/generation
