@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import {
   goldenManifestPath,
@@ -230,7 +231,7 @@ describe("atomic golden-set publication", () => {
     const root = freshRoot();
     const writerScript = `
       const { publishGoldenSet } = await import(${JSON.stringify(
-        path.join(HARNESS_ROOT, "src/golden-store.mjs"),
+        pathToFileURL(path.join(HARNESS_ROOT, "src/golden-store.mjs")).href,
       )});
       const root = process.argv[1];
       for (let i = 0; i < 20; i += 1) {
@@ -271,6 +272,21 @@ describe("atomic golden-set publication", () => {
     expect([...set.keys()].sort()).toEqual(["vue/a", "vue/b"]);
     expect(set.get("vue/a").code).toBe("export default 1;");
     expect(set.get("vue/b").code).toBe("export default 2;");
+  });
+
+  it("post-commit GC collects unreferenced digest files and leaves in-flight temp names", () => {
+    const root = freshRoot();
+    publishGoldenSet(root, [{ name: "vue/a", record: { case: "a1" } }]);
+    const live = readGoldenManifest(root).entries["vue/a"];
+    const records = path.join(root, "records");
+    const orphan = path.join(records, `${"ab".repeat(32)}.json`);
+    writeFileSync(orphan, "{}\n");
+    const inflight = path.join(records, `${live}.json.tmp-4242`);
+    writeFileSync(inflight, "partial");
+    publishGoldenSet(root, [{ name: "vue/a", record: { case: "a1" } }]);
+    expect(existsSync(orphan)).toBe(false);
+    expect(existsSync(inflight)).toBe(true);
+    expect(existsSync(path.join(records, `${live}.json`))).toBe(true);
   });
 
   it("the COMMITTED golden set is complete, manifest-resolvable, and digest-consistent", () => {
