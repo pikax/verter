@@ -46,7 +46,13 @@ impl VerterHost {
     /// LSP/test workspace swaps.
     pub fn set_workspace(&self, workspace: Arc<dyn verter_workspace::WorkspaceAccess>) {
         self.workspace_services.attach(workspace.as_ref());
+        let freshness_readers = workspace.freshness_readers();
         *self.workspace.write() = workspace;
+        // Artifacts published from here on own their freshness evidence in
+        // the new workspace; the clear below releases the old leases.
+        self.project_type_store
+            .indexed()
+            .install_freshness_readers(freshness_readers);
         // SWAP-FIRST, then clear — the order is load-bearing. Clearing
         // before the swap would be unsound: a concurrent reader could
         // repopulate a just-cleared cache from the OLD workspace, and

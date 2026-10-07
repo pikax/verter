@@ -3168,3 +3168,60 @@ fn a_distinct_content_edit_loop_on_one_canonical_is_swept_per_canonical() {
     );
     assert_eq!(store.retained_retired_version_count(), 0);
 }
+
+/// A stored artifact owns its canonical's content-transition evidence: the
+/// workspace may retire unrelated history (raising the floor every
+/// unleased canonical answers), but the stored artifact's canonical keeps
+/// answering from its own evidence until the version is reclaimed.
+#[test]
+fn stored_artifacts_own_their_canonical_freshness_evidence_until_reclaimed() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess, WorkspaceRead};
+
+    let workspace = MemoryWorkspace::new(MemoryOptions::default());
+    let store = FileArtifactStore::new();
+    store.install_freshness_readers(workspace.freshness_readers());
+    let leased = "/pkg/leased.d.ts";
+    let built_at = workspace.content_generation();
+    store.insert(Arc::from(leased), synth_indexed(1));
+    assert_eq!(
+        workspace
+            .resource_snapshot()
+            .freshness_history
+            .leased_entries,
+        1
+    );
+
+    let churn: Vec<(String, Arc<str>)> = (0..verter_workspace::freshness::DEFAULT_RETIRE_TRIGGER
+        + 64)
+        .map(|index| (format!("/churn/{index}.ts"), Arc::from("export {};")))
+        .collect();
+    workspace.notify_upsert_many(&churn);
+    workspace.notify_upsert("/churn/last.ts", Arc::from("export {};"));
+
+    assert!(
+        workspace.last_content_transition_generation("/pkg/unleased.d.ts") > built_at,
+        "unrelated churn past the retirement trigger must have raised the floor"
+    );
+    assert!(
+        workspace.last_content_transition_generation(leased) <= built_at,
+        "retiring unrelated history must not make a stored artifact stale"
+    );
+    let residency = workspace.resource_snapshot().freshness_history;
+    // Retirement runs once the queue reaches the trigger, so at most the
+    // evidence recorded after the last pass remains.
+    assert!(
+        residency.exact_entries <= 1 + 64 + 1,
+        "unleased churn must have retired: {residency:?}"
+    );
+
+    store.clear_all();
+    store.reclaim_retired_versions();
+    assert_eq!(
+        workspace
+            .resource_snapshot()
+            .freshness_history
+            .leased_entries,
+        0,
+        "a reclaimed version must release its canonical's evidence"
+    );
+}

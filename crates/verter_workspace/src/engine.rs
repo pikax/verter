@@ -466,7 +466,7 @@ impl BaselineFold {
 ///  7. `package_index` (read or write)
 ///  8. `dir_index` (read or write)
 ///  9. `lazy_resolution_cache` (read or write)
-/// 10. `content_transitions` / `subtree_transitions` (read or write)
+/// 10. `freshness` (the content-transition history; a leaf)
 ///
 /// **`resolution_world_write` outranks BOTH evidence ledgers.** Gate → ledger
 /// is the REQUIRED order and the one the code takes:
@@ -632,43 +632,28 @@ pub(crate) struct Engine {
     /// invalidates it implicitly.
     workspace_default_env_hashes: ArcSwapOption<WorkspaceDefaultEnvHashes>,
 
-    /// Per-canonical content-transition ledger: canonical id → the
-    /// `content_generation` recorded at its most recent content
-    /// transition (overlay write/clear, snapshot inject/remove, disk
-    /// write/copy/delete). The workspace is the sole content authority,
-    /// so this is the AUTHORITATIVE per-canonical freshness rail for
-    /// consumers retaining content-derived artifacts: an artifact built
-    /// at generation `G` for canonical `C` is provably content-fresh
-    /// only while `G >= last_content_transition_generation(C)`. Unlike a
-    /// global generation-equality clause, the ledger is per-canonical —
-    /// unrelated transitions never invalidate an untouched canonical's
-    /// retained artifacts (package reuse). Recording lives at the
-    /// workspace mutation chokepoints, so mutators that bypass any
+    /// Per-canonical content-transition history: the AUTHORITATIVE
+    /// per-canonical freshness rail for consumers retaining
+    /// content-derived artifacts. An artifact built at generation `G` for
+    /// canonical `C` is provably content-fresh only while
+    /// `G >= last_content_transition_generation(C)`. The rail is
+    /// per-canonical — unrelated transitions never invalidate an untouched
+    /// canonical's retained artifacts (package reuse) — and folds in every
+    /// recorded SUBTREE transition (`delete_dir_all`, a watcher
+    /// `DirectoryTreeDirty` recovery) whose prefix contains `C`, since those
+    /// change a member set the engine cannot enumerate. Recording lives at
+    /// the workspace mutation chokepoints, so mutators that bypass any
     /// host-level wrapper (direct embedder `notify_upsert`, `write_file`,
     /// `copy_file`) are covered by construction. Keys are normalized
-    /// through [`verter_session_query::resolution::normalize_canonical_id`] at the
-    /// recording chokepoints AND the query, so a direct embedder passing
-    /// a non-canonical key form (backslashes, Windows drive casing)
-    /// records under the same key the gate reads.
+    /// through [`verter_session_query::resolution::normalize_canonical_id`]
+    /// at the recording chokepoints AND the query, so a direct embedder
+    /// passing a non-canonical key form (backslashes, Windows drive
+    /// casing) records under the same key the gate reads.
     ///
-    /// Growth: insert-only, bounded by the number of DISTINCT canonicals
-    /// ever mutated in this workspace instance — the same order as the
-    /// snapshot/edge stores, which key per-canonical and are also never
-    /// compacted; the ledger adds one `(String, u64)` per such canonical.
-    content_transitions: RwLock<FxHashMap<String, u64>>,
-
-    /// Per-SUBTREE content-transition ledger: directory prefix → the
-    /// `content_generation` recorded at its most recent subtree-scoped
-    /// mutation (`delete_dir_all`, a watcher `DirectoryTreeDirty`
-    /// recovery). Those mutations change an UNKNOWN member set — the
-    /// engine cannot enumerate every canonical a recursive disk delete
-    /// or an out-of-band disk change touched — so they record the
-    /// PREFIX instead; [`Self::last_content_transition_generation`]
-    /// folds in every recorded prefix that contains the queried
-    /// canonical. Same normalization and growth story as
-    /// `content_transitions` (bounded by distinct mutated directory
-    /// prefixes).
-    subtree_transitions: RwLock<FxHashMap<String, u64>>,
+    /// Growth: evidence no live reader owns retires into a monotone floor
+    /// (see [`crate::freshness`]); retained artifacts and request views
+    /// own the evidence they read through [`crate::FreshnessReaders`].
+    freshness: Arc<crate::freshness::FreshnessHistory>,
 }
 
 struct StrictSelfRootTransition<'a>(&'a Engine);
@@ -755,8 +740,7 @@ impl Engine {
             ambient_libs: ArcSwap::from_pointee(AmbientLibsByProject::default()),
             default_resolve_extensions: ArcSwap::from_pointee(initial_extensions),
             workspace_default_env_hashes: ArcSwapOption::new(None),
-            content_transitions: RwLock::new(FxHashMap::default()),
-            subtree_transitions: RwLock::new(FxHashMap::default()),
+            freshness: Arc::new(crate::freshness::FreshnessHistory::new()),
         };
         // Publish an initial snapshot from the empty project graph so that
         // `published_state` is always `Some`. This ensures basic relative
@@ -948,35 +932,18 @@ impl Engine {
         self.content_generation.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// The per-canonical rail only moves FORWARD. A byte-less transition may
-    /// have advanced it past the global content generation, and a later real
-    /// mutation recorded at that lower generation must not walk it back onto a
-    /// key a consumer was already refused under.
+    /// The per-canonical rail only moves FORWARD: every recorded transition
+    /// mints a key strictly newer than the last one read for this canonical
+    /// — a real mutation included, since a byte-less transition may already
+    /// sit at or above its generation.
     fn record_content_transition_at(&self, canonical_id: &str, generation: u64) {
-        let mut transitions = self.content_transitions.write();
-        let recorded = transitions
-            .entry(verter_session_query::resolution::normalize_canonical_id(
-                canonical_id,
-            ))
-            .or_insert(0);
-        // Every recorded transition mints a key strictly newer than the last
-        // one read for this canonical — a real mutation included, since a
-        // byte-less transition may already sit at or above its generation.
-        *recorded = if generation > *recorded {
-            generation
-        } else {
-            *recorded + 1
-        };
+        self.freshness
+            .record_exact(canonical_id, generation, self.current_content_generation());
     }
 
     fn record_subtree_content_transition_at(&self, prefix: &str, generation: u64) {
-        let mut normalized = verter_session_query::resolution::normalize_canonical_id(prefix);
-        while normalized.len() > 1 && normalized.ends_with('/') {
-            normalized.pop();
-        }
-        self.subtree_transitions
-            .write()
-            .insert(normalized, generation);
+        self.freshness
+            .record_subtree(prefix, generation, self.current_content_generation());
     }
 
     pub(crate) fn bump_content_generation(&self) -> u64 {
@@ -1040,35 +1007,18 @@ impl Engine {
     }
 
     /// The generation recorded at `canonical_id`'s most recent content
-    /// transition; `0` when the canonical has never transitioned. Folds
-    /// the exact per-canonical record with every recorded SUBTREE prefix
-    /// containing the canonical (a `delete_dir_all` / watcher recovery
-    /// transitions every member of the subtree).
+    /// transition, or a later one; `0` when the canonical has never
+    /// transitioned. Folds the exact per-canonical record with every
+    /// recorded SUBTREE prefix containing the canonical (a `delete_dir_all`
+    /// / watcher recovery transitions every member of the subtree).
+    /// Monotone per canonical: retiring history only ever raises it.
     pub(crate) fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
-        let canonical = verter_session_query::resolution::normalize_canonical_id(canonical_id);
-        let exact = self
-            .content_transitions
-            .read()
-            .get(&canonical)
-            .copied()
-            .unwrap_or(0);
-        let subtree = self
-            .subtree_transitions
-            .read()
-            .iter()
-            // Boundary-correct subtree containment through the shared
-            // `path_matches_prefix` chokepoint — the recorded root
-            // prefix `"/"` folds into every canonical (a raw
-            // next-byte-is-`'/'` check can never match it), while a
-            // byte-prefix sibling (`/srcx.ts` under `/src`) never
-            // matches. Recorded prefixes are normalized at
-            // [`Self::record_subtree_content_transition`]; the helper
-            // re-normalizes on read so both sides agree.
-            .filter(|(prefix, _)| crate::path_matches_prefix(canonical.as_str(), prefix))
-            .map(|(_, generation)| *generation)
-            .max()
-            .unwrap_or(0);
-        exact.max(subtree)
+        self.freshness.last_transition(canonical_id)
+    }
+
+    /// Handle through which readers own the freshness evidence they read.
+    pub(crate) fn freshness_readers(&self) -> crate::freshness::FreshnessReaders {
+        crate::freshness::FreshnessReaders::new(Arc::clone(&self.freshness))
     }
 
     /// Four-step resolution-world publication protocol. The callback performs
@@ -2714,6 +2664,7 @@ impl Engine {
                 .as_ref()
                 .map(|root| root.snapshot.projects.len())
                 .unwrap_or(0),
+            freshness_history: self.freshness.residency(),
         }
     }
 

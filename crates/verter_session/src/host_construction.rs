@@ -586,6 +586,11 @@ impl VerterHost {
                 task_registry,
             );
         let project_type_store = Arc::new(project_type_store);
+        // Retained artifacts own their canonical's freshness evidence in the
+        // workspace they are built from.
+        project_type_store
+            .indexed()
+            .install_freshness_readers(workspace_lock.read().freshness_readers());
         // Pull RouteDb / ImportedRootDb handles from the project-type-store
         // BEFORE constructing the resolver runtime so the runtime borrows
         // the project-shared `Arc`s. This keeps

@@ -116,6 +116,8 @@ mod raw_snapshot_template_source_move_tests;
 #[cfg(test)]
 mod request_store_view_derived_hash_tests;
 #[cfg(test)]
+mod request_store_view_freshness_tests;
+#[cfg(test)]
 mod template_slot_generation_rail_tests;
 #[cfg(test)]
 mod unrootable_route_admission_tests;

@@ -2531,6 +2531,10 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
         self.inner.last_content_transition_generation(canonical_id)
     }
 
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        self.inner.freshness_readers()
+    }
+
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         self.inner.vfs_provenance_snapshot()
     }
@@ -2795,6 +2799,10 @@ impl crate::traits::WorkspaceRead for TransactionReader<'_> {
 
     fn last_content_transition_generation(&self, canonical_id: &str) -> u64 {
         self.inner.last_content_transition_generation(canonical_id)
+    }
+
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        self.inner.freshness_readers()
     }
 
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {

@@ -44,6 +44,9 @@ pub struct WorkspaceResourceSnapshot {
     /// Cold resolutions currently in flight (request-scoped: each lives
     /// from its claim to its producer's settlement).
     pub resolution_flights: usize,
+    /// Content-transition history occupancy: retained exact and subtree
+    /// evidence, the evidence readers own, and the backing capacity.
+    pub freshness_history: crate::freshness::FreshnessResidency,
 }
 
 /// Read-only view of the workspace authority.
@@ -511,6 +514,14 @@ pub trait WorkspaceRead: Send + Sync {
     /// than the refused key. Default no-op (reader-only impls never transition
     /// content).
     fn record_content_transition(&self, _canonical_id: &str) {}
+
+    /// Handle through which a retained artifact or view owns the
+    /// [`Self::last_content_transition_generation`] evidence it reads, so
+    /// retiring history never makes that reader falsely stale. `None` for
+    /// reader-only impls that never transition content.
+    fn freshness_readers(&self) -> Option<crate::FreshnessReaders> {
+        None
+    }
 
     /// Point-in-time VFS provenance counters for observability and benchmarks.
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
