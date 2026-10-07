@@ -317,6 +317,8 @@ mod tests {
             scheduler.remove(id);
         }
         assert_no_retained_state(&scheduler, &ids);
+        // `DashMap::capacity` sums every shard, so the bound is the probe's
+        // largest single shard: the one its occupant landed in.
         let single_occupant = {
             let probe: DashMap<String, Arc<FileNode>> = DashMap::new();
             probe.insert(
@@ -324,10 +326,20 @@ mod tests {
                 Arc::new(FileNode::new("/probe.ts".into(), FileLanguage::script_ts())),
             );
             probe.remove("/probe.ts");
-            probe.capacity()
+            probe
+                .shards()
+                .iter()
+                .map(|shard| shard.read().capacity())
+                .max()
+                .unwrap()
         };
+        assert!(single_occupant > 0);
         for shard in scheduler.nodes.shards() {
-            assert!(shard.read().capacity() <= single_occupant);
+            let capacity = shard.read().capacity();
+            assert!(
+                capacity <= single_occupant,
+                "shard capacity {capacity} exceeds single-occupant capacity {single_occupant}"
+            );
         }
     }
 
