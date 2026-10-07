@@ -672,6 +672,10 @@ pub struct DependencyOccupancy {
     pub blocker_ref_entries: usize,
     /// Backing capacity of the blocker reference index's canonical table.
     pub blocker_ref_capacity: usize,
+    /// Backing capacity summed over the blocker reference index's
+    /// per-canonical entry tables. A table keeps its capacity while any
+    /// entry survives, so this can exceed `blocker_ref_entries`.
+    pub blocker_ref_entries_capacity: usize,
 }
 
 pub struct SchedulerDag {
@@ -1159,6 +1163,7 @@ impl SchedulerDag {
             blocker_ref_canonicals: refs.len(),
             blocker_ref_entries: refs.values().map(FxHashMap::len).sum(),
             blocker_ref_capacity: refs.capacity(),
+            blocker_ref_entries_capacity: refs.values().map(FxHashMap::capacity).sum(),
         }
     }
 

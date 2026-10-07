@@ -126,6 +126,11 @@ pub struct DepEdgeOccupancy {
     pub file_generations: usize,
     /// Gated file dependencies held by the file index.
     pub file_deps: usize,
+    /// Backing capacity summed over the file index's per-generation
+    /// dependency sets. A set keeps its capacity while any member
+    /// survives, so this can exceed `file_deps`. The ordered levels of
+    /// the store hold no spare backing capacity.
+    pub file_deps_capacity: usize,
 }
 
 impl DepEdges {
@@ -224,13 +229,14 @@ impl DepEdges {
 
     /// Current occupancy of the store and its file index.
     pub(in crate::dag) fn occupancy(&self) -> DepEdgeOccupancy {
-        let (file_generations, file_deps) =
+        let (file_generations, file_deps, file_deps_capacity) =
             self.by_file
                 .values()
-                .fold((0, 0), |(generations, deps), gens| {
+                .fold((0, 0, 0), |(generations, deps, capacity), gens| {
                     (
                         generations + gens.len(),
                         deps + gens.values().map(FxHashSet::len).sum::<usize>(),
+                        capacity + gens.values().map(FxHashSet::capacity).sum::<usize>(),
                     )
                 });
         DepEdgeOccupancy {
@@ -241,6 +247,7 @@ impl DepEdges {
             file_canonicals_capacity: self.by_file.capacity(),
             file_generations,
             file_deps,
+            file_deps_capacity,
         }
     }
 

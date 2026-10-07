@@ -126,6 +126,10 @@ pub struct WaitGraphOccupancy {
     pub reverse_entries: usize,
     /// Backing capacity of the producer → waiters reverse index.
     pub reverse_capacity: usize,
+    /// Backing capacity summed over the per-producer waiter sets. A set
+    /// keeps its capacity while any waiter survives, so this can exceed
+    /// `reverse_entries`.
+    pub reverse_entries_capacity: usize,
 }
 
 /// A refused wait: registering it would close a cycle of waiting tasks (or
@@ -258,6 +262,7 @@ impl TaskRegistry {
             producers: state.waiters.len(),
             reverse_entries: state.waiters.values().map(FxHashSet::len).sum(),
             reverse_capacity: state.waiters.capacity(),
+            reverse_entries_capacity: state.waiters.values().map(FxHashSet::capacity).sum(),
         }
     }
 
@@ -555,6 +560,47 @@ mod tests {
             drained.edges_capacity >= 65,
             "backing capacity is reported separately from membership",
         );
+    }
+
+    /// A producer's waiter set emptied down to one survivor still reports
+    /// the backing capacity its former waiters left behind, and retiring
+    /// the producer releases it.
+    #[test]
+    fn producer_waiter_set_capacity_is_reported_until_it_drains() {
+        let registry = TaskRegistry::default();
+        let producer = registry.register_task();
+        let waiters: Vec<ExecutionTask> = (0..64).map(|_| registry.register_task()).collect();
+        let mut edges: Vec<WaitEdge> = waiters
+            .iter()
+            .map(|waiter| {
+                registry
+                    .register_wait(waiter.id(), producer.id())
+                    .expect("acyclic wait registers")
+            })
+            .collect();
+        let populated = registry.wait_graph_occupancy();
+        assert_eq!((populated.producers, populated.reverse_entries), (1, 64));
+        assert!(populated.reverse_entries_capacity >= 64);
+
+        edges.truncate(1);
+        let shrunk = registry.wait_graph_occupancy();
+        assert_eq!((shrunk.producers, shrunk.reverse_entries), (1, 1));
+        assert_eq!(
+            shrunk.reverse_entries_capacity, populated.reverse_entries_capacity,
+            "the surviving set keeps the backing its former waiters used",
+        );
+
+        drop(producer);
+        let retired = registry.wait_graph_occupancy();
+        assert_eq!(
+            (
+                retired.producers,
+                retired.reverse_entries,
+                retired.reverse_entries_capacity
+            ),
+            (0, 0, 0),
+        );
+        drop(edges);
     }
 
     /// Retiring a waiter removes its own outgoing edge from both sides.

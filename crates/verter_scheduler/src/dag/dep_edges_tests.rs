@@ -65,8 +65,9 @@ fn drain_and_assert_empty(dag: &mut SchedulerDag) {
             occupancy.file_canonicals,
             occupancy.file_generations,
             occupancy.file_deps,
+            occupancy.file_deps_capacity,
         ),
-        (0, 0, 0, 0, 0),
+        (0, 0, 0, 0, 0, 0),
         "every dependency edge and file-index entry unlinked",
     );
     assert!(dag.canonical_index.node_tokens.is_empty());
@@ -320,5 +321,42 @@ fn cancelling_a_self_gated_node_leaves_no_dangling_edge() {
     );
     assert_eq!(dag.dependency_occupancy().dep_edges.edges, 1);
     assert!(dag.cancel(&identity).is_empty());
+    drain_and_assert_empty(&mut dag);
+}
+
+/// A `(canonical, generation)` bucket emptied down to one survivor still
+/// reports the backing capacity its former population left behind, and
+/// unlinking the survivor releases it.
+#[test]
+fn file_index_bucket_capacity_is_reported_until_it_drains() {
+    let mut dag = SchedulerDag::new();
+    let waiters: Vec<WorkNodeIdentity> = (0..64u64)
+        .map(|i| {
+            let waiter = artifact(&format!("/waiter-{i}.vue"), 1, 1);
+            gated(
+                &mut dag,
+                waiter.clone(),
+                vec![analysis("/hub.ts", i + 1, 1)],
+            );
+            waiter
+        })
+        .collect();
+    let populated = dag.dependency_occupancy().dep_edges;
+    assert_eq!((populated.file_generations, populated.file_deps), (1, 64));
+    assert!(populated.file_deps_capacity >= 64);
+
+    let (survivor, removed) = waiters.split_last().expect("waiters exist");
+    for waiter in removed {
+        assert!(dag.cancel(waiter).is_empty());
+    }
+    let shrunk = dag.dependency_occupancy().dep_edges;
+    assert_eq!((shrunk.file_generations, shrunk.file_deps), (1, 1));
+    assert_eq!(
+        shrunk.file_deps_capacity, populated.file_deps_capacity,
+        "the surviving bucket keeps the backing its former members used",
+    );
+
+    assert!(dag.cancel(survivor).is_empty());
+    assert_eq!(dag.dependency_occupancy().dep_edges.file_deps_capacity, 0);
     drain_and_assert_empty(&mut dag);
 }

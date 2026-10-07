@@ -722,3 +722,50 @@ fn supersede_node_index_matches_no_filter_scan() {
         "filtered and no-filter scans agree on the current tree",
     );
 }
+
+/// A blocker reference bucket emptied down to one surviving owner still
+/// reports the backing capacity its former owners left behind; taking the
+/// last owner releases it, and reset releases a populated bucket.
+#[test]
+fn blocker_reference_bucket_capacity_is_reported_until_it_drains() {
+    let mut dag = SchedulerDag::new();
+    let owners: Vec<Arc<str>> = (0..64)
+        .map(|i| canonical(&format!("/owner-{i}.vue")))
+        .collect();
+    let set = || PendingBlockerSet::from_deps(BTreeSet::from([analysis_dep("/dep.ts", 1)]));
+    for owner in &owners {
+        dag.record_artifact_blockers(owner, 1, set());
+    }
+    let populated = dag.dependency_occupancy();
+    assert_eq!(
+        (
+            populated.blocker_ref_canonicals,
+            populated.blocker_ref_entries
+        ),
+        (1, 64),
+    );
+    assert!(populated.blocker_ref_entries_capacity >= 64);
+
+    let (survivor, removed) = owners.split_last().expect("owners exist");
+    for owner in removed {
+        dag.clear_artifact_blockers(owner, 1);
+    }
+    let shrunk = dag.dependency_occupancy();
+    assert_eq!(
+        (shrunk.blocker_ref_canonicals, shrunk.blocker_ref_entries),
+        (1, 1),
+    );
+    assert_eq!(
+        shrunk.blocker_ref_entries_capacity, populated.blocker_ref_entries_capacity,
+        "the surviving bucket keeps the backing its former owners used",
+    );
+
+    dag.clear_artifact_blockers(survivor, 1);
+    assert_eq!(dag.dependency_occupancy().blocker_ref_entries_capacity, 0);
+
+    for owner in &owners {
+        dag.record_artifact_blockers(owner, 1, set());
+    }
+    dag.clear();
+    assert_eq!(dag.dependency_occupancy(), DependencyOccupancy::default());
+}
