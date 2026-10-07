@@ -88,6 +88,10 @@ pub struct SourceSnapshot {
     pub semantic_hash: [u8; 16],
     /// Generation this snapshot was produced at.
     pub generation: u64,
+    /// Incarnation of the [`FileNode`] object that committed this snapshot.
+    /// The scheduler stamps it at commit; an executor-supplied value is
+    /// overwritten. See [`SourceVersion`].
+    pub incarnation: u64,
     /// Host-specific data (parse results, descriptors, etc.).
     pub data: Arc<dyn SnapshotData>,
 }
@@ -99,6 +103,7 @@ impl Clone for SourceSnapshot {
             whole_hash: self.whole_hash,
             semantic_hash: self.semantic_hash,
             generation: self.generation,
+            incarnation: self.incarnation,
             data: Arc::clone(&self.data),
         }
     }
@@ -108,6 +113,7 @@ impl std::fmt::Debug for SourceSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SourceSnapshot")
             .field("generation", &self.generation)
+            .field("incarnation", &self.incarnation)
             .field("source_len", &self.source.len())
             .finish()
     }
@@ -121,7 +127,16 @@ impl SourceSnapshot {
             whole_hash: [0; 16],
             semantic_hash: [0; 16],
             generation,
+            incarnation: 0,
             data: Arc::new(EmptyData),
+        }
+    }
+
+    /// The node object and generation this snapshot was committed at.
+    pub fn version(&self) -> SourceVersion {
+        SourceVersion {
+            incarnation: self.incarnation,
+            generation: self.generation,
         }
     }
 
@@ -129,6 +144,23 @@ impl SourceSnapshot {
     pub fn downcast_data<T: 'static>(&self) -> Option<&T> {
         self.data.as_any().downcast_ref::<T>()
     }
+}
+
+/// Identity of one committed version of a file: the [`FileNode`] object
+/// that committed it and the generation it was committed at.
+///
+/// A generation alone names a version only within one node object: a
+/// removal, reset or re-home publishes a fresh object that starts its own
+/// generation sequence and may reach a generation an earlier object
+/// already used. The incarnation is process-unique, never reused, and
+/// allocated in increasing order, so a successor object always carries a
+/// larger incarnation than the object it replaces. The derived ordering
+/// (incarnation first, then generation) is therefore monotonic across
+/// replacements, and equality never aliases a retired object's version.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceVersion {
+    pub incarnation: u64,
+    pub generation: u64,
 }
 
 /// Scheduler-captured identity of the [`FileNode`] object and generation a
@@ -183,6 +215,10 @@ pub struct WitnessedSource {
 pub struct AnalysisSnapshot {
     /// Generation this snapshot was produced at.
     pub generation: u64,
+    /// Incarnation of the [`FileNode`] object that committed this snapshot.
+    /// The scheduler stamps it at commit; an executor-supplied value is
+    /// overwritten. See [`SourceVersion`].
+    pub incarnation: u64,
     /// Host-specific analysis data (script analysis, exports, styles, etc.).
     pub data: Arc<dyn SnapshotData>,
 }
@@ -191,6 +227,7 @@ impl Clone for AnalysisSnapshot {
     fn clone(&self) -> Self {
         Self {
             generation: self.generation,
+            incarnation: self.incarnation,
             data: Arc::clone(&self.data),
         }
     }
@@ -200,6 +237,7 @@ impl std::fmt::Debug for AnalysisSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnalysisSnapshot")
             .field("generation", &self.generation)
+            .field("incarnation", &self.incarnation)
             .finish()
     }
 }
@@ -209,7 +247,16 @@ impl AnalysisSnapshot {
     pub fn new_empty(generation: u64) -> Self {
         Self {
             generation,
+            incarnation: 0,
             data: Arc::new(EmptyData),
+        }
+    }
+
+    /// The node object and generation this snapshot was committed at.
+    pub fn version(&self) -> SourceVersion {
+        SourceVersion {
+            incarnation: self.incarnation,
+            generation: self.generation,
         }
     }
 
@@ -295,8 +342,8 @@ pub struct FileNode {
     /// The generation identifies a version of a file's content; the
     /// incarnation identifies the node OBJECT serving it. Two different
     /// nodes for the same canonical can coexist at the SAME generation
-    /// (a replacement publishes a fresh node starting at generation 0/
-    /// floor), so a generation comparison alone cannot tell a dispatched
+    /// (a replacement publishes a fresh node starting its own generation
+    /// sequence), so a generation comparison alone cannot tell a dispatched
     /// node from its replacement. Work carries this id from dispatch so
     /// its completion can prove it is still publishing for the
     /// incarnation it actually ran against.
@@ -325,7 +372,7 @@ impl FileNode {
     /// Create a file node whose generation is assigned at construction.
     ///
     /// Use this for unpublished nodes (first insertion, replacement
-    /// incarnation, generation-floor restart). Live generation advances
+    /// incarnation, language re-home). Live generation advances
     /// on an already-published node must go through
     /// [`crate::source_root::SourcePublication::bump_node_generation`].
     pub(crate) fn new_at(

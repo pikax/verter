@@ -12,12 +12,13 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 | FileNode current-generation Source admission marker | Distinguish a queued Source producer or reload from a terminal producer at blocker registration | REQUIRED-lifetime | One node object; reset on generation advance, set on successful Source admission | `src/node.rs`, `src/scheduler/{admission,completion}.rs`, `src/scheduler.rs` | always |
 | Auto-ingest tracking incarnation and conditional clears | Distinguish queued producer from dead producer without touching successor tracking | REQUIRED-lifetime | Existing bounded active producer tracking lifetime | `src/scheduler/dependencies.rs`, `src/scheduler.rs` | always |
 | Tombstones and DAG retirement floors | None; replaced by queued stamps and live object admission | REQUIRED-lifetime, retired | No population or backing allocation | `src/scheduler.rs`, `src/dag.rs` | absent |
-| Generation floors | Host base source revision uniqueness; external artifact publication/eviction is fenced by the captured `SourceWitness` instead | REQUIRED-lifetime | Removed known canonical history until that history is reclaimed; unknown removals allocate none | `src/scheduler.rs`, `src/scheduler/lifecycle.rs`; retirement: SKR-RET-FLOORSB | always |
+| Generation floors | None; retired, see [SKR-RET-FLOORS](SKR-RET-FLOORS.md) | REQUIRED-lifetime, retired | No population or backing allocation | `src/scheduler.rs`, `src/scheduler/lifecycle.rs` | absent |
 | Source-root and edge/blocker/failure cleanup | Source visibility, dependency gating and capacity release | REQUIRED-lifetime | Current records and existing source-root retention leases | `src/scheduler/{lifecycle,completion}.rs`, `src/scheduler.rs` | always |
 | Stale completion refusal counter | Attribution and tests only | OPTIONAL | Scheduler instance | `src/scheduler.rs`, `src/scheduler/completion.rs` | `cfg(any(test, feature = "semantic-observe"))` |
 | after_sweep admission rendezvous | No production consumer; regression barrier only | OPTIONAL | One test removal call | `src/scheduler/lifecycle.rs` | `cfg(test)` |
 
 Internal file work can reuse a generation without aliasing a removed object.
-The external restart fence remains necessary, so this inventory does not claim
-that all three history populations have drained. No event history or production
-per-operation feature check is introduced.
+External publication and host identities name the node object through
+`SourceWitness` and `SourceVersion`, so none of the three history populations
+retains storage. No event history or production per-operation feature check is
+introduced.

@@ -2614,9 +2614,8 @@ impl SchedulerDag {
     /// by `next_ready`, racing the live-generation work.
     pub fn supersede_old_file_generations(&mut self, canonical: &Arc<str>, current_gen: u64) {
         // Delegates to the single retirement primitive. Superseding a
-        // generation IS retiring everything below the new one — the
-        // backward sweep and the forward admission floor are the same
-        // event and must not drift apart.
+        // generation IS retiring everything below the new one; later stale
+        // admissions are refused by the live node's generation witness.
         let _stranded = self.retire_generations_below(canonical, current_gen);
     }
 
@@ -2674,7 +2673,7 @@ impl SchedulerDag {
     /// Signal `Shutdown` to every waiter group at exactly
     /// `(canonical, generation)`.
     ///
-    /// Used when an admission is refused by the retirement floor AFTER
+    /// Used when an admission is refused by the live object witness AFTER
     /// its waiter group was registered: nothing will produce that
     /// identity, so the group must be terminalized rather than parked.
     /// Scoped to the one generation so a live neighbour is untouched.

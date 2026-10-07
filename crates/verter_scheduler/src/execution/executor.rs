@@ -122,6 +122,7 @@ pub trait StageExecutor: Send + Sync + 'static {
         _file_language: FileLanguage,
         content: Arc<str>,
         generation: u64,
+        _incarnation: u64,
     ) -> Result<SourceSnapshot, StageError> {
         Ok(SourceSnapshot::new_empty(content, generation))
     }
