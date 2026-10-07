@@ -931,14 +931,20 @@ impl FrameworkAdapterRegistry {
     /// Whether the adapter that owns `language` declares its carrier's
     /// script-setup type-bindings surface — REGISTRY DATA the
     /// framework-neutral prepared-declaration materializer reads instead of
-    /// branching on a framework identity (`is_vue()`). A non-framework
-    /// language or an unregistered adapter declares nothing.
+    /// branching on a framework identity (`is_vue()`). The row is confirmed
+    /// to be the adapter's CARRIER language (its `carrier_language_id()`
+    /// matches the descriptor's `carrier_language`), so a same-adapter
+    /// TEMPLATE row answers `false`. A non-framework language, an
+    /// unregistered adapter or a non-carrier row declares nothing.
     #[must_use]
     pub fn declares_script_setup_type_bindings(&self, language: &FileLanguage) -> bool {
         language
             .adapter_id()
             .and_then(|adapter_id| self.get(adapter_id))
-            .is_some_and(|registration| registration.descriptor.declares_script_setup_type_bindings)
+            .is_some_and(|registration| {
+                registration.descriptor.declares_script_setup_type_bindings
+                    && is_registered_carrier_row(language, &registration.descriptor)
+            })
     }
 
     /// Whether the adapter that owns `language` declares its carrier's
@@ -946,27 +952,37 @@ impl FrameworkAdapterRegistry {
     /// snapshot builder and narrowed-scope serve read instead of branching
     /// on a framework identity (`is_vue()`): a carrier with the surface
     /// serves its analysis snapshot from the parse artifact together with
-    /// template-analysis inputs. A non-framework language or an
-    /// unregistered adapter declares nothing.
+    /// template-analysis inputs. The row is confirmed to be the adapter's
+    /// CARRIER language, so a same-adapter TEMPLATE row answers `false`. A
+    /// non-framework language, an unregistered adapter or a non-carrier row
+    /// declares nothing.
     #[must_use]
     pub fn carries_template_analysis_inputs(&self, language: &FileLanguage) -> bool {
         language
             .adapter_id()
             .and_then(|adapter_id| self.get(adapter_id))
-            .is_some_and(|registration| registration.descriptor.carries_template_analysis_inputs)
+            .is_some_and(|registration| {
+                registration.descriptor.carries_template_analysis_inputs
+                    && is_registered_carrier_row(language, &registration.descriptor)
+            })
     }
 
     /// Whether the adapter that owns `language` anchors its carrier's
     /// export spans at script-setup bindings and macros — REGISTRY DATA
-    /// the framework-neutral export-span lookup reads instead of
-    /// branching on a framework identity (`is_vue()`). A non-framework
-    /// language or an unregistered adapter declares nothing.
+    /// the framework-neutral export-span lookup reads instead of branching
+    /// on a framework identity (`is_vue()`). The row is confirmed to be the
+    /// adapter's CARRIER language, so a same-adapter TEMPLATE row answers
+    /// `false`. A non-framework language, an unregistered adapter or a
+    /// non-carrier row declares nothing.
     #[must_use]
     pub fn anchors_exports_at_script_setup(&self, language: &FileLanguage) -> bool {
         language
             .adapter_id()
             .and_then(|adapter_id| self.get(adapter_id))
-            .is_some_and(|registration| registration.descriptor.anchors_exports_at_script_setup)
+            .is_some_and(|registration| {
+                registration.descriptor.anchors_exports_at_script_setup
+                    && is_registered_carrier_row(language, &registration.descriptor)
+            })
     }
 
     /// The adapter id of the unique registered adapter that SYNTHESIZES a
@@ -1003,6 +1019,23 @@ impl FrameworkAdapterRegistry {
         let vue = FrameworkAdapterId::vue();
         self.synth_for(&vue).map(|_| vue)
     }
+}
+
+/// Whether `language` is the CARRIER row of `descriptor` — its
+/// `carrier_language_id()` (defined for framework CARRIER rows only) matches
+/// the descriptor's declared `carrier_language`.
+///
+/// The carrier-capability predicates above dispatch by
+/// [`FileLanguage::adapter_id`] and then confirm the row with this check, as
+/// the `carrier_language_id()` contract requires: a same-adapter TEMPLATE row
+/// or a same-adapter non-carrier language answers `false`, never inheriting
+/// the carrier's declared capabilities. A carrier-less adapter (`None`
+/// `carrier_language`) has no carrier row, so no row confirms against it.
+fn is_registered_carrier_row(
+    language: &FileLanguage,
+    descriptor: &crate::framework::descriptor::FrameworkAdapterDescriptor,
+) -> bool {
+    language.carrier_language_id() == descriptor.carrier_language.as_ref()
 }
 
 /// The Vue adapter registration row.

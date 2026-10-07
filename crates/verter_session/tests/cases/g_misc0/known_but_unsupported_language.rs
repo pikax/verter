@@ -259,3 +259,71 @@ fn vue_adapter_non_carrier_language_row_is_typed_unsupported() {
         ),
     }
 }
+
+/// The registry's carrier-capability predicates answer for the adapter's
+/// CARRIER row only: a same-adapter TEMPLATE row and a same-adapter
+/// NON-CARRIER language row resolve `adapter_id()` but must NOT inherit the
+/// carrier's declared capabilities — the row is confirmed against the
+/// descriptor's `carrier_language`, exactly as the `carrier_language_id()`
+/// contract requires. DISCRIMINATING: a predicate keyed on `adapter_id()`
+/// alone answers `true` for both non-carrier rows.
+#[test]
+fn carrier_capability_predicates_require_the_carrier_row() {
+    let registry = verter_session::framework::FrameworkAdapterRegistry::built_in();
+
+    // The Vue SFC CARRIER row — the descriptor declares all three surfaces.
+    let carrier = FileLanguage::vue();
+    assert!(registry.declares_script_setup_type_bindings(&carrier));
+    assert!(registry.carries_template_analysis_inputs(&carrier));
+    assert!(registry.anchors_exports_at_script_setup(&carrier));
+
+    // A same-adapter TEMPLATE row is not the carrier: no capability answers.
+    let template_row = FileLanguage::FrameworkTemplate {
+        adapter_id: verter_session::FrameworkAdapterId::vue(),
+        owner_hint: None,
+    };
+    assert!(
+        !registry.declares_script_setup_type_bindings(&template_row),
+        "a same-adapter template row must not inherit the carrier's \
+         script-setup type-bindings surface"
+    );
+    assert!(
+        !registry.carries_template_analysis_inputs(&template_row),
+        "a same-adapter template row must not inherit the carrier's \
+         template-analysis inputs"
+    );
+    assert!(
+        !registry.anchors_exports_at_script_setup(&template_row),
+        "a same-adapter template row must not inherit the carrier's \
+         script-setup export anchoring"
+    );
+
+    // A same-adapter NON-CARRIER language row is not the carrier either.
+    let non_carrier_row = FileLanguage::Framework {
+        adapter_id: verter_session::FrameworkAdapterId::vue(),
+        language_id: verter_session::LanguageId::new("vue_template"),
+    };
+    assert!(
+        !registry.declares_script_setup_type_bindings(&non_carrier_row),
+        "a same-adapter non-carrier language must not inherit the carrier's \
+         script-setup type-bindings surface"
+    );
+    assert!(
+        !registry.carries_template_analysis_inputs(&non_carrier_row),
+        "a same-adapter non-carrier language must not inherit the carrier's \
+         template-analysis inputs"
+    );
+    assert!(
+        !registry.anchors_exports_at_script_setup(&non_carrier_row),
+        "a same-adapter non-carrier language must not inherit the carrier's \
+         script-setup export anchoring"
+    );
+
+    // The Svelte CARRIER row resolves but declares none of the three
+    // surfaces — carrier-row confirmation is necessary, the declared flag
+    // decides.
+    let svelte_carrier = FileLanguage::svelte();
+    assert!(!registry.declares_script_setup_type_bindings(&svelte_carrier));
+    assert!(!registry.carries_template_analysis_inputs(&svelte_carrier));
+    assert!(!registry.anchors_exports_at_script_setup(&svelte_carrier));
+}
