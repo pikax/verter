@@ -107,7 +107,7 @@ fn getcomponentmeta_fallthrough_emits_no_nested_records() {
     // fallthrough / root-reachability fields.
     //
     // Note: `AuditedRequest::resolve_component_meta` drains the
-    // outer record via `take_audit_record` before returning. The
+    // outer record via `take_record` before returning. The
     // discriminating signal therefore lives in:
     //   (a) `record` itself — the SINGLE drained record, scoped to
     //       the outer request id; and

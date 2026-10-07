@@ -367,7 +367,7 @@ pub struct Scheduler {
     /// READ time instead would leave a peek-before-lock race: an id inserted
     /// between the peek and the lock would have no language, which is exactly
     /// the silent-skip this field's shape now prevents.
-    pub deferred_blocker_ids: DashMap<String, Vec<(String, FileLanguage)>>,
+    pub(crate) deferred_blocker_ids: DashMap<String, Vec<(String, FileLanguage)>>,
     /// Tracking set for deps whose Source `NewRequest` is queued in the
     /// inbox but has not yet been drained by the driver. Source-of-truth
     /// for "auto-ingest fired, FileNode is present, but no DAG identity

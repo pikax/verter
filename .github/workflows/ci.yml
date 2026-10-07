@@ -166,7 +166,7 @@ jobs:
               - '.github/workflows/release.yml'
               - '.github/workflows/ci.yml'
               - '.github/actions/**'
-            # Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH5/ARH7
+            # Gates the `architecture-health` lane (ARH0/ARH1/ARH2/ARH4/ARH5/ARH7
             # verifiers). Their products join the live Rust tree — hotspot
             # sources, crate Cargo manifests and the cross-crate consumer
             # population derived from EVERY crate — so a product/verifier-only
@@ -179,6 +179,7 @@ jobs:
             # how an ARH1 edit or a scheduler.rs change could skip the ratified
             # contracts. ARH7 additionally joins packages/vue-vscode activation
             # sources, so an extension-only edit must still schedule this lane.
+            # ARH4 joins its API migration notes to the audit API reference.
             arch:
               - 'tests/architecture-health/**'
               # ARH5's public-example guard scans examples/reference for the
@@ -186,6 +187,7 @@ jobs:
               # so example-only edits must still schedule this lane.
               - 'examples/reference/**'
               - 'packages/vue-vscode/**'
+              - 'docs/audit-footprint/api-reference.md'
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -971,10 +973,10 @@ jobs:
       - name: Verify package tarballs
         run: node scripts/verify-packages.mjs
 
-  # The ARH0/ARH1/ARH2/ARH5/ARH7 verifiers join their products to the live
-  # tree (hotspot sources, crate manifests, the cross-crate consumer
-  # population derived from every crate, the compiler-facade cutover, and
-  # the VS Code activation composition), so this lane — not the js-filtered
+  # The ARH0/ARH1/ARH2/ARH4/ARH5/ARH7 verifiers join their products to the
+  # live tree (hotspot sources, crate manifests, the cross-crate consumer
+  # population derived from every crate, the host lifecycle cutover, the
+  # compiler-facade cutover, and the VS Code activation composition), so this lane — not the js-filtered
   # test:scripts job — is what runs the guards when a Rust dependency or
   # surface change moves a ratified population, and when the products or
   # the verifier themselves change.
@@ -1006,6 +1008,10 @@ jobs:
         run: node tests/architecture-health/ARH2/verify.mjs
       - name: ARH2 dirty twins
         run: node --test tests/architecture-health/ARH2/arh2.test.mjs
+      - name: ARH4 verify (host and session lifecycle cutover)
+        run: node tests/architecture-health/ARH4/verify.mjs
+      - name: ARH4 dirty twins
+        run: node --test tests/architecture-health/ARH4/arh4.test.mjs
       - name: ARH5 verify (compiler facade cutover)
         run: node tests/architecture-health/ARH5/verify.mjs
       - name: ARH5 dirty twins

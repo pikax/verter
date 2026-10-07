@@ -168,7 +168,7 @@ u32 and smaller remain JS `number`.
 - **`AuditRecordMissing { request_id }`** — the store is bounded
   to 256 entries; long-running processes with many audited
   requests can displace older records. Drain records with
-  `take_audit_record` shortly after resolution.
+  `take_record` shortly after resolution.
 - **Empty `vfs_reads` on a real request** — typically a capture-site
   TLS propagation gap. Auto-ingested dep Source jobs thread the
   parent's context onto the `QueueEntry`; other gaps may surface

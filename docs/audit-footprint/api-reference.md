@@ -227,14 +227,17 @@ the consumer filter rejected the request kind.
 
 ## Host runtime — `verter_session::HostAuditRuntime`
 
-The session-side concrete runtime owned by `VerterHost`. Wraps the
-records store, the audit-config snapshot, and the active-request
-registry; on native targets it also owns the at-most-one peak-RSS
-sampler thread.
+The session-side concrete runtime owned by `VerterHost`. It mints and
+solely owns the host's records store, and holds the audit-config
+snapshot and the active-request registry; on native targets it also
+owns the at-most-one peak-RSS sampler thread. The host keeps no second
+handle to the store: records are published through a registration (or,
+outside an audited entry-point, the runtime's crate-private publish)
+and drained through `take_record`, all keyed by ids the host mints.
 
 ```rust
 impl HostAuditRuntime {
-    pub fn new(config: Arc<AuditConfig>, capacity: usize) -> Self;
+    pub fn new(config: AuditConfig) -> Self;
     pub fn audit_config(&self) -> Arc<AuditConfig>;
     pub fn audit_records_store(&self) -> &Arc<AuditRecordsStore>;
     pub fn snapshot(&self) -> AuditRuntimeSnapshot;
@@ -288,12 +291,12 @@ underlying operation, finalise the registration, return the record:
 | `audit_workspace_op(op: WorkspaceOp)`                         | Drive a workspace traversal under audit (`AuditResolve` / `DepGraphTraverse` / `ResolverWalk`). |
 | `lsp_audit_begin(method, target_identity) -> LspAuditSession` | Open an audited LSP handler session — the handler drives finalize through the returned session. |
 | `audit_mcp_tool_call(tool_name, canonical_id, args_size, f)`  | Wrap an MCP tool invocation; the closure returns `McpToolOutcome<T>`.                           |
-| `take_audit_record(request_id) -> Option<RequestAuditRecord>` | Drain a published record by id.                                                                 |
+| `host_audit_runtime().take_record(request_id)`                | Drain a published record by id. The runtime is the sole owner of the host's records store.      |
 
 `get_component_meta_with_resolution` is the canonical
 component-meta entry-point used by tests and consumers; the audit
 record is published into the host's records store and can be drained
-with `take_audit_record(request_id)` afterwards.
+with `host_audit_runtime().take_record(request_id)` afterwards.
 
 ## Harness — `AuditedRequest`
 
@@ -394,7 +397,7 @@ u32 and smaller remain JS `number`.
 eviction; oldest entries evict on overflow. Strict insert-then-take
 — no access refresh.
 
-`VerterHost::take_audit_record(request_id) -> Option<RequestAuditRecord>`
+`HostAuditRuntime::take_record(request_id) -> Option<RequestAuditRecord>`
 drains the entry. NAPI exposes the same surface via
 `getLastAuditRecord` (drain most recent) and `getAuditRecords`
 (non-destructive filtered query).

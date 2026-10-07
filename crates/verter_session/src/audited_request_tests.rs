@@ -17,7 +17,7 @@
 //! * The shared semantic dispatcher (`ProjectSemanticDispatch::execute`
 //!   and `execute_read`) never publishes records. It performs cooperative
 //!   admission, dep-signature accumulation, and warm-cache reads, but it
-//!   has no path to `audit_records.insert`. Records emerge only when an
+//!   has no path to the records store. Records emerge only when an
 //!   outer entry-point synthesises and finalises them.
 //!
 //! Future drift in either direction would be a correctness regression:
@@ -106,7 +106,7 @@ fn synthetic_macro_owner(
 ///
 /// Discriminating: the assertions inspect the records store via
 /// `host_audit_runtime().snapshot()` AND drive a direct
-/// `take_audit_record(request_id)` lookup. A drift commit that, say,
+/// `take_record(request_id)` lookup. A drift commit that, say,
 /// inserted a record under the active request id without bumping
 /// the snapshot would still surface as a `Some(_)` from `take`.
 #[test]
@@ -258,7 +258,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
     // assigned to the manual context returns `None`. This catches a
     // drift commit that inserted under our id without incrementing
     // the snapshot counter.
-    let drained = host.take_audit_record(request_id);
+    let drained = host.host_audit_runtime().take_record(request_id);
     assert!(
         drained.is_none(),
         "no audit record should be filed against request_id={request_id}; got {drained:?}",

@@ -4,7 +4,7 @@
 //! `VerterHost` owns a single `AuditRecordsStore` instance;
 //! every audited request inserts its `RequestAuditRecord` at completion;
 //! consumers (harness, NAPI, WASM, LSP) retrieve via
-//! `take_audit_record(request_id)` — a strict insert-then-take flow.
+//! `take_record(request_id)` — a strict insert-then-take flow.
 //!
 //! Capacity is bounded to 256 by oldest-by-insertion eviction on
 //! insert-overflow. No access-refresh semantics are needed because

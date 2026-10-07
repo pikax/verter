@@ -146,7 +146,9 @@ fn cold_inference_emits_started_event_and_counts_one_cold_compute() {
 
     // The active registration published the record into the host store.
     assert!(
-        host.take_audit_record(record.request_id).is_some(),
+        host.host_audit_runtime()
+            .take_record(record.request_id)
+            .is_some(),
         "active flow-return registration must publish into the records store"
     );
 }
@@ -299,7 +301,9 @@ fn filtered_kind_returns_cheap_noop_record_and_publishes_nothing() {
     assert_eq!(payload.cold_computes, 0, "noop record is default-filled");
     // Nothing was published into the records store.
     assert!(
-        host.take_audit_record(record.request_id).is_none(),
+        host.host_audit_runtime()
+            .take_record(record.request_id)
+            .is_none(),
         "a filtered registration must not publish"
     );
 }

@@ -578,7 +578,10 @@ impl MetaSession {
         &self,
         request_id: u64,
     ) -> Option<crate::component_meta_audit::RequestAuditRecord> {
-        self.project.host().take_audit_record(request_id)
+        self.project
+            .host()
+            .host_audit_runtime()
+            .take_record(request_id)
     }
 
     /// This session's execution mode.
