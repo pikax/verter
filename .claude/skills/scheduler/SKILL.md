@@ -165,9 +165,14 @@ under every dependency mutation hold, including iterations after inbox
 backpressure has executed callbacks. No host callback or inbox send runs under
 the lifecycle hold.
 
-Generation allocation/advance uses checked arithmetic. Exhaustion refuses work
-before an external publication generation can be reused, including restart from
-a retained removal floor.
+Generation allocation/advance uses checked arithmetic within one node object:
+exhaustion refuses further advancement on that node, and leaves no history,
+rather than wrapping to a generation the same object already published. Across
+a removal, reset or re-home the successor object restarts its own sequence, and
+safety comes from its never-reused incarnation, not from the generation:
+`SourceVersion`/`SourceWitness` (and the host's registered-source file
+incarnation and native-host bind check) compare the incarnation too, so a
+successor's same-numbered generation never authorizes work for its predecessor.
 
 **Generation-advance rule (both directions).** A generation advance and
 its supersede sweep are ONE critical section under `dag.lock()`

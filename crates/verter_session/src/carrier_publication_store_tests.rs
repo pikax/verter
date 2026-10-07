@@ -375,6 +375,84 @@ fn base_revision_never_repeats_across_remove_and_reset() {
     }
 }
 
+/// A registered carrier source is bound to the scheduler node object that
+/// committed it. A remove or reset retires that object, and its successor
+/// restarts at the same generation, so identical bytes re-added afterwards
+/// must mint a new registered snapshot and envelope: a reader still holding
+/// the retired structure never shares an identity or handle with the
+/// successor, and the retired registration is retracted rather than kept.
+#[test]
+fn registered_structure_never_aliases_across_remove_and_reset() {
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+
+    const CANONICAL: &str = "/src/App.vue";
+    const SOURCE: &str = "<script setup>const x = 1</script>";
+    for reset in [false, true] {
+        let workspace: Arc<dyn WorkspaceAccess> =
+            Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+        let host = crate::VerterHost::new(crate::HostConfig::default(), workspace);
+        let upsert = || {
+            let _ = host
+                .upsert(crate::UpsertRequest {
+                    canonical_id: Some(CANONICAL.to_string()),
+                    input_id: CANONICAL.to_string(),
+                    source: Arc::from(SOURCE),
+                    file_language: verter_language::FileLanguage::vue(),
+                    aliases: Vec::new(),
+                })
+                .expect("upsert");
+            let generation = host
+                .scheduler
+                .try_get_source(CANONICAL)
+                .expect("committed source")
+                .generation;
+            let structure = host
+                .registered_file_structure(CANONICAL)
+                .expect("registered structure");
+            (generation, structure)
+        };
+        let (retired_generation, retired) = upsert();
+        if reset {
+            host.close();
+        } else {
+            host.remove(CANONICAL).expect("known file");
+        }
+        let (generation, current) = upsert();
+        assert_eq!(generation, retired_generation, "reset={reset}");
+        let retired_source = retired.envelope().source();
+        let current_source = current.envelope().source();
+        assert_ne!(
+            current_source.file_incarnation(),
+            retired_source.file_incarnation(),
+            "reset={reset}"
+        );
+        assert_ne!(
+            current_source.snapshot_id(),
+            retired_source.snapshot_id(),
+            "reset={reset}"
+        );
+        assert_ne!(
+            current.envelope().id(),
+            retired.envelope().id(),
+            "reset={reset}"
+        );
+        assert!(
+            !Arc::ptr_eq(current.envelope(), retired.envelope()),
+            "reset={reset}"
+        );
+        let authority = &host.carrier_publication.source_authority;
+        assert!(
+            authority.validate_current(current_source).is_ok(),
+            "reset={reset}"
+        );
+        assert!(
+            authority.validate_current(retired_source).is_err(),
+            "the retired registration is retracted, reset={reset}"
+        );
+        assert_eq!(authority.len(), 1, "reset={reset}");
+    }
+}
+
 /// The host revision names this host's own scheduler node object on every
 /// ingress. An ingested envelope carries its registering owner's identity,
 /// which restarts with that owner's file lifetime and lives in a numbering

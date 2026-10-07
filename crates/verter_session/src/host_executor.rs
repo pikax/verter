@@ -329,16 +329,34 @@ impl HostStageExecutor {
                 }
                 (Arc::clone(structure.artifact()), structure)
             } else {
+                // The registration names the scheduler node object that
+                // committed these bytes, so it lives and retires with that
+                // file lifetime: a removed or reset file's successor restarts
+                // at the same generation and must never mint the retired
+                // registration's snapshot or artifact identity.
+                let canonical = CanonicalFileId::new(canonical_id);
+                let file_incarnation = FileIncarnation::new(incarnation);
                 let registered = self
                     .source_authority
                     .register_source(
-                        CanonicalFileId::new(canonical_id),
-                        FileIncarnation::new(self.host_instance.get()),
+                        canonical.clone(),
+                        file_incarnation,
                         SourceGeneration::new(generation),
                         file_language.clone(),
                         Arc::clone(&content),
                     )
                     .map_err(|_| StageError::new("registered source authority rejected source"))?;
+                // Retract the base registrations of every node object this one
+                // replaced. Node incarnations increase across replacement, so a
+                // late stage of a retired node never retracts its successor;
+                // overlay registrations belong to their own views.
+                self.source_authority
+                    .retain_incarnations(&canonical, |registered| {
+                        registered.get()
+                            & crate::host_manage::overlay_materialize::OVERLAY_INCARNATION_BIT
+                            != 0
+                            || registered >= file_incarnation
+                    });
                 // Registered-identity fact read: the grammar comes from
                 // the file's frontend catalog row, keyed adapter ×
                 // carrier language. A miss (unregistered carrier, or a
