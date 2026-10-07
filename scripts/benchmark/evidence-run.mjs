@@ -9,7 +9,7 @@
 //   node scripts/benchmark/evidence-run.mjs --run <name> --dry-run
 //   node scripts/benchmark/evidence-run.mjs --run <name> [--worker <record.json>]
 //
-// See docs/contributing/semantic-benchmark.md#evidence-runs.
+// See scripts/benchmark/evidence-runs/README.md.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -151,7 +151,9 @@ export function validateManifest(manifest, file) {
     else
       for (const prefix of manifest.scenarios) {
         try {
-          scenarios.push(...selectScenarios([prefix]).filter((s) => !scenarios.includes(s)));
+          scenarios.push(
+            ...selectScenarios([prefix]).filter((s) => !scenarios.some((e) => e.id === s.id)),
+          );
         } catch {
           problems.push(`scenario ${prefix} selects no scenario of the catalog`);
         }

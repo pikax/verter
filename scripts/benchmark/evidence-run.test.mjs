@@ -21,6 +21,7 @@ import {
   MANIFEST_DIR,
   readWorker,
   SUMMARY_FILE,
+  validateManifest,
 } from "./evidence-run.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -117,6 +118,15 @@ describe("manifest validation", () => {
     );
     assert.equal(r.status, 2);
     assert.match(r.stderr, /unknown arm tsc-watch/);
+  });
+});
+
+describe("scenario selection", () => {
+  test("overlapping prefixes select each scenario once", () => {
+    const base = JSON.parse(readFileSync(join(FIXTURES, "valid-minimal.json"), "utf8"));
+    const manifest = { ...base, scenarios: [base.scenarios[0], base.scenarios[0]] };
+    const { run } = validateManifest(manifest, join(MANIFEST_DIR, base.name + ".json"));
+    assert.deepEqual(run.scenarios, [...new Set(run.scenarios)]);
   });
 });
 
