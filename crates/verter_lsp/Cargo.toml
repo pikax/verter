@@ -26,7 +26,8 @@ test-support = []
 # The coordinated, default-off observation opt-in (see
 # docs/arch/semantic-observe.md). Gates this crate's OPTIONAL trace
 # bookkeeping — the handler enter/exit and heartbeat active-count trace
-# lines and the timer/thread fields only they consume — behind
+# lines, the timer/thread fields only they consume, and the foreground
+# route response-class observation — behind
 # `cfg(feature = "semantic-observe")`, so default builds compile them away
 # with no per-operation enabled checks. Forwards to the session through the
 # existing dependency edge (which forwards to every lower layer), so an

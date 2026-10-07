@@ -671,7 +671,8 @@ fn member_header_facts_match_production_index_across_body_shapes() {
             .unwrap_or_else(|| panic!("{name} header"))
             .member_headers;
         assert_eq!(
-            &env_members, header_members,
+            env_members.as_slice(),
+            header_members.as_slice(),
             "member-header facts must match the production index for:\n{source}"
         );
     }

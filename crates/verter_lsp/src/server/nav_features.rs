@@ -200,19 +200,18 @@ pub(super) async fn handle_hover(
     let _timer = server
         .statistics
         .timer("hover", Some(uri.as_str().to_string()));
-    // The whole response settles against a basis captured after the route's
-    // current-file repair. A diagnostics-generation-only advance during the
-    // provider await (this request's own repair, a cold native hydration, a
-    // background sync, or an importer re-armed by a dependency's settled edit)
-    // repeats the repair and recomputes against a fresh basis captured after
-    // it, until one attempt observes no move; an edit, close/reopen or
-    // workspace change still answers `ContentModified`.
+    // The whole response settles against the request admitted before the
+    // route's current-file repair, computed once.
     server
-        .settle_request_with_generation_retry(uri, || handle_hover_attempt(server, &params))
+        .answer_repaired_foreground(
+            crate::documents::ForegroundRoute::Hover,
+            uri,
+            handle_hover_attempt(server, &params),
+        )
         .await
 }
 
-/// One unsettled hover computation; [`handle_hover`] owns its settlement.
+/// The unsettled hover computation; [`handle_hover`] owns its settlement.
 async fn handle_hover_attempt(
     server: &VerterLanguageServer,
     params: &HoverParams,
@@ -323,9 +322,8 @@ async fn handle_hover_attempt(
         match child_hover {
             super::component_resolve::ChildHoverOutcome::Hover(child_hover) => {
                 // A cold native projection can hydrate an imported declaration
-                // and advance the diagnostics generation; `handle_hover`'s
-                // settlement recomputes and never carries this payload
-                // into the new basis.
+                // and advance the diagnostics generation; that moves no input
+                // `handle_hover` admitted.
                 return Ok(Some(child_hover));
             }
             super::component_resolve::ChildHoverOutcome::SurfaceUnavailable
@@ -621,72 +619,50 @@ pub(super) async fn handle_completion(
     params: CompletionParams,
 ) -> Result<Option<CompletionResponse>> {
     let uri = params.text_document_position.text_document.uri.clone();
-    if uri.as_str().starts_with("verter-virtual://") {
-        return handle_completion_attempt(server, &params, false).await;
+    // D1 (open+edit+completion race): tower-lsp runs the did_open notification and
+    // a completion request concurrently, so a completion can arrive BEFORE the
+    // document is registered. Wait for the registration event (bounded 300ms)
+    // rather than polling — the request resumes the instant the open lands, not
+    // at a poll-step boundary — and only then admit, so the admitted revision
+    // is the one the client sent the request against. Each request stays
+    // independent: an unrelated concurrent open cannot cancel a valid request
+    // into an empty response.
+    if !uri.as_str().starts_with("verter-virtual://") && server.documents.get(&uri).is_none() {
+        server
+            .documents
+            .registration
+            .wait_until(std::time::Duration::from_millis(300), || {
+                server.documents.get(&uri).is_some()
+            })
+            .await;
     }
-
     // Provider work can suspend while a newer document instance or edit commits.
-    // Match both version and immutable source identity: a close/reopen may reuse
-    // the same LSP version and must still invalidate the suspended response. The
-    // final native-only attempt keeps the commit fence through native calculation,
-    // so it returns the coherent post-fence snapshot even if the pre-wait identity
-    // sampled here was older.
-    //
-    // Only edit, reopen and workspace races spend those two retries. A move of
-    // the diagnostics generation alone is background settlement (an imported
-    // carrier settling right after open, a resync or compile of this file), not
-    // a content change: recompute against a fresh basis, bounded as every
-    // request route is, so a cold provider answer is not demoted to the
-    // native-only list while that work drains.
-    let mut edit_races = 0;
-    let mut generation_recomputations = 0;
-    while edit_races < 2 {
-        let settlement = crate::documents::ForegroundSettlement::capture(&server.documents, &uri);
-        #[cfg(test)]
-        server
-            .request_barriers
-            .reach(super::test_support::RequestBarrier::Capture)
-            .await;
-        let response = handle_completion_attempt(server, &params, false).await?;
-        #[cfg(test)]
-        server
-            .request_barriers
-            .reach(super::test_support::RequestBarrier::Settlement)
-            .await;
-        if settlement.is_current(&server.documents, &uri) {
-            return Ok(response);
-        }
-        if settlement.document_and_workspace_are_current(&server.documents, &uri) {
-            if generation_recomputations == super::GENERATION_ONLY_RECOMPUTE_LIMIT {
-                break;
-            }
-            generation_recomputations += 1;
-            tracing::debug!(
-                "completion: recomputing {} after a diagnostics-generation-only move ({generation_recomputations})",
-                uri.as_str()
-            );
-            continue;
-        }
-        edit_races += 1;
-        tracing::debug!(
-            "completion: retrying {} after readiness basis advanced (version {:?} -> {:?})",
-            uri.as_str(),
-            settlement.version(),
-            server
-                .documents
-                .snapshot_identity(&uri)
-                .map(|identity| identity.version)
-        );
-    }
-    #[cfg(test)]
-    server.maybe_pause_completion_before_final_native().await;
-    handle_completion_attempt(server, &params, true).await
+    // The one admission pins the document revision (open incarnation and edit
+    // generation as well as the client version, so a close/reopen that reuses
+    // the version still supersedes the suspended response) and the project
+    // authority; every provider surface and imported contract the answer is
+    // read from joins it. An answer whose admitted inputs moved answers
+    // `ContentModified`: the cursor names a position in the admitted revision
+    // and is never reinterpreted against a later one. Background work that
+    // moves no admitted input — a diagnostics-generation advance, an identical
+    // surface re-record, an equivalent root publication — settles the answer.
+    // Completion reads its source under the edit-commit fence, so it is
+    // admitted under that fence too: an edit already queued ahead of this
+    // request commits first and the request pins the revision it was sent
+    // against, rather than pinning the replaced one and answering
+    // `ContentModified` for an edit that preceded it.
+    server
+        .answer_foreground_after_edit_commit(
+            crate::documents::ForegroundRoute::Completion,
+            &uri,
+            handle_completion_attempt(server, &params),
+        )
+        .await
 }
 
 async fn handle_completion_attempt(
     server: &VerterLanguageServer,
     params: &CompletionParams,
-    native_only: bool,
 ) -> Result<Option<CompletionResponse>> {
     let _hg = HandlerGuard::new(&server.handler_activity, "completion");
     let uri = &params.text_document_position.text_document.uri;
@@ -712,7 +688,7 @@ async fn handle_completion_attempt(
     // fence through every synchronous native snapshot read below; otherwise a
     // new edit can land between releasing the mutex and reading source/analysis.
     // The fence is released before any provider await.
-    let mut edit_fence = server.did_change_mutex.lock().await;
+    let edit_fence = server.did_change_mutex.lock().await;
     // NOTE: completion starts NO sync work here. The eager did_change carrier
     // refresh keeps the current-file surface fresh per keystroke, and the
     // import-dependency closure is background-published (capture-only readiness
@@ -779,26 +755,6 @@ async fn handle_completion_attempt(
         }
     }
 
-    // D1 (open+edit+completion race): tower-lsp runs the did_open notification and
-    // a completion request concurrently, so a completion can arrive BEFORE the
-    // document is registered. Wait for the registration event (bounded 300ms)
-    // rather than polling — the request resumes the instant the open lands, not
-    // at a poll-step boundary. Each request stays independent: an unrelated
-    // concurrent open cannot cancel a valid request into an empty response.
-    if server.documents.get(uri).is_none() {
-        drop(edit_fence);
-        server
-            .documents
-            .registration
-            .wait_until(std::time::Duration::from_millis(300), || {
-                server.documents.get(uri).is_some()
-            })
-            .await;
-        edit_fence = server.did_change_mutex.lock().await;
-    }
-
-    let mut final_settlement = native_only
-        .then(|| crate::documents::ForegroundSettlement::capture(&server.documents, uri));
     let completion_ssr_context = {
         let canonical_id = server.documents.get_canonical_id(uri);
         canonical_id
@@ -928,27 +884,12 @@ async fn handle_completion_attempt(
         })
     };
     let native_snapshot = capture_native_snapshot();
-    // Normal attempts release the typing fence before cold child/meta work and
-    // validate identity after provider awaits. The bounded final native-only
-    // attempt deliberately retains the fence through its native calculation, so
-    // it returns one coherent, current snapshot instead of panicking or failing
-    // open under sustained churn. Its only provider await is the bounded
-    // style `v-bind(|)` detail enrichment of its first computation. The fence
-    // stops edits and membership changes, not background settlement, so the
-    // final attempt recomputes under the same fence when only the diagnostics
-    // generation moved (see the settlement check below).
-    let native_edit_fence = if native_only {
-        Some(edit_fence)
-    } else {
-        drop(edit_fence);
-        #[cfg(test)]
-        server.maybe_pause_completion_after_snapshot().await;
-        None
-    };
+    // Release the typing fence before cold child/meta work and provider
+    // awaits; an edit after this point is a revision change of the admitted
+    // request and answers `ContentModified` at settlement.
+    drop(edit_fence);
     #[cfg(test)]
-    if native_only {
-        server.maybe_pause_final_completion_after_snapshot().await;
-    }
+    server.maybe_pause_completion_after_snapshot().await;
 
     // Answers the native completion together with whether it recognized an
     // authored component whose child contract is not cached yet.
@@ -1172,48 +1113,7 @@ async fn handle_completion_attempt(
     // its own. A cold native contract cache must not turn that provider-only
     // probe into a synthetic empty response; normal product requests retain
     // the cache-only fail-closed behavior above.
-    if native_only || (recognized_authored_component_contract_miss && !provider_only) {
-        let (mut verter_is_incomplete, mut verter_items) = (verter_is_incomplete, verter_items);
-        // The commit fence pins the document, so only background settlement (an
-        // open importer re-armed by a dependency's settled publication, a
-        // resync or a compile of this file) can move the final basis. A
-        // generation-only move is not a content change: recompute the native
-        // answer against a fresh basis under the SAME fence, bounded like every
-        // other route. A workspace replacement still fails closed at once, as
-        // does churn past the bound. A recomputation is synchronous and native:
-        // it keeps the native kind detail instead of repeating the provider
-        // `v-bind(|)` enrichment while every document commit waits on the fence.
-        let mut generation_recomputations = 0;
-        while let Some(settlement) = final_settlement
-            .as_ref()
-            .filter(|settlement| !settlement.is_current(&server.documents, uri))
-        {
-            if generation_recomputations == super::GENERATION_ONLY_RECOMPUTE_LIMIT
-                || !settlement.document_and_workspace_are_current(&server.documents, uri)
-            {
-                return Err(tower_lsp_server::jsonrpc::Error::new(
-                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-                ));
-            }
-            generation_recomputations += 1;
-            tracing::debug!(
-                "completion: recomputing final native answer for {} after a diagnostics-generation-only move ({generation_recomputations})",
-                uri.as_str()
-            );
-            final_settlement = Some(crate::documents::ForegroundSettlement::capture(
-                &server.documents,
-                uri,
-            ));
-            let recomputed = native_items(capture_native_snapshot().as_ref());
-            if recomputed.recognized_authored_component_contract_miss {
-                server.enqueue_import_dependency_publication_if_idle(uri);
-            }
-            verter_is_incomplete = recomputed.is_incomplete;
-            verter_items = recomputed.items;
-            #[cfg(test)]
-            server.run_final_completion_recompute_hook();
-        }
-        drop(native_edit_fence);
+    if recognized_authored_component_contract_miss && !provider_only {
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
                 is_incomplete: verter_is_incomplete,
@@ -1278,7 +1178,6 @@ async fn handle_completion_attempt(
     // not a slot name. Serve Verter's list alone rather than merging junk into
     // a closed, server-owned surface.
     if matches!(source_ctx, CompletionSourceContext::TemplateFrameworkSlot) {
-        drop(native_edit_fence);
         return Ok(verter_items.map(|items| {
             CompletionResponse::List(CompletionList {
                 is_incomplete: verter_is_incomplete,
@@ -1662,9 +1561,33 @@ pub(super) async fn handle_completion_resolve(
                             return Ok(item);
                         };
 
+                        // Capture the surface the provider path serves BEFORE the
+                        // query: the provider answers against it, so its
+                        // enrichment and edits are accepted only while it is
+                        // still current, and any returned edit is translated
+                        // through it — never through a later replacement. A path
+                        // with no consistent surface (retired, unsynced, or no
+                        // longer matching its open source) has nothing to bracket
+                        // the provider's answer with, so the provider is not asked.
+                        let Some((carrier_uri, snapshot)) =
+                            super::nav_features_completion_resolve::capture_resolve_surface(
+                                server,
+                                provider_path,
+                            )
+                        else {
+                            return Err(tower_lsp_server::jsonrpc::Error::new(
+                                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                            ));
+                        };
                         if let Ok(Some(resolve_result)) =
                             tp.resolve_completion(provider_path, resolve_data).await
                         {
+                            if !server.provider_request_surface_still_valid(&carrier_uri, &snapshot)
+                            {
+                                return Err(tower_lsp_server::jsonrpc::Error::new(
+                                    tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
+                                ));
+                            }
                             // Lazy `completionItem/resolve` enrichment: fold the
                             // provider's resolved detail (signature) and
                             // documentation onto the item when it returned them.
@@ -1725,6 +1648,7 @@ pub(super) async fn handle_completion_resolve(
                                 let resolved = resolve_provider_auto_import_edits(
                                     server,
                                     provider_path,
+                                    Some(&snapshot),
                                     &provider_edits,
                                 )
                                 .map_err(|reason| {

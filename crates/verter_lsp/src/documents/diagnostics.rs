@@ -67,60 +67,6 @@ impl ReadinessBasis {
     }
 }
 
-pub(crate) struct ForegroundSettlement {
-    basis: Option<ReadinessBasis>,
-}
-
-impl ForegroundSettlement {
-    pub(crate) fn capture(documents: &DocumentRegistry, uri: &Uri) -> Self {
-        Self {
-            basis: ReadinessBasis::capture(documents, uri),
-        }
-    }
-
-    pub(crate) fn is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
-        match &self.basis {
-            Some(basis) => basis.is_current(documents, uri),
-            None => documents.snapshot_identity(uri).is_none(),
-        }
-    }
-
-    pub(crate) fn version(&self) -> Option<i32> {
-        self.basis.as_ref().map(|basis| basis.snapshot.version)
-    }
-
-    /// Admission for recomputing a native result, never a publication check.
-    pub(crate) fn document_and_workspace_are_current(
-        &self,
-        documents: &DocumentRegistry,
-        uri: &Uri,
-    ) -> bool {
-        let Some(basis) = &self.basis else {
-            return documents.snapshot_identity(uri).is_none();
-        };
-        let workspace = documents.host().workspace_read().published_root();
-        documents.snapshot_identity_is_current(uri, &basis.snapshot)
-            && basis
-                .environment
-                .workspace_matches(workspace.as_ref().map(Arc::downgrade).as_ref())
-    }
-
-    pub(crate) fn settle<T>(
-        &self,
-        documents: &DocumentRegistry,
-        uri: &Uri,
-        response: Option<T>,
-    ) -> tower_lsp_server::jsonrpc::Result<Option<T>> {
-        if response.is_none() || self.is_current(documents, uri) {
-            Ok(response)
-        } else {
-            Err(tower_lsp_server::jsonrpc::Error::new(
-                tower_lsp_server::jsonrpc::ErrorCode::ContentModified,
-            ))
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PublicationEpoch(u64);
 

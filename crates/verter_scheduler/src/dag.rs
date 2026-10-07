@@ -30,7 +30,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{btree_map, BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -46,6 +46,15 @@ use verter_execution::cancellation::CancellationToken;
 /// owns the `record` / `drain` / `peek` / `clear` /
 /// `scrub_referencing` / `remove_owner` impls.
 mod blocker_registry;
+
+/// The single dependency-edge representation: per-dependency waiters in
+/// edge-admission order plus the `(canonical, generation)` file index that
+/// generation retirement drives off. See [`dep_edges::DepEdges`].
+mod dep_edges;
+#[cfg(any(test, feature = "semantic-observe"))]
+pub use dep_edges::DepEdgeObservations;
+pub use dep_edges::DepEdgeOccupancy;
+use dep_edges::{DepEdges, EdgeSeq};
 
 /// Terminal-failure store + dependency-failure fan-out — owns the
 /// `terminal_dep_failures` persistent store, the per-stage fan-out
@@ -337,10 +346,12 @@ pub(in crate::dag) struct DagNode {
     /// context retained for TLS attribution and is cancelled by DAG terminal
     /// cancellation/reset (or, for scoped cache nodes, loss of all owners).
     pub(in crate::dag) cancellation: CancellationToken,
-    /// Dependency identities this node is gated on. Each entry is the
+    /// Dependency identities this node is gated on, each mapped to the
+    /// sequence of its edge in [`SchedulerDag::dep_edges`]. Each key is the
     /// identity of another work node whose readiness must clear before
-    /// this node is dispatchable.
-    pub(in crate::dag) deps_remaining: BTreeSet<DepKey>,
+    /// this node is dispatchable; the producer need never have been
+    /// admitted. The sequence removes this node's edge directly.
+    pub(in crate::dag) deps_remaining: BTreeMap<DepKey, EdgeSeq>,
     /// Dependency records for [`DepKey`]s whose producer failed
     /// terminally before this node became dispatchable. Two
     /// population paths:
@@ -648,6 +659,25 @@ pub struct CacheNodeTerminalCounts {
     pub cancelled: u64,
 }
 
+/// Current occupancy of the DAG's dependency state, read under the DAG
+/// lock. Always available; every count is derived from the resident
+/// tables, so it reports membership and backing capacity separately.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DependencyOccupancy {
+    /// The dependency-edge store and its `(canonical, generation)` index.
+    pub dep_edges: DepEdgeOccupancy,
+    /// Referenced canonicals in the blocker reference index.
+    pub blocker_ref_canonicals: usize,
+    /// `(owner, generation)` entries across the blocker reference index.
+    pub blocker_ref_entries: usize,
+    /// Backing capacity of the blocker reference index's canonical table.
+    pub blocker_ref_capacity: usize,
+    /// Backing capacity summed over the blocker reference index's
+    /// per-canonical entry tables. A table keeps its capacity while any
+    /// entry survives, so this can exceed `blocker_ref_entries`.
+    pub blocker_ref_entries_capacity: usize,
+}
+
 pub struct SchedulerDag {
     /// Per-token node bookkeeping. Visibility is narrowed to
     /// `pub(in crate::dag)` because the `terminal_failures` child
@@ -662,11 +692,14 @@ pub struct SchedulerDag {
     /// the `terminal_failures` child module can resolve
     /// `(identity → token → node)` in `attach_failed_dep`.
     pub(in crate::dag) by_identity: FxHashMap<WorkNodeIdentity, SubmissionToken>,
-    /// Reverse map: `DepKey` → list of tokens whose `deps_remaining`
-    /// contains that key. Used to fan out the blocker-resolve sweep.
-    /// `pub(in crate::dag)` so the `terminal_failures` child module
-    /// can drain Analysis-keyed waiters on terminal failure.
-    pub(in crate::dag) waiters: FxHashMap<DepKey, Vec<SubmissionToken>>,
+    /// Reverse side of every dependency edge: `DepKey` → the tokens whose
+    /// `deps_remaining` contains that key, in edge-admission order, plus
+    /// the `(canonical, generation)` index generation retirement reads.
+    /// Every edge is linked and unlinked together with its
+    /// `deps_remaining` entry. `pub(in crate::dag)` so the
+    /// `terminal_failures` child module can drain Analysis-keyed waiters
+    /// on terminal failure.
+    pub(in crate::dag) dep_edges: DepEdges,
     /// Per-`(canonical, generation)` request waiter groups. Each group
     /// holds the senders interested in a particular `TargetStage` plus
     /// the winner context for that group.
@@ -821,19 +854,34 @@ fn dep_canonical(dep: &DepKey) -> Option<&Arc<str>> {
     }
 }
 
-/// Per-canonical reverse indices for the four state surfaces a source
-/// bump must sweep, so [`SchedulerDag::supersede_old_file_generations`]
-/// does work proportional to the entries affected for the bumped
-/// canonical instead of scanning every surface crate-wide.
+/// `(owner canonical, owner generation)` key of one Artifact blocker entry.
+type BlockerKey = (Arc<str>, u64);
+
+/// Canonicals referenced by a blocker set's live deps and failed records,
+/// one item per reference.
+fn blocker_set_canonicals(set: &PendingBlockerSet) -> impl Iterator<Item = &Arc<str>> {
+    set.deps
+        .iter()
+        .chain(set.failed.iter().map(|record| &record.dep_key))
+        .filter_map(dep_canonical)
+}
+
+/// Per-canonical reverse indices for the state surfaces a source bump or
+/// a file removal must sweep, so
+/// [`SchedulerDag::supersede_old_file_generations`] and removal do work
+/// proportional to the entries affected for that canonical instead of
+/// scanning every surface crate-wide. Gated dependency edges carry their
+/// own `(canonical, generation)` index in [`dep_edges::DepEdges`].
 ///
-/// **One structure, four maps.** The surfaces share the canonical
+/// **One structure, five maps.** The surfaces share the canonical
 /// `Arc<str>` key and are populated/pruned at the same typed mutation
 /// funnels, so grouping them keeps the "every funnel updates the index"
 /// invariant auditable in a single place. Their value shapes genuinely
 /// differ per surface — generation sets for the two generation-keyed
 /// maps, live submission tokens for DAG nodes, full [`DepKey`]s for
-/// terminal failures — so each surface keeps the value type its own
-/// cleanup needs rather than a forced common shape.
+/// terminal failures, counted owner entries for blocker references — so
+/// each surface keeps the value type its own cleanup needs rather than a
+/// forced common shape.
 ///
 /// Every map holds ONLY entries with at least one live member; the
 /// remove helpers drop a canonical bucket the moment it empties, so the
@@ -854,6 +902,11 @@ struct CanonicalReverseIndex {
     /// canonical → the `FileStage` / `Artifact` [`DepKey`]s referencing
     /// it in [`SchedulerDag::terminal_dep_failures`].
     terminal_failure_keys: FxHashMap<Arc<str>, FxHashSet<DepKey>>,
+    /// referenced canonical → the `(owner, generation)` entries of
+    /// [`SchedulerDag::artifact_blocker_deps`] whose live deps or failed
+    /// records name it, each with its reference count. Lets a removal
+    /// scrub only the entries that reference the removed file.
+    blocker_dep_refs: FxHashMap<Arc<str>, FxHashMap<BlockerKey, usize>>,
 }
 
 impl CanonicalReverseIndex {
@@ -916,9 +969,51 @@ impl CanonicalReverseIndex {
         }
     }
 
-    /// Drop every artifact-blocker entry whose owner is `owner`.
-    fn remove_blocker_owner_all(&mut self, owner: &str) {
-        self.blocker_owner_gens.remove(owner);
+    /// Drop and return every artifact-blocker generation whose owner is
+    /// `owner`, with the owner key the registry is keyed by.
+    fn remove_blocker_owner_all(&mut self, owner: &str) -> Option<(Arc<str>, FxHashSet<u64>)> {
+        self.blocker_owner_gens.remove_entry(owner)
+    }
+
+    /// Index every canonical `set` references under its `(owner,
+    /// generation)` entry.
+    fn add_blocker_refs(&mut self, key: &BlockerKey, set: &PendingBlockerSet) {
+        for canonical in blocker_set_canonicals(set) {
+            *self
+                .blocker_dep_refs
+                .entry(Arc::clone(canonical))
+                .or_default()
+                .entry(key.clone())
+                .or_insert(0) += 1;
+        }
+    }
+
+    /// Drop the references `add_blocker_refs` indexed for the same set.
+    fn remove_blocker_refs(&mut self, key: &BlockerKey, set: &PendingBlockerSet) {
+        for canonical in blocker_set_canonicals(set) {
+            let Some(owners) = self.blocker_dep_refs.get_mut(canonical.as_ref()) else {
+                verter_debug_assert!(false, "blocker reference index lost a live reference");
+                continue;
+            };
+            if let Some(count) = owners.get_mut(key) {
+                *count -= 1;
+                if *count == 0 {
+                    owners.remove(key);
+                }
+            }
+            if owners.is_empty() {
+                self.blocker_dep_refs.remove(canonical.as_ref());
+            }
+        }
+    }
+
+    /// The `(owner, generation)` entries whose blocker sets reference
+    /// `canonical`.
+    fn blocker_entries_referencing(&self, canonical: &str) -> Vec<BlockerKey> {
+        self.blocker_dep_refs
+            .get(canonical)
+            .map(|owners| owners.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Record a terminal-failure entry under its dep key's canonical.
@@ -943,9 +1038,12 @@ impl CanonicalReverseIndex {
         }
     }
 
-    /// Drop every terminal-failure dep key referencing `canonical`.
-    fn remove_terminal_failures_for_canonical(&mut self, canonical: &str) {
-        self.terminal_failure_keys.remove(canonical);
+    /// Drop and return every terminal-failure dep key referencing
+    /// `canonical`.
+    fn remove_terminal_failures_for_canonical(&mut self, canonical: &str) -> FxHashSet<DepKey> {
+        self.terminal_failure_keys
+            .remove(canonical)
+            .unwrap_or_default()
     }
 
     /// File-waiter generations strictly below `current_gen` for
@@ -1000,12 +1098,13 @@ impl CanonicalReverseIndex {
         self.file_waiter_gens.clear();
     }
 
-    /// Drop all four maps. Used by the DAG reset path.
+    /// Drop every map. Used by the DAG reset path.
     fn clear(&mut self) {
         self.file_waiter_gens.clear();
         self.node_tokens.clear();
         self.blocker_owner_gens.clear();
         self.terminal_failure_keys.clear();
+        self.blocker_dep_refs = FxHashMap::default();
     }
 }
 
@@ -1026,7 +1125,7 @@ impl SchedulerDag {
         Self {
             nodes: FxHashMap::default(),
             by_identity: FxHashMap::default(),
-            waiters: FxHashMap::default(),
+            dep_edges: DepEdges::default(),
             file_waiters: FxHashMap::default(),
             artifact_blocker_deps: FxHashMap::default(),
             analysis_blocker_demand: FxHashMap::default(),
@@ -1046,6 +1145,25 @@ impl SchedulerDag {
             budget,
             cache_node_completed: 0,
             cache_node_cancelled: 0,
+        }
+    }
+
+    /// Cumulative dependency-edge work counters.
+    #[cfg(any(test, feature = "semantic-observe"))]
+    pub fn dep_edge_observations(&self) -> DepEdgeObservations {
+        self.dep_edges.observations()
+    }
+
+    /// Current occupancy of the dependency-edge store, its file index and
+    /// the blocker reference index.
+    pub fn dependency_occupancy(&self) -> DependencyOccupancy {
+        let refs = &self.canonical_index.blocker_dep_refs;
+        DependencyOccupancy {
+            dep_edges: self.dep_edges.occupancy(),
+            blocker_ref_canonicals: refs.len(),
+            blocker_ref_entries: refs.values().map(FxHashMap::len).sum(),
+            blocker_ref_capacity: refs.capacity(),
+            blocker_ref_entries_capacity: refs.values().map(FxHashMap::capacity).sum(),
         }
     }
 
@@ -1087,7 +1205,7 @@ impl SchedulerDag {
 
     // ─────────────────────────────────────────────────────────────
     // Ready-lane index management. The lane matrix is the ONLY
-    // ready-set representation; `nodes`/`waiters`/`deps_remaining`
+    // ready-set representation; `nodes`/`dep_edges`/`deps_remaining`
     // remain the canonical ownership/gating state. Every lifecycle
     // mutation that can change a token's dispatch-readiness routes
     // through `refresh_ready_membership` so the lane index stays in
@@ -1271,8 +1389,10 @@ impl SchedulerDag {
     pub(crate) fn deps_remaining_for_test(
         &self,
         token: SubmissionToken,
-    ) -> Option<&BTreeSet<DepKey>> {
-        self.nodes.get(&token).map(|n| &n.deps_remaining)
+    ) -> Option<BTreeSet<DepKey>> {
+        self.nodes
+            .get(&token)
+            .map(|n| n.deps_remaining.keys().cloned().collect())
     }
 
     /// Test-only peek at a node's `base_priority` by token. Used by
@@ -1402,7 +1522,7 @@ impl SchedulerDag {
     /// - New identity → new token, returned.
     /// - Identity already pending (not yet dispatched) → priority is
     ///   merged (`min` over base + inherited), incoming `deps` are
-    ///   merged into `deps_remaining` plus the `waiters` reverse-index,
+    ///   merged into `deps_remaining` plus the dependency-edge store,
     ///   and the existing token is returned. The merged dispatch does
     ///   not start until all merged deps complete.
     /// - Identity already dispatched (in-flight) → joiner shares the
@@ -1547,11 +1667,12 @@ impl SchedulerDag {
                 if existing.request_context.is_none() {
                     existing.request_context = request_context;
                 }
-                // Merge incoming deps into deps_remaining + waiters
-                // reverse-index. New deps gate the same dispatch.
+                // Link each new incoming dep on both sides of its edge.
+                // New deps gate the same dispatch.
                 for dep in deps {
-                    if existing.deps_remaining.insert(dep.clone()) {
-                        self.waiters.entry(dep).or_default().push(existing_token);
+                    if let btree_map::Entry::Vacant(slot) = existing.deps_remaining.entry(dep) {
+                        let seq = self.dep_edges.link(slot.key().clone(), existing_token);
+                        slot.insert(seq);
                     }
                 }
                 // Reconcile the lane: a priority upgrade migrates the
@@ -1565,10 +1686,12 @@ impl SchedulerDag {
         let token = SubmissionToken(self.next_token);
         self.next_token += 1;
 
-        let mut deps_remaining = BTreeSet::new();
+        let mut deps_remaining = BTreeMap::new();
         for dep in deps {
-            deps_remaining.insert(dep.clone());
-            self.waiters.entry(dep).or_default().push(token);
+            if let btree_map::Entry::Vacant(slot) = deps_remaining.entry(dep) {
+                let seq = self.dep_edges.link(slot.key().clone(), token);
+                slot.insert(seq);
+            }
         }
 
         let node = DagNode {
@@ -1609,13 +1732,14 @@ impl SchedulerDag {
     /// exists, so cancelling nodes alone can never reach it.
     fn release_dep_waiters(&mut self, dep_key: &DepKey) -> Vec<SubmissionToken> {
         let mut stranded = Vec::new();
-        if let Some(waiters) = self.waiters.remove(dep_key) {
-            for waiter_tok in waiters {
+        if let Some(waiters) = self.dep_edges.take(dep_key) {
+            for waiter_tok in waiters.into_values() {
                 if let Some(waiter) = self.nodes.get_mut(&waiter_tok) {
+                    // The edge left the store; its node side goes with it.
+                    waiter.deps_remaining.remove(dep_key);
                     if waiter.cancelled {
                         continue;
                     }
-                    waiter.deps_remaining.remove(dep_key);
                     if waiter.deps_remaining.is_empty() && !waiter.dispatched {
                         stranded.push(waiter_tok);
                     }
@@ -1686,27 +1810,11 @@ impl SchedulerDag {
         // Artifact gated on `dep:Analysis-G` while `dep:Source-G` was
         // still running, where the invalidate cancels Source-G and no
         // Analysis-G is ever admitted to fan out from. Those waiters
-        // would park forever. Sweeping the dep index by canonical +
-        // generation reaches every consumer regardless of which stage it
-        // named and regardless of whether that stage was ever admitted.
-        let retired_dep_keys: Vec<DepKey> = self
-            .waiters
-            .keys()
-            .filter(|dep| match dep {
-                DepKey::FileStage {
-                    canonical: c,
-                    generation,
-                    ..
-                }
-                | DepKey::Artifact {
-                    canonical: c,
-                    generation,
-                    ..
-                } => c == canonical && *generation < floor,
-                DepKey::CacheNode { .. } => false,
-            })
-            .cloned()
-            .collect();
+        // would park forever. The edge store's `(canonical, generation)`
+        // index reaches every consumer regardless of which stage it named
+        // and regardless of whether that stage was ever admitted, and
+        // visits only this canonical's retired dependencies.
+        let retired_dep_keys = self.dep_edges.gated_below(canonical, floor);
         for dep_key in retired_dep_keys {
             stranded.extend(self.release_dep_waiters(&dep_key));
         }
@@ -1776,7 +1884,7 @@ impl SchedulerDag {
             return false;
         };
         match self.nodes.get(&token) {
-            Some(node) => node.deps_remaining.contains(dep),
+            Some(node) => node.deps_remaining.contains_key(dep),
             None => false,
         }
     }
@@ -1931,12 +2039,12 @@ impl SchedulerDag {
             };
             // Direct hit: this node's deps_remaining contains the
             // owner's Analysis identity → cycle closes here.
-            if node.deps_remaining.contains(&owner_dep) {
+            if node.deps_remaining.contains_key(&owner_dep) {
                 return (true, metrics);
             }
             // Otherwise enqueue every Analysis-stage dep for the
             // next layer of the BFS.
-            for dep_key in node.deps_remaining.iter() {
+            for dep_key in node.deps_remaining.keys() {
                 if let DepKey::FileStage {
                     canonical: c,
                     incarnation,
@@ -2023,17 +2131,9 @@ impl SchedulerDag {
         if matches!(identity, WorkNodeIdentity::CacheNode { .. }) {
             self.cache_node_completed += 1;
         }
-        // Scrub this node's token from every `waiters` list its
-        // outstanding deps still point at, BEFORE removing the node,
-        // so the reverse-index never carries a stale entry for a
-        // removed token. Snapshot the dep set first because the
-        // helper needs `&mut self` on `self.waiters`.
-        let outgoing_deps = self
-            .nodes
-            .get(&tok)
-            .map(|n| n.deps_remaining.clone())
-            .unwrap_or_default();
-        self.remove_incoming_edges(tok, &outgoing_deps);
+        // Unlink this node's outstanding dependency edges BEFORE removing
+        // the node, so the edge store never carries a removed token.
+        self.unlink_dep_edges(tok);
         // Drop any lane entry for this token before the node is
         // removed (the lane mirror lives on the node).
         self.remove_from_lane(tok);
@@ -2052,13 +2152,14 @@ impl SchedulerDag {
 
         let dep_key = DepKey::from_identity(identity);
         let mut newly_ready = Vec::new();
-        if let Some(waiters) = self.waiters.remove(&dep_key) {
-            for waiter_tok in waiters {
+        if let Some(waiters) = self.dep_edges.take(&dep_key) {
+            for waiter_tok in waiters.into_values() {
                 if let Some(waiter) = self.nodes.get_mut(&waiter_tok) {
+                    // The edge left the store; its node side goes with it.
+                    waiter.deps_remaining.remove(&dep_key);
                     if waiter.cancelled {
                         continue;
                     }
-                    waiter.deps_remaining.remove(&dep_key);
                     if waiter.deps_remaining.is_empty() && !waiter.dispatched {
                         newly_ready.push(waiter_tok);
                     }
@@ -2098,17 +2199,11 @@ impl SchedulerDag {
 
         let dep_key = DepKey::from_identity(identity);
         let stranded = self.release_dep_waiters(&dep_key);
-        // Scrub this node's token from every `waiters` list its own
-        // unresolved deps still point at, so the reverse-index never
-        // carries a stale entry for a removed token after the node's
-        // entry is dropped. Snapshot the dep set first because the
-        // helper needs `&mut self` on `self.waiters`.
-        let outgoing_deps = self
-            .nodes
-            .get(&tok)
-            .map(|n| n.deps_remaining.clone())
-            .unwrap_or_default();
-        self.remove_incoming_edges(tok, &outgoing_deps);
+        // Unlink this node's own unresolved dependency edges, so the edge
+        // store never carries a removed token after the node's entry is
+        // dropped. Each edge is removed by its sequence: cancelling many
+        // siblings gated on one dependency never rescans the others.
+        self.unlink_dep_edges(tok);
         // Drop this node's token from the per-canonical reverse index in
         // lock-step with its removal from `nodes`.
         self.canonical_index.remove_node(identity, tok);
@@ -2123,41 +2218,37 @@ impl SchedulerDag {
         stranded
     }
 
-    /// Scrub `token` from every `waiters` list keyed by the deps in
-    /// `deps`. Idempotent — if `token` is not present in a list, the
-    /// retain is a no-op. Called by [`Self::complete`] and
-    /// [`Self::cancel`] immediately before removing the node so the
-    /// reverse-index never carries stale entries for a removed token.
-    fn remove_incoming_edges(&mut self, token: SubmissionToken, deps: &BTreeSet<DepKey>) {
-        for dep in deps {
-            if let Some(list) = self.waiters.get_mut(dep) {
-                list.retain(|&t| t != token);
-                if list.is_empty() {
-                    self.waiters.remove(dep);
-                }
-            }
+    /// Unlink every outstanding dependency edge of `token`, each by the
+    /// sequence its `deps_remaining` entry recorded. Called by
+    /// [`Self::complete`] and [`Self::cancel`] immediately before removing
+    /// the node so the edge store never carries a removed token.
+    fn unlink_dep_edges(&mut self, token: SubmissionToken) {
+        let Some(node) = self.nodes.get_mut(&token) else {
+            return;
+        };
+        for (dep, seq) in std::mem::take(&mut node.deps_remaining) {
+            self.dep_edges.unlink(&dep, seq);
         }
     }
 
-    /// Cancel every node whose identity matches the predicate. Returns
-    /// the count of nodes cancelled and a list of stranded waiter
-    /// tokens.
-    pub fn cancel_matching<F>(&mut self, predicate: F) -> (usize, Vec<SubmissionToken>)
-    where
-        F: Fn(&WorkNodeIdentity) -> bool,
-    {
-        let to_cancel: Vec<WorkNodeIdentity> = self
-            .nodes
-            .values()
-            .filter(|n| !n.cancelled && predicate(&n.identity))
-            .map(|n| n.identity.clone())
+    /// Cancel every live node of `canonical`, across every incarnation and
+    /// generation, through the per-canonical node index. Returns the
+    /// stranded waiter tokens.
+    pub(crate) fn cancel_canonical(&mut self, canonical: &str) -> Vec<SubmissionToken> {
+        let identities: Vec<WorkNodeIdentity> = self
+            .canonical_index
+            .node_tokens_for(canonical)
+            .into_iter()
+            .filter_map(|token| {
+                let node = self.nodes.get(&token)?;
+                (!node.cancelled).then(|| node.identity.clone())
+            })
             .collect();
-        let count = to_cancel.len();
         let mut stranded = Vec::new();
-        for identity in to_cancel {
+        for identity in identities {
             stranded.extend(self.cancel(&identity));
         }
-        (count, stranded)
+        stranded
     }
 
     /// Number of non-cancelled, non-dispatched nodes.
@@ -2441,7 +2532,7 @@ impl SchedulerDag {
             let _ = node.reservation.take();
         }
         self.by_identity.clear();
-        self.waiters.clear();
+        self.dep_edges.clear();
         // Signal Shutdown on any outstanding waiters so handles don't
         // hang across reset.
         for (_, mut state) in self.file_waiters.drain() {
@@ -2865,12 +2956,10 @@ impl SchedulerDag {
             generation,
             stage: FileStageKey::Analysis,
         };
-        let admitted_consumer = self.waiters.get(&dep).is_some_and(|tokens| {
-            tokens.iter().any(|token| {
-                self.nodes
-                    .get(token)
-                    .is_some_and(|node| !node.cancelled && node.deps_remaining.contains(&dep))
-            })
+        let admitted_consumer = self.dep_edges.waiters_of(&dep).any(|token| {
+            self.nodes
+                .get(&token)
+                .is_some_and(|node| !node.cancelled && node.deps_remaining.contains_key(&dep))
         });
         if admitted_consumer {
             return true;

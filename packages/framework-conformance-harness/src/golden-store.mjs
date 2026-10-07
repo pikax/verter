@@ -30,15 +30,7 @@
 // own expectation. Readers return deep-frozen objects.
 
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export function sha256(text) {
@@ -64,6 +56,80 @@ function recordPath(goldensRoot, digest) {
   return path.join(recordsDir(goldensRoot), `${digest}.json`);
 }
 
+/** Finalized record names only. In-flight `*.tmp-*` siblings share this directory. */
+const DIGEST_FILE = /^[0-9a-f]{64}\.json$/;
+
+const REPLACE_RETRY = new Set(["EPERM", "EEXIST", "EBUSY"]);
+
+function readIdentical(target, text) {
+  let existing;
+  try {
+    existing = readFileSync(target, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+  if (existing !== text) {
+    throw new Error(`golden record digest collision with different bytes: ${sha256(text)}`);
+  }
+  return true;
+}
+
+/**
+ * Renames `tmp` onto `target`. POSIX replaces atomically. Windows can refuse
+ * while another publisher is renaming the same path (EPERM, EEXIST, EBUSY);
+ * retry with backoff, then delete `tmp` and throw. Moving the live file aside
+ * first would leave no manifest: readers throw ENOENT, and a concurrent
+ * publisher treats that gap as a first publish.
+ */
+const REPLACE_ATTEMPTS = 12;
+const REPLACE_BACKOFF_CAP_MS = 50;
+
+function pause(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function renameOnto(tmp, target) {
+  renameSync(tmp, target);
+}
+
+function renameOver(tmp, target) {
+  let last;
+  for (let attempt = 0; attempt < REPLACE_ATTEMPTS; attempt += 1) {
+    try {
+      renameOnto(tmp, target);
+      return;
+    } catch (error) {
+      last = error;
+      if (!REPLACE_RETRY.has(error.code)) throw error;
+      pause(Math.min(REPLACE_BACKOFF_CAP_MS, 2 ** attempt));
+    }
+  }
+  rmSync(tmp, { force: true });
+  throw last;
+}
+
+function readManifestText(target) {
+  return readFileSync(target, "utf8");
+}
+
+/** @returns {object | null} null only when the file is still absent */
+function readPreviousManifest(target) {
+  const readOnce = () => {
+    try {
+      return JSON.parse(readManifestText(target));
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+  };
+  const first = readOnce();
+  if (first !== null) return first;
+  // A concurrent replace can report ENOENT once. Confirm before treating
+  // the publish as the first one (generation reset, empty grace).
+  return readOnce();
+}
+
 export function serializeGoldenRecord(record) {
   return `${JSON.stringify(record, null, 2)}\n`;
 }
@@ -73,16 +139,23 @@ function writeRecordFile(goldensRoot, record) {
   const text = serializeGoldenRecord(record);
   const digest = sha256(text);
   const target = recordPath(goldensRoot, digest);
-  if (existsSync(target)) {
-    const existing = readFileSync(target, "utf8");
-    if (existing !== text)
-      throw new Error(`golden record digest collision with different bytes: ${digest}`);
-    return digest;
-  }
   mkdirSync(recordsDir(goldensRoot), { recursive: true });
-  const tmp = `${target}.tmp-${process.pid}`;
-  writeFileSync(tmp, text, "utf8");
-  renameSync(tmp, target);
+  // Same digest, two publishers: the loser must not throw. Its temp can also
+  // vanish (ENOENT) if a peer sweep removed every non-retained name — the
+  // sweep below ignores non-digest names so that window stays closed.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (readIdentical(target, text)) return digest;
+    const tmp = `${target}.tmp-${process.pid}`;
+    writeFileSync(tmp, text, "utf8");
+    try {
+      renameSync(tmp, target);
+      return digest;
+    } catch (error) {
+      rmSync(tmp, { force: true });
+      if (readIdentical(target, text)) return digest;
+      if (attempt === 3 || (error.code !== "ENOENT" && !REPLACE_RETRY.has(error.code))) throw error;
+    }
+  }
   return digest;
 }
 
@@ -116,12 +189,7 @@ export function publishGoldenSet(goldensRoot, entries, meta = {}) {
   // everything its manifest lists (see the module header's reader-schedule
   // contract — two full generations of grace).
   const manifestTarget = goldenManifestPath(goldensRoot);
-  let previousManifest = null;
-  try {
-    previousManifest = JSON.parse(readFileSync(manifestTarget, "utf8"));
-  } catch {
-    /* first publish: no previous manifest, no grace set */
-  }
+  const previousManifest = readPreviousManifest(manifestTarget);
   const manifest = {
     schemaVersion: 2,
     generation: (previousManifest?.generation ?? 0) + 1,
@@ -134,7 +202,7 @@ export function publishGoldenSet(goldensRoot, entries, meta = {}) {
   mkdirSync(goldensRoot, { recursive: true });
   const manifestTmp = `${manifestTarget}.tmp-${process.pid}`;
   writeFileSync(manifestTmp, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  renameSync(manifestTmp, manifestTarget); // THE single reader-visible commit point
+  renameOver(manifestTmp, manifestTarget); // THE single reader-visible commit point
   // Post-commit GC (best-effort; readers only ever resolve through a
   // manifest, so a leftover orphan is inert). Retained: the NEW manifest's
   // records ∪ the REPLACED manifest's records ∪ the records of the
@@ -149,6 +217,10 @@ export function publishGoldenSet(goldensRoot, entries, meta = {}) {
   }
   try {
     for (const file of readdirSync(recordsDir(goldensRoot))) {
+      // Temps live beside the digest file (`<digest>.json.tmp-<pid>`). A
+      // concurrent publisher of the same bytes still needs that temp for
+      // its rename; deleting it is the ENOENT the write-once race hit.
+      if (!DIGEST_FILE.test(file)) continue;
       if (!retained.has(file)) rmSync(path.join(recordsDir(goldensRoot), file), { force: true });
     }
   } catch {

@@ -16,10 +16,13 @@
 //! - the liveness rows (`liveness`) require a coherent answer while background
 //!   work moves only state that cannot change it.
 //!
-//! The route universe is the [`Route`] enum, generated together with every
-//! route's rows by `foreground_routes!`. Each per-route property is an
-//! exhaustive `match` without a wildcard, so a route added to the enum without
-//! its row does not compile.
+//! The route universe is the production [`ForegroundRoute`] enum the request
+//! disposition settles by. `foreground_routes!` generates every route's rows
+//! together with an exhaustive `match` over that enum, and each per-route
+//! property is an exhaustive `match` without a wildcard, so a production route
+//! added without its rows does not compile.
+//!
+//! [`ForegroundRoute`]: crate::documents::ForegroundRoute
 
 use std::sync::Arc;
 
@@ -32,6 +35,7 @@ use super::server_tests::{
 };
 use super::test_support::{RequestBarrier, RequestBarriers};
 use super::{TypeProviderContext, VerterLanguageServer};
+pub(super) use crate::documents::ForegroundRoute as Route;
 use crate::type_provider::merge;
 use crate::type_provider::mock::{MockCall, MockTypeProvider};
 use crate::type_provider::protocol as wire;
@@ -39,6 +43,7 @@ use crate::type_provider::protocol as wire;
 mod controls;
 mod liveness;
 mod movement;
+mod pins;
 
 const APP_PATH: &str = "src/App.vue";
 
@@ -52,8 +57,10 @@ const HOVER_TEXT: &str = "const msg: \"hello\"";
 const SIGNATURE_LABEL: &str = "greet(name: string): string";
 const COMPLETION_LABEL: &str = "messageFromProvider";
 const RESOLVED_DETAIL: &str = "resolved by the provider";
+const RESOLVED_IMPORT: &str = "import { messageFromProvider } from './provider'\n";
 const CODE_ACTION_TITLE: &str = "Replace the greeting";
 const INLAY_LABEL: &str = ": string";
+const BINDING_TYPE: &str = "const msg: \"hello\" (binding)";
 
 macro_rules! foreground_routes {
     ($(
@@ -61,11 +68,12 @@ macro_rules! foreground_routes {
             $($(#[$attr:meta])* $row:ident: $movement:ident),+ $(,)?
         }
     ),+ $(,)?) => {
-        /// Every foreground LSP route whose answer settles against a captured
-        /// document basis.
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        pub(super) enum Route {
-            $($route),+
+        /// Every production route has rows: a route without one is a
+        /// non-exhaustive match.
+        fn every_route_has_rows(route: Route) {
+            match route {
+                $(Route::$route => {}),+
+            }
         }
 
         $(
@@ -89,94 +97,73 @@ macro_rules! foreground_routes {
 
 foreground_routes! {
     hover => Hover {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     signature_help => SignatureHelp {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     definition => Definition {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     type_definition => TypeDefinition {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     references => References {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     document_highlight => DocumentHighlight {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     prepare_rename => PrepareRename {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     rename => Rename {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     completion => Completion {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and falls back to the native-only list once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is retried as an edit race and falls back to the native-only list"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     completion_resolve => CompletionResolve {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     code_action => CodeAction {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     inlay_hint => InlayHint {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
     semantic_tokens => SemanticTokens {
-        #[ignore = "a diagnostics-generation-only move re-dispatches the provider and answers ContentModified once the recompute bound is spent"]
         answers_through_diagnostics_republication: DiagnosticsRepublication,
         answers_through_identical_surface_records: IdenticalSurfaceRecord,
-        #[ignore = "an equivalent workspace-root publication is settled as a workspace replacement and answers ContentModified"]
+        answers_through_equivalent_root_publication: EquivalentRootPublication,
+    },
+    binding_types => BindingTypes {
+        answers_through_diagnostics_republication: DiagnosticsRepublication,
+        answers_through_identical_surface_records: IdenticalSurfaceRecord,
         answers_through_equivalent_root_publication: EquivalentRootPublication,
     },
 }
@@ -217,11 +204,15 @@ impl Drop for Fixture {
 
 impl Fixture {
     pub(super) async fn new() -> Self {
+        Self::with_host_config(verter_session::HostConfig::default()).await
+    }
+
+    pub(super) async fn with_host_config(host_config: verter_session::HostConfig) -> Self {
         let (temp, service, drain, provider, workspace_id) =
             make_definition_test_server_with_config(
                 &[(APP_PATH, "vue", APP)],
                 crate::TypeProviderKind::Tsgo,
-                verter_session::HostConfig::default(),
+                host_config,
                 false,
             )
             .await;
@@ -311,16 +302,17 @@ impl Route {
             | Route::CompletionResolve
             | Route::CodeAction
             | Route::InlayHint
-            | Route::SemanticTokens => false,
+            | Route::SemanticTokens
+            | Route::BindingTypes => false,
         }
     }
 
-    /// Whether the route captures the provider surface it maps through before
-    /// it queries. Completion resolve queries by provider path alone and maps
-    /// any returned edit through the surface current when the answer arrives.
-    pub(super) fn maps_through_a_surface_captured_before_the_query(self) -> bool {
+    /// Provider queries one unmoved request of this route makes.
+    pub(super) fn provider_queries_per_request(self) -> usize {
         match self {
-            Route::CompletionResolve => false,
+            // One quick-info query per script binding of the fixture: `msg`
+            // and `greet`.
+            Route::BindingTypes => 2,
             Route::Hover
             | Route::SignatureHelp
             | Route::Definition
@@ -330,9 +322,10 @@ impl Route {
             | Route::PrepareRename
             | Route::Rename
             | Route::Completion
+            | Route::CompletionResolve
             | Route::CodeAction
             | Route::InlayHint
-            | Route::SemanticTokens => true,
+            | Route::SemanticTokens => 1,
         }
     }
 
@@ -353,6 +346,7 @@ impl Route {
             Route::CodeAction => matches!(call, MockCall::GetCodeActions { .. }),
             Route::InlayHint => matches!(call, MockCall::GetInlayHints { .. }),
             Route::SemanticTokens => matches!(call, MockCall::GetSemanticTokens { .. }),
+            Route::BindingTypes => matches!(call, MockCall::GetHover { .. }),
         }
     }
 
@@ -504,11 +498,20 @@ impl Route {
                     label: COMPLETION_LABEL.to_string(),
                     data: serde_json::json!({ "exportName": COMPLETION_LABEL }),
                 };
+                // The provider's import edit is addressed in the surface the
+                // resolve queried, so the edit can only be placed through that
+                // surface's map.
+                let (import_at, _) = fixture.tsx_span(&ctx, "const msg");
                 provider.set_resolve_completion(
                     &path,
                     key,
                     Some(wire::CompletionResolveResult {
                         detail: Some(RESOLVED_DETAIL.to_string()),
+                        additional_text_edits: vec![wire::ResolvedTextEdit {
+                            start: import_at,
+                            end: import_at,
+                            new_text: RESOLVED_IMPORT.to_string(),
+                        }],
                         ..Default::default()
                     }),
                 );
@@ -569,6 +572,20 @@ impl Route {
                         token_type: 7,
                         token_modifiers: 1,
                     }],
+                );
+            }
+            Route::BindingTypes => {
+                let declaration = fixture.position("msg = 'hello'", 0);
+                provider.set_hover(
+                    &path,
+                    fixture.tsx_offset(&ctx, declaration),
+                    Some(wire::HoverInfo {
+                        contents: BINDING_TYPE.to_string(),
+                        display_signature: Some(
+                            crate::type_provider::mock::test_display_signature(BINDING_TYPE),
+                        ),
+                        ..Default::default()
+                    }),
                 );
             }
         }
@@ -708,7 +725,7 @@ impl Route {
                     .expect("completion resolve is armed with an item");
                 server.completion_resolve(item).await.map(|item| {
                     (item.detail.as_deref() == Some(RESOLVED_DETAIL))
-                        .then(|| format!("{:?}", item.detail))
+                        .then(|| format!("{:?} {:?}", item.detail, item.additional_text_edits))
                 })
             }
             Route::CodeAction => server
@@ -767,6 +784,19 @@ impl Route {
                         Some(format!("{:?}", tokens.data))
                     }
                     _ => None,
+                }),
+            Route::BindingTypes => server
+                .get_binding_types(crate::server::protocol_types::GetAnalysisParams {
+                    uri: uri.as_str().to_string(),
+                })
+                .await
+                .map(|types| {
+                    types
+                        .get("msg")
+                        .and_then(|binding| binding.get("displaySignature"))
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|signature| signature.contains(BINDING_TYPE))
+                        .map(str::to_string)
                 }),
         };
         match reply {
@@ -827,6 +857,7 @@ pub(super) async fn reference_answer(route: Route) -> String {
 /// provider dispatch, when nothing moves during the request — and reaches every
 /// barrier the schedules move state at.
 async fn assert_steady(route: Route) {
+    every_route_has_rows(route);
     let fixture = Fixture::new().await;
     let armed = route.arm(&fixture).await;
     fixture.provider.clear_calls();
@@ -838,8 +869,8 @@ async fn assert_steady(route: Route) {
     assert!(!answer.is_empty(), "{route:?}: the answer is nonempty");
     assert_eq!(
         fixture.dispatches(route),
-        1,
-        "{route:?}: one provider dispatch per unmoved request"
+        route.provider_queries_per_request(),
+        "{route:?}: one provider dispatch per provider query of an unmoved request"
     );
     for barrier in BARRIERS {
         assert!(
@@ -857,6 +888,12 @@ async fn assert_steady(route: Route) {
         answer.contains(&canonical_answer),
         "{route:?}: the provider location maps onto the authored literal: {answer}"
     );
+    if route == Route::CompletionResolve {
+        assert!(
+            answer.contains("messageFromProvider } from"),
+            "the resolve places the provider's import edit: {answer}"
+        );
+    }
     if route == Route::Rename {
         assert_eq!(
             answer,
