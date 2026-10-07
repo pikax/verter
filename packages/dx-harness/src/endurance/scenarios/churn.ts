@@ -310,10 +310,6 @@ export interface RetentionReading {
   readonly semanticMemoEntries: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
   readonly unresolvedReach: number;
-  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
-  readonly relationProofs: number;
-  /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
-  readonly relateKeys: number;
   /** Resident union member views, released with their union's document. */
   readonly unionViews: number;
   /** Stable-key classes the semantic store's key table holds. */
@@ -417,8 +413,6 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "semanticNodeSlots",
   "semanticMemoEntries",
   "unresolvedReach",
-  "relationProofs",
-  "relateKeys",
   "unionViews",
   "stableKeyClasses",
   "shapeCacheEntries",
@@ -1102,8 +1096,6 @@ export const CHURN_RETENTION_COUNTERS = [
   "semanticNodeSlots",
   "semanticMemoEntries",
   "unresolvedReach",
-  "relationProofs",
-  "relateKeys",
   "unionViews",
   "stableKeyClasses",
   "shapeCacheEntries",
@@ -1315,7 +1307,7 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `roots=${reading.liveRoots} leases=${reading.snapshotLeases} ` +
     `candidates=${reading.carrierCandidates} lanes=${reading.publicationLanes} ` +
     `nodes=${reading.semanticNodes}/${reading.semanticNodeSlots} memo=${reading.semanticMemoEntries} reach=${reading.unresolvedReach} ` +
-    `proofs=${reading.relationProofs} relateKeys=${reading.relateKeys} unionViews=${reading.unionViews} keyClasses=${reading.stableKeyClasses} shapes=${reading.shapeCacheEntries} ` +
+    `unionViews=${reading.unionViews} keyClasses=${reading.stableKeyClasses} shapes=${reading.shapeCacheEntries} ` +
     `flow=${reading.flowGraphs}/${reading.flowHashEntries}/${reading.flowLoweredEntries} mappers=${reading.mapperFingerprints} surfaces=${reading.frameworkSurfaceEntries} ` +
     `pinned=${bytesToMib(reading.pinnedBytes)} retainedBytes=${bytesToMib(reading.retainedBytes)} ` +
     `pressureRefusals=${reading.refusalsPressure} ` +

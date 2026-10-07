@@ -794,6 +794,89 @@ fn cache_satisfaction_requires_path_exact_not_prefix() {
 /// family memo but skipped `relation_memo.clear()` /
 /// `derivation.clear()`, those counters stay non-zero and the assertion
 /// fails — a stale judgement would survive the project-generation bump.
+/// Many distinct relations over live operands under a tiny retention
+/// budget leave the store holding the operands and at most the budgeted
+/// relation candidates: a published relation retains no explanation
+/// beside its memo candidate, so publishing interns no node and evicting
+/// the candidate leaves nothing behind. (The payload names no proof and
+/// the store owns no proof or co-discharged-key table — that half is held
+/// by the types themselves.)
+///
+/// DISCRIMINATES a relation publish that retains explanation state in the
+/// arena or the memo: the node count would exceed the operand count, or
+/// the memo would hold more than the budget.
+#[test]
+fn many_distinct_relations_under_tiny_retention_keep_operand_only_residency() {
+    use crate::semantic_query::DeclIdentity;
+
+    const BUDGET: usize = 2;
+    const RELATIONS: usize = 64;
+    let store = SemanticGraphStore::new_with_memo_budget_for_test(BUDGET);
+    let operand = |name: String| SemanticNodeData::TypeParam {
+        decl: DeclIdentity {
+            canonical_id: Arc::from("/w/operands.ts"),
+            owner: TopLevelOwnerId::ordinary_file(),
+            whole_hash: [7u8; 16],
+            decl_name: Arc::from(name.as_str()),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: Arc::from(name.as_str()),
+    };
+    let pairs: Vec<(SemanticNodeId, SemanticNodeId)> = (0..RELATIONS)
+        .map(|i| {
+            (
+                store.intern_node(operand(format!("S{i}"))),
+                store.intern_node(operand(format!("T{i}"))),
+            )
+        })
+        .collect();
+    let operand_count = store.node_count();
+    assert_eq!(operand_count, 2 * RELATIONS, "every operand is distinct");
+
+    for (i, (source, target)) in pairs.iter().enumerate() {
+        let outcome = if i % 2 == 0 {
+            RelationOutcome::Assignable
+        } else {
+            RelationOutcome::NotAssignable
+        };
+        store.insert_relation_payload_for_tests(
+            RelateMemoKey::assignable(*source, *target, RelationContext::default()),
+            verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
+            Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+            store.relation_payload_for_tests(outcome),
+            0,
+        );
+        assert!(
+            store.relation_memo_count() <= BUDGET,
+            "relation {i}: retention stays within the budget"
+        );
+    }
+
+    assert_eq!(
+        store.node_count(),
+        operand_count,
+        "publishing relations interned nothing beside the operands"
+    );
+    assert_eq!(store.relation_memo_count(), BUDGET);
+    assert_eq!(
+        store.memo_entry_count(),
+        BUDGET,
+        "the only retained relation state is the budgeted candidates"
+    );
+    let (last_source, last_target) = pairs[RELATIONS - 1];
+    assert_eq!(
+        store
+            .relation_entries_for_tests()
+            .into_iter()
+            .find(|(key, _)| key.source == last_source && key.target == last_target)
+            .map(|(_, outcome)| outcome),
+        Some(RelationOutcome::NotAssignable),
+        "the freshest relation still answers"
+    );
+}
+
 #[test]
 fn invalidate_all_clears_id_keyed_semantic_caches() {
     let store = SemanticGraphStore::new();
@@ -2316,23 +2399,18 @@ fn carrier_facts_reference_a_canonical_deep_in_a_receipt_chain() {
 /// reverse index AND through the released-id key / result sweep), its
 /// node payloads plus the nodes embedding them (the cascade reaches a
 /// Global alias shell over the closed object), its `unresolved_reach`
-/// bits, its member-ordinal index, its origin edges, and the relation
-/// proofs / relate keys naming its nodes — while the neighbour document's
-/// entries, nodes, sidecars and proofs, and the shared Global primitive,
-/// stay intact and still dedup.
+/// bits, its member-ordinal index and its origin edges — while the
+/// neighbour document's entries, nodes and sidecars, and the shared Global
+/// primitive, stay intact and still dedup.
 ///
 /// On the old code a close reached only `invalidate_canonical`: the
 /// three `/w/a.ts` nodes stayed live (`node_count` would read 7, not 4),
 /// `unresolved_reach` kept every bit (7, not 4), the member-ordinal index
-/// kept both entries, both relate keys and all four proofs stayed
-/// interned, and the two entries whose carriers name only `/w/b.ts` but
+/// kept both entries, and the two entries whose carriers name only `/w/b.ts` but
 /// whose key / result hold `/w/a.ts` nodes kept serving them.
 #[test]
 fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neighbours() {
-    use crate::semantic_query::{
-        BudgetExceededKind, OriginEdgeKind, OriginMeta, RecursionOrBudgetCap, RelateMemoKey,
-        RelationContext, RelationFailureCode, RelationProof, SubRelationPosition, SubRelationRef,
-    };
+    use crate::semantic_query::{OriginEdgeKind, OriginMeta};
 
     let store = SemanticGraphStore::new();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2412,47 +2490,6 @@ fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neigh
         dep_sig_for("/w/b.ts", 2),
     );
 
-    // Relation tables: one relate key and one negative proof per
-    // document, a cycle proof over A's key, and a budget proof with no
-    // node at all.
-    let key_id_a = store.intern_relate_key(RelateMemoKey::assignable(
-        a_obj,
-        shared,
-        RelationContext::default(),
-    ));
-    let key_id_b = store.intern_relate_key(RelateMemoKey::assignable(
-        b_obj,
-        shared,
-        RelationContext::default(),
-    ));
-    let proof_a = store.intern_relation_proof(RelationProof::NotAssignable {
-        reason: RelationFailureCode::Structural,
-        failing_sub: SubRelationRef {
-            source: a_param,
-            target: shared,
-            position: SubRelationPosition::Root,
-        },
-    });
-    let proof_b = store.intern_relation_proof(RelationProof::NotAssignable {
-        reason: RelationFailureCode::Structural,
-        failing_sub: SubRelationRef {
-            source: b_param,
-            target: shared,
-            position: SubRelationPosition::Root,
-        },
-    });
-    let proof_cycle_a = store.intern_relation_proof(RelationProof::CoinductiveCycle {
-        keys: Arc::from(vec![key_id_a].into_boxed_slice()),
-    });
-    let proof_budget = store.intern_relation_proof(RelationProof::BudgetExceeded {
-        cap: RecursionOrBudgetCap {
-            kind: BudgetExceededKind::RelationBudget,
-            limit: 0,
-        },
-    });
-    assert_eq!(store.relate_key_count(), 2);
-    assert_eq!(store.relation_proof_count(), 4);
-
     let report = store.release_canonical("/w/a.ts");
 
     assert_eq!(
@@ -2509,17 +2546,6 @@ fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neigh
     assert_eq!(report.derivation_buckets_dropped, 1);
     assert!(store.origins(a_obj).is_empty(), "A's origin edges dropped");
     assert_eq!(store.origins(b_obj).len(), 1, "B's origin edge kept");
-
-    assert_eq!(store.relate_key_count(), 1);
-    assert_eq!(store.relation_proof_count(), 2);
-    assert_eq!(report.relate_keys_released, 1);
-    assert_eq!(report.relation_proofs_released, 2);
-    assert!(store.relate_key_for_id(key_id_a).is_none());
-    assert!(store.relate_key_for_id(key_id_b).is_some());
-    assert!(store.relation_proof_for(proof_a).is_none());
-    assert!(store.relation_proof_for(proof_cycle_a).is_none());
-    assert!(store.relation_proof_for(proof_b).is_some());
-    assert!(store.relation_proof_for(proof_budget).is_some());
 
     // Dedup: A's content mints fresh ids; B's and the shared primitive
     // still dedup to their existing ids.
