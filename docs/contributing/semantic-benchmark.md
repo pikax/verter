@@ -31,19 +31,19 @@ same files on disk, byte for byte.
 | `verter` | `semantic_perf_probe`: a release executable linking the production `verter_session` library, host built with the shipped `HostConfig::default()` (no audit, trace, footprint or metrics capture) | yes |
 | `tsc-api` | TypeScript 7.0.2's native API (`typescript/unstable/sync`, driving the native `tsc --api` server; the verified executable is passed to it explicitly) | yes |
 | `verter-obs` | the same probe with the host's observability bookkeeping on (audit records with timing and footprint capture, metrics) | no: shows what the bookkeeping costs |
+| `verter-observe` | the same probe built with `--features semantic-observe` (optional semantic capture compiled in; production configuration), in its own target directory. The `verter` probe has that capture physically compiled out, and the validator requires each binary's `identity` to say so | no: shows what compiled-in capture costs, and checks both builds retain the same REQUIRED state |
 | `verter-counted` | the probe's twin with a counting global allocator | no: allocation counts only |
 | `tsc-cli` | `tsc -p --extendedDiagnostics`, default (parallel) checkers | no: whole-program reference |
 | `tsc-cli-1` | `tsc -p --extendedDiagnostics --singleThreaded` | no: whole-program reference |
 
-Observability is compared outside the head-to-head. Today that comparison is
-runtime-only: the `verter-obs` arm turns the host's runtime bookkeeping on in
-the production build. A build-level comparison — pairing the
-production-default probe with one that differs only in the default-off
-`semantic-observe` Cargo feature (see `docs/arch/semantic-observe.md`), both
-builds retaining identical required state so the pair isolates what the
-optional observation layer costs — **is planned and not yet in this
-repository**: the runner builds and pins only `semantic_perf_probe` and
-`semantic_perf_probe_counted` (see [Running it](#running-it)).
+Observability is compared outside the head-to-head, in two arms. The
+`verter-obs` arm turns the host's runtime bookkeeping on in the production
+build. The `verter-observe` arm is the build-level comparison: the
+production-default probe — built with the default-off `semantic-observe`
+Cargo feature (see `docs/arch/semantic-observe.md`) physically compiled out —
+paired with the same probe built with it compiled in, both builds retaining
+identical required state so the pair isolates what the optional observation
+layer costs (see [Running it](#running-it)).
 
 Verter exposes no whole-program diagnostic pass, so the `tsc -p` arms have no
 Verter counterpart. They show what tsc's full check costs, in both thread
@@ -445,10 +445,10 @@ claim depends on where it ran:
   **measured only on the benchmark machine**: a worker tagged `bench-m3`.
   On any other worker they are reported as `not measured`, never as zero,
   never as a pass and never as a failure. A timing or memory gate exists only
-  on `bench-m3`, owned by the performance work that runs there. The planned
-  Capacity report (tsc's outcome at the engine budget in the API and CLI arms
-  with time-to-cap and peak at kill; Verter's answer class, peak and time)
-  will be measured under this same rule when its workload lands.
+  on `bench-m3`, owned by the performance work that runs there. The Capacity
+  report (each arm's outcome at the engine budget, its engine peak and time,
+  and for killed invocations the tree's peak at the kill and the time to it)
+  is measured under this same rule.
 - A comparison (a baseline commit against a candidate) measures both on the
   same worker in the same session, interleaved — never against a stored
   number from another host or another session.
@@ -473,9 +473,9 @@ every arm, the same validation).
 
 | Tier | Scenarios | Arms | Deadline | Indicative duration (one developer machine, Ryzen 9 7950X on Windows; a planning figure, not a measurement) |
 |---|---|---|---|---|
-| `quick` (default) | one representative normal size per scenario series (21) | Verter, tsc API, and the labelled observability-on and counting Verter arms | 60 s | 62 s (336 invocations) |
+| `quick` (default) | one representative normal size per scenario series (21), and the three session workloads | Verter, tsc API, and the labelled observability-on, observe-build and counting Verter arms | 60 s | not yet measured with the session workloads and the observe arm (62 s and 336 invocations before them) |
 | `standard` | + the other normal sizes and the sizes at tsc's own limits (48) — the baseline | + `tsc -p` in both thread modes | 120 s | 564 s (1152 invocations) |
-| `stress` (opt-in) | + Verter's limit and pathological sizes (55): tsc exhausting 8 GiB, multi-second Verter requests | all six | 600 s | hours |
+| `stress` (opt-in) | + Verter's limit and pathological sizes (55): tsc exhausting 8 GiB, multi-second Verter requests | all seven | 600 s | hours |
 
 Every tier runs 1 warmup and 3 measured invocations per (scenario, arm) and
 3 warm repeats; any option given explicitly (`--repeat`, `--arms`,
@@ -483,6 +483,57 @@ Every tier runs 1 warmup and 3 measured invocations per (scenario, arm) and
 scenarios from the whole catalog. The tier of each scenario is listed in
 `scenarios.mjs` (`SCENARIO_TIERS`); the validator checks that a run's cells
 are exactly its tier's (or `--only`'s).
+
+## Session workloads
+
+`sessions.mjs` holds the editor workloads. A session is a multi-file project
+and an ordered script of steps, run in ONE live engine per invocation:
+
+| Session | Family | Script |
+|---|---|---|
+| `incremental-edits` | INCREMENTAL | demand an alias that depends on a leaf through an intermediate generic; edit the leaf, the intermediate type and an unrelated file, re-requesting after each |
+| `editor-session` | EDITOR SESSION | an InputMenu-equivalent Vue component (props composed from a picked base, events from a tuple map, both imported from a types module): hover-like demands on its types and its component metadata, cold, then across an edit to the types and an edit to the file being hovered |
+| `concurrent-demands` | CONCURRENT | eight demands in eight files issued at once (one thread each for Verter; all in flight together through tsc's asynchronous API), cold, then again |
+
+Every demand carries the answer the type system defines at that point of the
+script, derived from the construction: tsc's answer must equal it (a run
+where it does not fails validation) and Verter's is classified against it
+exactly as a probe answer is. A `meta` step (props with their required flags,
+and events) has no tsc counterpart: it is Verter-only and never compared.
+
+The arms are `verter`, `verter-observe` and `tsc-api`, each invocation a fresh
+process on its own copy of the project, under the same supervisor, budget,
+deadline and counterbalanced schedule as the probes. Verter applies an edit
+through its workspace and host. tsc uses its own incremental facility: the
+driver (`tsc-session-probe.mjs`) writes the file and calls `updateSnapshot`
+with `fileChanges.changed` naming it, so the server derives the next snapshot
+from the previous one (API program reuse); the validator requires every edit
+to name its file and advance the snapshot. A step is compared only when all
+its answers matched in Verter and reproduced the constructed answer in tsc.
+Answers are observed right after each step, outside every timer, so a
+session's memory figures include observation for both tools.
+
+Each arm's provenance is bound as the probes' is: a Verter session must have
+run the pinned probe's `session` runner, a tsc session the harness's own node
+(recorded with the run's host) running `tsc-session-probe.mjs` on the
+invocation's own job and record paths, with the verified tsc executable and
+the pinned probe that read the server's counters recorded in the record; the
+statistics reading must be of the session's own process (the record's pid),
+and every recorded input digest must be the catalog's — the benchmark
+library's included. A session killed after its complete record was written
+keeps its measurement (the kill took nothing from it); a kill inside a step
+counts as the engine's only on the probes' memory-kill evidence. The observe
+arm's REQUIRED-state identity is enforced: a build that retains differently
+fails validation, and a session where an arm has no completed measured
+invocation reports `n/a` with a warning.
+
+## Capacity
+
+Every cell has a Capacity row: each arm's outcome at the engine budget (its
+class or status; for a completed arm its engine peak and time), and for the
+invocations the supervisor killed, the tree's peak at the kill, the time to
+it and how many kills are attributed to the engine. The memory cap stays the
+machine's protection: the row reports, it never raises the cap.
 
 ## Schedule
 
@@ -719,12 +770,13 @@ work-growth ratios from any worker are valid evidence (see
 These perf-suite families need their own harness and are listed in every
 report:
 
-- **workspace concurrency** — sibling batches of 12 / 50 components importing
-  `./types`: resolution operations, fs reads, restarts and single-flight
-  across a workspace; a lifecycle workload with no single demanded probe;
-- **whole project (`InputMenu.vue`)** — an equivalent demand for a Vue SFC
-  needs matched project dependencies, libraries and projection boundaries on
-  both sides; Verter's SFC projection has no tsc counterpart request;
+- **workspace concurrency at batch scale** — the concurrent session measures
+  demands across files in one engine; sibling batches of 12 / 50 components
+  with fs-read, restart and single-flight counts are a workspace lifecycle
+  workload;
+- **a real component library project** — the editor session uses an
+  InputMenu-equivalent component built from local sources; a real library's
+  dependency graph is an external corpus, outside the hermetic catalog;
 - **frame-runtime overhead on shallow paths** — a Verter-against-Verter
   regression: `scripts/benchmark/signature-kernel-perf.mjs`;
 - **recursion-detection time per shape** — a Verter budget property with no

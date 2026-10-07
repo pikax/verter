@@ -36,7 +36,7 @@ import {
   supervisorDeadlineMs,
   warmRepeatsFor,
 } from "./analyze.mjs";
-import { ROOT, sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
+import { LIB_FILE, ROOT, sameArchitecture, schedule, scheduleBalanceProblems } from "./run.mjs";
 import {
   buildProblems,
   RECORDED_PACKAGES,
@@ -56,6 +56,8 @@ import {
   tsconfigText,
 } from "./scenarios.mjs";
 import { MEASURING_SUFFIX } from "./measure-expected.mjs";
+import { validateSessions } from "./session-analyze.mjs";
+import { allSessions, sessionsFor } from "./sessions.mjs";
 import { summarize } from "./summary.mjs";
 import { supervisorRecordProblems } from "./supervisor.mjs";
 
@@ -85,7 +87,12 @@ const forwardSlashes = (p) => (typeof p === "string" ? p.replace(/\\/g, "/") : p
 const finite = (x) => typeof x === "number" && Number.isFinite(x) && x >= 0;
 const sha256Digest = (x) => typeof x === "string" && /^[a-f0-9]{64}$/.test(x);
 
-export function validateRun(run, expected, scenarios, { requireAllMatched = false } = {}) {
+export function validateRun(
+  run,
+  expected,
+  scenarios,
+  { requireAllMatched = false, sessions = allSessions() } = {},
+) {
   const failures = [];
   const warnings = [];
   const fail = (m) => failures.push(m);
@@ -121,6 +128,21 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   }
   if (bins.counted?.identity?.instrumented !== true)
     fail("wrong binary: the counted probe does not report its instrumentation");
+  // Optional semantic capture is physically compiled out of the production
+  // probe; only the observe arm's binary carries it.
+  if (bins.probe?.identity?.captureAvailable !== false)
+    fail("wrong binary: the Verter probe has optional semantic capture compiled in");
+  if ((meta.options?.arms ?? []).includes("verter-observe")) {
+    if (!bins.observe || bins.observe.sha256 !== after.observe)
+      fail("wrong binary: the observe probe changed during the run");
+    const id = bins.observe?.identity ?? {};
+    if (id.captureAvailable !== true || id.instrumented !== false || id.debugAssertions !== false)
+      fail(
+        "wrong binary: the observe probe is not a release build with semantic capture compiled in",
+      );
+    if (!meta.observeBuild?.observe) fail("wrong binary: no observe build record");
+    else for (const p of buildProblems(meta.observeBuild)) fail(`wrong binary: ${p}`);
+  }
   const t0 = meta.buildInputs ?? {};
   const t1 = meta.buildInputsAfterBuild ?? {};
   if (
@@ -146,6 +168,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   for (const [name, bin] of [
     ["the Verter probe", bins.probe],
     ["the counted probe", bins.counted],
+    ...(bins.observe ? [["the observe probe", bins.observe]] : []),
   ]) {
     if (
       !bin?.identity ||
@@ -277,7 +300,7 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
   }
   for (const p of scheduleBalanceProblems(expectedPlan, opts.arms ?? [])) fail(`schedule: ${p}`);
   const invs = run.invocations ?? [];
-  if (!invs.length) fail("zero records: the run holds no invocation");
+  if (!invs.length && cellKeys.length) fail("zero records: the run holds no invocation");
   const seen = new Map();
   invs.forEach((inv, position) => {
     const entry = planEntry(inv);
@@ -420,7 +443,12 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
         fail(`${id}: instrumentation flag ${r.instrumented} is wrong for ${inv.arm}`);
       if (r.observability !== (inv.arm === "verter-obs"))
         fail(`${id}: observability flag ${r.observability} is wrong for ${inv.arm}`);
-      const exe = inv.arm === "verter-counted" ? bins.counted?.pinned : bins.probe?.pinned;
+      const exe =
+        inv.arm === "verter-counted"
+          ? bins.counted?.pinned
+          : inv.arm === "verter-observe"
+            ? bins.observe?.pinned
+            : bins.probe?.pinned;
       if (inv.command?.[0] !== exe)
         fail(`${id}: ran ${inv.command?.[0]}, not the pinned probe ${exe}`);
     } else {
@@ -439,8 +467,19 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     if (answer.alias && answer.alias !== "__Probe") fail(`${id}: answered ${answer.alias}`);
   }
 
+  // The session workloads: their records, answers and summary. Their inputs
+  // must be the catalog's, the benchmark's own library included.
+  const selectedSessions = sessionsFor(opts.tier ?? "stress", TIERS, opts.only ?? []);
+  const sessionCheck = validateSessions(run, selectedSessions, {
+    schedule,
+    bins,
+    libText: readFileSync(LIB_FILE, "utf8"),
+  });
+  for (const f of sessionCheck.failures) fail(f);
+  warnings.push(...sessionCheck.warnings);
+
   // Answers, classes and the summary, recomputed from the raw records.
-  const recomputed = summarize(run, expected, scenarios);
+  const recomputed = summarize(run, expected, scenarios, sessions);
   for (const cell of recomputed.cells) {
     for (const [arm, s] of Object.entries(cell.arms)) {
       const id = `${cell.key}|${arm}`;
@@ -489,7 +528,10 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
     }
   }
   if (!run.summary) fail("the run holds no summary");
-  else if (stable(run.summary) !== stable(recomputed)) {
+  else if (
+    stable({ ...run.summary, sessions: undefined }) !==
+    stable({ ...recomputed, sessions: undefined })
+  ) {
     const stored = new Map((run.summary.cells ?? []).map((c) => [c.key, c]));
     let reported = 0;
     for (const cell of recomputed.cells) {
@@ -517,6 +559,28 @@ export function validateRun(run, expected, scenarios, { requireAllMatched = fals
  */
 export function rawFileProblems(run) {
   const problems = [];
+  for (const inv of run.sessionInvocations ?? []) {
+    const id = `${inv.sessionId}|${inv.arm}|${inv.warmup ? "w" : "r"}${inv.rep}`;
+    const read = (path) => {
+      try {
+        return JSON.parse(readFileSync(path, "utf8"));
+      } catch {
+        return null;
+      }
+    };
+    const sup = read(inv.supervisorOut);
+    if (!sup) problems.push(`${id}: cannot read ${inv.supervisorOut}`);
+    else delete sup.samples;
+    const embedded = inv.supervisor ? { ...inv.supervisor } : null;
+    if (embedded) {
+      delete embedded.samples;
+      delete embedded.sampleCount;
+    }
+    if (stable(sup) !== stable(embedded))
+      problems.push(`${id}: the supervisor record on disk differs from results.json`);
+    if (stable(read(inv.sessionOut)) !== stable(inv.session ?? null))
+      problems.push(`${id}: the session record on disk differs from results.json`);
+  }
   for (const inv of run.invocations ?? []) {
     if (inv.skipped) continue;
     const id = planEntry(inv);
@@ -592,6 +656,7 @@ async function cli(argv) {
   failures.push(...rawFileProblems(run));
   const result = validateRun(run, expected, allScenarios(), {
     requireAllMatched: argv.includes("--require-all-matched"),
+    sessions: allSessions(),
   });
   failures.push(...result.failures);
   for (const w of result.warnings) console.log(`warning: ${w}`);
