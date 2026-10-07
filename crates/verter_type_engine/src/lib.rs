@@ -66,6 +66,7 @@ pub mod resolver_core {
     //! engine-side name, scope and ambient resolution over them.
     pub mod ambient_resolve;
     pub mod bare_name_resolve;
+    pub mod dispatch_profile;
     pub mod fact_validation_port;
     pub mod fuses;
     pub mod request_ports;
@@ -74,8 +75,8 @@ pub mod resolver_core {
 
     pub use fuses::{FuseBudgets, FuseState, FuseTrip};
     pub use resolver_context::{
-        MaterializeScopeObservation, RequestBoundResolverContext, ResolverCapabilities,
-        ResolverContext,
+        MaterializeScopeObservation, ProjectGenerationClock, RequestBoundResolverContext,
+        RequestFlags, RequestSnapshot, ResolverCapabilities, ResolverContext,
     };
 }
 

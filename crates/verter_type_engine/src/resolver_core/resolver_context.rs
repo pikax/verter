@@ -1,8 +1,11 @@
 //! Request-bound adapter implementations for `ResolverContext`.
 //!
-//! The method-free marker composes six dyn-compatible services: indexed
-//! inputs, owned lowering, routing, fact validation, cancellation and execution
-//! submission. Their answers are owned records, typed source demands or an
+//! The method-free marker composes five dyn-compatible services: indexed
+//! inputs, owned lowering, routing, fact validation and execution submission.
+//! The reads a request makes once per semantic node or more — cancellation,
+//! the project generation and the live aggregate clocks — are not port
+//! methods: they are handles on the engine-owned [`RequestSnapshot`] the host
+//! captures once when it admits the request. Their answers are owned records, typed source demands or an
 //! opaque engine attachment; no ambient host/store/config getter is exposed.
 //! Two capability refinements — expression-source selection over owned
 //! lowering, live clock sampling over fact validation — hand out concrete
@@ -26,7 +29,7 @@ use std::sync::Arc;
 
 use super::fact_validation_port::{FactValidation, LiveFactValidation};
 use super::request_ports::{
-    Cancellation, ExecutionSubmission, ExpressionSourceSelection, HostAttachmentPort,
+    CancellationCheckpoint, ExecutionSubmission, ExpressionSourceSelection, HostAttachmentPort,
     IndexedInputs, OwnedLowering, RouteLookup,
 };
 
@@ -104,11 +107,131 @@ impl MaterializeScopeObservation {
     }
 }
 
+/// A request's project-generation clock: a handle on the counter the host
+/// advances when configuration, environment, project identity or workspace
+/// authority is reset. Every [`Self::current`] reads the live counter, so a
+/// reset that lands mid-request is visible to the next read.
+#[derive(Clone)]
+pub struct ProjectGenerationClock(Arc<std::sync::atomic::AtomicU64>);
+
+impl ProjectGenerationClock {
+    /// Read `clock`, which its owner keeps advancing.
+    #[must_use]
+    pub fn new(clock: Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self(clock)
+    }
+
+    /// The current project generation.
+    #[inline]
+    #[must_use]
+    pub fn current(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// The cancellation and project-generation handles of one request.
+///
+/// Both are handles, never sampled values: capturing them is constant-cost,
+/// and every read observes the live state.
+#[derive(Clone)]
+pub struct RequestFlags {
+    cancellation: CancellationCheckpoint,
+    project_generation: ProjectGenerationClock,
+}
+
+impl RequestFlags {
+    #[must_use]
+    pub fn new(project_generation: ProjectGenerationClock) -> Self {
+        Self {
+            cancellation: CancellationCheckpoint::new(),
+            project_generation,
+        }
+    }
+
+    /// The request's cancellation checkpoint.
+    #[inline]
+    #[must_use]
+    pub fn cancellation_checkpoint(&self) -> CancellationCheckpoint {
+        self.cancellation
+    }
+
+    /// Whether the request is cancelled now.
+    #[cfg_attr(feature = "test-support", track_caller)]
+    #[inline]
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// The current project generation.
+    #[inline]
+    #[must_use]
+    pub fn current_project_generation(&self) -> u64 {
+        self.project_generation.current()
+    }
+}
+
+/// What the host captures once when it admits a request, for the engine's
+/// hot paths to read as plain fields: the request's [`RequestFlags`] and its
+/// live aggregate clock reader.
+///
+/// It holds handles, tokens and flags only — never workspace or store state —
+/// so capturing it is constant-cost, and no read through it is stale: a
+/// cancellation, a project reset or a workspace edit that lands mid-request
+/// is observed by the next read.
+#[derive(Clone)]
+pub struct RequestSnapshot<W> {
+    flags: RequestFlags,
+    clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
+}
+
+impl<W> RequestSnapshot<W> {
+    #[must_use]
+    pub fn new(
+        project_generation: ProjectGenerationClock,
+        clocks: verter_session_query::facts::clocks::AggregateClockReader<W>,
+    ) -> Self {
+        Self {
+            flags: RequestFlags::new(project_generation),
+            clocks,
+        }
+    }
+
+    /// The request's cancellation and project-generation handles.
+    #[inline]
+    #[must_use]
+    pub fn flags(&self) -> &RequestFlags {
+        &self.flags
+    }
+
+    /// The request's live aggregate clock reader.
+    #[inline]
+    #[must_use]
+    pub fn clocks(&self) -> &verter_session_query::facts::clocks::AggregateClockReader<W> {
+        &self.clocks
+    }
+
+    /// Whether the request is cancelled now.
+    #[cfg_attr(feature = "test-support", track_caller)]
+    #[inline]
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.flags.is_cancelled()
+    }
+
+    /// The current project generation.
+    #[inline]
+    #[must_use]
+    pub fn current_project_generation(&self) -> u64 {
+        self.flags.current_project_generation()
+    }
+}
+
 /// Restricted host facade for resolver-tier code (`resolver_core/*`,
 /// `meta_resolve/*` post-moves, `component_meta_caches.rs`,
 /// `project_semantic_dispatch/*`).
 ///
-/// `ResolverContext` composes six request ports, their two capability
+/// `ResolverContext` composes five request ports, their two capability
 /// refinements and the adapter markers in [`sealed`]. All service traits are
 /// dyn-compatible and expose no ambient host access.
 ///
@@ -128,7 +251,6 @@ pub trait ResolverContext<C: ResolverCapabilities>:
     + RouteLookup
     + FactValidation
     + LiveFactValidation<Clocks = C::Clocks>
-    + Cancellation
     + ExecutionSubmission<MacroMirrors = C::MacroMirrors>
     + HostAttachmentPort<HostAttachment = C::HostAttachment>
 {
@@ -405,4 +527,59 @@ where
     // can leak out of TLS.
     drop(scope);
     (result, cell.into_inner())
+}
+
+#[cfg(test)]
+mod request_snapshot_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    use verter_session_query::facts::clocks::{
+        AggregateClockReader, BracketedGenerationRead, ProjectGenerationRead, WorkspaceClocks,
+    };
+
+    use super::{ProjectGenerationClock, RequestSnapshot};
+
+    #[derive(Clone)]
+    struct Content(Arc<AtomicU64>);
+    impl WorkspaceClocks for Content {
+        fn content_generation(&self) -> u64 {
+            self.0.load(Ordering::Acquire)
+        }
+        fn source_env_generation(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    /// A snapshot is captured once per request, so it must hold handles, not
+    /// sampled values: a project reset or a workspace edit that lands after
+    /// the capture has to be visible to the request's next read, or a
+    /// mid-request change would go undetected at publish.
+    #[test]
+    fn reads_through_a_captured_snapshot_observe_later_changes() {
+        let project = Arc::new(AtomicU64::new(3));
+        let content = Arc::new(AtomicU64::new(10));
+        let imports = Arc::new(AtomicU64::new(0));
+        let routes = Arc::new(AtomicU64::new(0));
+        let snapshot = RequestSnapshot::new(
+            ProjectGenerationClock::new(Arc::clone(&project)),
+            AggregateClockReader::new(
+                Content(Arc::clone(&content)),
+                ProjectGenerationRead::new(Arc::clone(&project)),
+                BracketedGenerationRead::new(imports),
+                BracketedGenerationRead::new(routes),
+            ),
+        );
+        assert_eq!(snapshot.current_project_generation(), 3);
+        assert_eq!(snapshot.clocks().live().content, 10);
+
+        project.fetch_add(1, Ordering::AcqRel);
+        content.fetch_add(5, Ordering::AcqRel);
+
+        assert_eq!(snapshot.current_project_generation(), 4);
+        assert_eq!(snapshot.flags().current_project_generation(), 4);
+        let live = snapshot.clocks().live();
+        assert_eq!(live.content, 15);
+        assert_eq!(live.workspace_shape, 4);
+    }
 }

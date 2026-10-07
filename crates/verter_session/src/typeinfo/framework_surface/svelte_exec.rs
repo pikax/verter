@@ -145,7 +145,7 @@ pub(crate) fn resolve_svelte_surface(
         owner_whole_hash: whole_hash,
         adapter_key: SvelteSurfaceKey { source },
     };
-    let generation = ctx.current_project_generation();
+    let generation = ctx.request_flags().current_project_generation();
 
     // Warm read against the SAME `ctx` view the surface resolves under — a
     // carrier edit (a cross-file dependency the captured `TypeExpr` reaches)

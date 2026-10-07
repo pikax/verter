@@ -2225,6 +2225,7 @@ impl SemanticGraphStore {
     fn warm_publish_one<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
         prepared: &PreparedKeyHandle,
         result: &QueryResult<SemanticQueryValue>,
         walker_diagnostics: &Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
@@ -2267,7 +2268,7 @@ impl SemanticGraphStore {
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
         let dispatch_dep_signature = self.dep_signature_interner.intern(dispatch_dep_signature);
-        let validated_at_generation = ctx.current_project_generation();
+        let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
             result: result.clone(),
@@ -2308,7 +2309,7 @@ impl SemanticGraphStore {
         // Atomic re-check under the entries lock — `state` is briefly
         // locked nested inside `entries`; no AB-BA deadlock risk because
         // no path holds `state` then acquires `entries`.
-        let cancelled = ctx.is_cancelled();
+        let cancelled = flags.is_cancelled();
         if cancelled {
             inflight.state.lock().aborted = true;
         }
@@ -2448,6 +2449,7 @@ impl SemanticGraphStore {
     fn warm_publish_one_if_absent<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
         key: SemanticQueryKey,
         result: QueryResult<SemanticNodeId>,
         read_set_signature: verter_session_query::facts::fact_cache::ReadSetSignature,
@@ -2506,7 +2508,7 @@ impl SemanticGraphStore {
         verter_audit::attribute!(CacheCandidateCopy);
         let dispatch_dep_signature = self.dep_signature_interner.intern(&dispatch_dep_signature);
         let dispatch_dep_signature_clone = Arc::clone(&dispatch_dep_signature);
-        let validated_at_generation = ctx.current_project_generation();
+        let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
             result: match result {
@@ -2553,7 +2555,7 @@ impl SemanticGraphStore {
         // therefore this backfill's — `SemanticNodeId`s were interned
         // against a now-stale id epoch: skip the publish so no stale
         // warm slot survives the reset.
-        if !admission_already_linearized && ctx.is_cancelled() {
+        if !admission_already_linearized && flags.is_cancelled() {
             parent_inflight.state.lock().aborted = true;
         }
         if parent_inflight.state.lock().aborted {

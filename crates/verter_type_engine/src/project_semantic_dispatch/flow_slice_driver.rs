@@ -34,24 +34,28 @@ pub struct FlowSliceDriver<'a> {
     facts: &'a dyn FactValidation,
     #[cfg(any(test, feature = "test-support"))]
     fixture: Option<&'a dyn FlowBodySkeletonSource>,
+    flags: &'a crate::resolver_core::resolver_context::RequestFlags,
 }
 
 impl<'a> FlowSliceDriver<'a> {
     pub fn new<C: crate::resolver_core::ResolverCapabilities>(
         stores: &'a FlowSliceStores,
         ctx: &'a dyn ResolverContext<C>,
+        flags: &'a crate::resolver_core::resolver_context::RequestFlags,
     ) -> Self {
-        Self::from_ports(stores, ctx, ctx)
+        Self::from_ports(stores, ctx, ctx, flags)
     }
     pub(crate) fn from_ports(
         stores: &'a FlowSliceStores,
         lowering: &'a dyn OwnedLowering,
         facts: &'a dyn FactValidation,
+        flags: &'a crate::resolver_core::resolver_context::RequestFlags,
     ) -> Self {
         Self {
             stores,
             lowering,
             facts,
+            flags,
             #[cfg(any(test, feature = "test-support"))]
             fixture: None,
         }
@@ -92,7 +96,12 @@ impl<'a> FlowSliceDriver<'a> {
     }
 
     pub fn lookup_hash(&self, key: FlowSliceHashKey) -> Option<FlowSliceHashOutcome> {
-        crate::cache_runtime::lookup(&FlowSliceHashNodeDemand { driver: self }, key, self.facts)
+        crate::cache_runtime::lookup(
+            &FlowSliceHashNodeDemand { driver: self },
+            key,
+            self.facts,
+            self.flags,
+        )
     }
 
     pub fn lookup_lowered(&self, key: FlowSliceLoweredKey) -> Option<Arc<FlowSliceIR>> {
@@ -100,6 +109,7 @@ impl<'a> FlowSliceDriver<'a> {
             &FlowSliceLoweredBodyNodeDemand { driver: self },
             key,
             self.facts,
+            self.flags,
         )
     }
 }

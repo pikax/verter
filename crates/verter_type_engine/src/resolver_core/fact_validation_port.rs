@@ -8,19 +8,21 @@ use verter_session_query::facts::fact_cache::{
 };
 use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
-/// Samples the live aggregate clocks a fact basis composes. The clock source
-/// type is concrete per host, so a live sample dispatches statically.
+/// Hands out the request's live aggregate clocks. The clock source type is
+/// concrete per host, so a live sample dispatches statically.
 pub trait LiveFactValidation: FactValidation {
     /// The workspace clock source a live aggregate sample reads.
     type Clocks: verter_session_query::facts::clocks::WorkspaceClocks + Clone;
-    fn aggregate_clock_reader(
-        &self,
-    ) -> verter_session_query::facts::clocks::AggregateClockReader<Self::Clocks>;
+    /// The snapshot the host captured when it admitted this request. Its
+    /// clocks are live handles: every sample reads the current generations.
+    fn request_snapshot(&self) -> &super::resolver_context::RequestSnapshot<Self::Clocks>;
 }
 
 pub trait FactValidation {
     fn current_external_supersession_fingerprint(&self) -> u64;
-    fn current_project_generation(&self) -> u64;
+    /// The cancellation and project-generation handles the host captured
+    /// when it admitted this request. Every read through them is live.
+    fn request_flags(&self) -> &super::resolver_context::RequestFlags;
     fn source_environment(
         &self,
         key: &verter_session_query::source::artifact_key::FileArtifactKey,
@@ -76,6 +78,7 @@ pub trait FactValidation {
     #[inline]
     #[allow(dead_code)]
     fn observe(&self, fact: verter_session_query::facts::fact_cache::FactVersionRef) {
+        crate::count_resolver_context_call!("FactValidation::observe");
         crate::fact_tracing::tracing::observe_fan_out(fact);
     }
 
@@ -91,6 +94,7 @@ pub trait FactValidation {
         &self,
         sig: &[verter_session_query::facts::fact_cache::FactVersionRef],
     ) {
+        crate::count_resolver_context_call!("FactValidation::observe_borrowed_signature");
         crate::fact_tracing::tracing::observe_fan_out_borrowed(sig);
     }
     fn compat_token(&self) -> StoreViewCompatToken;

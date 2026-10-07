@@ -118,9 +118,13 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
         let mut carrier = None;
         let claim = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-            dispatch
-                .graph()
-                .claim_query(dispatch.ctx, &mut attempt, &self.task, &mut capture)
+            dispatch.graph().claim_query(
+                dispatch.ctx,
+                dispatch.snapshot.flags(),
+                &mut attempt,
+                &self.task,
+                &mut capture,
+            )
         };
         match claim {
             Claim::Read(read) => Start::Answer(Ok(dispatch.answered(key, read, carrier))),
@@ -164,11 +168,20 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
         let mut carrier = None;
         let mut capture = ReadCapture::deferring_carrier(&mut carrier);
         let graph = dispatch.graph();
-        let claim = match graph.begin_query_claim(dispatch.ctx, key.clone(), &mut capture) {
+        let claim = match graph.begin_query_claim(
+            dispatch.ctx,
+            dispatch.snapshot.flags(),
+            key.clone(),
+            &mut capture,
+        ) {
             Err(read) => return Ok(dispatch.answered(key, read, carrier)),
-            Ok(mut attempt) => {
-                graph.claim_query(dispatch.ctx, &mut attempt, &self.task, &mut capture)
-            }
+            Ok(mut attempt) => graph.claim_query(
+                dispatch.ctx,
+                dispatch.snapshot.flags(),
+                &mut attempt,
+                &self.task,
+                &mut capture,
+            ),
         };
         Ok(match claim {
             Claim::Read(read) => dispatch.answered(key, read, carrier),
@@ -196,7 +209,12 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> Program for QueryPro
         let mut carrier = None;
         let joined = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-            subscription.wait(dispatch.ctx, &mut attempt, &mut capture)
+            subscription.wait(
+                dispatch.ctx,
+                dispatch.snapshot.flags(),
+                &mut attempt,
+                &mut capture,
+            )
         };
         match joined {
             Joined::Read(read) => External::Complete(Ok(dispatch.answered(&key, read, carrier))),
@@ -334,7 +352,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let attempt = self
             .graph()
-            .begin_query_claim(self.ctx, key.clone(), &mut capture)
+            .begin_query_claim(self.ctx, self.snapshot.flags(), key.clone(), &mut capture)
             .map_err(|read| {
                 self.attribute_query_read(key, false, read, &CarrierNormalizationPrelude::none())
             })?;
@@ -516,12 +534,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut carrier = None;
         let read = {
             let mut capture = ReadCapture::deferring_carrier(&mut carrier);
-            match lease.settle(self.ctx, output) {
+            match lease.settle(self.ctx, self.snapshot.flags(), output) {
                 Err(read) => read,
-                Ok(mut settled) => match settled.admit(self.ctx, &mut capture) {
-                    Err(read) => read,
-                    Ok(()) => settled.complete(self.ctx, &mut capture),
-                },
+                Ok(mut settled) => {
+                    match settled.admit(self.ctx, self.snapshot.flags(), &mut capture) {
+                        Err(read) => read,
+                        Ok(()) => settled.complete(self.ctx, &mut capture),
+                    }
+                }
             }
         };
         QueryDelivery {

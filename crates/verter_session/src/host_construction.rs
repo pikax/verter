@@ -592,6 +592,8 @@ impl VerterHost {
         let host = Self {
             #[cfg(any(test, feature = "test-support"))]
             source_input_leases: crate::resolver_core::request_inputs::InputArtifactLeases::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            direct_request_snapshot: std::sync::OnceLock::new(),
 
             instance_id,
             config,
@@ -1759,10 +1761,11 @@ mod fact_validation_authority {
         for crate::VerterHost
     {
         type Clocks = crate::resolver_store::WorkspaceSlotClocks;
-        fn aggregate_clock_reader(
+        fn request_snapshot(
             &self,
-        ) -> verter_session_query::facts::clocks::AggregateClockReader<Self::Clocks> {
-            crate::VerterHost::aggregate_clock_reader(self)
+        ) -> &verter_type_engine::resolver_core::RequestSnapshot<Self::Clocks> {
+            self.direct_request_snapshot
+                .get_or_init(|| self.capture_request_snapshot())
         }
     }
     impl FactValidation for crate::VerterHost {
@@ -1775,8 +1778,9 @@ mod fact_validation_authority {
         ) -> verter_session_query::source::env_identity::SourceEnvIdentity {
             crate::resolver_store::live_source_env_identity(self, key)
         }
-        fn current_project_generation(&self) -> u64 {
-            self.project_type_store().current_project_generation()
+        fn request_flags(&self) -> &verter_type_engine::resolver_core::RequestFlags {
+            verter_type_engine::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(self)
+                .flags()
         }
         fn complete_graph_signature(
             &self,
