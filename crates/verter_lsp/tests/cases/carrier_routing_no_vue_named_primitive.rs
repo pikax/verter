@@ -125,8 +125,7 @@ fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let dir = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if dir == "tests" || dir.ends_with("_tests") {
+            if path.ends_with("server/tests") {
                 continue;
             }
             collect_rs(&path, out);

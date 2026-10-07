@@ -84,8 +84,7 @@ fn collect_rs_recursive(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                let dir = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if dir != "tests" && !dir.ends_with("_tests") {
+                if !p.ends_with("runtime/client_tests") {
                     stack.push(p);
                 }
             } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {

@@ -1880,7 +1880,10 @@ fn no_direct_oxc_parser_calls_outside_scheduler_path() {
         // Skip test sources.
         if path_str.ends_with("_tests.rs")
             || path_str.ends_with("/tests.rs")
-            || path_str.contains("/tests/")
+            || path_str.contains("/verter_session/src/tests/meta/")
+            || path_str.contains("/verter_session/src/tests/host_manage/")
+            || path_str.contains("/verter_type_engine/src/project_semantic_dispatch/tests/")
+            || path_str.contains("/verter_type_engine/src/semantic_query_memo/tests/")
         {
             continue;
         }
