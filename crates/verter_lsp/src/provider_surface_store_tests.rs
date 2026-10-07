@@ -265,6 +265,42 @@ fn captured_provider_paths_use_filesystem_identity() {
 }
 
 #[test]
+fn two_tracked_spellings_of_one_identity_resolve_exactly_or_fail_closed() {
+    let store = ProviderSurfaceStore::new();
+    for (provider, content) in [
+        (r"D:\src\Twin.svelte.verter.ts", "first\n"),
+        ("d:/src/Twin.svelte.verter.ts", "second\n"),
+    ] {
+        store.record(RecordSurface::carrier_api_legacy(
+            provider.to_string(),
+            r"D:\src\Twin.svelte".to_string(),
+            Arc::from(content),
+            None,
+            Arc::from("carrier\n"),
+        ));
+    }
+
+    let captured = store.capture_current_carrier_api_set();
+    let exact = |spelling: &str| {
+        captured
+            .snapshot_for(spelling)
+            .map(|s| s.provider_content.to_string())
+    };
+    assert_eq!(
+        exact(r"D:\src\Twin.svelte.verter.ts").as_deref(),
+        Some("first\n")
+    );
+    assert_eq!(
+        exact("d:/src/Twin.svelte.verter.ts").as_deref(),
+        Some("second\n")
+    );
+    assert!(matches!(
+        captured.captured_state_for("D:/src/Twin.svelte.verter.ts"),
+        Some(CapturedPathState::KnownNonMappable)
+    ));
+}
+
+#[test]
 fn captured_foreign_ide_surface_maps_when_imported_carrier_is_closed() {
     use tower_lsp_server::ls_types::PositionEncodingKind;
 
