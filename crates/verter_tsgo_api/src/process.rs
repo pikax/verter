@@ -19,9 +19,9 @@
 //! kill targets the process GROUP whose id is the child's pid, which is only
 //! meaningful when the child leads its own group.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use crate::error::{TsgoApiError, TsgoApiResult};
@@ -30,51 +30,100 @@ use crate::error::{TsgoApiError, TsgoApiResult};
 /// is prompt; this only bounds an already-dead system's bookkeeping).
 pub const REAP_BOUND: Duration = Duration::from_secs(2);
 
-static ACTIVE_ENGINE_TREES: OnceLock<Mutex<HashMap<u64, u32>>> = OnceLock::new();
 static NEXT_ENGINE_TREE_REGISTRATION: AtomicU64 = AtomicU64::new(1);
+static ENGINE_TREES: EngineTreeRegistry = EngineTreeRegistry::new();
 
-fn active_engine_trees() -> &'static Mutex<HashMap<u64, u32>> {
-    ACTIVE_ENGINE_TREES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn register_engine_tree(pid: u32) -> Option<u64> {
-    if pid == 0 {
-        return None;
-    }
-    let registration = NEXT_ENGINE_TREE_REGISTRATION.fetch_add(1, Ordering::Relaxed);
-    active_engine_trees()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(registration, pid);
-    Some(registration)
-}
-
-fn unregister_engine_tree(registration: Option<u64>) {
-    let Some(registration) = registration else {
-        return;
-    };
-    active_engine_trees()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&registration);
-}
-
-/// Kill every engine process group currently owned by this process.
+/// Every engine process tree this process owns, keyed by registration.
 ///
-/// Normal provider teardown uses the individual [`TreeKill`] handles. The
-/// process-lifetime monitor calls this first when the LSP client dies, while the
-/// LSP runtime is still alive, so Unix descendants are killed before the LSP is
-/// forcibly terminated and cannot outlive their direct engine parent.
+/// Process exit closes it. [`EngineTreeRegistry::close_and_take`] marks it
+/// closed under the same lock that snapshots the trees, so a tree armed after
+/// the snapshot is never left behind: [`TreeKill::arm`] kills it on the spot
+/// instead of tracking it.
+#[derive(Debug)]
+struct EngineTreeRegistry {
+    state: Mutex<EngineTreeState>,
+}
+
+#[derive(Debug)]
+struct EngineTreeState {
+    closed: bool,
+    trees: BTreeMap<u64, u32>,
+}
+
+/// What registering a freshly armed tree produced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Registration {
+    /// Tracked until its [`TreeKill`] drops.
+    Tracked(u64),
+    /// Nothing to track: pid 0 never names a tree.
+    Untracked,
+    /// The registry closed for process exit, so the tree must die now.
+    Closed,
+}
+
+impl EngineTreeRegistry {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(EngineTreeState {
+                closed: false,
+                trees: BTreeMap::new(),
+            }),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, EngineTreeState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn register(&self, pid: u32) -> Registration {
+        if pid == 0 {
+            return Registration::Untracked;
+        }
+        let mut state = self.lock();
+        if state.closed {
+            return Registration::Closed;
+        }
+        let registration = NEXT_ENGINE_TREE_REGISTRATION.fetch_add(1, Ordering::Relaxed);
+        state.trees.insert(registration, pid);
+        Registration::Tracked(registration)
+    }
+
+    fn unregister(&self, registration: Option<u64>) {
+        if let Some(registration) = registration {
+            self.lock().trees.remove(&registration);
+        }
+    }
+
+    /// Close registration and hand back every tracked tree root, sorted and
+    /// deduplicated. Closing and snapshotting share one lock acquisition.
+    fn close_and_take(&self) -> Vec<u32> {
+        let mut state = self.lock();
+        state.closed = true;
+        let mut pids: Vec<u32> = std::mem::take(&mut state.trees).into_values().collect();
+        pids.sort_unstable();
+        pids.dedup();
+        pids
+    }
+}
+
+/// Kill every engine process group this process owns, and close engine
+/// registration for good.
+///
+/// Call this only on the way to process exit. Normal provider teardown uses
+/// the individual [`TreeKill`] handles. The process-lifetime monitor calls this
+/// first when the LSP client dies, and the server calls it after serving ends,
+/// while the runtime is still alive, so Unix descendants are killed before the
+/// process ends and cannot outlive their direct engine parent. A provider that
+/// is still being established may spawn its engine after this call; that
+/// engine's tree is killed as soon as it is armed.
 pub fn terminate_registered_engine_trees() {
-    let mut pids: Vec<u32> = active_engine_trees()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .values()
-        .copied()
-        .collect();
-    pids.sort_unstable();
-    pids.dedup();
-    for pid in pids {
+    terminate_engine_trees_in(&ENGINE_TREES);
+}
+
+fn terminate_engine_trees_in(registry: &EngineTreeRegistry) {
+    for pid in registry.close_and_take() {
         kill_tree_by_pid(pid);
     }
 }
@@ -453,6 +502,7 @@ fn spawn_client_monitor(
 #[derive(Debug)]
 pub struct TreeKill {
     pid: u32,
+    registry: &'static EngineTreeRegistry,
     registration: Option<u64>,
     #[cfg(windows)]
     job: Option<JobHandle>,
@@ -469,24 +519,35 @@ impl TreeKill {
     /// CALLER'S OWN process group, so a caller handing over a pid it failed
     /// to read (e.g. an already-reaped child, whose `Child::id()` is `None`)
     /// must never become a self-kill.
+    ///
+    /// Arming after [`terminate_registered_engine_trees`] closed registration
+    /// kills the tree immediately: the process is exiting and nothing would
+    /// kill it later.
     pub fn arm(pid: u32) -> Self {
-        let registration = register_engine_tree(pid);
-        #[cfg(windows)]
-        {
-            Self {
-                pid,
-                registration,
-                job: if pid == 0 {
-                    None
-                } else {
-                    JobHandle::create_and_assign(pid)
-                },
-            }
+        Self::arm_in(&ENGINE_TREES, pid)
+    }
+
+    fn arm_in(registry: &'static EngineTreeRegistry, pid: u32) -> Self {
+        let registration = registry.register(pid);
+        let tracked = match registration {
+            Registration::Tracked(id) => Some(id),
+            Registration::Untracked | Registration::Closed => None,
+        };
+        let tree = Self {
+            pid,
+            registry,
+            registration: tracked,
+            #[cfg(windows)]
+            job: if pid == 0 {
+                None
+            } else {
+                JobHandle::create_and_assign(pid)
+            },
+        };
+        if registration == Registration::Closed {
+            tree.kill_tree();
         }
-        #[cfg(not(windows))]
-        {
-            Self { pid, registration }
-        }
+        tree
     }
 
     /// Kill the entire process tree rooted at the armed child. Does not reap
@@ -526,7 +587,7 @@ impl TreeKill {
 impl Drop for TreeKill {
     fn drop(&mut self) {
         self.kill_tree();
-        unregister_engine_tree(self.registration);
+        self.registry.unregister(self.registration);
     }
 }
 
@@ -811,14 +872,87 @@ mod tests {
             .kill_on_drop(true);
         configure_tree_spawn(&mut command);
         let mut child = command.spawn().expect("spawn registered engine tree");
-        let tree = TreeKill::arm(child.id().expect("engine pid"));
+        let registry = isolated_registry();
+        let tree = TreeKill::arm_in(registry, child.id().expect("engine pid"));
 
-        terminate_registered_engine_trees();
+        terminate_engine_trees_in(registry);
         assert!(
             reap_child_bounded(&mut child, REAP_BOUND).await,
             "the registered engine group must die before the LSP exits"
         );
         drop(tree);
+    }
+
+    /// A registry of its own, so closing it never closes the process-wide one
+    /// that other tests in this binary arm against.
+    fn isolated_registry() -> &'static EngineTreeRegistry {
+        Box::leak(Box::new(EngineTreeRegistry::new()))
+    }
+
+    fn spawn_sleeping_engine() -> tokio::process::Child {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = tokio::process::Command::new("powershell");
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = tokio::process::Command::new("/bin/sleep");
+            command.arg("30");
+            command
+        };
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        configure_tree_spawn(&mut command);
+        command.spawn().expect("spawn sleeping engine")
+    }
+
+    // An engine whose provider was still being established when exit began is
+    // spawned after the exit snapshot. Nothing would kill it later, because the
+    // process ends without running destructors, so arming it must kill it.
+    #[tokio::test]
+    async fn an_engine_armed_after_exit_closed_registration_dies_immediately() {
+        let registry = isolated_registry();
+        terminate_engine_trees_in(registry);
+
+        let mut child = spawn_sleeping_engine();
+        let tree = TreeKill::arm_in(registry, child.id().expect("engine pid"));
+
+        assert!(
+            reap_child_bounded(&mut child, REAP_BOUND).await,
+            "an engine armed after exit closed registration must not survive"
+        );
+        assert!(
+            tree.registration.is_none(),
+            "a tree killed on arming must not be tracked by a closed registry"
+        );
+    }
+
+    // Closing hands back every tracked root exactly once, and only trees
+    // armed before the close are in that snapshot.
+    #[test]
+    fn closing_the_registry_snapshots_tracked_roots_once() {
+        let registry = isolated_registry();
+        let first = registry.register(7);
+        let duplicate = registry.register(7);
+        let other = registry.register(3);
+        let released = registry.register(11);
+        assert_eq!(registry.register(0), Registration::Untracked);
+        let Registration::Tracked(released) = released else {
+            panic!("an open registry must track a live pid");
+        };
+        registry.unregister(Some(released));
+        assert!(matches!(first, Registration::Tracked(_)));
+        assert!(matches!(duplicate, Registration::Tracked(_)));
+        assert!(matches!(other, Registration::Tracked(_)));
+
+        assert_eq!(registry.close_and_take(), vec![3, 7]);
+        assert_eq!(registry.register(5), Registration::Closed);
+        assert_eq!(registry.close_and_take(), Vec::<u32>::new());
     }
 
     // @ai-generated - A provider Job Object must be armed while the direct
