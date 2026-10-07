@@ -32,6 +32,8 @@ mod typeinfo;
 #[cfg(test)]
 mod host_compile_request_tests;
 #[cfg(test)]
+mod offset_batch_tests;
+#[cfg(test)]
 mod tests;
 
 pub use actions::*;
