@@ -19,6 +19,7 @@ use verter_type_engine::cache_runtime::admission::PublishCoreOutcome;
 use verter_type_engine::cache_runtime::candidate_store::ReverseIndexedCandidateStore;
 use verter_type_engine::cache_runtime::node::*;
 use verter_type_engine::cache_runtime::singleflight::InflightTable;
+use verter_type_engine::resolver_core::resolver_context::RequestFlags;
 use verter_type_engine::resolver_core::ResolverContext;
 
 /// A minimal `ArtifactNode` impl over a bare value type. The point of
@@ -243,7 +244,7 @@ impl QueryNode for SkewedDiscriminantQueryNode {
         if self.compute_calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.generations.bump_project_generation();
         }
-        let live = cx.resolver.current_project_generation();
+        let live = cx.resolver.request_flags().current_project_generation();
         CacheAdmission::Cacheable {
             value: format!("v{key}"),
             signature: Self::fixed_signature(),
@@ -299,7 +300,7 @@ impl QueryNode for SkewedDiscriminantQueryNode {
 fn compute_ctx_from_resolver_carries_compat_token_and_generation() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
-    let cx = ComputeCtx::from_resolver(ctx);
+    let cx = ComputeCtx::from_resolver(ctx, ctx.request_flags());
     // The compat token matches the resolver's store-view token, and the
     // generation matches the project-type-store generation.
     assert_eq!(
@@ -307,7 +308,10 @@ fn compute_ctx_from_resolver_carries_compat_token_and_generation() {
         verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)
             .compat_token()
     );
-    assert_eq!(cx.generation(), ctx.current_project_generation());
+    assert_eq!(
+        cx.generation(),
+        ctx.request_flags().current_project_generation()
+    );
 }
 
 /// `lookup` dedups the cold compute for repeated calls on the same key
@@ -317,15 +321,16 @@ fn compute_ctx_from_resolver_carries_compat_token_and_generation() {
 fn lookup_dedups_cold_compute_under_same_view() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let flags: &RequestFlags = ctx.request_flags();
     let node = CountingArtifactNode {
         entries: dashmap::DashMap::new(),
         inflight: InflightTable::new(),
         compute_count: Arc::new(AtomicUsize::new(0)),
     };
 
-    let first = lookup(&node, 7u32, ctx);
+    let first = lookup(&node, 7u32, ctx, flags);
     assert_eq!(first.as_deref(), Some("v7"));
-    let second = lookup(&node, 7u32, ctx);
+    let second = lookup(&node, 7u32, ctx, flags);
     assert_eq!(second.as_deref(), Some("v7"));
 
     assert_eq!(
@@ -347,13 +352,14 @@ fn lookup_dedups_cold_compute_under_same_view() {
 fn publish_rejects_candidate_when_self_root_edited_mid_compute() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let flags: &RequestFlags = ctx.request_flags();
     let node = StaleGenerationQueryNode {
         inflight: InflightTable::new(),
         publish_count: Arc::new(AtomicUsize::new(0)),
         store: ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0))),
     };
 
-    let result = query::lookup(&node, 1u32, ctx);
+    let result = query::lookup(&node, 1u32, ctx, flags);
     assert_eq!(
         result, None,
         "a generation-superseded candidate must be rejected by the publish gate"
@@ -394,7 +400,8 @@ fn publish_rejects_candidate_when_self_root_edited_mid_compute() {
 fn discriminant_generation_tracks_candidate_stamp_not_lookup_snapshot() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
-    let gen_before = ctx.current_project_generation();
+    let flags: &RequestFlags = ctx.request_flags();
+    let gen_before = ctx.request_flags().current_project_generation();
     let node = SkewedDiscriminantQueryNode {
         generations: Arc::clone(host.project_type_store()),
         inflight: InflightTable::new(),
@@ -404,9 +411,9 @@ fn discriminant_generation_tracks_candidate_stamp_not_lookup_snapshot() {
 
     // First publish: enters at `G`, bumps to `G+1` mid-compute, stamps the
     // candidate at `G+1`.
-    let first = query::lookup(&node, 1u32, ctx);
+    let first = query::lookup(&node, 1u32, ctx, flags);
     assert_eq!(first.as_deref(), Some("v1"), "first cold build publishes");
-    let gen_after_first = ctx.current_project_generation();
+    let gen_after_first = ctx.request_flags().current_project_generation();
     assert_eq!(
         gen_after_first,
         gen_before + 1,
@@ -420,10 +427,10 @@ fn discriminant_generation_tracks_candidate_stamp_not_lookup_snapshot() {
 
     // Second publish: enters at `G+1` (no further bump), stamps a second
     // candidate at `G+1` with the same facts. Same view → must REPLACE.
-    let second = query::lookup(&node, 1u32, ctx);
+    let second = query::lookup(&node, 1u32, ctx, flags);
     assert_eq!(second.as_deref(), Some("v1"), "second cold build publishes");
     assert_eq!(
-        ctx.current_project_generation(),
+        ctx.request_flags().current_project_generation(),
         gen_before + 1,
         "the second cold compute does NOT bump again"
     );

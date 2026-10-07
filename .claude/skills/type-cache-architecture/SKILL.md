@@ -734,7 +734,7 @@ The only intentional content-agnostic escapes are `get_any` /
 `get_artifacts_any`, each guarded at every call site.
 
 **R18.** The private request adapter captures `SessionView` and its completion
-overlay at entry. Engine consumers use the six request-bound ports and owned
+overlay at entry. Engine consumers use the five request-bound ports and owned
 observations; `ResolverContext` returns no view or overlay borrow. Thread-local
 "current view" globals remain forbidden.
 

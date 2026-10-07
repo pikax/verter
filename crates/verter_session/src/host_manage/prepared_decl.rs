@@ -123,7 +123,7 @@ impl VerterHost {
         canonical_id: &str,
         old_source: &Arc<verter_scheduler::node::SourceSnapshot>,
         new_source: Arc<verter_scheduler::node::SourceSnapshot>,
-        committed_generation: u64,
+        committed_version: verter_scheduler::node::SourceVersion,
     ) -> bool {
         let (Some(old_data), Some(new_data)) = (
             old_source.downcast_data::<crate::host_executor::HostSourceData>(),
@@ -131,7 +131,7 @@ impl VerterHost {
         ) else {
             return false;
         };
-        if new_source.generation != committed_generation
+        if new_source.version() != committed_version
             || old_data.file_language != new_data.file_language
             || !new_data.file_language.is_framework_carrier()
             || old_data.source_type != new_data.source_type
@@ -1227,7 +1227,7 @@ impl VerterHost {
         // `complete_canonical_inner`'s
         // `host.current_store_view_epoch() != base.mutation_epoch()`
         // short-circuit — but the resolver-tier `StoreView` trait
-        // cannot take `&VerterHost` (the six request ports in
+        // cannot take `&VerterHost` (the five request ports in
         // `resolver_core::request_ports` return owned records or typed
         // demands, never a host handle). The materialiser publishes
         // unconditionally; a superseded view will be detected by
@@ -2453,7 +2453,7 @@ impl VerterHost {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let export_signatures = Arc::new(hd.parse.export_signatures.clone());
             let template =
-                self.validated_raw_template_analysis(canonical_id, source_snap.generation);
+                self.validated_raw_template_analysis(canonical_id, source_snap.version());
             let snapshot = Arc::new(Self::source_bound_file_analysis_snapshot(
                 &hd.parse,
                 Arc::clone(&export_signatures),

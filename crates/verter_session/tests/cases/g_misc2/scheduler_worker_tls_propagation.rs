@@ -232,6 +232,7 @@ fn scheduler_winner_thread_propagates_session_context_via_install_tls() {
             _file_language: SchedFileKind,
             content: Arc<str>,
             generation: u64,
+            _incarnation: u64,
         ) -> Result<SourceSnapshot, StageError> {
             let id = current_request_context().map_or(0, |ctx| ctx.request_id);
             self.source_observed.store(id, Ordering::SeqCst);

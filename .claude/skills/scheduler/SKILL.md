@@ -142,10 +142,17 @@ only from that object and only artifacts no newer than the witnessed
 generation. `try_get_source_for_witness` gives the host's block-content
 publication fence the same answer. A witness from a removed, reset or re-homed
 node is rejected even when its successor serves the same content at the same
-generation. The per-canonical generation floors remain only for the host's base
-source revision uniqueness until that history is reclaimed. Internal admission,
-dispatch, publication, completion and failure use full incarnation identity
-independently of the floors.
+generation. The scheduler keeps no generation floors: a removed or reset file's
+successor starts at generation 0. Committed `SourceSnapshot` and
+`AnalysisSnapshot` carry the committing node's `incarnation`, stamped by the
+driver, and `version()` returns a `SourceVersion` (incarnation, generation)
+ordered incarnation-first, so a successor's versions order after its
+predecessor's and never compare equal to them. `StageExecutor::execute_source`
+receives the incarnation; the host's revision token (`HostSourceRevisionToken`
+carries the committing host's own `SourceVersion` on every ingress, ingested
+envelopes included — never the registering owner's identity), its raw-template
+version rail and its upsert commit fence key on it. Internal admission,
+dispatch, publication, completion and failure use full incarnation identity.
 
 **Preparation must still name a live submission lifetime at admission.**
 Preparation drops the node map guard before taking `dag.lock()`. The admission
@@ -168,9 +175,14 @@ under every dependency mutation hold, including iterations after inbox
 backpressure has executed callbacks. No host callback or inbox send runs under
 the lifecycle hold.
 
-Generation allocation/advance uses checked arithmetic. Exhaustion refuses work
-before an external publication generation can be reused, including restart from
-a retained removal floor.
+Generation allocation/advance uses checked arithmetic within one node object:
+exhaustion refuses further advancement on that node, and leaves no history,
+rather than wrapping to a generation the same object already published. Across
+a removal, reset or re-home the successor object restarts its own sequence, and
+safety comes from its never-reused incarnation, not from the generation:
+`SourceVersion`/`SourceWitness` (and the host's registered-source file
+incarnation and native-host bind check) compare the incarnation too, so a
+successor's same-numbered generation never authorizes work for its predecessor.
 
 **Generation-advance rule (both directions).** A generation advance and
 its supersede sweep are ONE critical section under `dag.lock()`
@@ -600,7 +612,7 @@ pub struct Scheduler {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) io_pool: Arc<SchedulerIoPool>,
     // ... other existing state (inbox, edges, dag, overlay, source_loader,
-    //     executor, generation_floors, deferred_blocker_ids,
+    //     executor, deferred_blocker_ids,
     //     shutdown, driver_handle, counters, config) ...
 }
 ```

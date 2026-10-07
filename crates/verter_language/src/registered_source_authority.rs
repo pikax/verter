@@ -214,13 +214,24 @@ pub enum SourceValidationError {
     SourceBytesMismatch,
 }
 
+/// One live registration of a document under one file incarnation.
+#[derive(Debug)]
+struct LiveRegistration {
+    snapshot: RegisteredSourceSnapshot,
+    /// Registration order, for [`RegisteredSourceAuthority::retain_recent_incarnations`].
+    order: u64,
+}
+
+/// A document's live registrations, one per file incarnation.
+type DocumentRegistrations = HashMap<FileIncarnation, LiveRegistration>;
+
 /// Sole live mint and current-source validator for one host lifetime.
 #[derive(Debug)]
 pub struct RegisteredSourceAuthority {
     namespace: SourceAuthorityNamespaceId,
-    current: Mutex<HashMap<(CanonicalFileId, FileIncarnation), RegisteredSourceSnapshot>>,
-    /// Registration order, for [`Self::retain_recent_incarnations`].
-    registered_at: Mutex<HashMap<(CanonicalFileId, FileIncarnation), u64>>,
+    /// Live registrations grouped by document, so retracting one document's
+    /// registrations never visits another document's.
+    current: Mutex<HashMap<CanonicalFileId, DocumentRegistrations>>,
     next_registration: std::sync::atomic::AtomicU64,
 }
 
@@ -229,7 +240,6 @@ impl RegisteredSourceAuthority {
         Ok(Self {
             namespace: SourceAuthorityNamespaceId(random_bytes()?),
             current: Mutex::new(HashMap::new()),
-            registered_at: Mutex::new(HashMap::new()),
             next_registration: std::sync::atomic::AtomicU64::new(0),
         })
     }
@@ -268,10 +278,15 @@ impl RegisteredSourceAuthority {
         self.current
             .lock()
             .map_err(|_| SourceRegistrationError::AuthorityUnavailable)?
-            .insert((canonical.clone(), file_incarnation), snapshot.clone());
-        if let Ok(mut registered_at) = self.registered_at.lock() {
-            registered_at.insert((canonical, file_incarnation), order);
-        }
+            .entry(canonical)
+            .or_default()
+            .insert(
+                file_incarnation,
+                LiveRegistration {
+                    snapshot: snapshot.clone(),
+                    order,
+                },
+            );
         Ok(snapshot)
     }
 
@@ -291,13 +306,16 @@ impl RegisteredSourceAuthority {
         let Ok(mut current) = self.current.lock() else {
             return 0;
         };
-        let before = current.len();
-        current
-            .retain(|(registered, incarnation), _| registered != canonical || keep(*incarnation));
-        if let Ok(mut registered_at) = self.registered_at.lock() {
-            registered_at.retain(|key, _| current.contains_key(key));
+        let Some(document) = current.get_mut(canonical) else {
+            return 0;
+        };
+        let before = document.len();
+        document.retain(|incarnation, _| keep(*incarnation));
+        let retracted = before - document.len();
+        if document.is_empty() {
+            current.remove(canonical);
         }
-        before - current.len()
+        retracted
     }
 
     /// Among this document's registrations that `selects`, keep the `keep`
@@ -311,17 +329,17 @@ impl RegisteredSourceAuthority {
         keep: usize,
         mut selects: impl FnMut(FileIncarnation) -> bool,
     ) -> usize {
-        let Ok(registered_at) = self.registered_at.lock() else {
+        let Ok(current) = self.current.lock() else {
             return 0;
         };
-        let mut selected: Vec<(u64, FileIncarnation)> = registered_at
-            .iter()
-            .filter(|((registered, incarnation), _)| {
-                registered == canonical && selects(*incarnation)
-            })
-            .map(|((_, incarnation), order)| (*order, *incarnation))
+        let mut selected: Vec<(u64, FileIncarnation)> = current
+            .get(canonical)
+            .into_iter()
+            .flatten()
+            .filter(|(incarnation, _)| selects(**incarnation))
+            .map(|(incarnation, registration)| (registration.order, *incarnation))
             .collect();
-        drop(registered_at);
+        drop(current);
         selected.sort_unstable_by_key(|(order, _)| std::cmp::Reverse(*order));
         let retract: Vec<FileIncarnation> = selected
             .into_iter()
@@ -339,7 +357,7 @@ impl RegisteredSourceAuthority {
     pub fn len(&self) -> usize {
         self.current
             .lock()
-            .map(|current| current.len())
+            .map(|current| current.values().map(HashMap::len).sum())
             .unwrap_or(0)
     }
 
@@ -370,10 +388,7 @@ impl RegisteredSourceAuthority {
 
     fn validate_locked(
         &self,
-        current: &MutexGuard<
-            '_,
-            HashMap<(CanonicalFileId, FileIncarnation), RegisteredSourceSnapshot>,
-        >,
+        current: &MutexGuard<'_, HashMap<CanonicalFileId, DocumentRegistrations>>,
         snapshot: &RegisteredSourceSnapshot,
     ) -> Result<(), SourceValidationError> {
         if snapshot.id.authority != self.namespace {
@@ -391,16 +406,13 @@ impl RegisteredSourceAuthority {
             return Err(SourceValidationError::ByteLengthMismatch);
         }
 
-        let live = match current.get(&(snapshot.canonical.clone(), snapshot.id.file_incarnation)) {
-            Some(live) => live,
-            None if current
-                .keys()
-                .any(|(canonical, _)| canonical == &snapshot.canonical) =>
-            {
-                return Err(SourceValidationError::FileIncarnationMismatch);
-            }
-            None => return Err(SourceValidationError::SourceNotCurrent),
+        let Some(document) = current.get(&snapshot.canonical) else {
+            return Err(SourceValidationError::SourceNotCurrent);
         };
+        let Some(live) = document.get(&snapshot.id.file_incarnation) else {
+            return Err(SourceValidationError::FileIncarnationMismatch);
+        };
+        let live = &live.snapshot;
         if snapshot.id.generation != live.id.generation {
             return Err(SourceValidationError::SourceGenerationMismatch);
         }
@@ -977,7 +989,9 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .get_mut(&(snapshot.canonical().clone(), snapshot.file_incarnation()))
+            .get_mut(snapshot.canonical())
+            .and_then(|document| document.get_mut(&snapshot.file_incarnation()))
+            .map(|registration| &mut registration.snapshot)
             .expect("current source")
             .byte_len = tampered.byte_len;
         assert_eq!(
@@ -993,7 +1007,7 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .remove(&(snapshot.canonical().clone(), snapshot.file_incarnation()));
+            .remove(snapshot.canonical());
         assert_eq!(
             authority.validate_current(&snapshot),
             Err(SourceValidationError::SourceNotCurrent)
@@ -1007,7 +1021,9 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .get_mut(&(snapshot.canonical().clone(), snapshot.file_incarnation()))
+            .get_mut(snapshot.canonical())
+            .and_then(|document| document.get_mut(&snapshot.file_incarnation()))
+            .map(|registration| &mut registration.snapshot)
             .expect("current source")
             .id
             .content_hash = WholeSourceHash([0xDA; 32]);
@@ -1024,7 +1040,9 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .get_mut(&(snapshot.canonical().clone(), snapshot.file_incarnation()))
+            .get_mut(snapshot.canonical())
+            .and_then(|document| document.get_mut(&snapshot.file_incarnation()))
+            .map(|registration| &mut registration.snapshot)
             .expect("current source")
             .byte_len += 1;
         assert_eq!(
@@ -1040,7 +1058,9 @@ mod tests {
             .current
             .lock()
             .expect("source registry")
-            .get_mut(&(snapshot.canonical().clone(), snapshot.file_incarnation()))
+            .get_mut(snapshot.canonical())
+            .and_then(|document| document.get_mut(&snapshot.file_incarnation()))
+            .map(|registration| &mut registration.snapshot)
             .expect("current source")
             .source = Arc::from("<template>jello</template>");
         assert_eq!(

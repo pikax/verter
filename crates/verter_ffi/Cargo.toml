@@ -11,6 +11,9 @@ publish = false
 
 [features]
 default = []
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# exposes the offset-conversion source-visit counter.
+semantic-observe = []
 
 [dependencies]
 verter_session_query = { workspace = true }

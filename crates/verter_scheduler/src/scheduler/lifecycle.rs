@@ -30,6 +30,7 @@ mod tests {
             _: FileLanguage,
             content: Arc<str>,
             generation: u64,
+            _incarnation: u64,
         ) -> Result<SourceSnapshot, crate::execution::executor::StageError> {
             self.entered.wait();
             self.release.wait();
@@ -86,7 +87,8 @@ mod tests {
             } else {
                 scheduler.remove("/delayed.ts");
             }
-            // Exercise the protocol without the external-publisher restart fence.
+            // The successor object restarts at generation 0, reusing the
+            // retired object's generation sequence.
             let fresh = Arc::new(FileNode::new(
                 "/delayed.ts".into(),
                 scheduler.source_loader.classify("/delayed.ts"),
@@ -187,9 +189,8 @@ mod tests {
             } else {
                 scheduler.remove("/external.vue");
             }
-            // Re-add the same content at the same generation: without the
-            // generation floor the successor reuses the retired generation.
-            scheduler.generation_floors.clear();
+            // Re-add the same content: the successor object restarts its
+            // generation sequence and reaches the retired generation again.
             let current = analyze(&scheduler, "/external.vue");
             assert_eq!(current.snapshot.source, Arc::from("same"));
             assert_eq!(current.witness.generation(), stale.generation());
@@ -229,20 +230,117 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unknown_removals_do_not_allocate_restart_history() {
-        let scheduler = Scheduler::test_new_sync(
-            SchedulerConfig::default(),
-            Arc::new(crate::source_loader::MemorySourceLoader::new()),
-        );
-        let capacity = scheduler.generation_floors.capacity();
-        for index in 0..256 {
-            scheduler.remove(&format!("/unknown-{index}.ts"));
+    fn source_request(id: &str) -> Request {
+        Request {
+            file_id: id.into(),
+            source: None,
+            target: TargetStage::Analysis,
+            priority: Priority::Interactive,
+            file_language: None,
+            request_context: None,
         }
-        assert!(scheduler.generation_floors.is_empty());
-        assert_eq!(scheduler.generation_floors.capacity(), capacity);
+    }
+
+    /// Everything a removed canonical could leave behind in the scheduler.
+    fn assert_no_retained_state(scheduler: &Scheduler, ids: &[String]) {
+        scheduler.source_root.reclaim_superseded_versions();
         assert!(scheduler.nodes.is_empty());
         assert_eq!(scheduler.dag.lock().total_active(), 0);
+        assert!(scheduler.auto_ingested_recent.is_empty());
+        assert!(scheduler.deferred_blocker_ids.is_empty());
+        for id in ids {
+            assert_eq!(scheduler.source_root.retained_version_count(id), 0, "{id}");
+        }
+    }
+
+    #[test]
+    fn removal_reset_and_cancellation_leave_no_restart_history() {
+        let loader = Arc::new(crate::source_loader::MemorySourceLoader::new());
+        let scheduler = Scheduler::test_new_sync(SchedulerConfig::default(), loader.clone());
+
+        // Unknown removals allocate nothing.
+        let unknown: Vec<String> = (0..256)
+            .map(|index| format!("/unknown-{index}.ts"))
+            .collect();
+        for id in &unknown {
+            scheduler.remove(id);
+        }
+        assert_no_retained_state(&scheduler, &unknown);
+
+        // Repeated create/remove and reset of one canonical: every successor
+        // object starts the same generation sequence, so no per-canonical
+        // generation history survives the predecessor.
+        loader.insert("/cycled.vue".into(), Arc::from("cycled"));
+        let first = analyze(&scheduler, "/cycled.vue").witness;
+        let mut incarnation = first.incarnation();
+        for cycle in 0..64 {
+            if cycle % 2 == 0 {
+                scheduler.remove("/cycled.vue");
+            } else {
+                scheduler.reset();
+            }
+            assert_no_retained_state(&scheduler, &["/cycled.vue".to_string()]);
+            let witness = analyze(&scheduler, "/cycled.vue").witness;
+            assert_eq!(witness.generation(), first.generation(), "cycle {cycle}");
+            assert!(witness.incarnation() > incarnation, "cycle {cycle}");
+            incarnation = witness.incarnation();
+        }
+        scheduler.remove("/cycled.vue");
+
+        // Cancellation: work still queued or admitted when its file is
+        // removed or reset terminates and drains.
+        for reset in [false, true] {
+            let handle = scheduler.submit_request(source_request("/cycled.vue"));
+            scheduler.drain_inbox();
+            assert!(scheduler.dag.lock().total_active() > 0);
+            if reset {
+                scheduler.reset();
+            } else {
+                scheduler.remove("/cycled.vue");
+            }
+            scheduler.drive_all();
+            assert!(matches!(handle.try_get(), Some(CompletionState::Shutdown)));
+            assert_no_retained_state(&scheduler, &["/cycled.vue".to_string()]);
+        }
+
+        // Distinct canonicals created and removed one at a time: the node
+        // table never holds more than one file, so no shard's backing
+        // capacity may exceed what a single occupant allocates, however
+        // long the removal history. Every shard sees many files, so any
+        // retained per-removal entry would grow some shard past that bound.
+        let ids: Vec<String> = (0..(16 * scheduler.nodes.shards().len()).max(2048))
+            .map(|index| format!("/distinct-{index}.ts"))
+            .collect();
+        for id in &ids {
+            loader.insert(id.clone(), Arc::from("x"));
+            analyze(&scheduler, id);
+            scheduler.remove(id);
+        }
+        assert_no_retained_state(&scheduler, &ids);
+        // `DashMap::capacity` sums every shard, so the bound is the probe's
+        // largest single shard: the one its occupant landed in.
+        let single_occupant = {
+            let probe: DashMap<String, Arc<FileNode>> = DashMap::new();
+            probe.insert(
+                "/probe.ts".into(),
+                Arc::new(FileNode::new("/probe.ts".into(), FileLanguage::script_ts())),
+            );
+            probe.remove("/probe.ts");
+            probe
+                .shards()
+                .iter()
+                .map(|shard| shard.read().capacity())
+                .max()
+                .unwrap()
+        };
+        assert!(single_occupant > 0);
+        for shard in scheduler.nodes.shards() {
+            let capacity = shard.read().capacity();
+            assert!(
+                capacity <= single_occupant,
+                "shard capacity {capacity} exceeds single-occupant capacity {single_occupant}"
+            );
+        }
     }
 
     #[test]
@@ -467,36 +565,27 @@ impl Scheduler {
         )
     }
 
-    /// Create a FileNode for a file, respecting the generation floor
-    /// for external publishers that do not yet carry an incarnation witness.
+    /// Create a FileNode for a file at generation 0.
+    ///
+    /// A successor of a removed or reset node keeps no history of it: the
+    /// fresh object's incarnation is what distinguishes its versions from
+    /// the retired object's, so its generation sequence may restart.
     pub(super) fn create_node(
         &self,
         file_id: &str,
         file_language: Option<FileLanguage>,
     ) -> Arc<FileNode> {
-        self.create_node_at_least(file_id, file_language, 0)
+        self.create_node_at(file_id, file_language, 0)
     }
 
-    pub(super) fn create_node_at_least(
+    pub(super) fn create_node_at(
         &self,
         file_id: &str,
         file_language: Option<FileLanguage>,
-        min_generation: u64,
+        generation: u64,
     ) -> Arc<FileNode> {
         let language = file_language.unwrap_or_else(|| self.source_loader.classify(file_id));
-        Arc::new(FileNode::new_at(
-            file_id.to_string(),
-            language,
-            self.generation_floors
-                .get(file_id)
-                .map_or(min_generation, |floor| {
-                    min_generation.max(
-                        floor
-                            .checked_add(1)
-                            .expect("file generation identity space exhausted"),
-                    )
-                }),
-        ))
+        Arc::new(FileNode::new_at(file_id.to_string(), language, generation))
     }
 
     /// Bind queued work to the current submission lifetime under the lifecycle hold.
@@ -564,9 +653,6 @@ impl Scheduler {
             self.deferred_blocker_ids.remove(id);
             self.auto_ingested_recent.remove(&canonical);
 
-            if self.nodes.contains_key(id) {
-                self.generation_floors.insert(id.to_owned(), last_gen);
-            }
             let removed = self.source_root.publish_transition(|publication| {
                 let removed = self.nodes.remove(id);
                 if let Some((_, node)) = removed.as_ref() {
