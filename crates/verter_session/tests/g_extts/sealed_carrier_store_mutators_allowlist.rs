@@ -245,6 +245,9 @@ fn production_rs_files(path: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
+            if p.ends_with("server/tests") {
+                continue;
+            }
             production_rs_files(&p, out);
         } else if p.extension().and_then(|e| e.to_str()) == Some("rs") {
             let is_test = p

@@ -234,8 +234,6 @@ pub struct JobResult {
 pub struct RetentionCounts {
     pub semantic_nodes: usize,
     pub semantic_memo_entries: usize,
-    pub relation_proofs: usize,
-    pub relate_keys: usize,
     pub union_views: usize,
     pub shape_cache_entries: usize,
     pub active_bytes: usize,
@@ -585,8 +583,6 @@ fn retention(host: &VerterHost) -> RetentionCounts {
     RetentionCounts {
         semantic_nodes: snapshot.semantic_nodes,
         semantic_memo_entries: snapshot.semantic_memo_entries,
-        relation_proofs: snapshot.relation_proofs,
-        relate_keys: snapshot.relate_keys,
         union_views: snapshot.union_views,
         shape_cache_entries: snapshot.shape_cache_entries,
         active_bytes: snapshot.active_bytes,

@@ -492,6 +492,8 @@ impl Drop for ExecutionScope {
 
 #[cfg(test)]
 mod tests {
+    mod wait_cycles;
+
     use super::*;
 
     fn reverse_index(registry: &TaskRegistry) -> FxHashMap<TaskId, FxHashSet<TaskId>> {

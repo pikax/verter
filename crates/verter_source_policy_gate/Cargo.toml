@@ -15,6 +15,10 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = "1"
+toml = "1.1"
+walkdir = "2.5"
 serde_json = { workspace = true }
 static_assertions = "1.1.0"
 tempfile = "3.27"

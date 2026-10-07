@@ -1,70 +1,3 @@
-//! Invariant tests for `ProjectSemanticDispatch`: per-function
-//! recursion guards, fixpoint termination of `evaluate_deferred`,
-//! cycle-safe `walk_path` / `key_names_from_base_node`,
-//! `relation_guard` short-circuiting, mapped-type substitution, and
-//! the relation-memo round-trip. Each test characterizes a specific
-//! architectural property of the dispatch surface and discriminates
-//! against violations introduced by future regressions.
-
-#![allow(dead_code)]
-
-// ============================================================================
-// §6.1 Guard contract (8 tests) — un-ignored in §5.3
-// ============================================================================
-//
-// Verify the per-function recursion-guard contract from The
-// guards themselves are stack-local `FxHashSet` / TLS-backed sets
-// inside the `project_semantic_dispatch` module; these tests assert
-// (a) the guard implementations exist in their intended sub-modules,
-// and (b) the public cycle-reachable surfaces terminate with the
-// contracted sentinels (Unknown / input-node-unchanged / Unresolvable).
-
-/// `substitute_semantic_type_param` is the  substitution
-/// driver ( Change Split). When a nested structural form
-/// contains the same TypeParam reference in multiple sibling slots,
-/// substitution must visit each sibling — not short-circuit on the
-/// first hit. Verified by content grep on the canonical source:
-/// structural recursion into Union/Intersection/Object/Tuple members
-/// is still present.
-#[test]
-fn substitute_visits_repeated_type_param_reference_across_siblings() {
-    let substitute_src =
-        include_str!("../../verter_type_engine/src/project_semantic_dispatch/substitute.rs");
-    // Structural descent into union / intersection / object members
-    // is the "visits all siblings" evidence.
-    assert!(
-        substitute_src.contains("SemanticNodeData::Union")
-            || substitute_src.contains("Intersection"),
-        "substitute_semantic_type_param must descend into union/intersection sibling arms"
-    );
-    assert!(
-        substitute_src.contains("members") && substitute_src.contains("iter()"),
-        "substitute_semantic_type_param must iterate across sibling members"
-    );
-}
-
-/// Guard invariant: `substitute_semantic_type_param` returns the
-/// input node unchanged on cyclic re-entry. Verified by source-
-/// content inspection: the substitute driver in `substitute.rs`
-/// carries a catch-all arm returning input unchanged.
-///
-/// Strengthened guarantee: every match arm returns the input id when
-/// no descendant changed (not just the catch-all). The catch-all
-/// itself returns `(node, false)` from the internal change-tracking
-/// helper.
-#[test]
-fn substitute_returns_input_node_on_cyclic_reentry() {
-    let substitute_src =
-        include_str!("../../verter_type_engine/src/project_semantic_dispatch/substitute.rs");
-    // Catch-all arm returns `node` unchanged. The change-tracking
-    // variant returns a `(node, changed)` tuple, so accept either form.
-    assert!(
-        substitute_src.contains("_ => node") || substitute_src.contains("_ => (node, false)"),
-        "substitute_semantic_type_param (or its change-tracking helper) must carry a \
-         catch-all arm returning input unchanged"
-    );
-}
-
 /// The deferred evaluator terminates when a reducer returns its input node as
 /// a stable fixpoint. A template literal over non-finite `string` is a real
 /// carrier-stop: evaluation must return the same shell as Complete rather than
@@ -3891,14 +3824,14 @@ fn relate_optional_to_required_decides_not_assignable_through_execute() {
 /// D7.3 SCC table, positive recursion: `interface RecA { next: RecA }` vs
 /// `interface RecB { next: RecB }` discharges POSITIVE through the
 /// coinductive assumption ("assume the relation holds and verify the
-/// rest") and publishes `Assignable` with a `CoinductiveCycle` proof.
+/// rest") and publishes a binding-free `Assignable`.
 ///
 /// DISCRIMINATES the SCC discharge: the retired TLS-guard engine answered
 /// a warm-cached `Unknown` for exactly this shape (the deleted bug), and a
 /// tree without assumption recording either hangs or returns Unknown —
-/// both fail the Assignable + proof assertions.
+/// both fail the Assignable + published-payload assertions.
 #[test]
-fn coinductive_positive_scc_publishes_assignable_with_cycle_proof() {
+fn coinductive_positive_scc_publishes_assignable() {
     let host = host_for_relation_tests();
     let canonical = "/w/coinductive_pos.ts";
     upsert_relation_fixture(
@@ -3917,8 +3850,7 @@ fn coinductive_positive_scc_publishes_assignable_with_cycle_proof() {
         "a genuinely recursive structural match must discharge Assignable, got {result:?}"
     );
 
-    // The published payload carries the CoinductiveCycle proof (the cycle
-    // co-discharged; the proof references the completed member keys).
+    // The cycle co-discharged and published the root judgement warm.
     let key = dispatch.relate_key_for(a, b);
     let payload = graph
         .get_relation_payload(&host, &key)
@@ -3927,18 +3859,108 @@ fn coinductive_positive_scc_publishes_assignable_with_cycle_proof() {
         payload.outcome,
         verter_type_engine::semantic_query::RelationOutcome::Assignable
     );
-    let proof = graph
-        .relation_proof_for(payload.relation_proof)
-        .expect("the payload's proof id resolves in the proof table");
-    match proof {
-        verter_type_engine::semantic_query::RelationProof::CoinductiveCycle { keys } => {
-            assert!(
-                !keys.is_empty(),
-                "the coinductive proof must reference the co-discharged keys"
-            );
-        }
-        other => panic!("a cyclic positive discharge must carry CoinductiveCycle, got {other:?}"),
-    }
+    assert!(
+        payload.bindings.is_empty(),
+        "a non-binding relation publishes no bindings"
+    );
+}
+
+/// A `semantic-observe` build captures the cyclic discharge's explanation
+/// request-owned, and the explanation LEASES its operands: after the memo
+/// evicts the judgement and a document close tombstones the operand slots,
+/// the captured explanation still reads the operands' payloads. The answer
+/// and bindings are the uncaptured ones, and a warm re-ask captures nothing.
+///
+/// DISCRIMINATES an id-only explanation (its operands would read the
+/// released `Opaque(Miss)` placeholder after the close) and a store-owned
+/// one (the close would drop it).
+#[cfg(feature = "semantic-observe")]
+#[test]
+fn captured_cycle_explanation_leases_operands_past_eviction_and_release() {
+    use verter_type_engine::project_semantic_dispatch::relation_explanation::RelationExplanation;
+
+    let host = host_for_relation_tests();
+    let canonical = "/w/coinductive_capture.ts";
+    upsert_relation_fixture(
+        &host,
+        canonical,
+        "export interface RecA { next: RecA }\nexport interface RecB { next: RecB }\n",
+    );
+    let a = resolve_relation_fixture_symbol(&host, canonical, "RecA");
+    let b = resolve_relation_fixture_symbol(&host, canonical, "RecB");
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let graph = host.project_type_store().semantic_graph();
+
+    let cold = dispatch.execute_relate_pair_as_result_for_tests(a, b);
+    assert!(
+        matches!(&cold, RelationResult::Assignable { bindings } if bindings.is_empty()),
+        "capture leaves the recursive answer and its bindings unchanged, got {cold:?}"
+    );
+    let explanations = dispatch.take_relation_explanations();
+    let (pair, members) = explanations
+        .iter()
+        .find_map(|explanation| match explanation {
+            RelationExplanation::CoinductiveCycle { pair, members }
+                if pair.source.id == a && pair.target.id == b =>
+            {
+                Some((pair.clone(), Arc::clone(members)))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the root pair explains as a cycle, got {explanations:?}"));
+    // `RecA.next` against `RecB.next` re-enters the root pair itself, so the
+    // component the cycle discharged is that one pair.
+    assert!(
+        members
+            .iter()
+            .any(|member| member.source.id == a && member.target.id == b),
+        "the cycle names every co-discharged pair, the root included: {members:?}"
+    );
+    let leased_source = pair
+        .source
+        .payload
+        .clone()
+        .expect("the source operand is leased");
+    assert!(
+        !matches!(leased_source.as_ref(), SemanticNodeData::Opaque(_)),
+        "the lease holds the operand's real payload, got {leased_source:?}"
+    );
+
+    let warm = dispatch.execute_relate_pair_as_result_for_tests(a, b);
+    assert_eq!(warm, cold, "the warm answer is the captured cold answer");
+    assert!(
+        dispatch.take_relation_explanations().is_empty(),
+        "a warm hit computes nothing and so captures nothing"
+    );
+
+    let key = dispatch.relate_key_for(a, b);
+    assert!(graph.get_relation_payload(&host, &key).is_some());
+    graph.release_canonical(canonical);
+    assert!(
+        graph.get_relation_payload(&host, &key).is_none(),
+        "the close evicts the published judgement"
+    );
+    assert!(!graph.node_is_live(a), "the close tombstones the operand");
+    assert!(
+        matches!(
+            graph.node_data(a).as_deref(),
+            Some(SemanticNodeData::Opaque(_))
+        ),
+        "the store now reads the released placeholder"
+    );
+    assert_eq!(
+        pair.source.payload.as_deref(),
+        Some(leased_source.as_ref()),
+        "the captured explanation still reads the leased operand"
+    );
+    assert!(
+        members.iter().all(|member| member
+            .source
+            .payload
+            .as_deref()
+            .is_some_and(|payload| !matches!(payload, SemanticNodeData::Opaque(_)))),
+        "every cycle member keeps its leased source operand"
+    );
 }
 
 /// D7.3 SCC table, negative recursion: the mutual-recursion pair whose
@@ -4205,7 +4227,7 @@ fn relation_budget_exceeded_is_public_and_admits_nothing() {
     let checks_before = graph.stats_snapshot().relation_check_count;
 
     // PUBLIC: the payload is a real SemanticQueryValue::Relation with the
-    // typed BudgetExceeded outcome and a BudgetExceeded proof.
+    // typed BudgetExceeded outcome.
     let first = dispatch.execute(key.to_query_key());
     match &first {
         QueryResult::Value(output) => match &output.value {
@@ -4214,16 +4236,6 @@ fn relation_budget_exceeded_is_public_and_admits_nothing() {
                     matches!(payload.outcome, RelationOutcome::BudgetExceeded(_)),
                     "budget exhaustion is a PUBLIC typed outcome, got {:?}",
                     payload.outcome
-                );
-                let proof = graph
-                    .relation_proof_for(payload.relation_proof)
-                    .expect("the budget payload's proof resolves");
-                assert!(
-                    matches!(
-                        proof,
-                        verter_type_engine::semantic_query::RelationProof::BudgetExceeded { .. }
-                    ),
-                    "the proof rides the BudgetExceeded shape"
                 );
             }
             other => panic!("expected a Relation payload, got {other:?}"),

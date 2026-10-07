@@ -9,7 +9,7 @@
     "  - EXACT: package + target + normalized src_path must all match a real cargo-metadata test target.",
     "  - NO globs, NO prefixes, NO package-wide switches.",
     "  - STALE-FAILING: if an allowlisted (package,target) no longer exists in cargo metadata,",
-    "    or its src_path moved, the guard FAILS — a removed binary cannot leave a dead exception.",
+    "    or its src_path moved, the guard FAILS \u2014 a removed binary cannot leave a dead exception.",
     "Adding an entry requires a genuine 'needs a separate test process' justification (process-global",
     "state that must be isolated in its own binary)."
   ],
@@ -21,9 +21,9 @@
       "reason": "single counting #[global_allocator] for allocation canaries"
     },
     {
-      "package": "verter_semantic",
+      "package": "verter_session_query",
       "target": "allocator_canaries",
-      "src_path": "crates/verter_semantic/tests/allocator_canaries.rs",
+      "src_path": "crates/verter_session_query/tests/allocator_canaries.rs",
       "reason": "single counting #[global_allocator] for allocation canaries (result-receipt summaries keep near-linear memory as the evidence graph grows)"
     },
     {
@@ -39,34 +39,16 @@
       "reason": "single counting #[global_allocator] for style-pipeline allocation canaries (pre-cutover legacy baseline and, later, the converged style_planner ceiling)"
     },
     {
-      "package": "verter_compiler",
-      "target": "compile_type_info_routes",
-      "src_path": "crates/verter_compiler/tests/compile_type_info_routes.rs",
-      "reason": "C2 ratified entry contract pins this exact test home; its route/continuation evidence is independently accepted per charter and cannot be consolidated into tests/main.rs without abandoning the frozen path"
+      "package": "verter_type_engine",
+      "target": "allocator_canaries",
+      "src_path": "crates/verter_type_engine/tests/allocator_canaries.rs",
+      "reason": "single counting #[global_allocator] for owner-local allocation canaries"
     },
     {
-      "package": "verter_semantic",
-      "target": "type_info_non_flow",
-      "src_path": "crates/verter_semantic/tests/type_info_non_flow.rs",
-      "reason": "C2 ratified entry contract pins this exact test home; the GAP-3 table-row evidence is independently accepted per charter and cannot be consolidated into tests/main.rs without abandoning the frozen path"
-    },
-    {
-      "package": "verter_semantic",
-      "target": "type_info_privacy",
-      "src_path": "crates/verter_semantic/tests/ui/type_info_privacy.rs",
-      "reason": "trybuild compile-fail UI control drives rustc child processes and needs its own test binary; C2 ratified entry contract also pins this exact home"
-    },
-    {
-      "package": "verter_session",
-      "target": "c2_continuation_mutations",
-      "src_path": "crates/verter_session/tests/c2_continuation_mutations.rs",
-      "reason": "C2 ratified entry contract (C2-AC-C1-A6-CONTINUATION-001) pins this exact test home; the resume-mutation evidence is independently accepted per charter and cannot be consolidated into tests/main.rs without abandoning the frozen path"
-    },
-    {
-      "package": "verter_session",
-      "target": "c2_continuation_revalidation",
-      "src_path": "crates/verter_session/tests/c2_continuation_revalidation.rs",
-      "reason": "C2 ratified entry contract (C2-AC-C1-A6-CONTINUATION-001) pins this exact test home; the incremental-equals-fresh evidence is independently accepted per charter and cannot be consolidated into tests/main.rs without abandoning the frozen path"
+      "package": "verter_type_expr",
+      "target": "allocator_canaries",
+      "src_path": "crates/verter_type_expr/tests/allocator_canaries.rs",
+      "reason": "single counting #[global_allocator] for owner-local allocation canaries"
     }
   ]
 }
