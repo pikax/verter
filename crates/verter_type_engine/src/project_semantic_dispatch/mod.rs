@@ -153,6 +153,8 @@ pub mod reactive_wrapper;
 pub mod reference_carriers;
 pub mod relation;
 pub mod relation_excess;
+#[cfg(feature = "semantic-observe")]
+pub mod relation_explanation;
 pub mod relation_knobs;
 pub mod relation_predicates;
 pub mod relation_variance;
@@ -498,6 +500,12 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// function in that file asks again.
     pub(super) relation_env_by_file:
         std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, dispatch_txn::RelationEnvironment>>,
+    /// The relation explanations this request captured, in decision order
+    /// ([`relation_explanation`]). Optional observation state: it exists
+    /// only under `semantic-observe` and is dropped with the request.
+    #[cfg(feature = "semantic-observe")]
+    pub(super) relation_explanations:
+        std::cell::RefCell<Vec<relation_explanation::RelationExplanation>>,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -744,6 +752,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             relation_env: std::cell::OnceCell::new(),
             relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            #[cfg(feature = "semantic-observe")]
+            relation_explanations: std::cell::RefCell::new(Vec::new()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             operation_budget_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(

@@ -87,6 +87,8 @@ use super::dispatch_txn::{
     RelationStep, ResolveCallPendingState, ReverseProjectionState, ReverseRecoveredEntry,
     SessionCheckpoint, StrictFamilyConfig,
 };
+#[cfg(feature = "semantic-observe")]
+use super::relation_explanation::RelationExplanation;
 use super::relation_predicates::*;
 use super::relation_variance::MarkerPair;
 use super::ProjectSemanticDispatch;
@@ -94,10 +96,10 @@ use crate::semantic_query::{
     ConstParamPolicy, ContextualInferenceMode, DeclIdentity, IndexKey, InferBinding,
     InferenceCandidatePriority, InferencePassKind, LiteralValue, NoInferMask, OptionalityMod,
     PrimitiveKind, ProjectionReductionContext, QueryError, QueryResult, ReadonlyMod,
-    RecursionOrBudgetCap, RelateKeyId, RelateMemoKey, RelationContext, RelationFailureCode,
-    RelationKind, RelationOutcome, RelationPayload, RelationPolicy, RelationProof, RelationResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
-    SemanticQueryValue, SubRelationPosition, SubRelationRef, SurfaceView, VariancePhase,
+    RecursionOrBudgetCap, RelateMemoKey, RelationContext, RelationKind, RelationOutcome,
+    RelationPayload, RelationPolicy, RelationResult, SemanticNodeData, SemanticNodeId,
+    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue, SurfaceView,
+    VariancePhase,
 };
 use crate::semantic_query_memo::InlineMemberFlight;
 
@@ -2339,32 +2341,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .unwrap_or(InferenceOccurrence::ARGUMENT_COVARIANT);
         let step = self.execute_relate_inline(key.clone(), occurrence);
         let payload = match step {
-            RelationStep::Assignable { bindings } => self.relation_payload(
-                RelationOutcome::Assignable,
-                bindings,
-                RelationProof::Assignable {
-                    witness: crate::semantic_query::DerivationTree {
-                        sub_derivations: Arc::from(Vec::new().into_boxed_slice()),
-                    },
-                },
-            ),
-            RelationStep::NotAssignable => self.relation_payload(
-                RelationOutcome::NotAssignable,
-                Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-                RelationProof::NotAssignable {
-                    reason: RelationFailureCode::Structural,
-                    failing_sub: SubRelationRef {
-                        source: key.source,
-                        target: key.target,
-                        position: SubRelationPosition::Root,
-                    },
-                },
-            ),
-            RelationStep::BudgetExceeded(cap) => self.relation_payload(
-                RelationOutcome::BudgetExceeded(cap.kind),
-                Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-                RelationProof::BudgetExceeded { cap },
-            ),
+            RelationStep::Assignable { bindings } => {
+                #[cfg(feature = "semantic-observe")]
+                self.record_relation_explanation(RelationExplanation::Assignable {
+                    pair: self.lease_relate_pair(&key),
+                });
+                self.relation_payload(RelationOutcome::Assignable, bindings)
+            }
+            RelationStep::NotAssignable => {
+                #[cfg(feature = "semantic-observe")]
+                self.record_relation_explanation(RelationExplanation::NotAssignable {
+                    pair: self.lease_relate_pair(&key),
+                });
+                self.relation_payload(
+                    RelationOutcome::NotAssignable,
+                    Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                )
+            }
+            RelationStep::BudgetExceeded(cap) => {
+                #[cfg(feature = "semantic-observe")]
+                self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
+                self.relation_payload(
+                    RelationOutcome::BudgetExceeded(cap.kind),
+                    Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                )
+            }
             RelationStep::Unknown | RelationStep::Assumed(_) => {
                 return QueryResult::Error(QueryError::Miss);
             }
@@ -2928,17 +2929,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 return FramePop::RootClose(match failure {
                     crate::semantic_query::ResolveCallFailure::Budget => {
+                        #[cfg(feature = "semantic-observe")]
+                        self.record_relation_explanation(RelationExplanation::BudgetExceeded {
+                            cap: RecursionOrBudgetCap {
+                                kind:
+                                    crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
+                                limit: self.connected_trip_limit(),
+                            },
+                        });
                         RootClose::BudgetExceeded(self.relation_payload(
                             RelationOutcome::BudgetExceeded(
                                 crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
                             ),
                             Arc::from([]),
-                            RelationProof::BudgetExceeded {
-                                cap: RecursionOrBudgetCap {
-                                    kind: crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
-                                    limit: self.connected_trip_limit(),
-                                },
-                            },
                         ))
                     }
                     _ => RootClose::Undecided,
@@ -2990,10 +2993,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // surfaces the public `BudgetExceeded` payload when a budget
             // edge drove the poison.
             if let Some(cap) = budget_cap {
+                #[cfg(feature = "semantic-observe")]
+                self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
                 let payload = self.relation_payload(
                     RelationOutcome::BudgetExceeded(cap.kind),
                     Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-                    RelationProof::BudgetExceeded { cap },
                 );
                 return FramePop::RootClose(RootClose::BudgetExceeded(payload));
             }
@@ -3062,10 +3066,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // relation member). The machinery root surfaces the public
                 // `BudgetExceeded` payload when a budget edge drove it.
                 if let Some(cap) = cap {
+                    #[cfg(feature = "semantic-observe")]
+                    self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
                     let payload = self.relation_payload(
                         RelationOutcome::BudgetExceeded(cap.kind),
                         Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-                        RelationProof::BudgetExceeded { cap },
                     );
                     return FramePop::RootClose(RootClose::BudgetExceeded(payload));
                 }
@@ -3336,15 +3341,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // session-local delta (row 7) never publishes.
         let footprints =
             Self::relation_publication_footprints(&recursion_uses, cyclic, has_relation_root);
-        let scc_keys: Arc<[RelateKeyId]> = if cyclic {
-            let keys: Vec<RelateKeyId> = discharged
-                .iter()
-                .map(|(key, _, _, _, _, _, _)| self.graph().intern_relate_key(key.clone()))
-                .collect();
-            Arc::from(keys.into_boxed_slice())
-        } else {
-            Arc::from(Vec::<RelateKeyId>::new().into_boxed_slice())
-        };
+        #[cfg(feature = "semantic-observe")]
+        let cycle_members: Option<Arc<[super::relation_explanation::LeasedRelatePair]>> = cyclic
+            .then(|| {
+                discharged
+                    .iter()
+                    .map(|(key, _, _, _, _, _, _)| self.lease_relate_pair(key))
+                    .collect()
+            });
         let mut self_publish: Option<RelationPayload> = None;
         let mut self_step: Option<RelationStep> = None;
         let mut completed: Vec<CompletedSccMember> = Vec::new();
@@ -3356,38 +3360,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let is_self = has_relation_root && position == 0;
             let mut payload = match &verdict {
                 PendingVerdict::Assignable { bindings } => {
-                    let proof = if cyclic {
-                        RelationProof::CoinductiveCycle {
-                            keys: Arc::clone(&scc_keys),
-                        }
-                    } else {
-                        RelationProof::Assignable {
-                            witness: crate::semantic_query::DerivationTree {
-                                sub_derivations: Arc::from(
-                                    vec![SubRelationRef {
-                                        source: key.source,
-                                        target: key.target,
-                                        position: SubRelationPosition::Root,
-                                    }]
-                                    .into_boxed_slice(),
-                                ),
-                            },
-                        }
-                    };
-                    self.relation_payload(RelationOutcome::Assignable, Arc::clone(bindings), proof)
-                }
-                PendingVerdict::NotAssignable => self.relation_payload(
-                    RelationOutcome::NotAssignable,
-                    Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-                    RelationProof::NotAssignable {
-                        reason: RelationFailureCode::Structural,
-                        failing_sub: SubRelationRef {
-                            source: key.source,
-                            target: key.target,
-                            position: SubRelationPosition::Root,
+                    #[cfg(feature = "semantic-observe")]
+                    self.record_relation_explanation(match &cycle_members {
+                        Some(members) => RelationExplanation::CoinductiveCycle {
+                            pair: self.lease_relate_pair(&key),
+                            members: Arc::clone(members),
                         },
-                    },
-                ),
+                        None => RelationExplanation::Assignable {
+                            pair: self.lease_relate_pair(&key),
+                        },
+                    });
+                    self.relation_payload(RelationOutcome::Assignable, Arc::clone(bindings))
+                }
+                PendingVerdict::NotAssignable => {
+                    #[cfg(feature = "semantic-observe")]
+                    self.record_relation_explanation(RelationExplanation::NotAssignable {
+                        pair: self.lease_relate_pair(&key),
+                    });
+                    self.relation_payload(
+                        RelationOutcome::NotAssignable,
+                        Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                    )
+                }
                 PendingVerdict::Unknown | PendingVerdict::BudgetExceeded(_) => {
                     unreachable!("poisoned SCCs return before the publish routing")
                 }
@@ -4110,11 +4104,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let payload = self.relation_payload(
             RelationOutcome::Assignable,
             Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
-            RelationProof::Assignable {
-                witness: crate::semantic_query::DerivationTree {
-                    sub_derivations: Arc::from(Vec::new().into_boxed_slice()),
-                },
-            },
         );
         self.dispatch_txn
             .borrow_mut()
@@ -8281,20 +8270,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Construct a public payload and intern its proof into the store's
-    /// payload-side proof table (Decision 4 — the proof rides the table
-    /// BY ID, never embedded on the value / type-values surface).
+    /// Construct a public payload. It names no explanation and touches no
+    /// store table: an optional explanation is captured beside it, by the
+    /// caller, only under `semantic-observe`.
     fn relation_payload(
         &self,
         outcome: RelationOutcome,
         bindings: Arc<[InferBinding]>,
-        proof: RelationProof,
     ) -> RelationPayload {
-        let relation_proof = self.graph().intern_relation_proof(proof);
         RelationPayload {
             outcome,
             bindings,
-            relation_proof,
             recursion: crate::semantic_query::RelationRecursionFootprint::default(),
         }
     }
